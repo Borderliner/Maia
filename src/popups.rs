@@ -2322,19 +2322,20 @@ fn connect(app: &mut App, ctx: &egui::Context, st: &mut ConnectState) -> bool {
     centered(ctx, "connect", 440.0, &pal, |ui| {
         ui.label(egui::RichText::new("Connect to server").strong());
         ui.add_space(6.0);
-        let field = |ui: &mut Ui, label: &str, text: &mut String, hint: &str, secret: bool, focus: bool| {
+        let field = |ui: &mut Ui, label: &str, id: &'static str, text: &mut String, hint: &str, secret: bool, focus: bool| {
             ui.label(egui::RichText::new(label).small().color(pal.text_dim));
             let r = ui.add_enabled(!busy, egui::TextEdit::singleline(text).hint_text(hint).password(secret).desired_width(f32::INFINITY));
+            crate::ui::note_control(ui, r.rect, id);
             if focus {
                 r.request_focus();
             }
         };
-        field(ui, "Address", &mut st.uri, "smb://server/share, sftp://user@host, ftp://host", false, st.focus);
+        field(ui, "Address", "address field", &mut st.uri, "smb://server/share, sftp://user@host, ftp://host", false, st.focus);
         st.focus = false;
         ui.add_space(4.0);
         ui.columns(2, |cols| {
-            field(&mut cols[0], "User", &mut st.user, "Optional", false, false);
-            field(&mut cols[1], "Password", &mut st.password, "Optional", true, false);
+            field(&mut cols[0], "User", "user field", &mut st.user, "Optional", false, false);
+            field(&mut cols[1], "Password", "password field", &mut st.password, "Optional", true, false);
         });
         ui.add_space(2.0);
         ui.add_enabled(!busy, egui::Checkbox::new(&mut st.anonymous, "Connect as a guest"));

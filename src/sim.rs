@@ -2275,7 +2275,8 @@ mod journeys {
         }
         let home = fixture("single");
         let mut s = Sim::new(&home, vec2(1280.0, 800.0));
-        let sock = root().join("single.sock");
+        // Socket paths are limited to 108 bytes: the sim root can be deeper than that.
+        let sock = std::env::temp_dir().join(format!("maia-sim-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
         let l = crate::single::claim_at(&sock).unwrap_or_else(|| s.fail("listen"));
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2658,19 +2659,17 @@ mod journeys {
         s.act("key Enter");
         wait_until(&mut s, "login refused", 10, |s| s.texts.iter().any(|(_, t)| t == "Wrong user name or password"));
         look(&mut s, "connect dialog with an error");
-        // A field sits right under its label.
-        let field = |s: &mut Sim, label: &str| {
-            let r = s.text_rect(label);
-            s.act(&format!("click {:.0} {:.0}", r.left() + 30.0, r.bottom() + 12.0));
-        };
-        field(&mut s, "User");
+        click_control(&mut s, "user field");
         s.act("text me");
-        field(&mut s, "Password");
+        click_control(&mut s, "password field");
         s.act("text nope");
         s.click_text("Connect");
         wait_until(&mut s, "wrong password refused", 10, |s| !s.app.connecting("smb://nas/media") && s.texts.iter().any(|(_, t)| t == "Wrong user name or password"));
-        assert!(matches!(&s.app.popup, Popup::Connect(st) if st.user == "me" && st.password.is_empty()), "user kept, password cleared");
-        field(&mut s, "Password");
+        match &s.app.popup {
+            Popup::Connect(st) => assert!(st.user == "me" && st.password.is_empty(), "user kept, password cleared: user {:?} password {:?} uri {:?}", st.user, st.password, st.uri),
+            _ => s.fail("dialog still open"),
+        }
+        click_control(&mut s, "password field");
         s.act("text secret");
         s.act("key Enter");
         let share = d.join("gvfs/smb___nas_media");
