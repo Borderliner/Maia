@@ -2058,6 +2058,73 @@ mod journeys {
         report("dnd", &s);
     }
 
+    /// Single instance: a second launch's folders arrive over the real socket and open as
+    /// focused tabs (a file opens its folder with it selected); the switch for the default
+    /// file manager shows the desktop's state, turns it on with a click and gives folders
+    /// back to the previous file manager when turned off.
+    #[test]
+    fn single_instance_and_default_file_manager() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("single");
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        let sock = root().join("single.sock");
+        let _ = std::fs::remove_file(&sock);
+        let l = crate::single::claim_at(&sock).unwrap_or_else(|| s.fail("listen"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        crate::single::serve(l, tx, || {});
+        s.app.requests = Some(rx);
+        let tabs = s.app.panels[&s.app.active].tabs.len();
+        let file = home.join("Documents/notes.txt");
+        assert!(crate::single::forward_to(&sock, &[home.join("Music"), file.clone()]), "second launch handed over");
+        wait_until(&mut s, "tabs opened", 5, |s| s.app.panels[&s.app.active].tabs.len() == tabs + 2);
+        s.settle();
+        assert_eq!(s.tab().path, home.join("Documents"), "the last one is in front");
+        assert_eq!(s.tab().cursor_path().as_deref(), Some(file.as_path()), "the file is selected");
+        assert!(s.app.panels[&s.app.active].tabs.iter().any(|t| t.path == home.join("Music")));
+        assert!(crate::single::forward_to(&sock, &[home.join("gone")]));
+        wait_until(&mut s, "missing path reported", 5, |s| s.app.toast.as_ref().is_some_and(|t| t.0.starts_with("Couldn't open")));
+        look(&mut s, "after handing over");
+
+        // Default file manager: another one is set; the switch shows off.
+        let cfg = crate::config::config_dir().parent().unwrap_or(&root()).to_path_buf().join("mimeapps.list");
+        std::fs::write(&cfg, "[Default Applications]\ninode/directory=org.example.Files.desktop;\n").unwrap();
+        let switch = |s: &mut Sim, on_wanted: Option<bool>| {
+            s.act("key ctrl+Comma");
+            s.settle();
+            s.act("text default file manager");
+            wait_until(s, "state read", 5, |s| s.app.default_fm().is_some());
+            s.idle(3);
+            if let Some(w) = on_wanted {
+                assert_eq!(s.app.default_fm(), Some(!w), "switch starts the other way");
+                click_control(s, "switch");
+                wait_until(s, "default changed", 5, |s| s.app.toast.is_some());
+            }
+        };
+        switch(&mut s, Some(true));
+        assert!(std::fs::read_to_string(&cfg).unwrap().contains("inode/directory=io.github.yappologistic.Maia.desktop;"), "Maia set as default");
+        assert_eq!(s.app.toast.as_ref().map(|t| t.0.as_str()), Some("Maia is now the default file manager"));
+        look(&mut s, "default file manager on");
+        s.act("key Escape");
+        s.settle();
+        switch(&mut s, Some(false));
+        assert!(std::fs::read_to_string(&cfg).unwrap().contains("inode/directory=org.example.Files.desktop;"), "previous file manager restored");
+        assert_eq!(s.app.default_fm(), Some(false));
+        s.act("key Escape");
+        // Reuse the open window: a plain switch in the same group.
+        s.act("key ctrl+Comma");
+        s.settle();
+        s.act("text reuse the open window");
+        s.idle(3);
+        assert!(s.app.cfg.single_instance);
+        s.act("key Enter");
+        s.idle(2);
+        assert!(!s.app.cfg.single_instance, "Enter turns it off");
+        s.act("key Escape");
+        report("single", &s);
+    }
+
     #[test]
     fn monkey_sessions() {
         if !sandboxed() {

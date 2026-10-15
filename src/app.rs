@@ -129,6 +129,12 @@ pub struct App {
     pub ext_drag: Option<bool>,
     /// A system drag was dropped this frame (Some(own)).
     pub ext_drop: Option<bool>,
+    /// Folders handed over by later launches (single instance).
+    pub requests: Option<std::sync::mpsc::Receiver<crate::single::Request>>,
+    /// Whether Maia is the desktop's file manager: 0 not known yet, 1 no, 2 yes, 3 asking.
+    default_fm: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    /// Messages from background work, shown as toasts.
+    notes: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl App {
@@ -194,6 +200,9 @@ impl App {
             inject: vec![],
             ext_drag: None,
             ext_drop: None,
+            requests: None,
+            default_fm: Default::default(),
+            notes: Default::default(),
             cfg,
             ud,
         };
@@ -305,6 +314,66 @@ impl App {
                     self.inject.push(egui::Event::PointerGone);
                 }
             }
+        }
+    }
+
+    /// Whether Maia opens folders for other apps (None while that is being read; the first
+    /// call starts reading it in the background).
+    pub fn default_fm(&self) -> Option<bool> {
+        use std::sync::atomic::Ordering::Relaxed;
+        match self.default_fm.load(Relaxed) {
+            1 => Some(false),
+            2 => Some(true),
+            3 => None,
+            _ => {
+                self.default_fm.store(3, Relaxed);
+                let (state, ctx) = (self.default_fm.clone(), self.ctx.clone());
+                std::thread::spawn(move || {
+                    state.store(if crate::install::is_default() { 2 } else { 1 }, Relaxed);
+                    ctx.request_repaint();
+                });
+                None
+            }
+        }
+    }
+
+    /// Make Maia the desktop's file manager, or hand folders back, in the background.
+    pub fn set_default_fm(&mut self, on: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.default_fm.store(if on { 2 } else { 1 }, Relaxed);
+        let (state, notes, ctx) = (self.default_fm.clone(), self.notes.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let r = if on { crate::install::set_default() } else { crate::install::unset_default() };
+            let msg = r.unwrap_or_else(|e| format!("Couldn't change the default file manager: {e}"));
+            state.store(if crate::install::is_default() { 2 } else { 1 }, Relaxed);
+            notes.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Later launches: their folders open as tabs here (files in their folder, selected),
+    /// and the window comes forward.
+    fn pump_requests(&mut self, ctx: &egui::Context) {
+        let reqs: Vec<crate::single::Request> = match &self.requests {
+            Some(rx) => rx.try_iter().collect(),
+            None => return,
+        };
+        for r in reqs {
+            if let crate::single::Request::Open(paths) = r {
+                let panel = self.active;
+                for p in paths {
+                    if !p.exists() {
+                        self.toast(format!("Couldn't open {}: it doesn't exist", p.display()));
+                    } else if p.is_dir() {
+                        self.actions.push(Action::NewTab { panel, path: p, select: None, focus: true });
+                    } else if let Some(parent) = p.parent().filter(|d| d.is_dir()) {
+                        self.actions.push(Action::NewTab { panel, path: parent.to_path_buf(), select: Some(p.clone()), focus: true });
+                    } else {
+                        self.toast(format!("Couldn't open {}", p.display()));
+                    }
+                }
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
     }
 
@@ -590,6 +659,11 @@ impl App {
     /// Poll background work: listings, walks, stats, thumbnails, jobs, watcher.
     fn pump(&mut self, ctx: &egui::Context) {
         self.pump_drives(ctx);
+        self.pump_requests(ctx);
+        let notes = std::mem::take(&mut *self.notes.lock().unwrap_or_else(|e| e.into_inner()));
+        if let Some(n) = notes.into_iter().last() {
+            self.toast(n);
+        }
         let thumbs_landed = self.thumbs.pump(ctx);
         let stats_changed = self.stats.pump();
         let changed_dirs = self.watch.poll();
@@ -1700,10 +1774,7 @@ impl App {
                 Ok(msg) => self.toast(msg),
                 Err(e) => self.toast(format!("Install failed: {e}")),
             },
-            Cmd::SetDefault => match crate::install::set_default() {
-                Ok(msg) => self.toast(msg),
-                Err(e) => self.toast(format!("Couldn't set default: {e}")),
-            },
+            Cmd::SetDefault => self.set_default_fm(true),
             Cmd::Uninstall => match crate::install::uninstall() {
                 Ok(msg) => self.toast(msg),
                 Err(e) => self.toast(format!("Uninstall failed: {e}")),

@@ -54,11 +54,14 @@ struct Runner {
     repaint_at: Option<Instant>,
     shown: bool,
     mods: winit::keyboard::ModifiersState,
+    /// The single-instance socket this window answers on (removed on exit).
+    listener: Option<(std::os::unix::net::UnixListener, PathBuf)>,
+    sock: Option<PathBuf>,
     #[cfg(feature = "testkit")]
     tk: Option<crate::testkit::Driver>,
 }
 
-pub fn run(opts: Options, paths: Vec<PathBuf>) {
+pub fn run(opts: Options, paths: Vec<PathBuf>, listener: Option<(std::os::unix::net::UnixListener, PathBuf)>) {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().or_die("No display connection (is a Wayland or X11 session running?)");
     let proxy = event_loop.create_proxy();
     let q = proxy.clone();
@@ -78,6 +81,8 @@ pub fn run(opts: Options, paths: Vec<PathBuf>) {
         repaint_at: None,
         shown: false,
         mods: Default::default(),
+        listener,
+        sock: None,
         #[cfg(feature = "testkit")]
         tk: None,
     };
@@ -200,6 +205,9 @@ impl Runner {
         if let Some(mut app) = self.app.take() {
             app.on_exit();
         }
+        if let Some(s) = self.sock.take() {
+            let _ = std::fs::remove_file(s);
+        }
         // Tear down in dependency order: GL objects (needs the context current), then the
         // EGL surface and context, and only then the window they render into.
         if let Some(mut p) = self.painter.take() {
@@ -250,7 +258,17 @@ impl ApplicationHandler<UserEvent> for Runner {
                 let _ = p.send_event(UserEvent::Repaint(std::time::Duration::ZERO));
             });
         }
-        self.app = Some(App::new(&self.ctx, self.paths.take().unwrap_or_default()));
+        let mut app = App::new(&self.ctx, self.paths.take().unwrap_or_default());
+        if let Some((l, sock)) = self.listener.take() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let p = self.proxy.clone();
+            crate::single::serve(l, tx, move || {
+                let _ = p.send_event(UserEvent::Repaint(Duration::ZERO));
+            });
+            app.requests = Some(rx);
+            self.sock = Some(sock);
+        }
+        self.app = Some(app);
         gl.window.request_redraw();
         self.gl = Some(gl);
         self.state = Some(state);

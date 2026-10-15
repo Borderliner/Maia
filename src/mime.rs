@@ -529,6 +529,20 @@ pub fn set_default(app_id: &str, mime: &str) -> Result<(), String> {
     #[cfg(test)]
     {
         LAUNCHED.lock().unwrap_or_else(|e| e.into_inner()).push(format!("xdg-mime default {app_id} {mime}"));
+        // Inside the simulation sandbox, do what xdg-mime does, to the sandbox's own file.
+        if std::env::var("COMET_SIM_SANDBOX").as_deref() == Ok("1") {
+            if let Some(dir) = dirs::config_dir() {
+                let p = dir.join("mimeapps.list");
+                let old = std::fs::read_to_string(&p).unwrap_or_default();
+                let mut out: Vec<String> = old.lines().filter(|l| !l.starts_with(&format!("{mime}="))).map(String::from).collect();
+                match out.iter().position(|l| l.trim() == "[Default Applications]") {
+                    Some(i) => out.insert(i + 1, format!("{mime}={app_id};")),
+                    None => out.extend(["[Default Applications]".to_string(), format!("{mime}={app_id};")]),
+                }
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(p, out.join("\n") + "\n");
+            }
+        }
         return Ok(());
     }
     #[allow(unreachable_code)]

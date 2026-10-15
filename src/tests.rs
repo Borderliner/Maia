@@ -1244,3 +1244,38 @@ fn finished_jobs_read_in_the_past_tense() {
     assert_eq!(finished_label("Moving to trash 2 items"), "Moved to trash 2 items");
     assert_eq!(finished_label("Deleting 1 item"), "Deleted 1 item");
 }
+
+#[test]
+fn second_launch_hands_its_folders_to_the_first() {
+    use crate::single::{Request, claim_at, forward_to, parse, serve};
+    let d = tmpdir("single");
+    let sock = d.join("maia.sock");
+    assert!(!forward_to(&sock, &[PathBuf::from("/x")]), "nobody listening: start normally");
+    let l = claim_at(&sock).expect("first launch listens");
+    assert!(claim_at(&sock).is_none(), "a second one does not take over");
+    let (tx, rx) = std::sync::mpsc::channel();
+    serve(l, tx, || {});
+    let odd = PathBuf::from("/tmp/two\nlines – é/日本 #1");
+    assert!(forward_to(&sock, &[PathBuf::from("/home"), odd.clone()]), "handed over");
+    assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap(), Request::Open(vec![PathBuf::from("/home"), odd]));
+    assert!(forward_to(&sock, &[]));
+    assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap(), Request::Focus);
+    // A socket left by a crash (nobody answering) is replaced.
+    let stale = d.join("stale.sock");
+    drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+    assert!(stale.exists() && claim_at(&stale).is_some(), "stale socket replaced");
+    // Garbage never panics.
+    assert_eq!(parse(b"open"), None);
+    assert_eq!(parse(b"\0\0\0"), None);
+    assert_eq!(parse(b"what\0ever\0"), None);
+}
+
+#[test]
+fn default_file_manager_is_read_from_mimeapps() {
+    use crate::install::default_in;
+    let t = "[Added Associations]\ninode/directory=other.desktop;\n\n[Default Applications]\ntext/plain=gedit.desktop\ninode/directory=io.github.yappologistic.Maia.desktop;org.gnome.Nautilus.desktop;\n";
+    assert_eq!(default_in(t).as_deref(), Some("io.github.yappologistic.Maia.desktop"));
+    assert_eq!(default_in("[Default Applications]\ninode/directory= ;thunar.desktop\n").as_deref(), Some("thunar.desktop"));
+    assert_eq!(default_in("[Added Associations]\ninode/directory=x.desktop\n"), None, "only Default Applications counts");
+    assert_eq!(default_in(""), None);
+}

@@ -81,20 +81,60 @@ pub fn install() -> Result<String, String> {
     })
 }
 
+pub const DESKTOP_ID: &str = "io.github.yappologistic.Maia.desktop";
+
+/// The desktop's file manager: the first `inode/directory` default in the user's
+/// mimeapps.list, where `xdg-mime default` writes it.
+pub fn current_default() -> Option<String> {
+    default_in(&std::fs::read_to_string(dirs::config_dir()?.join("mimeapps.list")).ok()?)
+}
+
+/// The `inode/directory` default in a mimeapps.list text.
+pub fn default_in(text: &str) -> Option<String> {
+    let mut in_defaults = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_defaults = line == "[Default Applications]";
+        } else if in_defaults {
+            if let Some(v) = line.strip_prefix("inode/directory=") {
+                return v.split(';').map(str::trim).find(|s| !s.is_empty()).map(String::from);
+            }
+        }
+    }
+    None
+}
+
+pub fn is_default() -> bool {
+    current_default().as_deref() == Some(DESKTOP_ID)
+}
+
 pub fn set_default() -> Result<String, String> {
+    #[cfg(not(test))]
     if !desktop_path().exists() {
         install()?;
     }
-    // Remember the previous handler so uninstall can restore it.
-    if let Ok(out) = Command::new("xdg-mime").args(["query", "default", "inode/directory"]).output() {
-        let prev = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !prev.is_empty() && prev != "io.github.yappologistic.Maia.desktop" {
-            let _ = std::fs::create_dir_all(crate::config::data_dir());
-            let _ = std::fs::write(crate::config::data_dir().join("previous-file-manager"), prev);
-        }
+    // Remember the previous handler so turning this off (or uninstalling) restores it.
+    if let Some(prev) = current_default().filter(|p| p != DESKTOP_ID) {
+        let _ = std::fs::create_dir_all(crate::config::data_dir());
+        let _ = std::fs::write(crate::config::data_dir().join("previous-file-manager"), prev);
     }
-    crate::mime::set_default("io.github.yappologistic.Maia.desktop", "inode/directory")?;
+    crate::mime::set_default(DESKTOP_ID, "inode/directory")?;
     Ok("Maia is now the default file manager".into())
+}
+
+/// Give folders back to the file manager used before Maia, else to another one that
+/// is installed.
+pub fn unset_default() -> Result<String, String> {
+    let prev = std::fs::read_to_string(crate::config::data_dir().join("previous-file-manager")).ok().map(|p| p.trim().to_string()).filter(|p| !p.is_empty() && p != DESKTOP_ID);
+    let other = prev.or_else(|| crate::mime::apps().for_mime("inode/directory").into_iter().map(|a| a.id.clone()).find(|id| id != DESKTOP_ID));
+    match other {
+        Some(id) => {
+            crate::mime::set_default(&id, "inode/directory")?;
+            let name = crate::mime::apps().by_id(&id).map(|a| a.name.clone()).unwrap_or(id);
+            Ok(format!("{name} opens folders again"))
+        }
+        None => Err("No other file manager is installed".into()),
+    }
 }
 
 pub fn uninstall() -> Result<String, String> {
