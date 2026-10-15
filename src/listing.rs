@@ -400,7 +400,14 @@ fn handle_item(ui: &Ui, resp: &Response, idx: u32, t: &mut Tab, env: &mut Env) {
     if resp.clicked() && env.cfg.single_click && !mods.ctrl && !mods.shift && (is_dir || !env.cfg.single_click_folders_only) {
         env.actions.push(Action::Activate { panel: env.panel_id, idx, mods });
     }
-    if resp.double_clicked() && !env.cfg.single_click {
+    // egui takes any two quick clicks for a double-click; here both must land on this item.
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let this = Id::new(&path).value();
+    let double = resp.double_clicked() && LAST.load(std::sync::atomic::Ordering::Relaxed) == this;
+    if resp.clicked() {
+        LAST.store(this, std::sync::atomic::Ordering::Relaxed);
+    }
+    if double && !env.cfg.single_click {
         env.actions.push(Action::Activate { panel: env.panel_id, idx, mods });
     }
     if resp.middle_clicked() {

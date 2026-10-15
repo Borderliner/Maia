@@ -1454,6 +1454,21 @@ mod journeys {
         let mut s = Sim::new(&home.join("Documents"), vec2(1280.0, 800.0));
         s.act("move -50 -50");
         s.settle();
+        // Two quick clicks on different rows are not a double-click: nothing opens.
+        let (a, b) = (s.text_rect("notes.txt").center(), s.text_rect("Taxes").center());
+        let tabs = s.app.panels[&s.app.active].tabs.len();
+        s.act(&format!("click {:.0} {:.0}", a.x, a.y));
+        s.act(&format!("click {:.0} {:.0} ctrl", b.x, b.y));
+        s.settle();
+        assert_eq!((s.tab().path.clone(), s.app.panels[&s.app.active].tabs.len()), (home.join("Documents"), tabs), "a click on another row opened it");
+        assert_eq!(s.tab().selected.len(), 2);
+        s.idle(40);
+        s.act(&format!("dclick {:.0} {:.0}", b.x, b.y));
+        wait_until(&mut s, "double-click opens", 10, |s| s.tab().path == home.join("Documents/Taxes"));
+        s.act("key Backspace");
+        wait_until(&mut s, "back", 10, |s| s.tab().path == home.join("Documents"));
+        s.act("key Escape");
+        s.settle();
         // Drag notes.txt onto the Taxes folder: moved inside.
         let (a, b) = (s.text_rect("notes.txt").center(), s.text_rect("Taxes").center());
         s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", a.x, a.y, b.x, b.y));
