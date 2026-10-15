@@ -1133,14 +1133,14 @@ impl Tab {
                 for chunk in groups.chunks_mut(per.max(1)) {
                     sc.spawn(|| {
                         for v in chunk.iter_mut() {
-                            v.sort_by(cmp);
+                            merge_sort(v, &cmp);
                         }
                     });
                 }
             });
         } else {
             for v in groups {
-                v.sort_by(cmp);
+                merge_sort(v, &cmp);
             }
         }
         self.build_rows(top, &kids, c.stats);
@@ -1301,17 +1301,83 @@ pub fn is_system(e: &Entry) -> bool {
 /// Stable sort, split across threads for big lists (chunks sorted in parallel, then
 /// merged pairwise in parallel). Same result as `sort_by`; several times faster on the
 /// hundreds of thousands of items a flattened folder can hold.
+/// Stable sort for small Copy items: insertion-sorted runs of 24, then pairwise merges
+/// through one buffer, skipping pairs already in order. Release builds use the standard
+/// library built for size, whose sort is several times slower on large lists.
+pub fn merge_sort<T: Copy, F: Fn(&T, &T) -> Ordering>(v: &mut [T], f: &F) {
+    const RUN: usize = 32;
+    let n = v.len();
+    // Already in order (a re-sort, children listed by name): one pass and done.
+    if v.windows(2).all(|w| f(&w[1], &w[0]) != Ordering::Less) {
+        return;
+    }
+    // Binary insertion: few comparisons, which is what costs when they compare names.
+    for c in v.chunks_mut(RUN) {
+        for i in 1..c.len() {
+            let x = c[i];
+            let (mut lo, mut hi) = (0, i);
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                if f(&x, &c[mid]) == Ordering::Less { hi = mid } else { lo = mid + 1 }
+            }
+            c.copy_within(lo..i, lo + 1);
+            c[lo] = x;
+        }
+    }
+    if n <= RUN {
+        return;
+    }
+    let mut buf = v.to_vec();
+    let (mut width, mut in_v) = (RUN, true);
+    while width < n {
+        let (src, dst): (&[T], &mut [T]) = if in_v { (&*v, &mut buf[..]) } else { (&buf[..], &mut *v) };
+        for (k, out) in dst.chunks_mut(2 * width).enumerate() {
+            let lo = k * 2 * width;
+            let mid = (lo + width).min(n);
+            let hi = (lo + 2 * width).min(n);
+            let (a, b) = (&src[lo..mid], &src[mid..hi]);
+            if b.is_empty() || f(&b[0], &a[a.len() - 1]) != Ordering::Less {
+                out[..a.len()].copy_from_slice(a);
+                out[a.len()..].copy_from_slice(b);
+                continue;
+            }
+            merge(a, b, out, f);
+        }
+        in_v = !in_v;
+        width *= 2;
+    }
+    if !in_v {
+        v.copy_from_slice(&buf);
+    }
+}
+
+/// Merge two sorted runs into `out` (their combined length). Branch-free in the loop:
+/// on shuffled input a mispredicted branch per item costs more than the comparison.
+fn merge<T: Copy, F: Fn(&T, &T) -> Ordering>(a: &[T], b: &[T], out: &mut [T], f: &F) {
+    let (mut i, mut j, mut k) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        // Stable: equal items keep the left run's first.
+        let take_b = f(&b[j], &a[i]) == Ordering::Less;
+        out[k] = if take_b { b[j] } else { a[i] };
+        j += take_b as usize;
+        i += !take_b as usize;
+        k += 1;
+    }
+    out[k..k + a.len() - i].copy_from_slice(&a[i..]);
+    out[k + a.len() - i..].copy_from_slice(&b[j..]);
+}
+
 pub fn par_sort_by<T: Copy + Send + Sync, F: Fn(&T, &T) -> Ordering + Sync>(v: &mut [T], f: &F) {
     let n = v.len();
     let threads = std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1).min(8);
     if n < 40_000 || threads < 2 {
-        v.sort_by(f);
+        merge_sort(v, f);
         return;
     }
     let mut width = n.div_ceil(threads);
     std::thread::scope(|s| {
         for c in v.chunks_mut(width) {
-            s.spawn(move || c.sort_by(f));
+            s.spawn(move || merge_sort(c, f));
         }
     });
     let mut buf = v.to_vec();
@@ -1325,19 +1391,7 @@ pub fn par_sort_by<T: Copy + Send + Sync, F: Fn(&T, &T) -> Ordering + Sync>(v: &
                     let mid = (lo + width).min(n);
                     let hi = (lo + 2 * width).min(n);
                     let (a, b) = (&src[lo..mid], &src[mid..hi]);
-                    s.spawn(move || {
-                        let (mut i, mut j) = (0, 0);
-                        for o in out.iter_mut() {
-                            // Stable: equal items keep the left run's first.
-                            if j >= b.len() || (i < a.len() && f(&b[j], &a[i]) != Ordering::Less) {
-                                *o = a[i];
-                                i += 1;
-                            } else {
-                                *o = b[j];
-                                j += 1;
-                            }
-                        }
-                    });
+                    s.spawn(move || merge(a, b, out, f));
                 }
             });
         }

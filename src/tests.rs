@@ -1431,3 +1431,32 @@ fn archives_round_trip_through_bsdtar() {
     assert!(crate::archive::create(&d.join("bad.zip"), &src, &[std::ffi::OsString::from("missing")]).is_err(), "errors come back");
     assert!(!d.join("bad.zip").exists() && !d.join(".bad.zip.part").exists(), "nothing left behind");
 }
+
+#[test]
+fn merge_sort_is_stable_and_matches_sort_by() {
+    let mut x: u64 = 0x2545f4914f6cdd1d;
+    let mut rnd = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    for n in [0usize, 1, 2, 23, 24, 25, 47, 48, 49, 100, 1000, 4097, 50_000] {
+        for shape in 0..4 {
+            // (key, original position): few distinct keys, so stability shows.
+            let v: Vec<(u32, u32)> = (0..n as u32)
+                .map(|i| match shape {
+                    0 => ((rnd() % 7) as u32, i),
+                    1 => (i, i),
+                    2 => (n as u32 - i, i),
+                    _ => ((i / 3) as u32, i),
+                })
+                .collect();
+            let mut a = v.clone();
+            let mut b = v.clone();
+            crate::tab::merge_sort(&mut a, &|p: &(u32, u32), q: &(u32, u32)| p.0.cmp(&q.0));
+            b.sort_by(|p, q| p.0.cmp(&q.0));
+            assert_eq!(a, b, "n {n} shape {shape}");
+        }
+    }
+}
