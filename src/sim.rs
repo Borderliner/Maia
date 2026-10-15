@@ -218,7 +218,7 @@ while IFS=$'\t' read -r path pk label fs size rm hp type; do
   [ "$pk" = - ] && pk=""; [ "$label" = - ] && label=""; [ "$fs" = - ] && fs=""
   name="${path##*/}"; disk="${pk:-$name}"
   [ -e "$D/gone/$disk" ] && continue
-  mp=""; [ -f "$D/netmounts/$name" ] && mp="$(cat "$D/netmounts/$name")"
+  mp=""; [ -f "$D/mounted/$name" ] && mp="$(cat "$D/mounted/$name")"
   printf 'PATH="%s" PKNAME="%s" LABEL="%s" FSTYPE="%s" SIZE="%s" RM="%s" HOTPLUG="%s" TYPE="%s" MOUNTPOINTS="%s"\n' "$path" "$pk" "${label// /\\x20}" "$fs" "$size" "$rm" "$hp" "$type" "${mp// /\\x20}"
 done < "$D/devices"
 "#;
@@ -229,7 +229,7 @@ op="$1"; dev="$3"; name="${dev##*/}"
 field() { awk -F'\t' -v p="${2:-$dev}" -v f="$1" '$1==p{print $f}' "$D/devices"; }
 regen() {
   local f n m
-  for f in "$D"/netmounts/*; do
+  for f in "$D"/mounted/*; do
     [ -f "$f" ] || continue
     n="${f##*/}"; m="$(cat "$f")"
     echo "/dev/$n ${m// /\\040} $(field 4 "/dev/$n") rw 0 0"
@@ -239,15 +239,15 @@ sleep 0.15
 if [ -f "$D/fail/$name" ]; then echo "Error ${op}ing $dev: GDBus.Error:org.freedesktop.UDisks2.Error.Failed: $(cat "$D/fail/$name")" >&2; exit 1; fi
 case "$op" in
   mount)
-    if [ -f "$D/netmounts/$name" ]; then echo "Error mounting $dev: GDBus.Error:org.freedesktop.UDisks2.Error.AlreadyMounted: Device $dev is already mounted" >&2; exit 1; fi
+    if [ -f "$D/mounted/$name" ]; then echo "Error mounting $dev: GDBus.Error:org.freedesktop.UDisks2.Error.AlreadyMounted: Device $dev is already mounted" >&2; exit 1; fi
     label="$(field 3)"; [ "$label" = - ] && label="$name"
     mp="$D/media/$label"; mkdir -p "$mp"; echo "files on $label" > "$mp/readme.txt"
-    printf '%s' "$mp" > "$D/netmounts/$name"; regen
+    printf '%s' "$mp" > "$D/mounted/$name"; regen
     echo "Mounted $dev at $mp" ;;
   unmount)
     if [ -e "$D/busy/$name" ]; then echo "Error unmounting $dev: GDBus.Error:org.freedesktop.UDisks2.Error.DeviceBusy: Error unmounting $dev: target is busy" >&2; exit 1; fi
-    if [ ! -f "$D/netmounts/$name" ]; then echo "Error unmounting $dev: GDBus.Error:org.freedesktop.UDisks2.Error.NotMounted: Device is not mounted" >&2; exit 1; fi
-    mp="$(cat "$D/netmounts/$name")"; rm -f "$D/netmounts/$name"; regen; rm -rf "$mp" ;;
+    if [ ! -f "$D/mounted/$name" ]; then echo "Error unmounting $dev: GDBus.Error:org.freedesktop.UDisks2.Error.NotMounted: Device is not mounted" >&2; exit 1; fi
+    mp="$(cat "$D/mounted/$name")"; rm -f "$D/mounted/$name"; regen; rm -rf "$mp" ;;
   power-off)
     touch "$D/gone/$name" ;;
   *) echo "unknown $op" >&2; exit 1 ;;
@@ -1377,7 +1377,10 @@ mod journeys {
             assert!(!p.exists(), "{} trashed", p.display());
         }
         go(&mut s, &crate::sidebar::trash_dir());
-        assert_eq!(s.tab().entries.len(), 2, "both in the trash");
+        // The sandbox's trash is shared by the journeys that ran before: look for ours.
+        for n in ["notes.txt", "budget 2026.csv"] {
+            assert!(s.tab().entries.iter().any(|e| e.name == n), "{n} in the trash");
+        }
         for v in [ViewDetails, ViewList, ViewLarge] {
             s.cmd(v);
             look(&mut s, &format!("trash {v:?}"));
