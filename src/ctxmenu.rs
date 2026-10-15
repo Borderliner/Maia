@@ -23,6 +23,8 @@ pub enum Act {
     Place(PlaceAct, u64),
     /// Mount, unmount or eject the target drives.
     Drive(crate::drives::Op),
+    /// Unmount this network place.
+    Disconnect(String),
     None,
 }
 
@@ -145,6 +147,9 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         items.push(Item::cmd(Cmd::SavedView));
         items.push(Item::cmd(Cmd::ToggleHidden));
         items.push(Item::cmd(Cmd::Refresh));
+        if computer {
+            items.push(Item::cmd(Cmd::ConnectServer));
+        }
         if in_trash {
             items.push(Item::sep());
             items.push(Item::cmd(Cmd::EmptyTrash));
@@ -259,7 +264,7 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
 }
 
 /// Context menu for a sidebar place (recent, bookmark, drive or standard folder).
-pub fn build_place(panel: u64, path: PathBuf, bookmarked: bool, drive: Option<crate::drives::Drive>, pos: Pos2) -> Popup {
+pub fn build_place(panel: u64, path: PathBuf, bookmarked: bool, drive: Option<crate::drives::Drive>, network: Option<String>, pos: Pos2) -> Popup {
     let place = |id: &str, label: &str, a: PlaceAct| Item { id: format!("place:{id}"), label: label.into(), act: Act::Place(a, panel), children: vec![] };
     if let (Some(d), Some(_)) = (&drive, tab::drive_dev(&path)) {
         // A drive that isn't mounted: opening it mounts it.
@@ -281,6 +286,10 @@ pub fn build_place(panel: u64, path: PathBuf, bookmarked: bool, drive: Option<cr
         items.push(place("copy_path", "Copy As Path", PlaceAct::CopyPath));
         items.push(Item::sep());
         items.push(if bookmarked { place("unbookmark", "Remove Bookmark", PlaceAct::RemoveBookmark) } else { place("bookmark", "Add Bookmark", PlaceAct::AddBookmark) });
+        if let Some(uri) = network {
+            items.push(Item::sep());
+            items.push(Item { id: "disconnect".into(), label: "Disconnect".into(), act: Act::Disconnect(uri), children: vec![] });
+        }
         if let Some(d) = &drive {
             let di = Item::drive_items(std::slice::from_ref(d));
             if !di.is_empty() {
@@ -633,6 +642,10 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                     PlaceAct::RemoveBookmark => app.actions.push(Action::BookmarkRemove(path)),
                     PlaceAct::Properties => app.actions.push(Action::Open(Popup::properties(vec![path]))),
                 }
+            }
+            Act::Disconnect(uri) => {
+                let path = st.targets.first().cloned();
+                app.disconnect(uri, path);
             }
             Act::Drive(op) => {
                 for t in &st.targets {

@@ -9,9 +9,9 @@
 #   tools/window.sh shot NAME       target/window/shots/NAME.png (and NAME.s.png at 50%)
 #   tools/window.sh stop            kill the test window, by PID
 #
-# On Hyprland, MAIA_WS=N moves the window to workspace N as soon as it appears (it opens
-# on the focused workspace first); a headless output (hyprctl output create headless)
-# keeps it off the screen someone is using.
+# On Hyprland, MAIA_WS=N opens the window on workspace N (a window rule for the test
+# build's class, moved there again in case the rule did not apply); a headless output
+# (hyprctl output create headless) keeps it off the screen someone is using.
 set -e
 C=$(dirname "$(dirname "$(readlink -f "$0")")")
 W=$C/target/window
@@ -27,8 +27,13 @@ start)
   [ -p "$FIFO" ] || mkfifo "$FIFO"
   WL=${WAYLAND_DISPLAY:-wayland-1}
   GPU=""; for d in /dev/dri /dev/nvidia*; do [ -e "$d" ] && GPU="$GPU --dev-bind $d $d"; done
-  clients() { hyprctl -j clients 2>/dev/null | python3 -c 'import json,sys; [print(c["address"]) for c in json.load(sys.stdin) if c["class"]=="io.github.yappologistic.Maia"]' 2>/dev/null; }
+  # Test builds have their own window class, so a rule can place them before they show.
+  clients() { hyprctl -j clients 2>/dev/null | python3 -c 'import json,sys; [print(c["address"]) for c in json.load(sys.stdin) if c["class"]=="io.github.yappologistic.Maia.test"]' 2>/dev/null; }
   BEFORE=$(clients)
+  if [ -n "$MAIA_WS" ]; then
+    hyprctl eval "hl.window_rule({ match = { class = \"^(io\\\\.github\\\\.yappologistic\\\\.Maia\\\\.test)\$\" }, workspace = \"$MAIA_WS silent\" })" > /dev/null 2>&1 ||
+      hyprctl keyword windowrule "workspace $MAIA_WS silent, class:^(io\\.github\\.yappologistic\\.Maia\\.test)\$" > /dev/null 2>&1
+  fi
   # shellcheck disable=SC2086
   (setsid bwrap --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
     --symlink usr/bin /bin --symlink usr/bin /sbin --ro-bind /etc /etc --ro-bind /sys /sys \

@@ -264,6 +264,103 @@ esac
     d
 }
 
+/// A fake `gio` for network tests: a phone that can be mounted, a share on "nas" that
+/// asks for a login (user "me", password "secret") the way gio does, an anonymous FTP
+/// site "pub", and unknown hosts that fail. Mounts are folders under `gvfs/`.
+pub fn fake_network(name: &str) -> PathBuf {
+    let d = root().join("net").join(name);
+    let _ = std::fs::remove_dir_all(&d);
+    for sub in ["gvfs", "netmounts"] {
+        std::fs::create_dir_all(d.join(sub)).unwrap();
+    }
+    std::fs::write(d.join("phones"), "Pixel 7\tmtp://Google_Pixel_7/\n").unwrap();
+    let gio = r#"#!/bin/bash
+D="$(dirname "$0")"
+echo "gio $*" >> "$D/log"
+id() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '_'; }
+do_mount() {
+  local uri="$1" name="$2" i; i=$(id "$uri")
+  mkdir -p "$D/gvfs/$i"; echo "on $name" > "$D/gvfs/$i/hello.txt"
+  printf '%s\t%s\n' "$name" "$uri" > "$D/netmounts/$i"
+}
+if [ "$1" = mount ] && [ "$2" = -l ]; then
+  while IFS=$'\t' read -r name uri; do
+    [ -z "$uri" ] && continue
+    echo "Volume(0): $name"; echo "  Type: GProxyVolume (GProxyVolumeMonitorMTP)"; echo "  activation_root=$uri"
+    [ -f "$D/netmounts/$(id "$uri")" ] && { echo "  Mount(0): $name -> $uri"; echo "    Type: GProxyShadowMount"; }
+  done < "$D/phones"
+  for f in "$D"/netmounts/*; do
+    [ -f "$f" ] || continue
+    IFS=$'\t' read -r name uri < "$f"
+    case "$uri" in mtp://*) continue ;; esac
+    echo "Mount(0): $name -> $uri"; echo "  Type: GDaemonMount"
+  done
+  exit 0
+fi
+if [ "$1" = info ]; then
+  i=$(id "$2"); [ -f "$D/netmounts/$i" ] || { echo "gio: $2: Operation not supported" >&2; exit 1; }
+  echo "name: x"; echo "uri: $2"; echo "local path: $D/gvfs/$i"; exit 0
+fi
+if [ "$1" = mount ] && [ "$2" = -u ]; then
+  i=$(id "$3"); [ -f "$D/netmounts/$i" ] || { echo "gio: $3: Containing mount does not exist" >&2; exit 1; }
+  rm -f "$D/netmounts/$i"; rm -rf "$D/gvfs/$i"; exit 0
+fi
+if [ "$1" = mount ]; then
+  anon=0; uri="$2"; [ "$2" = -a ] && { anon=1; uri="$3"; }
+  case "$uri" in
+    mtp://Google_Pixel_7*) do_mount "$uri" "Pixel 7" ;;
+    ftp://pub*) do_mount "$uri" "pub" ;;
+    smb://nas/*)
+      [ $anon = 1 ] && { echo "gio: $uri: Failed to mount Windows share: Permission denied" >&2; exit 2; }
+      printf 'Password required for share “media” on nas\nUser [me]: '; read -r user
+      printf 'Domain [WORKGROUP]: '; read -r dom
+      while true; do
+        printf 'Password: '; read -r pass || exit 2
+        [ "$user" = me ] && [ "$pass" = secret ] && break
+      done
+      sleep 0.2; do_mount "$uri" "media on nas" ;;
+    *) echo "gio: $uri: Failed to mount Windows share: No such file or directory" >&2; exit 2 ;;
+  esac
+  exit 0
+fi
+echo "gio: unknown $*" >&2; exit 1
+"#;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(d.join("gio"), gio).unwrap();
+    std::fs::set_permissions(d.join("gio"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    d
+}
+
+/// A fake `pkexec` for administrator tests: it plays root by making the folders the
+/// command touches writable for the moment it runs, and refuses (exit 126, as a dismissed
+/// password dialog does) while a file named `deny` exists beside it.
+pub fn fake_pkexec(name: &str) -> PathBuf {
+    let d = root().join("admin").join(name);
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let script = r#"#!/bin/bash
+D="$(dirname "$0")"
+echo "pkexec $*" >> "$D/log"
+[ -e "$D/deny" ] && { echo "Error executing command as another user: Request dismissed" >&2; exit 126; }
+opened=()
+after=0
+for a in "$@"; do
+  [ "$a" = -- ] && { after=1; continue; }
+  [ $after = 1 ] || continue
+  for d in "$a" "$(dirname "$a")"; do
+    if [ -d "$d" ] && [ ! -w "$d" ]; then chmod u+w "$d"; opened+=("$d"); fi
+  done
+done
+"$@"; rc=$?
+for d in "${opened[@]}"; do chmod u-w "$d" 2>/dev/null; done
+exit $rc
+"#;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(d.join("pkexec"), script).unwrap();
+    std::fs::set_permissions(d.join("pkexec"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    d
+}
+
 /// Real media for preview/thumbnail tests, made with ffmpeg inside the sandbox: a video,
 /// an MP3 with cover art, a hand-written one-page PDF, an SVG, a PNG and a corrupt video.
 pub fn media_fixture(name: &str) -> PathBuf {
@@ -1323,7 +1420,10 @@ mod journeys {
             assert!(!p.exists(), "{} trashed", p.display());
         }
         go(&mut s, &crate::sidebar::trash_dir());
-        assert_eq!(s.tab().entries.len(), 2, "both in the trash");
+        // The sandbox's trash is shared by the journeys that ran before: look for ours.
+        for n in ["notes.txt", "budget 2026.csv"] {
+            assert!(s.tab().entries.iter().any(|e| e.name == n), "{n} in the trash");
+        }
         for v in [ViewDetails, ViewList, ViewLarge] {
             s.cmd(v);
             look(&mut s, &format!("trash {v:?}"));
@@ -2519,6 +2619,174 @@ mod journeys {
         report("aliases", &s);
     }
 
+    /// Network places as a user meets them, on a fake gio: the phone in the sidebar mounts
+    /// with a click and opens; Connect To Server asks again after a wrong password and opens
+    /// the share with the right one; an FTP address typed into Go To connects as a guest;
+    /// an unknown host says so; recent servers fill the address; Disconnect moves the tab
+    /// off the share first.
+    #[test]
+    fn network_places_connect_browse_disconnect() {
+        if !sandboxed() {
+            return;
+        }
+        let d = fake_network("main");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(d.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let home = fixture("net");
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        wait_until(&mut s, "phone in the sidebar", 10, |s| sidebar_text(s, "Pixel 7").is_some());
+        assert!(sidebar_text(&s, "Network").is_some(), "Network section shown");
+        look(&mut s, "network section");
+        // The phone: one click mounts it and opens it.
+        let r = sidebar_text(&s, "Pixel 7").unwrap();
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        let phone = d.join("gvfs/mtp___Google_Pixel_7_");
+        wait_until(&mut s, "phone opened", 10, |s| s.tab().path == phone);
+        s.settle();
+        assert!(s.tab().entries.iter().any(|e| e.name == "hello.txt"));
+        // Connect To Server: no password first, then a wrong one, then the right one.
+        s.cmd(ConnectServer);
+        s.idle(3);
+        assert!(s.texts.iter().any(|(_, t)| t == "Connect to server"));
+        s.act("text smb://nas/media");
+        s.act("key Enter");
+        wait_until(&mut s, "login refused", 10, |s| s.texts.iter().any(|(_, t)| t == "Wrong user name or password"));
+        look(&mut s, "connect dialog with an error");
+        // A field sits right under its label.
+        let field = |s: &mut Sim, label: &str| {
+            let r = s.text_rect(label);
+            s.act(&format!("click {:.0} {:.0}", r.left() + 30.0, r.bottom() + 12.0));
+        };
+        field(&mut s, "User");
+        s.act("text me");
+        field(&mut s, "Password");
+        s.act("text nope");
+        s.click_text("Connect");
+        wait_until(&mut s, "wrong password refused", 10, |s| !s.app.connecting("smb://nas/media") && s.texts.iter().any(|(_, t)| t == "Wrong user name or password"));
+        assert!(matches!(&s.app.popup, Popup::Connect(st) if st.user == "me" && st.password.is_empty()), "user kept, password cleared");
+        field(&mut s, "Password");
+        s.act("text secret");
+        s.act("key Enter");
+        let share = d.join("gvfs/smb___nas_media");
+        wait_until(&mut s, "share opened", 10, |s| s.tab().path == share && !s.popup_open());
+        assert_eq!(s.app.ud.servers.first().map(String::as_str), Some("smb://nas/media"), "remembered");
+        wait_until(&mut s, "share in the sidebar", 10, |s| sidebar_text(s, "media on nas").is_some());
+        look(&mut s, "inside the share");
+        // Go To: an address connects; an FTP site as a guest.
+        s.act("key ctrl+p");
+        s.act("text ftp://pub");
+        s.act("key Enter");
+        wait_until(&mut s, "ftp opened", 10, |s| s.tab().path == d.join("gvfs/ftp___pub"));
+        // An unknown host fails with the reason.
+        s.act("key ctrl+p");
+        s.act("text smb://nohost/x");
+        s.act("key Enter");
+        wait_until(&mut s, "failure reported", 10, |s| s.app.toast.as_ref().is_some_and(|t| t.0 == "Couldn't connect to x on nohost: No such file or directory"));
+        // Recent servers fill the address.
+        s.cmd(ConnectServer);
+        s.idle(3);
+        s.click_text("smb://nas/media");
+        s.idle(2);
+        assert!(matches!(&s.app.popup, Popup::Connect(st) if st.uri == "smb://nas/media"));
+        s.act("key Escape");
+        // Disconnect the share from the sidebar while a tab shows it.
+        go(&mut s, &share);
+        let r = sidebar_text(&s, "media on nas").unwrap();
+        s.act(&format!("move {:.0} {:.0}", r.center().x, r.center().y));
+        click_control(&mut s, "disconnect button");
+        assert!(crate::tab::is_computer(&s.tab().path), "tab left the share first");
+        wait_until(&mut s, "disconnected", 10, |s| s.app.toast.as_ref().is_some_and(|t| t.0 == "Disconnected media on nas"));
+        wait_until(&mut s, "gone from the sidebar", 10, |s| sidebar_text(s, "media on nas").is_none());
+        assert!(!share.exists());
+        let log = std::fs::read_to_string(d.join("log")).unwrap_or_default();
+        assert!(log.contains("gio mount smb://nas/media") && log.contains("gio mount -u smb://nas/media"), "{log}");
+        report("network", &s);
+    }
+
+    /// Administrator access, on a fake pkexec: pasting into, deleting in, creating in and
+    /// renaming in a folder the user may not write each fail first and then succeed through
+    /// "Retry as administrator" / "Use administrator"; a dismissed password dialog leaves
+    /// everything as it was and says so.
+    #[test]
+    fn administrator_retries_refused_operations() {
+        if !sandboxed() {
+            return;
+        }
+        let d = fake_pkexec("main");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(d.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let home = fixture("admin");
+        let locked = home.join("System");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("keep.conf"), "x").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let mut s = Sim::new(&home.join("Documents"), vec2(1280.0, 800.0));
+        s.cmd(ViewDetails);
+        s.settle();
+        let finished = |s: &Sim| !s.app.jobs.is_empty() && s.app.jobs.iter().all(|j| j.finished_at.is_some());
+        // Paste into it: refused, then copied as administrator.
+        select_path(&mut s, &home.join("Documents/notes.txt"));
+        s.act("key ctrl+c");
+        go(&mut s, &locked);
+        s.act("key ctrl+v");
+        wait_until(&mut s, "paste refused", 10, |s| s.texts.iter().any(|(_, t)| t == "Retry as administrator"));
+        look(&mut s, "permission refused");
+        s.click_text("Retry as administrator");
+        wait_until(&mut s, "copied as administrator", 10, |_| locked.join("notes.txt").exists());
+        assert!(std::fs::read_to_string(d.join("log")).unwrap().contains("cp -a -- "), "one cp through pkexec");
+        wait_until(&mut s, "job finished", 10, finished);
+        // Delete inside it (Shift+Delete asks first).
+        s.settle();
+        select_path(&mut s, &locked.join("keep.conf"));
+        s.act("key shift+Delete");
+        s.idle(2);
+        s.act("key Enter");
+        wait_until(&mut s, "delete refused", 10, |s| s.texts.iter().any(|(_, t)| t == "Retry as administrator"));
+        s.click_text("Retry as administrator");
+        wait_until(&mut s, "deleted as administrator", 10, |_| !locked.join("keep.conf").exists());
+        // A new folder: asked, then made.
+        s.settle();
+        s.act("key ctrl+shift+n");
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with("You don't have permission")), "asked first");
+        s.click_text("Use administrator");
+        wait_until(&mut s, "folder made", 10, |_| locked.join("New folder").is_dir());
+        // Rename: asked, then renamed.
+        s.settle();
+        select_path(&mut s, &locked.join("notes.txt"));
+        s.act("key F2");
+        s.act("key ctrl+a");
+        s.act("text settings.txt");
+        s.act("key Enter");
+        s.idle(2);
+        s.click_text("Use administrator");
+        wait_until(&mut s, "renamed", 10, |_| locked.join("settings.txt").exists() && !locked.join("notes.txt").exists());
+        // The password dialog dismissed: nothing changes, and the job says why.
+        std::fs::write(d.join("deny"), "").unwrap();
+        s.settle();
+        s.act("key ctrl+shift+n");
+        s.idle(2);
+        s.click_text("Use administrator");
+        wait_until(&mut s, "refusal reported", 10, |s| s.app.jobs.iter().any(|j| j.progress.lock().unwrap().errors.iter().any(|e| e == "Administrator access was not given")));
+        assert!(!locked.join("New folder (1)").exists());
+        look(&mut s, "after administrator work");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        report("admin", &s);
+    }
+
     #[test]
     fn monkey_sessions() {
         if !sandboxed() {
@@ -2532,13 +2800,34 @@ mod journeys {
             let home = fixture(&format!("monkey{seed}"));
             // A git work tree with every kind of change, for the status marks.
             crate::tests::git_fixture(&home.join("Code/repo"));
-            // Fake drives to mount and eject at random (never the real tools).
+            // Fake drives, network places and pkexec to use at random (never the real tools).
             let drv = fake_drives(&format!("monkey{seed}"));
+            let net = fake_network(&format!("monkey{seed}"));
+            let adm = fake_pkexec(&format!("monkey{seed}"));
+            for (dir, f) in [(&net, "gio"), (&net, "phones"), (&adm, "pkexec")] {
+                let _ = std::fs::copy(dir.join(f), drv.join(f));
+            }
+            for sub in ["gvfs", "netmounts"] {
+                let _ = std::fs::create_dir_all(drv.join(sub));
+            }
             crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(drv));
+            // An archive to wander into.
+            if crate::archive::available() {
+                let _ = crate::archive::create(&home.join("bundle.zip"), &home.join("Documents"), &["notes.txt".into(), "Taxes".into()]);
+            }
             let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+            // Later launches handing folders over (single instance).
+            let (tx, rx) = std::sync::mpsc::channel();
+            s.app.requests = Some(rx);
             let mut rng = Rng::new(seed);
             s.note(format!("seed {seed}"));
             for k in 0..steps {
+                if rng.below(80) == 0 {
+                    let picks = [home.join("Music"), home.join("Documents/notes.txt"), home.join("bundle.zip"), home.join("gone")];
+                    let p = rng.pick(&picks).clone();
+                    s.note(format!("second launch with {}", p.display()));
+                    let _ = tx.send(crate::single::Request::Open(vec![p]));
+                }
                 monkey_step(&mut s, &mut rng);
                 // Every so often: dismiss whatever is open and check the layout of the
                 // state the random walk has reached (feature combinations no script has).

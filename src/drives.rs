@@ -30,7 +30,15 @@ impl Tools {
         Some(Tools { dir: None })
     }
 
-    fn cmd(&self, name: &str) -> Command {
+    /// The tool exists (on PATH, or among the fakes).
+    pub fn has(&self, name: &str) -> bool {
+        match &self.dir {
+            Some(d) => d.join(name).is_file(),
+            None => crate::media::have(name),
+        }
+    }
+
+    pub fn cmd(&self, name: &str) -> Command {
         match &self.dir {
             Some(d) => Command::new(d.join(name)),
             None => Command::new(name),

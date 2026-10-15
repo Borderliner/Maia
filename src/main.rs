@@ -1,5 +1,6 @@
 //! Maia: a fast, keyboard-first file manager for Linux.
 
+mod admin;
 mod app;
 mod archive;
 mod clipboard;
@@ -20,6 +21,7 @@ mod listing;
 mod media;
 mod lucide_map;
 mod mime;
+mod network;
 mod ops;
 mod panel;
 mod popups;
@@ -127,7 +129,7 @@ fn main() {
         single::claim_at(&sock).map(|l| (l, sock))
     };
     runner::run(
-        runner::Options { title: "Maia", app_id: "io.github.yappologistic.Maia", size: [1240.0, 780.0], min_size: [520.0, 340.0], icon: install::window_icon() },
+        runner::Options { title: "Maia", app_id: if cfg!(feature = "testkit") { "io.github.yappologistic.Maia.test" } else { "io.github.yappologistic.Maia" }, size: [1240.0, 780.0], min_size: [520.0, 340.0], icon: install::window_icon() },
         paths,
         listener,
     );

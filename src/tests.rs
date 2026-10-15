@@ -1615,3 +1615,36 @@ fn aliases_set_change_clear_and_refuse_duplicates() {
     ud.aliases.insert("gone_command".into(), "zz".into());
     assert_eq!(set_alias(&mut ud, Cmd::GoTo, "zz"), Ok(()));
 }
+
+#[test]
+fn network_places_parse_from_gio() {
+    use crate::network::{is_uri, label, normalize, parse_mounts};
+    let text = "Drive(0): Micron MTFDKBA1T0TFH\n  Type: GProxyDrive (GProxyVolumeMonitorUDisks2)\n  Volume(0): 681 GB Volume\n    Type: GProxyVolume (GProxyVolumeMonitorUDisks2)\n    can_mount=1\nVolume(0): Pixel 7\n  Type: GProxyVolume (GProxyVolumeMonitorMTP)\n  activation_root=mtp://Google_Pixel_7_2A09/\n  can_mount=1\nVolume(1): Camera\n  Type: GProxyVolume (GProxyVolumeMonitorGPhoto2)\n  activation_root=gphoto2://Canon_EOS/\n  Mount(0): Camera -> gphoto2://Canon_EOS/\n    Type: GProxyShadowMount (GProxyVolumeMonitorGPhoto2)\nMount(0): media on nas -> smb://nas/media/\n  Type: GDaemonMount\n  default_location=smb://nas/media/\nMount(1): me on host -> sftp://me@host/\n  Type: GDaemonMount\nMount(2): Backup -> file:///run/media/me/Backup\n  Type: GProxyMount (GProxyVolumeMonitorUDisks2)\n";
+    let p = parse_mounts(text);
+    let got: Vec<(String, bool, bool)> = p.iter().map(|x| (x.uri.clone(), x.device, x.mounted)).collect();
+    assert_eq!(
+        got,
+        [("mtp://Google_Pixel_7_2A09/".into(), true, false), ("gphoto2://Canon_EOS/".into(), true, true), ("smb://nas/media/".into(), false, true), ("sftp://me@host/".into(), false, true)],
+        "local disks left to Drives, phones and shares kept"
+    );
+    assert_eq!(p[0].name, "Pixel 7");
+    assert!(is_uri("smb://nas/media") && is_uri("SFTP://me@host") && !is_uri("/home/me") && !is_uri("smb://") && !is_uri("http://x"));
+    assert_eq!(normalize(" ssh://me@host/srv "), "sftp://me@host/srv");
+    assert_eq!(label("smb://nas/media/"), "media on nas");
+    assert_eq!(label("sftp://me@host/"), "me@host");
+    assert!(parse_mounts("garbage\nMount(\nVolume(3)\n").is_empty());
+}
+
+#[test]
+fn administrator_commands_are_exact() {
+    use crate::admin::{Task, denied};
+    let s = |v: Vec<std::ffi::OsString>| v.into_iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
+    let a = s(Task::Copy { srcs: vec!["/home/me/a b".into(), "/home/me/-x".into()], dest: "/etc".into() }.argv());
+    assert!(a[0].ends_with("/cp"), "absolute program: {}", a[0]);
+    assert_eq!(&a[1..], ["-a", "--", "/home/me/a b", "/home/me/-x", "/etc"], "-- before names that look like options");
+    assert_eq!(&s(Task::Delete { paths: vec!["/srv/x".into()] }.argv())[1..], ["-rf", "--", "/srv/x"]);
+    assert_eq!(&s(Task::Rename { from: "/etc/a".into(), to: "/etc/b".into() }.argv())[1..], ["-T", "--", "/etc/a", "/etc/b"]);
+    assert!(s(Task::NewFolder("/opt/n".into()).argv())[0].ends_with("/mkdir"));
+    assert!(denied(&std::io::Error::from_raw_os_error(libc::EACCES)) && denied(&std::io::Error::from_raw_os_error(libc::EPERM)));
+    assert!(!denied(&std::io::Error::from_raw_os_error(libc::EROFS)), "a read-only disk isn't a permission problem");
+}

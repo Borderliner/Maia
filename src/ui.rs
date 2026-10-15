@@ -1464,7 +1464,21 @@ impl App {
                         if !p.errors.is_empty() {
                             let n = p.errors.len();
                             let errs = p.errors.clone();
+                            let denied = p.denied.clone();
                             drop(p);
+                            // Refused for lack of permission: offer the same again as administrator.
+                            let task = match &j.kind {
+                                crate::ops::OpKind::Copy { dest, .. } if done && !denied.is_empty() => Some(crate::admin::Task::Copy { srcs: denied, dest: dest.clone() }),
+                                crate::ops::OpKind::Move { dest, .. } if done && !denied.is_empty() => Some(crate::admin::Task::Move { srcs: denied, dest: dest.clone() }),
+                                crate::ops::OpKind::Delete { .. } if done && !denied.is_empty() => Some(crate::admin::Task::Delete { paths: denied }),
+                                _ => None,
+                            };
+                            if let (Some(task), Some(tools)) = (task, crate::drives::Tools::current().filter(|t| t.has("pkexec"))) {
+                                if ui.add(egui::Button::new(egui::RichText::new("Retry as administrator").small())).clicked() {
+                                    self.actions.push(Action::StartJob(crate::ops::OpKind::Admin { task, tools }));
+                                    remove = Some(k);
+                                }
+                            }
                             if ui.add(egui::Label::new(egui::RichText::new(format!("{n} error{} · {}", if n == 1 { "" } else { "s" }, if j.show_errors { "hide" } else { "show" })).small().color(pal.danger)).sense(Sense::click())).clicked() {
                                 j.show_errors = !j.show_errors;
                             }

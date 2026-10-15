@@ -120,6 +120,7 @@ commands! {
     Up, "up", Folder, "Up", "Go to the parent folder and select the folder you came from.", ["Alt+Up", "Backspace"];
     Home, "home", Folder, "Home", "Go to your home folder.", ["Alt+Home"];
     Computer, "computer", Folder, "Computer", "Show drives and volumes; open an unmounted one to mount it.", [];
+    ConnectServer, "connect_server", Folder, "Connect To Server…", "Open a network share (smb, sftp, ftp, WebDAV) by its address.", [];
     Refresh, "refresh", Folder, "Refresh", "Re-read this folder and reload previews, keeping scroll and selection.", ["Ctrl+R", "Alt+R"];
     Activate, "activate", Folder, "Open", "Open the selected folder here or open files with their default app.", ["Enter"];
     OpenInNewTab, "open_in_new_tab", Folder, "Open In New Tab", "Open selected folders in new tabs; files open their containing folder.", ["Ctrl+Enter"];
