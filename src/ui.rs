@@ -592,7 +592,9 @@ impl App {
             } else if !crate::icons::dir(ui.painter(), ic, &t.path) {
                 crate::theme::paint_icon(ui.painter(), ic, crate::theme::FileCat::Folder, "", false);
             }
-            let close_w = if hovered || is_active { 18.0 } else { 0.0 };
+            // The close button waits until the tab (growing in as it opens) has room beside
+            // the icon.
+            let close_w = if (hovered || is_active) && r.width() >= 52.0 { 18.0 } else { 0.0 };
             let text_rect = Rect::from_min_max(pos2(r.left() + 27.0, r.top()), pos2(r.right() - 6.0 - close_w, r.bottom()));
             let title = t.title();
             let g = listing::elided(ui, &title, FontId::proportional(self.cfg.font_size - 0.5), text_rect.width(), if is_active { pal.text } else { pal.text_dim });
