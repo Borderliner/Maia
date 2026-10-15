@@ -194,6 +194,23 @@ fn name_job(name: &str, suffix: Option<&str>, q: &fuzzy::Query, font: &FontId, c
     job
 }
 
+/// A matched line after the name, with the words it matched in the accent colour.
+fn append_match(job: &mut LayoutJob, line: &str, needle: &str, font: &FontId, dim: Color32, accent: Color32) {
+    let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
+    let gap = if job.sections.len() > 1 { 12.0 } else { 8.0 };
+    // Lowercasing that keeps byte offsets (nearly all text) lets the match be found in place.
+    let (low, nl) = (line.to_lowercase(), needle.to_lowercase());
+    let at = (!nl.is_empty() && low.len() == line.len()).then(|| low.find(&nl)).flatten().filter(|i| line.is_char_boundary(i + nl.len()));
+    match at {
+        Some(i) => {
+            job.append(&line[..i], gap, fmt(dim));
+            job.append(&line[i..i + nl.len()], 0.0, fmt(accent));
+            job.append(&line[i + nl.len()..], 0.0, fmt(dim));
+        }
+        None => job.append(line, gap, fmt(dim)),
+    }
+}
+
 /// Row pitch: generous leading around the text, scaled by the Spacing option
 /// (12 px text at default spacing gives ~24.5 px rows).
 pub fn row_height(cfg: &Config) -> f32 {
@@ -834,12 +851,13 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                 let name_r = Rect::from_min_max(pos2(ic.right() + 7.0, cell.top()), pos2(inner.right() - if env.recents.contains(&e.path) && env.cfg.highlight_recents { 10.0 } else { 0.0 }, cell.bottom()));
                                 if !rename_field(ui, name_r, idx, t, env, &font) {
                                     let name = display_name(&e, env.cfg);
-                                    let rel = e.rel(); let mut suffix = rel.as_deref().and_then(|r| std::path::Path::new(r).parent()).filter(|p| !p.as_os_str().is_empty()).map(|p| format!("› {}", p.display()));
+                                    let rel = e.rel();
+                                    let suffix = rel.as_deref().and_then(|r| std::path::Path::new(r).parent()).filter(|p| !p.as_os_str().is_empty()).map(|p| format!("› {}", p.display()));
+                                    let mut job = name_job(&name, suffix.as_deref(), q, &font, dimc(pal.text), dimc(pal.text_dim), pal.accent, name_r.width(), 1);
                                     // The line that matched, after the name (elided with it).
                                     if let Some(line) = t.content.snippet(&e.path) {
-                                        suffix = Some(format!("{}{line}", suffix.map(|s| s + "  ").unwrap_or_default()));
+                                        append_match(&mut job, line, t.filter.trim(), &font, dimc(pal.text_dim), pal.accent);
                                     }
-                                    let job = name_job(&name, suffix.as_deref(), q, &font, dimc(pal.text), dimc(pal.text_dim), pal.accent, name_r.width(), 1);
                                     let g = ui.fonts_mut(|f| f.layout_job(job));
                                     ui.painter().galley(pos2(name_r.left(), cell.center().y - g.size().y / 2.0), g, pal.text);
                                 }
