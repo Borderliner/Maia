@@ -1,0 +1,2192 @@
+//! Application state, input routing, command dispatch and persistence.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use egui::{self, Event, Key, Modifiers, Pos2};
+
+use crate::commands::{self, Chord, Cmd, Keymap};
+use crate::config::{self, Config, LayoutSnap, NewTabShows, SaveScope, Session, SortKey, Startup, TabSnap, UserData, ViewSettings};
+use crate::fsx;
+use crate::inspector::Inspector;
+use crate::ops::{self, Job, OpKind};
+use crate::panel::{Node, Panel, Side};
+use crate::popups::{ConflictItem, Popup};
+use crate::rename::{Outcome, Rename};
+use crate::stats::Stats;
+use crate::tab::{self, COMPUTER, Tab, ViewCtx};
+use crate::theme::{self, Palette};
+use crate::thumbs::Thumbs;
+use crate::watch::Watch;
+
+/// Cross-cutting requests produced while drawing; applied after the frame's UI.
+pub enum Action {
+    Cmd(Cmd),
+    Navigate { panel: u64, path: PathBuf },
+    NewTab { panel: u64, path: PathBuf, select: Option<PathBuf>, focus: bool },
+    Split { panel: u64, path: PathBuf, side: Side, select: Option<PathBuf> },
+    Activate { panel: u64, idx: u32, mods: Modifiers },
+    OpenFile(PathBuf),
+    CtxMenu { panel: u64, pos: Pos2, background: bool },
+    Drop { paths: Vec<PathBuf>, dest: PathBuf, copy: bool, link: bool },
+    RunWith { exe: PathBuf, args: Vec<PathBuf> },
+    FocusPanel(u64),
+    ActivateTab { panel: u64, idx: usize },
+    CloseTab { panel: u64, idx: usize },
+    MoveTab { from: u64, idx: usize, to: u64, to_idx: Option<usize>, side: Option<Side>, copy: bool },
+    BookmarkAdd(PathBuf),
+    BookmarkRemove(PathBuf),
+    BookmarkMove { from: usize, to: usize },
+    CommitRename(u64),
+    CancelRename(u64),
+    Toast(String),
+    Open(Popup),
+    StartJob(OpKind),
+    ExternalDrop { paths: Vec<PathBuf>, dest: PathBuf },
+}
+
+pub enum Drag {
+    Tab { panel: u64, idx: usize, title: String },
+    Files { paths: Vec<PathBuf>, from_panel: u64, right: bool },
+    Bookmark { idx: usize },
+}
+
+pub struct UndoEntry {
+    pub label: String,
+    pub kind: UndoKind,
+}
+
+pub enum UndoKind {
+    Rename(Vec<(PathBuf, PathBuf)>),
+    Move(Vec<(PathBuf, PathBuf)>),
+    Created(Vec<PathBuf>),
+    Trashed(Vec<PathBuf>),
+}
+
+pub struct App {
+    pub cfg: Config,
+    pub ud: UserData,
+    pub keymap: Keymap,
+    pub pal: Palette,
+    pub panels: HashMap<u64, Panel>,
+    pub tree: Node,
+    pub active: u64,
+    pub prev_active: u64,
+    pub next_id: u64,
+    pub closed_tabs: Vec<TabSnap>,
+    pub thumbs: Thumbs,
+    pub stats: Stats,
+    pub watch: Watch,
+    pub jobs: Vec<Job>,
+    pub clipboard: Option<(Vec<PathBuf>, bool)>,
+    pub popup: Popup,
+    pub sidebar: bool,
+    pub sidebar_width: f32,
+    pub toast: Option<(String, Instant)>,
+    pub seq: Vec<Chord>,
+    pub seq_time: Instant,
+    pub drag: Option<Drag>,
+    pub recents_set: HashSet<PathBuf>,
+    pub actions: Vec<Action>,
+    pub ud_dirty: bool,
+    pub cfg_dirty: bool,
+    pub last_save: Instant,
+    pub ud_mtime: Option<std::time::SystemTime>,
+    pub save_session: bool,
+    pub jump_buf: (String, Instant),
+    pub undo: Vec<UndoEntry>,
+    pub theme_applied: (theme::ThemeName, f32, f32, bool),
+    pub ctx: egui::Context,
+    pub fresh: bool,
+    /// Set to close the window at the end of the frame.
+    pub quit: bool,
+    pub quick_anchor: Option<Pos2>,
+    /// The drag that just ended used the right mouse button (drop shows a menu).
+    pub drop_right: bool,
+    /// Theme previewed while hovering a swatch in Options.
+    pub preview_theme: Option<theme::ThemeName>,
+    pub font_applied: String,
+    /// Panel rectangles as drawn, easing toward the split layout (splits and closes animate).
+    pub shown_rects: std::collections::HashMap<u64, egui::Rect>,
+    /// Panels along the top edge: their tab strips live in the title bar.
+    pub title_tab_panels: Vec<u64>,
+    /// Closed tabs whose slot is still collapsing: (panel, index, width, when).
+    pub tab_ghosts: Vec<(u64, usize, f32, std::time::Instant)>,
+    /// When background work last produced results; memory is handed back once things settle.
+    pub trim_after: Option<std::time::Instant>,
+    /// When the first trim-worthy work after the last trim happened.
+    pub trim_pending_since: Option<std::time::Instant>,
+    /// Mounts, unmounts and ejects in progress.
+    pub drive_jobs: Vec<crate::drives::Job>,
+    /// Drive list generation the Computer views were last loaded with.
+    pub drives_seen: u64,
+    /// Input to add to the next frame (pointer state the system took over during drag
+    /// and drop, and drags from other apps).
+    pub inject: Vec<egui::Event>,
+    /// A system drag is over the window: Some(true) when it is Maia's own, carried out
+    /// and back in.
+    pub ext_drag: Option<bool>,
+    /// A system drag was dropped this frame (Some(own)).
+    pub ext_drop: Option<bool>,
+}
+
+impl App {
+    pub fn new(ctx: &egui::Context, paths: Vec<PathBuf>) -> App {
+        let ctx = ctx.clone();
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        let (font_family, cfg_mono) = {
+            let c = config::load_config();
+            (c.font_family, c.inspector_font)
+        };
+        theme::install_fonts(&ctx, &font_family, &cfg_mono);
+        crate::mime::preload();
+        let cfg = config::load_config();
+        let ud = config::load_userdata();
+        let pal = theme::palette(cfg.theme);
+        theme::apply(&ctx, &pal, cfg.font_size, cfg.spacing, cfg.animations);
+        let session: Session = config::load_json(&config::session_path());
+        let mut app = App {
+            keymap: Keymap::build(&cfg.hotkeys),
+            pal,
+            panels: HashMap::new(),
+            tree: Node::Leaf(0),
+            active: 0,
+            prev_active: 0,
+            next_id: 1,
+            closed_tabs: vec![],
+            thumbs: Thumbs::new(ctx.clone(), 3),
+            stats: Stats::new(ctx.clone()),
+            watch: Watch::new(ctx.clone()),
+            jobs: vec![],
+            clipboard: None,
+            popup: Popup::None,
+            sidebar: if session.sidebar_width > 0.0 { session.sidebar } else { true },
+            sidebar_width: if session.sidebar_width > 0.0 { session.sidebar_width } else { 176.0 },
+            toast: None,
+            seq: vec![],
+            seq_time: Instant::now(),
+            drag: None,
+            recents_set: HashSet::new(),
+            actions: vec![],
+            ud_dirty: false,
+            cfg_dirty: false,
+            last_save: Instant::now(),
+            ud_mtime: config::mtime(&config::userdata_path()),
+            save_session: paths.is_empty(),
+            jump_buf: (String::new(), Instant::now()),
+            undo: vec![],
+            theme_applied: (cfg.theme, cfg.font_size, cfg.spacing, cfg.animations),
+            ctx: ctx.clone(),
+            fresh: true,
+            quit: false,
+            quick_anchor: None,
+            drop_right: false,
+            preview_theme: None,
+            font_applied: format!("{}\u{1f}{}", font_family, cfg_mono),
+            shown_rects: Default::default(),
+            title_tab_panels: vec![],
+            tab_ghosts: vec![],
+            trim_after: None,
+            trim_pending_since: None,
+            drive_jobs: vec![],
+            drives_seen: 0,
+            inject: vec![],
+            ext_drag: None,
+            ext_drop: None,
+            cfg,
+            ud,
+        };
+        app.refresh_recents();
+        // Startup: explicit paths → those; else last session / home / layout.
+        let mut restored = false;
+        if paths.is_empty() {
+            let layout = match &app.cfg.startup {
+                Startup::LastSession => session.layout.clone(),
+                Startup::Layout(name) => app.ud.layouts.get(name).cloned(),
+                Startup::Home => None,
+            };
+            if let Some(l) = layout {
+                restored = app.apply_layout(&l);
+            }
+        }
+        if !restored {
+            let id = app.alloc_id();
+            let first = paths.first().cloned().unwrap_or_else(fsx::home);
+            let t = app.make_tab(first);
+            let mut p = Panel::new(id, t);
+            for extra in paths.iter().skip(1) {
+                let t = app.make_tab(extra.clone());
+                p.tabs.push(t);
+            }
+            app.panels.insert(id, p);
+            app.tree = Node::Leaf(id);
+            app.active = id;
+            app.prev_active = id;
+        }
+        app
+    }
+
+    pub fn alloc_id(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id
+    }
+
+    pub fn view_for(&self, path: &Path) -> (ViewSettings, Option<SaveScope>) {
+        self.ud.view_for(path)
+    }
+
+    pub fn make_tab(&mut self, path: PathBuf) -> Tab {
+        let id = self.alloc_id();
+        let path = if tab::is_computer(&path) || path.exists() { path } else { fsx::home() };
+        let (v, scope) = self.view_for(&path);
+        let mut t = Tab::new(id, path.clone(), v, self.ctx.clone());
+        t.saved_scope = scope;
+        if path.is_file() {
+            t.navigate(path, None);
+        }
+        t
+    }
+
+    pub fn panel(&mut self) -> &mut Panel {
+        if !self.panels.contains_key(&self.active) {
+            self.active = self.tree.first_leaf();
+        }
+        if !self.panels.contains_key(&self.active) {
+            // Layout and panels disagree (should not happen): recover with a fresh panel
+            // instead of crashing.
+            let id = self.active;
+            let t = self.make_tab(fsx::home());
+            self.panels.insert(id, Panel::new(id, t));
+        }
+        self.panels.get_mut(&self.active).expect("active panel")
+    }
+
+    pub fn tab(&mut self) -> &mut Tab {
+        self.panel().tab_mut()
+    }
+
+    pub fn refresh_recents(&mut self) {
+        self.recents_set = self.ud.recents.iter().take(30).cloned().collect();
+    }
+
+    pub fn toast(&mut self, s: impl Into<String>) {
+        self.toast = Some((s.into(), Instant::now()));
+    }
+
+    /// Drag and drop with other apps: a drag over the window becomes an ordinary file
+    /// drag (every drop target works), and the drop a release at its position.
+    pub fn on_dnd(&mut self, ev: crate::clipboard::Dnd) {
+        use crate::clipboard::Dnd;
+        let z = self.ctx.zoom_factor();
+        let files = |paths| Some(Drag::Files { paths, from_panel: 0, right: false });
+        match ev {
+            Dnd::Over { x, y, paths, own } => {
+                self.inject.push(egui::Event::PointerMoved(Pos2::new(x / z, y / z)));
+                if !matches!(self.drag, Some(Drag::Files { .. })) {
+                    self.drag = files(paths);
+                }
+                self.ext_drag = Some(own);
+            }
+            Dnd::Dropped { x, y, paths, own } => {
+                let p = Pos2::new(x / z, y / z);
+                if !matches!(self.drag, Some(Drag::Files { .. })) {
+                    self.drag = files(paths);
+                }
+                self.ext_drag = None;
+                self.ext_drop = Some(own);
+                let modifiers = self.ctx.input(|i| i.modifiers);
+                self.inject.push(egui::Event::PointerMoved(p));
+                self.inject.push(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers });
+            }
+            Dnd::Left => {
+                if self.ext_drag.take().is_some() {
+                    self.drag = None;
+                    self.inject.push(egui::Event::PointerGone);
+                }
+            }
+        }
+    }
+
+    /// Mount, unmount or eject the drive with this device node, in the background.
+    /// `open_in`: once mounted, show it in this panel (in a new tab when true).
+    pub fn drive_op(&mut self, op: crate::drives::Op, dev: &str, open_in: Option<(u64, bool)>) {
+        use crate::drives::Op;
+        let all = crate::sidebar::drives();
+        let Some(d) = all.iter().find(|d| d.dev == dev).cloned() else {
+            self.toast("That drive is no longer connected");
+            return;
+        };
+        if op != Op::Mount {
+            // Tabs showing the drive move to Computer first, so nothing holds it busy.
+            let gone: Vec<PathBuf> = if op == Op::Eject { all.iter().filter(|x| x.disk == d.disk).flat_map(|x| x.mounts.clone()).collect() } else { d.mounts.clone() };
+            let s = self.view_for(Path::new(tab::COMPUTER));
+            for p in self.panels.values_mut() {
+                for t in &mut p.tabs {
+                    if gone.iter().any(|m| t.path.starts_with(m)) {
+                        t.navigate(PathBuf::from(tab::COMPUTER), Some(s.clone()));
+                    }
+                }
+                if let Some(i) = p.inspector.as_mut() {
+                    i.invalidate();
+                }
+            }
+        }
+        match crate::drives::Job::start(op, d, all, open_in, &self.ctx) {
+            Ok(j) => self.drive_jobs.push(j),
+            Err(e) => self.toast(e),
+        }
+    }
+
+    /// The drive mounted at `path` (for sidebar and Computer view rows).
+    pub fn drive_at(&self, path: &Path) -> Option<crate::drives::Drive> {
+        if let Some(dev) = tab::drive_dev(path) {
+            return crate::sidebar::drives().into_iter().find(|d| d.dev == dev);
+        }
+        crate::drives::at_mount(&crate::sidebar::drives(), path).cloned()
+    }
+
+    /// Finished drive operations, and Computer views reloaded when drives change.
+    fn pump_drives(&mut self, ctx: &egui::Context) {
+        use crate::drives::Op;
+        // Drives are only polled while something shows them (or an operation runs).
+        let shown = self.sidebar || !self.drive_jobs.is_empty() || self.panels.values().any(|p| p.tabs.iter().any(|t| tab::is_computer(&t.path)));
+        if shown {
+            crate::sidebar::refresh(self, ctx);
+        }
+        let g = crate::sidebar::drives_generation();
+        if g != self.drives_seen {
+            self.drives_seen = g;
+            for p in self.panels.values_mut() {
+                for t in &mut p.tabs {
+                    if tab::is_computer(&t.path) {
+                        t.reload();
+                    }
+                }
+            }
+        }
+        let mut i = 0;
+        while i < self.drive_jobs.len() {
+            let Some(r) = self.drive_jobs[i].poll() else {
+                i += 1;
+                continue;
+            };
+            let job = self.drive_jobs.remove(i);
+            crate::sidebar::invalidate();
+            let name = job.drive.title();
+            match (job.op, r) {
+                (Op::Mount, Ok(Some(at))) if job.open_in.is_some() => {
+                    let (panel, new_tab) = job.open_in.unwrap_or_default();
+                    if new_tab {
+                        self.actions.push(Action::NewTab { panel, path: at, select: None, focus: false });
+                    } else {
+                        self.navigate(panel, at);
+                    }
+                }
+                (Op::Mount, Ok(_)) => self.toast(format!("Mounted {name}")),
+                (Op::Unmount, Ok(_)) => self.toast(format!("Unmounted {name}")),
+                (Op::Eject, Ok(_)) => self.toast(format!("{name} can be safely removed")),
+                (op, Err(e)) => self.toast(format!("Couldn't {} {name}: {e}", op.verb())),
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- layouts
+
+    pub fn layout_snap(&self, ctx: &egui::Context) -> LayoutSnap {
+        let mut leaves = vec![];
+        self.tree.leaves(&mut leaves);
+        let index_of = |id: u64| leaves.iter().position(|&l| l == id).unwrap_or(0);
+        let (size, maximized) = ctx.input(|i| (i.viewport().inner_rect.map(|r| [r.width(), r.height()]), i.viewport().maximized.unwrap_or(false)));
+        LayoutSnap {
+            tree: self.tree.snap(&index_of),
+            panels: leaves.iter().map(|id| self.panels[id].snap()).collect(),
+            active: index_of(self.active),
+            window_size: size,
+            maximized,
+        }
+    }
+
+    pub fn apply_layout(&mut self, l: &LayoutSnap) -> bool {
+        if l.panels.is_empty() {
+            return false;
+        }
+        let mut new_panels = HashMap::new();
+        let mut ids = vec![];
+        for ps in &l.panels {
+            let mut tabs = vec![];
+            for ts in &ps.tabs {
+                // A file path opens its folder with the file selected.
+                let (path, select) = if tab::is_computer(&ts.path) || ts.path.is_dir() {
+                    (ts.path.clone(), None)
+                } else if ts.path.is_file() {
+                    (ts.path.parent().map(Path::to_path_buf).unwrap_or_else(fsx::home), Some(ts.path.clone()))
+                } else {
+                    (fsx::home(), None)
+                };
+                let id = self.alloc_id();
+                let mut t = Tab::new(id, path.clone(), ts.view.clone(), self.ctx.clone());
+                if let Some(f) = select {
+                    t.pending_restore = Some(tab::HistState { path: path.clone(), cursor: Some(f.clone()), selected: vec![f], scroll: 0.0 });
+                    t.scroll_to_cursor = true;
+                }
+                t.saved_scope = self.ud.views.get(&path).map(|v| v.scope);
+                if ts.flatten {
+                    t.set_flatten(true);
+                }
+                tabs.push(t);
+            }
+            if tabs.is_empty() {
+                let id = self.alloc_id();
+                tabs.push(Tab::new(id, fsx::home(), self.view_for(&fsx::home()).0, self.ctx.clone()));
+            }
+            let pid = self.alloc_id();
+            let mut p = Panel::new(pid, tabs.remove(0));
+            p.tabs.extend(tabs);
+            p.active = ps.active.min(p.tabs.len() - 1);
+            if ps.inspector {
+                p.inspector = Some(Inspector::default());
+            }
+            ids.push(pid);
+            new_panels.insert(pid, p);
+        }
+        let Some(tree) = Node::from_snap(&l.tree, &|i| ids.get(i).copied()) else { return false };
+        // Drop panels that didn't make it into the tree.
+        let mut leaves = vec![];
+        tree.leaves(&mut leaves);
+        new_panels.retain(|id, _| leaves.contains(id));
+        self.panels = new_panels;
+        self.tree = tree;
+        self.active = ids.get(l.active).copied().filter(|id| self.panels.contains_key(id)).unwrap_or_else(|| self.tree.first_leaf());
+        self.prev_active = self.active;
+        if let Some([w, h]) = l.window_size {
+            if !self.fresh || !l.maximized {
+                self.ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+            }
+        }
+        if l.maximized {
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
+        true
+    }
+
+    // ---------------------------------------------------------------- persistence
+
+    pub fn save_all(&mut self, ctx: &egui::Context) {
+        if self.cfg_dirty {
+            let _ = config::save_json(&config::config_path(), &self.cfg);
+            self.cfg_dirty = false;
+        }
+        if self.ud_dirty {
+            // Merge-safe: reload others' bookmarks if the file changed under us is handled by hot reload.
+            if self.cfg.recents_store == config::RecentsStore::Persistent {
+                let _ = config::save_json(&config::userdata_path(), &self.ud);
+            } else {
+                // Session-only (or off): never write the recents list to disk.
+                let mut ud = self.ud.clone();
+                ud.recents.clear();
+                let _ = config::save_json(&config::userdata_path(), &ud);
+            }
+            self.ud_mtime = config::mtime(&config::userdata_path());
+            self.ud_dirty = false;
+        }
+        if self.save_session {
+            let s = Session { layout: Some(self.layout_snap(ctx)), sidebar: self.sidebar, sidebar_width: self.sidebar_width };
+            let _ = config::save_json(&config::session_path(), &s);
+        }
+        self.last_save = Instant::now();
+    }
+
+    fn hot_reload(&mut self) {
+        let m = config::mtime(&config::userdata_path());
+        if m.is_some() && m != self.ud_mtime && !self.ud_dirty {
+            self.ud = config::load_userdata();
+            self.ud_mtime = m;
+            self.refresh_recents();
+        }
+    }
+
+    pub fn set_config_changed(&mut self) {
+        self.cfg_dirty = true;
+        self.keymap = Keymap::build(&self.cfg.hotkeys);
+        for p in self.panels.values_mut() {
+            for t in &mut p.tabs {
+                t.dirty = true;
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- frame
+
+    /// Restore layout invariants so drawing and commands can index freely: every layout
+    /// leaf has a panel, every panel has a tab and an in-range active index, and the
+    /// active panel exists. Cheap (a handful of panels); runs every frame and after each action.
+    fn heal(&mut self) {
+        let mut leaves = vec![];
+        self.tree.leaves(&mut leaves);
+        for id in &leaves {
+            if !self.panels.contains_key(id) {
+                let t = self.make_tab(fsx::home());
+                self.panels.insert(*id, Panel::new(*id, t));
+            }
+        }
+        let empty: Vec<u64> = self.panels.iter().filter(|(_, p)| p.tabs.is_empty()).map(|(id, _)| *id).collect();
+        for id in empty {
+            let t = self.make_tab(fsx::home());
+            if let Some(p) = self.panels.get_mut(&id) {
+                p.tabs.push(t);
+            }
+        }
+        for p in self.panels.values_mut() {
+            p.active = p.active.min(p.tabs.len().saturating_sub(1));
+        }
+        if !self.panels.contains_key(&self.active) {
+            if let Some(&first) = leaves.iter().find(|id| self.panels.contains_key(id)) {
+                self.active = first;
+            }
+        }
+    }
+
+    pub fn frame(&mut self, ctx: &egui::Context) {
+        let ctx = ctx.clone();
+        // egui may run a frame twice (a discarded layout pass): test registries start fresh.
+        #[cfg(test)]
+        {
+            crate::ui::CONTROLS.with(|c| c.borrow_mut().clear());
+            crate::ui::POPUPS.with(|c| c.borrow_mut().clear());
+        }
+        self.heal();
+        let t = (self.preview_theme.unwrap_or(self.cfg.theme), self.cfg.font_size, self.cfg.spacing, self.cfg.animations);
+        self.preview_theme = None;
+        crate::icons::set_enabled(self.cfg.system_icons);
+        // One wheel notch scrolls three rows (eased out by egui over ~100 ms).
+        let notch = 3.0 * crate::listing::row_height(&self.cfg);
+        if ctx.options(|o| o.input_options.line_scroll_speed) != notch {
+            ctx.options_mut(|o| o.input_options.line_scroll_speed = notch);
+        }
+        let want_fonts = format!("{}\u{1f}{}", self.cfg.font_family, self.cfg.inspector_font);
+        if want_fonts != self.font_applied {
+            self.font_applied = want_fonts;
+            theme::install_fonts(&ctx, &self.cfg.font_family, &self.cfg.inspector_font);
+        }
+        self.thumbs.budget_bytes = (self.cfg.asset_cache_mb.max(32) as usize) << 20;
+        if t != self.theme_applied {
+            self.pal = theme::palette(t.0);
+            theme::apply(&ctx, &self.pal, self.cfg.font_size, self.cfg.spacing, self.cfg.animations);
+            self.theme_applied = t;
+        }
+        self.pump(&ctx);
+        self.handle_input(&ctx);
+        self.draw(&ctx);
+        self.process_actions(&ctx);
+        self.ext_drop = None;
+        if self.last_save.elapsed() > Duration::from_secs(8) {
+            self.hot_reload();
+            self.save_all(&ctx);
+        }
+        self.fresh = false;
+    }
+
+    /// Poll background work: listings, walks, stats, thumbnails, jobs, watcher.
+    fn pump(&mut self, ctx: &egui::Context) {
+        self.pump_drives(ctx);
+        let thumbs_landed = self.thumbs.pump(ctx);
+        let stats_changed = self.stats.pump();
+        let changed_dirs = self.watch.poll();
+        let changed_files = std::mem::take(&mut self.watch.changed_files);
+        for f in &changed_files {
+            self.thumbs.invalidate(f);
+        }
+        for d in &changed_dirs {
+            self.stats.invalidate(d);
+        }
+        let mut want = HashSet::new();
+        let mut any_loading = false;
+        for p in self.panels.values_mut() {
+            let insp_path = p.inspector.as_ref().and_then(|i| i.folder_path.clone());
+            for (ti, t) in p.tabs.iter_mut().enumerate() {
+                if changed_dirs.iter().any(|d| *d == t.path) && !t.flatten && t.rename.is_none() {
+                    t.reload();
+                }
+                let sub: Vec<PathBuf> = changed_dirs.iter().filter(|d| t.expanded.contains(*d)).cloned().collect();
+                if t.rename.is_none() {
+                    for d in sub {
+                        t.load_children(&d);
+                    }
+                }
+                if t.poll() {
+                    t.dirty = true;
+                }
+                if t.gone {
+                    // A vanished folder sends the tab to its closest
+                    // existing parent instead of leaving an error page.
+                    t.gone = false;
+                    let mut up = t.path.parent().map(Path::to_path_buf);
+                    while let Some(p) = up.clone() {
+                        if p.is_dir() {
+                            break;
+                        }
+                        up = p.parent().map(Path::to_path_buf);
+                    }
+                    let target = up.unwrap_or_else(fsx::home);
+                    let from = t.path.clone();
+                    t.navigate(target, None);
+                    t.pending_restore = None;
+                    let _ = from;
+                }
+                if stats_changed && matches!(t.settings.sort, SortKey::Size | SortKey::Folders | SortKey::Files | SortKey::Usage) {
+                    t.dirty = true;
+                }
+                if t.is_loading() {
+                    any_loading = true;
+                }
+                if ti == p.active && !tab::is_computer(&t.path) && !t.flatten {
+                    want.insert(t.path.clone());
+                    if t.tree_active() {
+                        want.extend(t.expanded.iter().filter(|d| d.starts_with(&t.path)).take(64).cloned());
+                    }
+                }
+            }
+            if let Some(ip) = insp_path {
+                want.insert(ip);
+            }
+        }
+        self.watch.sync(&want);
+        let recents = &self.recents_set;
+        let stats = &self.stats.map;
+        let ctxv = ViewCtx {
+            show_hidden: self.cfg.show_hidden,
+            show_system: self.cfg.show_system,
+            folders_first: self.cfg.folders_first,
+            recents_on_top: self.cfg.recents_on_top,
+            recents,
+            stats,
+        };
+        let mut new_renames = vec![];
+        for p in self.panels.values_mut() {
+            for t in &mut p.tabs {
+                if t.dirty {
+                    t.rebuild(&ctxv);
+                } else if t.stream_dirty {
+                    match t.rebuild_due() {
+                        None => t.rebuild(&ctxv),
+                        Some(wait) => self.ctx.request_repaint_after(wait),
+                    }
+                }
+                if let Some(target) = t.pending_rename.clone() {
+                    if !t.is_loading() {
+                        if let Some(i) = t.entries.iter().position(|e| e.path == target) {
+                            t.pending_rename = None;
+                            new_renames.push((p.id, t.id, i as u32));
+                        } else if t.loaded_at.map(|l| l.elapsed() > Duration::from_secs(2)).unwrap_or(false) {
+                            t.pending_rename = None;
+                        }
+                    }
+                }
+            }
+        }
+        for (pid, tid, idx) in new_renames {
+            if let Some(t) = self.panels.get_mut(&pid).and_then(|p| p.tabs.iter_mut().find(|t| t.id == tid)) {
+                let e = &t.entries[idx as usize];
+                t.rename = Some(Rename::new(vec![(idx, e.path.clone(), e.name.clone())], true));
+                t.select_only(idx);
+                t.scroll_to_cursor = true;
+            }
+        }
+        // Folder statistics for visible folders of active tabs.
+        let mut req = vec![];
+        for p in self.panels.values() {
+            let t = p.tab();
+            if t.flatten || tab::is_computer(&t.path) {
+                continue;
+            }
+            for &i in t.view.iter().take(2000) {
+                let e = &t.entries[i as usize];
+                if e.is_dir && !e.is_link {
+                    req.push(e.path.clone());
+                }
+            }
+            req.push(t.path.clone());
+        }
+        if let Some(first) = req.first().cloned() {
+            if self.stats.allowed(&self.cfg, &first, &ctx) {
+                for r in req {
+                    self.stats.request(&r);
+                }
+            }
+        }
+        // Jobs: mark finished, drop after a moment.
+        let mut finished_dirs = vec![];
+        for j in &mut self.jobs {
+            if j.finished_at.is_none() && j.progress.lock().unwrap().finished {
+                j.finished_at = Some(Instant::now());
+                match &j.kind {
+                    OpKind::Copy { dest, .. } | OpKind::Move { dest, .. } => finished_dirs.push(dest.clone()),
+                    _ => {}
+                }
+                let p = j.progress.lock().unwrap();
+                if let OpKind::Move { .. } = j.kind {
+                    if !p.produced.is_empty() {
+                        self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Move(p.produced.clone()) });
+                    }
+                }
+                if let OpKind::Copy { .. } = j.kind {
+                    if !p.produced.is_empty() {
+                        self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Created(p.produced.iter().map(|x| x.1.clone()).collect()) });
+                    }
+                }
+                if let OpKind::Trash { paths } = &j.kind {
+                    self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Trashed(paths.clone()) });
+                }
+            }
+        }
+        for d in finished_dirs {
+            self.stats.invalidate(&d);
+        }
+        self.jobs.retain(|j| match j.finished_at {
+            Some(t) => {
+                let errs = !j.progress.lock().unwrap().errors.is_empty();
+                (errs && t.elapsed() < Duration::from_secs(30)) || t.elapsed() < Duration::from_millis(1800)
+            }
+            None => true,
+        });
+        // Worker threads (folder sizes, listings, icons) free large temporary buffers into
+        // their own malloc arenas, which glibc keeps. Two seconds after background work
+        // settles, give whole free pages back to the system.
+        // Image decodes (thumbnails, previews) count as background work too.
+        if stats_changed || any_loading || thumbs_landed {
+            self.trim_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+            self.trim_pending_since.get_or_insert_with(std::time::Instant::now);
+        } else if self.trim_after.is_some_and(|t| std::time::Instant::now() >= t)
+            // Folder sizing that never settles (a dead mount) mustn't postpone this forever.
+            && (self.stats.idle() || self.trim_pending_since.is_some_and(|t| t.elapsed() > Duration::from_secs(30)))
+        {
+            self.trim_pending_since = None;
+            self.trim_after = None;
+            unsafe {
+                libc::malloc_trim(0);
+            }
+        }
+        if let Some(t) = self.trim_after {
+            // Past due but waiting for folder sizing: check back slowly, not every frame.
+            let wait = t.saturating_duration_since(std::time::Instant::now());
+            ctx.request_repaint_after(if wait.is_zero() { Duration::from_millis(500) } else { wait + Duration::from_millis(50) });
+        }
+        if !self.jobs.is_empty() || any_loading || self.watch.has_pending() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        if self.seq.len() > 0 && self.seq_time.elapsed() > Duration::from_millis(1100) {
+            self.seq.clear();
+        }
+    }
+
+    // ---------------------------------------------------------------- input
+
+    fn handle_input(&mut self, ctx: &egui::Context) {
+        let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
+        // Hotkey capture for the palette's "+" button takes everything.
+        if self.popup.is_capturing() {
+            return;
+        }
+        let popup_open = !matches!(self.popup, Popup::None);
+        // Inline rename owns the keyboard.
+        let renaming = self.panels.get(&self.active).map(|p| p.tab().rename.is_some()).unwrap_or(false);
+        if renaming && !popup_open {
+            let mut clip = None;
+            let outcome = {
+                let t = self.tab();
+                t.rename.as_mut().map(|r| r.handle(&events, &mut clip)).unwrap_or(Outcome::Continue)
+            };
+            if let Some(c) = clip {
+                ctx.copy_text(c);
+            }
+            let id = self.active;
+            match outcome {
+                Outcome::Commit => self.actions.push(Action::CommitRename(id)),
+                Outcome::Cancel => self.actions.push(Action::CancelRename(id)),
+                Outcome::Continue => {}
+            }
+            ctx.input_mut(|i| {
+                i.events.retain(|e| !matches!(e, Event::Key { .. } | Event::Text(_) | Event::Copy | Event::Cut | Event::Paste(_) | Event::Ime(_)))
+            });
+            return;
+        }
+        if popup_open {
+            // Popups handle their own keys; still allow the palette/goto toggles.
+            for ev in &events {
+                if let Event::Key { key, pressed: true, modifiers, .. } = ev {
+                    let c = Chord::from_key(*key, *modifiers);
+                    let (hit, _) = self.keymap.lookup(&[c]);
+                    if matches!(hit, Some(Cmd::Palette) | Some(Cmd::GoTo) | Some(Cmd::Options)) {
+                        if self.popup.kind_cmd() == hit {
+                            self.popup = Popup::None;
+                        } else {
+                            self.actions.push(Action::Cmd(hit.unwrap()));
+                        }
+                        ctx.input_mut(|i| i.consume_key(*modifiers, *key));
+                    }
+                }
+            }
+            return;
+        }
+        let text_focus = ctx.wants_keyboard_input();
+        let filter_focus = self.panels.get(&self.active).map(|p| p.filter_has_focus).unwrap_or(false);
+        let mut consumed: Vec<usize> = vec![];
+        let mut plain_fired = false;
+        for (n, ev) in events.iter().enumerate() {
+            let chord = match ev {
+                Event::Key { key, pressed: true, modifiers, .. } => Chord::from_key(*key, *modifiers),
+                Event::Copy => Chord::from_key(Key::C, Modifiers { ctrl: true, shift: mods.shift, ..Default::default() }),
+                Event::Cut => Chord::from_key(Key::X, Modifiers { ctrl: true, shift: mods.shift, ..Default::default() }),
+                Event::Paste(_) => Chord::from_key(Key::V, Modifiers { ctrl: true, shift: mods.shift, ..Default::default() }),
+                Event::PointerButton { button, pressed: true, modifiers, .. } => match Chord::from_mouse(*button, *modifiers) {
+                    // Middle clicks are contextual (tabs, items); only thumb buttons are global.
+                    Some(c) if c.input != commands::Input::Mouse(3) => c,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            if text_focus {
+                // Filter box: arrows/enter drive the list; plain typing stays in the box.
+                if filter_focus {
+                    if let commands::Input::Key(k) = chord.input {
+                        if !chord.ctrl && !chord.alt {
+                            match k {
+                                Key::ArrowDown | Key::ArrowUp | Key::PageDown | Key::PageUp => {
+                                    let page = self.tab().page_items.max(1) as isize;
+                                    let d = match k {
+                                        Key::ArrowDown => 1,
+                                        Key::ArrowUp => -1,
+                                        Key::PageDown => page,
+                                        _ => -page,
+                                    };
+                                    self.tab().move_cursor(d, chord.shift, false);
+                                    consumed.push(n);
+                                    continue;
+                                }
+                                Key::Enter => {
+                                    self.actions.push(Action::Cmd(Cmd::Activate));
+                                    consumed.push(n);
+                                    continue;
+                                }
+                                Key::Escape => {
+                                    let t = self.tab();
+                                    if t.filter.is_empty() {
+                                        ctx.memory_mut(|m| m.surrender_focus(m.focused().unwrap_or(egui::Id::NULL)));
+                                    } else {
+                                        t.filter.clear();
+                                        t.dirty = true;
+                                    }
+                                    consumed.push(n);
+                                    continue;
+                                }
+                                Key::Tab => {}
+                                Key::F2 => {}
+                                _ => continue,
+                            }
+                        }
+                    }
+                }
+                let text_edit_key = matches!(chord.input, commands::Input::Key(Key::A | Key::C | Key::X | Key::V | Key::Z | Key::Y | Key::ArrowLeft | Key::ArrowRight | Key::Backspace | Key::Delete | Key::Home | Key::End))
+                    && chord.ctrl
+                    && !chord.alt;
+                if text_edit_key || (!chord.has_command_mod() && !matches!(chord.input, commands::Input::Key(Key::Tab | Key::F2))) {
+                    continue;
+                }
+            }
+            if chord.is_plain() && !chord.shift && self.cfg.char_key_action != config::CharKeyAction::TriggerHotkey && !matches!(chord.input, commands::Input::Key(Key::Space)) {
+                continue;
+            }
+            let mut seq = self.seq.clone();
+            seq.push(chord);
+            let (exact, longer) = self.keymap.lookup(&seq);
+            if longer {
+                self.seq = seq;
+                self.seq_time = Instant::now();
+                consumed.push(n);
+                if let Some(c) = exact {
+                    // Allow the shorter binding to fire if nothing follows (handled on timeout by ignoring).
+                    let _ = c;
+                }
+                continue;
+            }
+            self.seq.clear();
+            if let Some(cmd) = exact {
+                if chord.is_plain() {
+                    plain_fired = true;
+                }
+                // Escape-like keys in an empty context shouldn't swallow egui behavior.
+                self.actions.push(Action::Cmd(cmd));
+                consumed.push(n);
+            } else if let commands::Input::Key(Key::Escape) = chord.input {
+                // Escape: clear filter, then selection.
+                let t = self.tab();
+                if !t.filter.is_empty() {
+                    t.filter.clear();
+                    t.dirty = true;
+                } else if t.flatten {
+                    t.set_flatten(false);
+                } else {
+                    t.selected.clear();
+                }
+                consumed.push(n);
+            } else if !text_focus {
+                // Listing navigation keys (Page keys go to a paged preview under the pointer).
+                if let commands::Input::Key(k) = chord.input {
+                    let over_pages = matches!(k, Key::PageUp | Key::PageDown)
+                        && self.panels.get(&self.active).is_some_and(|p| {
+                            p.inspector.as_ref().is_some_and(|i| i.wants_page_keys()) && p.inspector_rect.zip(ctx.pointer_hover_pos()).is_some_and(|(r, pp)| r.contains(pp))
+                        });
+                    if over_pages {
+                        continue;
+                    }
+                    if self.nav_key(k, chord) {
+                        consumed.push(n);
+                    }
+                }
+            }
+        }
+        // Plain text typed into the listing → filter (or jump).
+        if !text_focus && !plain_fired {
+            for (n, ev) in events.iter().enumerate() {
+                if let Event::Text(t) = ev {
+                    if mods.ctrl || mods.alt || t.trim().is_empty() {
+                        continue;
+                    }
+                    match self.cfg.char_key_action {
+                        config::CharKeyAction::Jump => self.jump_to(t),
+                        _ => {
+                            let id = self.active;
+                            let p = self.panel();
+                            p.tab_mut().filter.push_str(t);
+                            p.tab_mut().dirty = true;
+                            p.focus_filter = true;
+                            let _ = id;
+                        }
+                    }
+                    consumed.push(n);
+                }
+            }
+        }
+        if !consumed.is_empty() {
+            ctx.input_mut(|i| {
+                let mut k = 0;
+                i.events.retain(|_| {
+                    let keep = !consumed.contains(&k);
+                    k += 1;
+                    keep
+                });
+            });
+        }
+    }
+
+    fn jump_to(&mut self, t: &str) {
+        if self.jump_buf.1.elapsed() > Duration::from_millis(900) {
+            self.jump_buf.0.clear();
+        }
+        self.jump_buf.0.push_str(&t.to_lowercase());
+        self.jump_buf.1 = Instant::now();
+        let prefix = self.jump_buf.0.clone();
+        let tab = self.tab();
+        let start = tab.cursor.and_then(|c| tab.view_pos(c)).unwrap_or(0);
+        let n = tab.view.len();
+        let single = prefix.chars().count() == 1;
+        for k in 0..n {
+            let pos = (start + k + if single { 1 } else { 0 }) % n.max(1);
+            let idx = tab.view[pos];
+            if tab.entries[idx as usize].lname().starts_with(&prefix) {
+                tab.select_only(idx);
+                tab.scroll_to_cursor = true;
+                break;
+            }
+        }
+    }
+
+    /// Arrow/Home/End/Page keys in the listing. Returns true if handled.
+    fn nav_key(&mut self, k: Key, c: Chord) -> bool {
+        let t = self.tab();
+        let (row_step, col_step) = (t.nav_row_step.max(1) as isize, t.nav_col_step.max(1) as isize);
+        let page = t.page_items.max(1) as isize;
+        let cursor_only = c.ctrl;
+        let d = match k {
+            Key::ArrowDown => row_step,
+            Key::ArrowUp => -row_step,
+            Key::ArrowRight => col_step,
+            Key::ArrowLeft => -col_step,
+            Key::PageDown => page,
+            Key::PageUp => -page,
+            Key::Home => {
+                t.move_cursor_to(0, c.shift);
+                return true;
+            }
+            Key::End => {
+                let n = t.view.len().saturating_sub(1);
+                t.move_cursor_to(n, c.shift);
+                return true;
+            }
+            _ => return false,
+        };
+        if matches!(k, Key::ArrowLeft | Key::ArrowRight) && t.nav_col_step == 0 {
+            // Details tree: Right expands / enters, Left collapses / goes to the parent row.
+            if !t.tree_active() {
+                return false;
+            }
+            let Some(cur) = t.cursor else { return false };
+            let e = t.entries[cur as usize].clone();
+            if c.shift {
+                // Shift+Right unfolds everything below, Shift+Left folds it all back.
+                if e.is_dir && !e.is_link {
+                    if k == Key::ArrowRight { t.expand_recursive(&e.path) } else { t.collapse_recursive(&e.path) }
+                }
+                return true;
+            }
+            if k == Key::ArrowRight {
+                if e.is_dir && !e.is_link {
+                    if t.expanded.contains(&e.path) {
+                        t.move_cursor(1, false, cursor_only);
+                    } else {
+                        t.toggle_expand(&e.path);
+                    }
+                }
+            } else if e.is_dir && t.expanded.contains(&e.path) {
+                t.toggle_expand(&e.path);
+            } else if e.depth > 0 {
+                let parent = e.path.parent().map(Path::to_path_buf);
+                if let Some(pi) = t.view.iter().copied().find(|&i| Some(&t.entries[i as usize].path) == parent.as_ref()) {
+                    if cursor_only { t.cursor = Some(pi) } else { t.select_only(pi) }
+                    t.scroll_to_cursor = true;
+                }
+            }
+            return true;
+        }
+        t.move_cursor(d, c.shift, cursor_only);
+        true
+    }
+
+    // ---------------------------------------------------------------- commands
+
+    pub fn run(&mut self, cmd: Cmd) {
+        // Every command below may index the active panel directly: make sure it exists.
+        let _ = self.panel();
+        let ctx = self.ctx.clone();
+        // Drives aren't files: in the Computer view nothing can be cut, deleted, linked or
+        // duplicated (a mounted volume's root would take its whole contents with it).
+        if tab::is_computer(&self.panel().path()) && matches!(cmd, Cmd::Cut | Cmd::Trash | Cmd::DeletePermanent | Cmd::Duplicate | Cmd::CreateLink | Cmd::Paste | Cmd::Rename) {
+            return;
+        }
+        match cmd {
+            Cmd::GoTo => self.popup = Popup::goto(String::new()),
+            Cmd::AddressBar => {
+                let p = self.panel().path();
+                let s = if tab::is_computer(&p) { "/".to_string() } else { format!("{}/", p.display()).replace("//", "/") };
+                self.popup = Popup::goto(s);
+            }
+            Cmd::Back => {
+                let ud = &self.ud;
+                let f = |p: &Path| ud.view_for(p);
+                let id = self.active;
+                let old = self.panels[&id].path();
+                self.panels.get_mut(&id).unwrap().tab_mut().back(f);
+                self.track_leave(&old);
+            }
+            Cmd::Forward => {
+                let ud = &self.ud;
+                let f = |p: &Path| ud.view_for(p);
+                let id = self.active;
+                let old = self.panels[&id].path();
+                self.panels.get_mut(&id).unwrap().tab_mut().forward(f);
+                self.track_leave(&old);
+            }
+            Cmd::Up => {
+                let ud = &self.ud;
+                let f = |p: &Path| ud.view_for(p);
+                let id = self.active;
+                let old = self.panels[&id].path();
+                self.panels.get_mut(&id).unwrap().tab_mut().up(f);
+                self.track_leave(&old);
+            }
+            Cmd::Home => self.navigate(self.active, fsx::home()),
+            Cmd::Computer => self.navigate(self.active, PathBuf::from(COMPUTER)),
+            Cmd::Refresh => {
+                let t = self.tab();
+                let entries: Vec<PathBuf> = t.entries.iter().map(|e| e.path.clone()).collect();
+                let p = t.path.clone();
+                t.reload();
+                for e in entries {
+                    self.thumbs.invalidate(&e);
+                }
+                self.stats.invalidate(&p);
+                if let Some(i) = self.panel().inspector.as_mut() {
+                    i.invalidate();
+                }
+            }
+            Cmd::Activate => {
+                let t = self.tab();
+                let targets: Vec<u32> = if t.selected.len() > 1 {
+                    let mut v: Vec<u32> = t.selected.iter().copied().collect();
+                    v.sort_by_key(|i| t.view_pos(*i));
+                    v
+                } else {
+                    t.cursor.or_else(|| t.selected.iter().next().copied()).into_iter().collect()
+                };
+                let id = self.active;
+                if targets.len() == 1 {
+                    self.actions.push(Action::Activate { panel: id, idx: targets[0], mods: Modifiers::NONE });
+                } else {
+                    for i in targets.into_iter().take(30) {
+                        self.actions.push(Action::Activate { panel: id, idx: i, mods: Modifiers::CTRL });
+                    }
+                }
+            }
+            Cmd::OpenInNewTab => {
+                let id = self.active;
+                let ents: Vec<(PathBuf, bool)> = self.tab().target_entries().iter().map(|e| (e.path.clone(), e.is_dir)).collect();
+                for (p, d) in ents {
+                    if d {
+                        self.actions.push(Action::NewTab { panel: id, path: p, select: None, focus: false });
+                    } else if let Some(parent) = p.parent() {
+                        self.actions.push(Action::NewTab { panel: id, path: parent.to_path_buf(), select: Some(p.clone()), focus: false });
+                    }
+                }
+            }
+            Cmd::OpenInNewWindow => {
+                let p = self.target_folder();
+                if let Some(dev) = tab::drive_dev(&p) {
+                    let dev = dev.to_string();
+                    self.drive_op(crate::drives::Op::Mount, &dev, None);
+                    return;
+                }
+                if let Err(e) = crate::mime::new_window(&p) {
+                    self.toast(format!("Couldn't open window: {e}"));
+                }
+            }
+            Cmd::OpenInRightSplit | Cmd::OpenInBottomSplit => {
+                let side = if cmd == Cmd::OpenInRightSplit { Side::Right } else { Side::Bottom };
+                let id = self.active;
+                let ent = self.tab().target_entries().first().map(|e| (e.path.clone(), e.is_dir));
+                match ent {
+                    Some((p, true)) => self.actions.push(Action::Split { panel: id, path: p, side, select: None }),
+                    Some((p, false)) => {
+                        let parent = p.parent().map(Path::to_path_buf).unwrap_or_else(fsx::home);
+                        self.actions.push(Action::Split { panel: id, path: parent, side, select: Some(p) })
+                    }
+                    None => {
+                        let p = self.panel().path();
+                        self.actions.push(Action::Split { panel: id, path: p, side, select: None })
+                    }
+                }
+            }
+            Cmd::OpenTerminal => {
+                let p = self.panel().path();
+                let dir = if tab::is_computer(&p) { PathBuf::from("/") } else { p };
+                if let Err(e) = crate::mime::open_terminal(&dir) {
+                    self.toast(format!("Couldn't start a terminal: {e}"));
+                }
+            }
+            Cmd::ToggleBookmark => {
+                let sel: Vec<PathBuf> = self.tab().target_entries().iter().filter(|e| e.is_dir).map(|e| e.path.clone()).collect();
+                let explicit = !self.tab().selected.is_empty();
+                let targets = if explicit && !sel.is_empty() { sel } else { vec![self.panel().path()] };
+                for p in targets {
+                    if tab::is_computer(&p) {
+                        continue;
+                    }
+                    if let Some(i) = self.ud.bookmarks.iter().position(|b| *b == p) {
+                        self.ud.bookmarks.remove(i);
+                        self.toast(format!("Removed bookmark {}", p.display()));
+                    } else {
+                        self.ud.bookmarks.push(p.clone());
+                        self.toast(format!("Bookmarked {}", p.display()));
+                    }
+                }
+                self.ud_dirty = true;
+            }
+            Cmd::OpenLinkTarget => {
+                let link = self.tab().target_entries().first().filter(|e| e.is_link).map(|e| e.path.clone());
+                if let Some(l) = link {
+                    if let Ok(target) = std::fs::read_link(&l) {
+                        let abs = if target.is_absolute() { target } else { l.parent().unwrap_or(Path::new("/")).join(target) };
+                        self.navigate(self.active, abs);
+                    }
+                }
+            }
+            Cmd::TabNewOrRecent => {
+                let p = self.panel().path();
+                if !tab::is_computer(&p) {
+                    self.popup = Popup::path_dropdown(self.active, p, None);
+                }
+            }
+            Cmd::NewTab => {
+                let cur = self.panel().path();
+                let path = match &self.cfg.new_tab {
+                    NewTabShows::Current => cur,
+                    NewTabShows::Home => fsx::home(),
+                    NewTabShows::Computer => PathBuf::from(COMPUTER),
+                    NewTabShows::Custom(p) => p.clone(),
+                };
+                let id = self.active;
+                self.actions.push(Action::NewTab { panel: id, path, select: None, focus: true });
+            }
+            Cmd::CloseTab => {
+                let (id, idx) = (self.active, self.panel().active);
+                self.close_tab(id, idx);
+            }
+            Cmd::CloseAllTabs => {
+                let id = self.active;
+                let n = self.panel().tabs.len();
+                for i in (0..n).rev() {
+                    self.close_tab(id, i);
+                }
+            }
+            Cmd::CloseOtherTabs => {
+                let id = self.active;
+                let n = self.panel().tabs.len();
+                let keep = self.panel().active.min(n.saturating_sub(1));
+                for i in (0..n).rev() {
+                    if i != keep {
+                        let p = self.panels.get_mut(&id).unwrap();
+                        let t = p.tabs.remove(i);
+                        self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false });
+                    }
+                }
+                self.panel().active = 0;
+            }
+            Cmd::ReopenTab => {
+                if let Some(s) = self.closed_tabs.pop() {
+                    let id = self.active;
+                    self.actions.push(Action::NewTab { panel: id, path: s.path, select: None, focus: true });
+                }
+            }
+            Cmd::DuplicateTab => {
+                let id = self.active;
+                let p = self.panel().path();
+                self.actions.push(Action::NewTab { panel: id, path: p, select: None, focus: true });
+            }
+            Cmd::NextTab | Cmd::PrevTab => {
+                let p = self.panel();
+                let n = p.tabs.len();
+                p.active = if cmd == Cmd::NextTab { (p.active + 1) % n } else { (p.active + n - 1) % n };
+            }
+            Cmd::MoveTabLeft | Cmd::MoveTabRight => {
+                let p = self.panel();
+                let i = p.active;
+                let j = if cmd == Cmd::MoveTabLeft { i.checked_sub(1) } else { Some(i + 1).filter(|j| *j < p.tabs.len()) };
+                if let Some(j) = j {
+                    p.tabs.swap(i, j);
+                    p.active = j;
+                }
+            }
+            Cmd::Tab1 | Cmd::Tab2 | Cmd::Tab3 | Cmd::Tab4 | Cmd::Tab5 | Cmd::Tab6 | Cmd::Tab7 | Cmd::Tab8 => {
+                let n = [Cmd::Tab1, Cmd::Tab2, Cmd::Tab3, Cmd::Tab4, Cmd::Tab5, Cmd::Tab6, Cmd::Tab7, Cmd::Tab8].iter().position(|c| *c == cmd).unwrap();
+                let p = self.panel();
+                if n < p.tabs.len() {
+                    p.active = n;
+                }
+            }
+            Cmd::LastTab => {
+                let p = self.panel();
+                p.active = p.tabs.len() - 1;
+            }
+            Cmd::TabSearch => self.popup = Popup::tab_search(),
+            Cmd::SplitRight | Cmd::SplitBottom => {
+                let id = self.active;
+                let p = self.panel().path();
+                let side = if cmd == Cmd::SplitRight { Side::Right } else { Side::Bottom };
+                self.actions.push(Action::Split { panel: id, path: p, side, select: None });
+            }
+            Cmd::ClosePanel => {
+                let id = self.active;
+                self.close_panel(id);
+            }
+            Cmd::FocusNextPanel | Cmd::FocusPrevPanel => {
+                let mut leaves = vec![];
+                self.tree.leaves(&mut leaves);
+                if leaves.len() > 1 {
+                    let i = leaves.iter().position(|&l| l == self.active).unwrap_or(0);
+                    let n = leaves.len();
+                    let j = if cmd == Cmd::FocusNextPanel { (i + 1) % n } else { (i + n - 1) % n };
+                    self.focus_panel(leaves[j]);
+                }
+                ctx.memory_mut(|m| {
+                    if let Some(f) = m.focused() {
+                        m.surrender_focus(f)
+                    }
+                });
+            }
+            Cmd::CopyToOther | Cmd::MoveToOther => {
+                let other = if self.prev_active != self.active && self.panels.contains_key(&self.prev_active) {
+                    Some(self.prev_active)
+                } else {
+                    let mut leaves = vec![];
+                    self.tree.leaves(&mut leaves);
+                    leaves.into_iter().find(|&l| l != self.active)
+                };
+                let Some(o) = other else {
+                    self.toast("No other panel");
+                    return;
+                };
+                let dest = self.panels[&o].path();
+                let srcs = self.tab().targets();
+                if !srcs.is_empty() && !tab::is_computer(&dest) {
+                    self.begin_transfer(srcs, dest, cmd == Cmd::MoveToOther);
+                }
+            }
+            Cmd::ToggleFlatten => {
+                let t = self.tab();
+                if t.tree_active() {
+                    // Tree view keeps the hierarchy: unfold everything instead of flattening.
+                    t.toggle_expand_all();
+                } else {
+                    let on = !t.flatten;
+                    t.set_flatten(on);
+                }
+            }
+            Cmd::FocusFilter => self.panel().focus_filter = true,
+            Cmd::TypesFilter => self.popup = Popup::types(self.active),
+            Cmd::ToggleHidden => {
+                self.cfg.show_hidden = !self.cfg.show_hidden;
+                self.set_config_changed();
+            }
+            Cmd::ToggleSystem => {
+                self.cfg.show_system = !self.cfg.show_system;
+                self.set_config_changed();
+            }
+            Cmd::ToggleExtensions => {
+                self.cfg.show_ext = !self.cfg.show_ext;
+                self.set_config_changed();
+            }
+            Cmd::ToggleRecentsOnTop => {
+                self.cfg.recents_on_top = !self.cfg.recents_on_top;
+                self.set_config_changed();
+            }
+            Cmd::ToggleSidebar => self.sidebar = !self.sidebar,
+            Cmd::ZoomIn | Cmd::ZoomOut => {
+                let t = self.tab();
+                t.settings.zoom = crate::listing::zoom_step(t.settings.zoom, if cmd == Cmd::ZoomIn { 1 } else { -1 });
+                t.scroll_to_cursor = true;
+            }
+            Cmd::ViewDetails | Cmd::ViewTree | Cmd::ViewList | Cmd::ViewMedium | Cmd::ViewLarge | Cmd::ViewXL => {
+                let z = match cmd {
+                    Cmd::ViewDetails => 0.0,
+                    Cmd::ViewTree => 0.1,
+                    Cmd::ViewList => 0.2,
+                    Cmd::ViewMedium => 0.3,
+                    Cmd::ViewLarge => 0.65,
+                    _ => 1.0,
+                };
+                let t = self.tab();
+                t.settings.zoom = z;
+                t.scroll_to_cursor = true;
+            }
+            Cmd::GroupNone | Cmd::GroupName | Cmd::GroupType | Cmd::GroupDate | Cmd::GroupCreated | Cmd::GroupAccessed | Cmd::GroupSize | Cmd::GroupItems | Cmd::GroupUsage | Cmd::GroupDeleted | Cmd::GroupOriginal | Cmd::GroupFree | Cmd::GroupFs | Cmd::GroupFull => {
+                let t = self.tab();
+                t.settings.group = cmd.group_key().unwrap_or_default();
+                t.collapsed_groups.clear();
+                t.dirty = true;
+            }
+            Cmd::GroupExpandAll => {
+                let t = self.tab();
+                t.collapsed_groups.clear();
+                t.dirty = true;
+            }
+            Cmd::GroupCollapseAll => {
+                let t = self.tab();
+                let labels: Vec<String> = t.header_labels();
+                t.collapsed_groups.extend(labels);
+                t.dirty = true;
+            }
+            Cmd::SavedView => self.popup = Popup::saved_view(self.active),
+            Cmd::SortName | Cmd::SortSize | Cmd::SortModified | Cmd::SortType | Cmd::SortCreated => {
+                let k = match cmd {
+                    Cmd::SortName => SortKey::Name,
+                    Cmd::SortSize => SortKey::Size,
+                    Cmd::SortModified => SortKey::Modified,
+                    Cmd::SortType => SortKey::Type,
+                    _ => SortKey::Created,
+                };
+                self.tab().set_sort(k);
+            }
+            Cmd::SortNameAsc | Cmd::SortNameDesc | Cmd::SortSizeAsc | Cmd::SortSizeDesc | Cmd::SortFullAsc | Cmd::SortFullDesc => {
+                let (k, desc) = match cmd {
+                    Cmd::SortNameAsc => (SortKey::Name, false),
+                    Cmd::SortNameDesc => (SortKey::Name, true),
+                    Cmd::SortSizeAsc => (SortKey::Size, false),
+                    Cmd::SortSizeDesc => (SortKey::Size, true),
+                    Cmd::SortFullAsc => (SortKey::Usage, false),
+                    _ => (SortKey::Usage, true),
+                };
+                let t = self.tab();
+                t.settings.sort = k;
+                t.settings.desc = desc;
+                t.dirty = true;
+                t.scroll_to_cursor = true;
+            }
+            Cmd::ToggleRecents => {
+                self.cfg.highlight_recents = !self.cfg.highlight_recents;
+                self.set_config_changed();
+            }
+            Cmd::CloseRightTabs | Cmd::CloseLeftTabs => {
+                let id = self.active;
+                let cur = self.panel().active;
+                let n = self.panel().tabs.len();
+                let range: Vec<usize> = if cmd == Cmd::CloseRightTabs { ((cur + 1)..n).rev().collect() } else { (0..cur).rev().collect() };
+                for i in range {
+                    let p = self.panels.get_mut(&id).unwrap();
+                    let t = p.tabs.remove(i);
+                    self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false });
+                }
+                let p = self.panel();
+                p.active = if cmd == Cmd::CloseLeftTabs { 0 } else { p.active.min(p.tabs.len().saturating_sub(1)) };
+            }
+            Cmd::OpenTabInWindow => {
+                let p = self.panel().path();
+                if crate::mime::new_window(&p).is_ok() && self.panel().tabs.len() > 1 {
+                    let (id, idx) = (self.active, self.panel().active);
+                    self.close_tab(id, idx);
+                }
+            }
+            Cmd::ToggleFoldersFirst => {
+                self.cfg.folders_first = !self.cfg.folders_first;
+                self.set_config_changed();
+            }
+            Cmd::ToggleInspector => {
+                let p = self.panel();
+                p.inspector = if p.inspector.is_some() { None } else { Some(Inspector::default()) };
+            }
+            Cmd::InspectorLineNumbers => {
+                if let Some(i) = self.panel().inspector.as_mut() {
+                    i.line_numbers = !i.line_numbers;
+                }
+            }
+            Cmd::InspectorMinimap => {
+                if let Some(i) = self.panel().inspector.as_mut() {
+                    i.minimap = !i.minimap;
+                }
+            }
+            Cmd::Properties => {
+                let mut t = self.tab().targets();
+                if t.is_empty() {
+                    t = vec![self.panel().path()];
+                }
+                t.retain(|p| !tab::is_computer(p) && tab::drive_dev(p).is_none());
+                if !t.is_empty() {
+                    for p in &t {
+                        if p.is_dir() {
+                            self.stats.request(p);
+                        }
+                    }
+                    self.popup = Popup::properties(t);
+                }
+            }
+            Cmd::Copy | Cmd::Cut => {
+                let mut paths = self.tab().targets();
+                paths.retain(|p| tab::drive_dev(p).is_none());
+                if paths.is_empty() {
+                    return;
+                }
+                let cut = cmd == Cmd::Cut;
+                crate::clipboard::set_files(&paths, cut);
+                self.toast(format!("{} {} item{}", if cut { "Cut" } else { "Copied" }, paths.len(), if paths.len() == 1 { "" } else { "s" }));
+                self.clipboard = Some((paths, cut));
+            }
+            Cmd::Paste => self.paste(),
+            Cmd::CopyPath | Cmd::CopyPathRaw | Cmd::CopyName => {
+                let mut paths = self.tab().selected_paths();
+                if paths.is_empty() {
+                    paths = vec![self.panel().path()];
+                }
+                // An unmounted drive's path is its device node.
+                for p in paths.iter_mut() {
+                    if let Some(d) = tab::drive_dev(p) {
+                        *p = PathBuf::from(d);
+                    }
+                }
+                let s = paths
+                    .iter()
+                    .map(|p| match cmd {
+                        Cmd::CopyName => p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                        Cmd::CopyPathRaw => p.to_string_lossy().into_owned(),
+                        _ => crate::clipboard::quote_if_needed(&p.to_string_lossy()),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ctx.copy_text(s.clone());
+                self.toast(format!("Copied {}", if paths.len() == 1 { s } else { format!("{} paths", paths.len()) }));
+            }
+            Cmd::Trash => {
+                let paths = self.tab().targets();
+                if paths.is_empty() {
+                    return;
+                }
+                self.move_cursor_past_selection();
+                self.actions.push(Action::StartJob(OpKind::Trash { paths }));
+            }
+            Cmd::DeletePermanent => {
+                let paths = self.tab().targets();
+                if paths.is_empty() {
+                    return;
+                }
+                let msg = if paths.len() == 1 {
+                    format!("Permanently delete “{}”? This can't be undone.", paths[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+                } else {
+                    format!("Permanently delete {} items? This can't be undone.", paths.len())
+                };
+                self.popup = Popup::confirm(msg, "Delete", Box::new(move |app: &mut App| {
+                    app.move_cursor_past_selection();
+                    app.actions.push(Action::StartJob(OpKind::Delete { paths: paths.clone() }));
+                }));
+            }
+            Cmd::Rename => {
+                let t = self.tab();
+                let mut idx: Vec<u32> = if t.selected.is_empty() { t.cursor.into_iter().collect() } else { t.selected.iter().copied().collect() };
+                idx.sort_by_key(|i| t.view_pos(*i));
+                if idx.is_empty() || tab::is_computer(&t.path) {
+                    return;
+                }
+                let items = idx.iter().map(|&i| (i, t.entries[i as usize].path.clone(), t.entries[i as usize].name.clone())).collect();
+                t.rename = Some(Rename::new(items, false));
+                t.scroll_to_cursor = true;
+                ctx.memory_mut(|m| {
+                    if let Some(f) = m.focused() {
+                        m.surrender_focus(f)
+                    }
+                });
+            }
+            Cmd::NewFolder | Cmd::NewFile => {
+                let dir = self.panel().path();
+                if tab::is_computer(&dir) {
+                    return;
+                }
+                let name = if cmd == Cmd::NewFolder { "New folder" } else { "New file.txt" };
+                let dest = fsx::unique_dest(&dir, name);
+                let r = if cmd == Cmd::NewFolder { std::fs::create_dir(&dest) } else { std::fs::File::create_new(&dest).map(|_| ()) };
+                match r {
+                    Ok(()) => {
+                        self.undo.push(UndoEntry { label: format!("Create {}", dest.display()), kind: UndoKind::Created(vec![dest.clone()]) });
+                        let t = self.tab();
+                        t.filter.clear();
+                        t.pending_rename = Some(dest);
+                        t.reload();
+                    }
+                    Err(e) => self.toast(format!("Couldn't create: {e}")),
+                }
+            }
+            Cmd::CreateLink => {
+                let paths = self.tab().targets();
+                let dir = self.panel().path();
+                let mut made = vec![];
+                for p in paths {
+                    let name = format!("{} (link)", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                    let dest = fsx::unique_dest(&dir, &name);
+                    if let Err(e) = std::os::unix::fs::symlink(&p, &dest) {
+                        self.toast(format!("Couldn't create link: {e}"));
+                    } else {
+                        made.push(dest);
+                    }
+                }
+                if !made.is_empty() {
+                    self.undo.push(UndoEntry { label: "Create links".into(), kind: UndoKind::Created(made) });
+                }
+                self.tab().reload();
+            }
+            Cmd::Duplicate => {
+                let paths = self.tab().targets();
+                let dir = self.panel().path();
+                if !paths.is_empty() {
+                    self.actions.push(Action::StartJob(OpKind::Copy { srcs: paths, dest: dir, decide: HashMap::new() }));
+                }
+            }
+            Cmd::OpenWith => {
+                let paths: Vec<PathBuf> = self.tab().target_entries().iter().filter(|e| !e.is_dir).map(|e| e.path.clone()).collect();
+                if !paths.is_empty() {
+                    self.popup = Popup::open_with(paths);
+                }
+            }
+            Cmd::ContextMenu => {
+                let id = self.active;
+                let pos = self.tab().cursor_screen_pos.unwrap_or_else(|| self.panels[&id].list_rect.center());
+                let bg = self.tab().targets().is_empty();
+                self.actions.push(Action::CtxMenu { panel: id, pos, background: bg });
+            }
+            Cmd::RestoreTrash => self.restore_from_trash(),
+            Cmd::EmptyTrash => {
+                self.popup = Popup::confirm("Permanently delete everything in the trash?".into(), "Empty trash", Box::new(|app: &mut App| {
+                    let errs = crate::trashcan::list().iter().filter(|it| crate::trashcan::purge(it).is_err()).count();
+                    if errs == 0 {
+                        app.toast("Trash emptied");
+                    } else {
+                        app.toast(format!("Couldn't remove {errs} item(s) from the trash"));
+                    }
+                    for p in app.panels.values_mut() {
+                        for t in &mut p.tabs {
+                            t.reload();
+                        }
+                    }
+                }));
+            }
+            Cmd::SelectAll => {
+                let t = self.tab();
+                t.selected = t.view.iter().copied().collect();
+            }
+            Cmd::SelectNone => self.tab().selected.clear(),
+            Cmd::InvertSelection => {
+                let t = self.tab();
+                let all: HashSet<u32> = t.view.iter().copied().collect();
+                t.selected = all.difference(&t.selected).copied().collect();
+            }
+            Cmd::ToggleSelection => {
+                let t = self.tab();
+                if let Some(c) = t.cursor {
+                    if !t.selected.remove(&c) {
+                        t.selected.insert(c);
+                    }
+                    t.anchor = Some(c);
+                }
+            }
+            Cmd::SaveLayout => self.popup = Popup::prompt("Save layout as", String::new(), Box::new(|app: &mut App, name: String| {
+                if name.trim().is_empty() {
+                    return;
+                }
+                let snap = app.layout_snap(&app.ctx.clone());
+                app.ud.layouts.insert(name.trim().to_string(), snap);
+                app.ud_dirty = true;
+                app.toast(format!("Saved layout “{}”", name.trim()));
+            })),
+            Cmd::LoadLayout => self.popup = Popup::layouts(false),
+            Cmd::DeleteLayout => self.popup = Popup::layouts(true),
+            Cmd::Palette => self.popup = Popup::palette(),
+            Cmd::Options => self.popup = Popup::options(),
+            Cmd::MainMenu => self.popup = Popup::MainMenu,
+            Cmd::QuickMenu => {
+                self.quick_anchor = None;
+                self.popup = Popup::QuickMenu;
+            }
+            Cmd::NewWindow => {
+                let _ = crate::mime::new_window(&fsx::home());
+            }
+            Cmd::Quit => self.quit = true,
+            Cmd::FontBigger => {
+                self.cfg.font_size = (self.cfg.font_size + 0.5).min(24.0);
+                self.cfg_dirty = true;
+            }
+            Cmd::FontSmaller => {
+                self.cfg.font_size = (self.cfg.font_size - 0.5).max(9.0);
+                self.cfg_dirty = true;
+            }
+            Cmd::ToggleAnimations => {
+                self.cfg.animations = !self.cfg.animations;
+                self.cfg_dirty = true;
+            }
+            Cmd::OpenConfig => {
+                if !config::config_path().exists() {
+                    let _ = config::save_json(&config::config_path(), &self.cfg);
+                }
+                let _ = crate::mime::open_default(&config::config_path());
+            }
+            Cmd::RevealConfig => {
+                let _ = std::fs::create_dir_all(config::config_dir());
+                let id = self.active;
+                self.actions.push(Action::NewTab { panel: id, path: config::config_dir(), select: None, focus: true });
+            }
+            Cmd::ResetConfig => {
+                self.popup = Popup::confirm("Reset all options and hotkeys to their defaults?".into(), "Reset", Box::new(|app: &mut App| {
+                    let _ = std::fs::copy(config::config_path(), config::config_path().with_extension("json.bak"));
+                    app.cfg = Config::default();
+                    app.set_config_changed();
+                    app.toast("Settings reset (previous saved as config.json.bak)");
+                }));
+            }
+            Cmd::Install => match crate::install::install() {
+                Ok(msg) => self.toast(msg),
+                Err(e) => self.toast(format!("Install failed: {e}")),
+            },
+            Cmd::SetDefault => match crate::install::set_default() {
+                Ok(msg) => self.toast(msg),
+                Err(e) => self.toast(format!("Couldn't set default: {e}")),
+            },
+            Cmd::Uninstall => match crate::install::uninstall() {
+                Ok(msg) => self.toast(msg),
+                Err(e) => self.toast(format!("Uninstall failed: {e}")),
+            },
+            Cmd::About => self.popup = Popup::About,
+            Cmd::Undo => self.undo_last(),
+        }
+    }
+
+    fn target_folder(&mut self) -> PathBuf {
+        let t = self.tab();
+        t.target_entries().first().filter(|e| e.is_dir).map(|e| e.path.clone()).unwrap_or_else(|| t.path.clone())
+    }
+
+    fn move_cursor_past_selection(&mut self) {
+        let t = self.tab();
+        let positions: Vec<usize> = t.targets_idx().iter().filter_map(|&i| t.view_pos(i)).collect();
+        let (Some(&lo), Some(&hi)) = (positions.iter().min(), positions.iter().max()) else { return };
+        let next = if hi + 1 < t.view.len() { Some(hi + 1) } else { lo.checked_sub(1) };
+        t.selected.clear();
+        if let Some(n) = next {
+            let idx = t.view[n];
+            t.cursor = Some(idx);
+            t.anchor = Some(idx);
+            t.selected.insert(idx);
+        } else {
+            t.cursor = None;
+        }
+    }
+
+    fn track_leave(&mut self, old: &Path) {
+        if self.cfg.track_recents() && !tab::is_computer(old) {
+            self.ud.push_recent(old);
+            self.ud_dirty = true;
+            self.refresh_recents();
+        }
+    }
+
+    pub fn navigate(&mut self, panel: u64, path: PathBuf) {
+        if let Some(dev) = tab::drive_dev(&path) {
+            let dev = dev.to_string();
+            self.drive_op(crate::drives::Op::Mount, &dev, Some((panel, false)));
+            return;
+        }
+        let s = self.view_for(&path);
+        let Some(p) = self.panels.get_mut(&panel) else { return };
+        let old = p.path();
+        p.tab_mut().navigate(path, Some(s));
+        if let Some(i) = p.inspector.as_mut() {
+            i.invalidate();
+        }
+        self.track_leave(&old);
+    }
+
+    pub fn focus_panel(&mut self, id: u64) {
+        if id != self.active && self.panels.contains_key(&id) {
+            self.prev_active = self.active;
+            self.active = id;
+        }
+    }
+
+    pub fn close_tab(&mut self, panel: u64, idx: usize) {
+        let Some(p) = self.panels.get_mut(&panel) else { return };
+        if idx >= p.tabs.len() {
+            return;
+        }
+        let t = p.tabs.remove(idx);
+        if self.cfg.animations && !p.tabs.is_empty() {
+            self.tab_ghosts.push((panel, idx, t.shown_tab_w, std::time::Instant::now()));
+        }
+        self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false });
+        if self.closed_tabs.len() > 50 {
+            self.closed_tabs.remove(0);
+        }
+        if p.tabs.is_empty() {
+            let mut leaves = vec![];
+            self.tree.leaves(&mut leaves);
+            if leaves.len() > 1 {
+                self.close_panel(panel);
+            } else {
+                let home = fsx::home();
+                let nt = self.make_tab(home);
+                let p = self.panels.get_mut(&panel).unwrap();
+                p.tabs.push(nt);
+                p.active = 0;
+            }
+            return;
+        }
+        if p.active > idx || p.active >= p.tabs.len() {
+            p.active = p.active.saturating_sub(1);
+        }
+    }
+
+    pub fn close_panel(&mut self, id: u64) {
+        let mut leaves = vec![];
+        self.tree.leaves(&mut leaves);
+        if leaves.len() <= 1 {
+            return;
+        }
+        if let Some(p) = self.panels.remove(&id) {
+            for t in p.tabs {
+                self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false });
+            }
+        }
+        self.tree.remove(id);
+        if self.active == id {
+            self.active = if self.panels.contains_key(&self.prev_active) { self.prev_active } else { self.tree.first_leaf() };
+        }
+    }
+
+    // ---------------------------------------------------------------- file ops
+
+    pub fn paste(&mut self) {
+        let (paths, cut) = match crate::clipboard::get_files() {
+            Some(x) => x,
+            None => match &self.clipboard {
+                Some((p, c)) => (p.clone(), *c),
+                None => {
+                    self.toast("Nothing to paste");
+                    return;
+                }
+            },
+        };
+        // Paste into the single selected folder, else the current folder.
+        let t = self.tab();
+        let sel = t.target_entries();
+        let dest = if t.selected.len() == 1 && sel.len() == 1 && sel[0].is_dir { sel[0].path.clone() } else { t.path.clone() };
+        if tab::is_computer(&dest) {
+            return;
+        }
+        if cut {
+            self.clipboard = None;
+        }
+        self.begin_transfer(paths, dest, cut);
+    }
+
+    /// Start a copy/move, asking about conflicts first.
+    pub fn begin_transfer(&mut self, srcs: Vec<PathBuf>, dest: PathBuf, mv: bool) {
+        let conflicts: Vec<ConflictItem> = srcs
+            .iter()
+            .filter_map(|s| {
+                let name = s.file_name()?;
+                let target = dest.join(name);
+                if target != *s && std::fs::symlink_metadata(&target).is_ok() {
+                    Some(ConflictItem { src: s.clone(), dst: target })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if conflicts.is_empty() {
+            let kind = if mv { OpKind::Move { srcs, dest, decide: HashMap::new() } } else { OpKind::Copy { srcs, dest, decide: HashMap::new() } };
+            self.actions.push(Action::StartJob(kind));
+        } else {
+            self.popup = Popup::conflict(srcs, dest, mv, conflicts);
+        }
+    }
+
+    pub fn start_job(&mut self, kind: OpKind) {
+        let id = self.alloc_id();
+        self.jobs.push(ops::spawn(id, kind, self.ctx.clone()));
+    }
+
+    fn restore_from_trash(&mut self) {
+        let sel = self.tab().targets();
+        let wanted: Vec<crate::trashcan::Item> = crate::trashcan::list().into_iter().filter(|it| sel.contains(&it.file)).collect();
+        if wanted.is_empty() {
+            self.toast("Select items inside the trash to restore");
+            return;
+        }
+        let n = wanted.len();
+        let errs: Vec<String> = wanted.iter().filter_map(|it| crate::trashcan::restore(it).err().map(|e| e.to_string())).collect();
+        if errs.is_empty() {
+            self.toast(format!("Restored {n} item{}", if n == 1 { "" } else { "s" }));
+        } else {
+            self.toast(format!("Restore failed: {}", errs.join("; ")));
+        }
+        self.tab().reload();
+    }
+
+    fn undo_last(&mut self) {
+        let Some(u) = self.undo.pop() else {
+            self.toast("Nothing to undo");
+            return;
+        };
+        let mut errs = 0;
+        match &u.kind {
+            UndoKind::Rename(pairs) => {
+                let plan: Vec<(PathBuf, String)> = pairs
+                    .iter()
+                    .map(|(from, to)| (to.clone(), from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
+                    .collect();
+                errs = crate::rename::apply(&plan).len();
+            }
+            UndoKind::Move(pairs) => {
+                for (src, dst) in pairs {
+                    if std::fs::symlink_metadata(src).is_ok() || std::fs::rename(dst, src).is_err() {
+                        errs += 1;
+                    }
+                }
+            }
+            UndoKind::Created(paths) => {
+                errs += paths.iter().filter(|p| crate::trashcan::delete(p).is_err()).count();
+            }
+            UndoKind::Trashed(orig) => {
+                // Restore the most recent trash entry for each original path.
+                let mut best: HashMap<PathBuf, crate::trashcan::Item> = HashMap::new();
+                for it in crate::trashcan::list() {
+                    if orig.contains(&it.original) && best.get(&it.original).map(|b| b.deleted < it.deleted).unwrap_or(true) {
+                        best.insert(it.original.clone(), it);
+                    }
+                }
+                errs += best.values().filter(|it| crate::trashcan::restore(it).is_err()).count();
+            }
+        }
+        for p in self.panels.values_mut() {
+            p.tab_mut().reload();
+        }
+        if errs > 0 {
+            self.toast(format!("Undo “{}” partly failed", u.label));
+        } else {
+            self.toast(format!("Undid “{}”", u.label));
+        }
+    }
+
+    // ---------------------------------------------------------------- actions
+
+    fn process_actions(&mut self, ctx: &egui::Context) {
+        let mut guard = 0;
+        while !self.actions.is_empty() && guard < 8 {
+            guard += 1;
+            let actions = std::mem::take(&mut self.actions);
+            for a in actions {
+                self.apply(a, ctx);
+                self.heal();
+            }
+        }
+    }
+
+    fn apply(&mut self, a: Action, ctx: &egui::Context) {
+        match a {
+            Action::Cmd(c) => self.run(c),
+            Action::Navigate { panel, path } => {
+                self.focus_panel(panel);
+                self.navigate(panel, path);
+            }
+            Action::NewTab { panel, path, .. } | Action::Split { panel, path, .. } if tab::drive_dev(&path).is_some() => {
+                let dev = tab::drive_dev(&path).unwrap_or_default().to_string();
+                self.drive_op(crate::drives::Op::Mount, &dev, Some((panel, true)));
+            }
+            Action::NewTab { panel, path, select, focus } => {
+                let mut t = self.make_tab(path);
+                if let Some(s) = select {
+                    t.navigate(s, None);
+                }
+                if let Some(p) = self.panels.get_mut(&panel) {
+                    let at = p.active + 1;
+                    let at = at.min(p.tabs.len());
+                    p.tabs.insert(at, t);
+                    if focus {
+                        p.active = at;
+                    }
+                }
+            }
+            Action::Split { panel, path, side, select } => {
+                let mut t = self.make_tab(path);
+                if let Some(s) = select {
+                    t.navigate(s, None);
+                }
+                let id = self.alloc_id();
+                if self.tree.split(panel, id, side) {
+                    self.panels.insert(id, Panel::new(id, t));
+                    self.focus_panel(id);
+                }
+            }
+            Action::Activate { panel, idx, mods } => self.activate(panel, idx, mods),
+            Action::OpenFile(p) => {
+                if let Err(e) = crate::mime::open_default(&p) {
+                    self.toast(format!("Couldn't open: {e}"));
+                }
+                if self.cfg.track_recents() {
+                    self.ud.push_recent(&p);
+                    self.ud_dirty = true;
+                    self.refresh_recents();
+                }
+            }
+            Action::CtxMenu { panel, pos, background } => {
+                self.focus_panel(panel);
+                self.popup = crate::ctxmenu::build(self, panel, pos, background);
+            }
+            Action::Drop { paths, dest, copy, link } => {
+                if paths.iter().any(|p| *p == dest) {
+                    return;
+                }
+                if std::mem::take(&mut self.drop_right) && !link {
+                    let pos = ctx.pointer_latest_pos().unwrap_or_default();
+                    self.popup = Popup::DropMenu { paths, dest, pos };
+                    return;
+                }
+                if link {
+                    for p in &paths {
+                        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        let _ = std::os::unix::fs::symlink(p, fsx::unique_dest(&dest, &name));
+                    }
+                    return;
+                }
+                // Files from other apps are copied (Shift moves them): whatever they
+                // came from keeps its own.
+                let copy = copy || (self.ext_drop == Some(false) && !ctx.input(|i| i.modifiers.shift));
+                // Default: move within a filesystem, copy across.
+                let same_fs = {
+                    use std::os::unix::fs::MetadataExt;
+                    let d = std::fs::metadata(&dest).map(|m| m.dev()).ok();
+                    paths.iter().all(|p| std::fs::metadata(p).map(|m| Some(m.dev()) == d).unwrap_or(false))
+                };
+                let mv = !copy && (same_fs || ctx.input(|i| i.modifiers.shift));
+                if mv && paths.iter().all(|p| p.parent() == Some(dest.as_path())) {
+                    return;
+                }
+                self.begin_transfer(paths, dest, mv);
+            }
+            Action::RunWith { exe, args } => {
+                let msg = format!("Run “{}” with {} item{}?", exe.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), args.len(), if args.len() == 1 { "" } else { "s" });
+                self.popup = Popup::confirm(msg, "Run", Box::new(move |app: &mut App| {
+                    if let Err(e) = crate::mime::run_with(&exe, &args) {
+                        app.toast(format!("Couldn't run: {e}"));
+                    }
+                }));
+            }
+            Action::FocusPanel(id) => self.focus_panel(id),
+            Action::ActivateTab { panel, idx } => {
+                self.focus_panel(panel);
+                if let Some(p) = self.panels.get_mut(&panel) {
+                    p.active = idx.min(p.tabs.len() - 1);
+                }
+            }
+            Action::CloseTab { panel, idx } => self.close_tab(panel, idx),
+            Action::MoveTab { from, idx, to, to_idx, side, copy } => self.move_tab(from, idx, to, to_idx, side, copy),
+            Action::BookmarkAdd(p) => {
+                if !self.ud.bookmarks.contains(&p) {
+                    self.ud.bookmarks.push(p);
+                    self.ud_dirty = true;
+                }
+            }
+            Action::BookmarkRemove(p) => {
+                self.ud.bookmarks.retain(|b| *b != p);
+                self.ud_dirty = true;
+            }
+            Action::BookmarkMove { from, to } => {
+                if from < self.ud.bookmarks.len() {
+                    let b = self.ud.bookmarks.remove(from);
+                    let to = to.min(self.ud.bookmarks.len());
+                    self.ud.bookmarks.insert(to, b);
+                    self.ud_dirty = true;
+                }
+            }
+            Action::CommitRename(panel) => self.commit_rename(panel),
+            Action::CancelRename(panel) => {
+                if let Some(p) = self.panels.get_mut(&panel) {
+                    p.tab_mut().rename = None;
+                }
+            }
+            Action::Toast(s) => self.toast(s),
+            Action::Open(p) => self.popup = p,
+            Action::StartJob(k) => self.start_job(k),
+            Action::ExternalDrop { paths, dest } => self.begin_transfer(paths, dest, false),
+        }
+    }
+
+    fn activate(&mut self, panel: u64, idx: u32, mods: Modifiers) {
+        let Some(p) = self.panels.get_mut(&panel) else { return };
+        let t = p.tab_mut();
+        let Some(e) = t.entries.get(idx as usize).cloned() else { return };
+        // An unmounted drive: mount it, then open it.
+        if let Some(dev) = tab::drive_dev(&e.path) {
+            let dev = dev.to_string();
+            self.drive_op(crate::drives::Op::Mount, &dev, Some((panel, mods.ctrl || mods.command)));
+            return;
+        }
+        if mods.alt {
+            self.popup = Popup::properties(vec![e.path.clone()]);
+            return;
+        }
+        if e.is_dir {
+            if mods.ctrl || mods.command {
+                self.actions.push(Action::NewTab { panel, path: e.path, select: None, focus: false });
+            } else {
+                self.navigate(panel, e.path);
+            }
+        } else if e.ext() == "desktop" || !e.is_executable() {
+            self.actions.push(Action::OpenFile(e.path));
+        } else {
+            // Plain executable: ask how to run it.
+            let path = e.path.clone();
+            self.popup = Popup::run_exec(path);
+        }
+    }
+
+    fn move_tab(&mut self, from: u64, idx: usize, to: u64, to_idx: Option<usize>, side: Option<Side>, copy: bool) {
+        let Some(src) = self.panels.get(&from) else { return };
+        if idx >= src.tabs.len() {
+            return;
+        }
+        let path = src.tabs[idx].path.clone();
+        let settings = src.tabs[idx].settings.clone();
+        // Moving a panel's only tab onto its own side is meaningless.
+        if from == to && side.is_some() && src.tabs.len() == 1 && !copy {
+            return;
+        }
+        let tid = self.alloc_id();
+        let mut t = Tab::new(tid, path, settings, self.ctx.clone());
+        t.saved_scope = None;
+        let mut removed = None;
+        if !copy {
+            let Some(p) = self.panels.get_mut(&from) else { return };
+            removed = Some(p.tabs.remove(idx));
+            t.selected.clear();
+            if p.active >= p.tabs.len() && !p.tabs.is_empty() {
+                p.active = p.tabs.len() - 1;
+            }
+        }
+        match side {
+            Some(s) => {
+                let id = self.alloc_id();
+                if self.tree.split(to, id, s) {
+                    self.panels.insert(id, Panel::new(id, t));
+                    self.focus_panel(id);
+                } else if let (Some(old), Some(p)) = (removed, self.panels.get_mut(&from)) {
+                    // Couldn't split there: put the tab back instead of losing it.
+                    let at = idx.min(p.tabs.len());
+                    p.tabs.insert(at, old);
+                    p.active = at;
+                }
+            }
+            None => {
+                if let Some(p) = self.panels.get_mut(&to) {
+                    let at = to_idx.unwrap_or(p.tabs.len()).min(p.tabs.len());
+                    p.tabs.insert(at, t);
+                    p.active = at;
+                }
+                self.focus_panel(to);
+            }
+        }
+        // Empty source panel closes.
+        if self.panels.get(&from).map(|p| p.tabs.is_empty()).unwrap_or(false) {
+            self.panels.remove(&from);
+            self.tree.remove(from);
+            if self.active == from {
+                self.active = self.tree.first_leaf();
+            }
+        }
+    }
+
+    fn commit_rename(&mut self, panel: u64) {
+        let Some(p) = self.panels.get_mut(&panel) else { return };
+        let t = p.tab_mut();
+        let Some(r) = t.rename.as_mut() else { return };
+        let bad = r.compute_conflicts();
+        if !bad.is_empty() {
+            r.error = Some(if r.is_batch() { format!("{} name(s) are invalid or collide", bad.len()) } else { "That name is invalid or already exists".into() });
+            return;
+        }
+        let plan = r.plan();
+        let batch = r.is_batch();
+        t.rename = None;
+        if plan.is_empty() {
+            return;
+        }
+        let new_paths: Vec<PathBuf> = plan.iter().map(|(p, n)| p.with_file_name(n)).collect();
+        let errors = crate::rename::apply(&plan);
+        t.pending_restore = Some(tab::HistState { path: t.path.clone(), cursor: new_paths.first().cloned(), selected: new_paths.clone(), scroll: t.current_scroll });
+        t.reload();
+        let pairs: Vec<(PathBuf, PathBuf)> = plan.iter().map(|(p, _)| p.clone()).zip(new_paths).collect();
+        self.undo.push(UndoEntry { label: if batch { format!("Rename {} items", pairs.len()) } else { "Rename".into() }, kind: UndoKind::Rename(pairs) });
+        if !errors.is_empty() {
+            self.toast(errors.join("; "));
+        }
+    }
+}
+
+impl App {
+    pub fn on_exit(&mut self) {
+        let ctx = self.ctx.clone();
+        self.save_all(&ctx);
+    }
+}

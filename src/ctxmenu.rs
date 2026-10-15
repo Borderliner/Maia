@@ -1,0 +1,682 @@
+//! Searchable context menu with pinning and inline (accordion) submenus.
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+use egui::{self, Align2, CornerRadius, FontId, Id, Key, Modifiers, Pos2, Rect, Sense, Stroke, Vec2, pos2, vec2};
+
+use crate::app::{Action, App};
+use crate::commands::Cmd;
+use crate::fuzzy;
+use crate::popups::Popup;
+use crate::tab;
+use crate::theme::{Glyph, paint_glyph};
+
+#[derive(Clone)]
+pub enum Act {
+    Cmd(Cmd),
+    OpenWith(String),
+    OtherApp,
+    Custom(usize),
+    Terminal(PathBuf),
+    /// Sidebar actions on one place: (what, panel to act in).
+    Place(PlaceAct, u64),
+    /// Mount, unmount or eject the target drives.
+    Drive(crate::drives::Op),
+    None,
+}
+
+#[derive(Clone, Copy)]
+pub enum PlaceAct {
+    Open,
+    NewTab,
+    RightSplit,
+    BottomSplit,
+    NewWindow,
+    CopyPath,
+    AddBookmark,
+    RemoveBookmark,
+    Properties,
+}
+
+#[derive(Clone)]
+pub struct Item {
+    pub id: String,
+    pub label: String,
+    pub act: Act,
+    pub children: Vec<Item>,
+}
+
+impl Item {
+    fn cmd(c: Cmd) -> Item {
+        Item { id: c.info().id.into(), label: c.info().title.into(), act: Act::Cmd(c), children: vec![] }
+    }
+    fn labeled(c: Cmd, label: &str) -> Item {
+        Item { id: c.info().id.into(), label: label.into(), act: Act::Cmd(c), children: vec![] }
+    }
+    fn sub(id: &str, label: &str, children: Vec<Item>) -> Item {
+        Item { id: id.into(), label: label.into(), act: Act::None, children }
+    }
+    fn drive(op: crate::drives::Op) -> Item {
+        let label = match op {
+            crate::drives::Op::Mount => "Mount",
+            crate::drives::Op::Unmount => "Unmount",
+            crate::drives::Op::Eject => "Eject",
+        };
+        Item { id: format!("drive_{}", op.verb()), label: label.into(), act: Act::Drive(op), children: vec![] }
+    }
+    /// Mount / Unmount / Eject, as they apply to these drives.
+    fn drive_items(drives: &[crate::drives::Drive]) -> Vec<Item> {
+        use crate::drives::{Op, can_unmount};
+        let mut v = vec![];
+        if drives.iter().any(|d| !d.mounted()) {
+            v.push(Item::drive(Op::Mount));
+        }
+        if drives.iter().any(can_unmount) {
+            v.push(Item::drive(Op::Unmount));
+        }
+        if drives.iter().any(|d| d.removable) {
+            v.push(Item::drive(Op::Eject));
+        }
+        v
+    }
+    fn sep() -> Item {
+        Item { id: "-".into(), label: String::new(), act: Act::None, children: vec![] }
+    }
+}
+
+pub struct CtxState {
+    /// Opened from the sidebar for this place (it stays highlighted meanwhile).
+    pub sidebar: Option<PathBuf>,
+    pub pos: Pos2,
+    pub items: Vec<Item>,
+    pub query: String,
+    pub sel: usize,
+    pub expanded: HashSet<String>,
+    pub targets: Vec<PathBuf>,
+    focus: bool,
+}
+
+pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
+    let Some(p) = app.panels.get(&panel) else { return Popup::None };
+    let t = p.tab();
+    let here = t.path.clone();
+    let computer = tab::is_computer(&here);
+    let in_trash = here.starts_with(crate::sidebar::trash_dir());
+    let ents: Vec<(PathBuf, bool, bool, String)> = if background { vec![] } else { t.target_entries().iter().map(|e| (e.path.clone(), e.is_dir, e.is_link, e.ext().to_string())).collect() };
+    let mut items = vec![];
+    if ents.is_empty() {
+        if !computer {
+            items.push(Item::cmd(Cmd::NewFolder));
+            items.push(Item::cmd(Cmd::NewFile));
+            items.push(Item::cmd(Cmd::Paste));
+            items.push(Item { id: "terminal_here".into(), label: "Open Terminal Here".into(), act: Act::Terminal(here.clone()), children: vec![] });
+            items.push(Item::sep());
+        }
+        items.push(Item::cmd(Cmd::SelectAll));
+        items.push(Item::sub("view", "View", vec![
+            Item::labeled(Cmd::ViewDetails, "Details"),
+            Item::labeled(Cmd::ViewTree, "Tree"),
+            Item::labeled(Cmd::ViewList, "List"),
+            Item::labeled(Cmd::ViewMedium, "Medium icons"),
+            Item::labeled(Cmd::ViewLarge, "Large icons"),
+            Item::labeled(Cmd::ViewXL, "Extra large icons"),
+        ]));
+        items.push(Item::sub("sort", "Sort by", vec![
+            Item::labeled(Cmd::SortName, "Name"),
+            Item::labeled(Cmd::SortSize, "Size"),
+            Item::labeled(Cmd::SortModified, "Date modified"),
+            Item::labeled(Cmd::SortCreated, "Date created"),
+            Item::labeled(Cmd::SortType, "Type"),
+            Item::labeled(Cmd::ToggleFoldersFirst, "Toggle folders first"),
+        ]));
+        let in_trash_files = crate::trashcan::is_trash_files(&here);
+        let group_items: Vec<Item> = crate::commands::GROUP_CMDS
+            .iter()
+            .filter(|c| match c {
+                Cmd::GroupDeleted | Cmd::GroupOriginal => in_trash_files,
+                Cmd::GroupFree | Cmd::GroupFs | Cmd::GroupFull => computer,
+                Cmd::GroupNone => true,
+                _ => !computer,
+            })
+            .map(|&c| Item::labeled(c, if c == Cmd::GroupNone { "None" } else { c.info().title.trim_start_matches("Group By ") }))
+            .collect();
+        items.push(Item::sub("group", "Group by", group_items));
+        items.push(Item::cmd(Cmd::SavedView));
+        items.push(Item::cmd(Cmd::ToggleHidden));
+        items.push(Item::cmd(Cmd::Refresh));
+        if in_trash {
+            items.push(Item::sep());
+            items.push(Item::cmd(Cmd::EmptyTrash));
+        }
+        if !computer {
+            items.push(Item::sep());
+            items.push(Item::cmd(Cmd::ToggleBookmark));
+            items.push(Item::cmd(Cmd::Properties));
+        }
+    } else if computer {
+        let drives: Vec<crate::drives::Drive> = ents.iter().filter_map(|e| app.drive_at(&e.0)).collect();
+        let mounted: Vec<&PathBuf> = ents.iter().filter(|e| tab::drive_dev(&e.0).is_none()).map(|e| &e.0).collect();
+        items.push(Item::labeled(Cmd::Activate, "Open"));
+        items.push(Item::cmd(Cmd::OpenInNewTab));
+        items.push(Item::cmd(Cmd::OpenInRightSplit));
+        items.push(Item::cmd(Cmd::OpenInBottomSplit));
+        if mounted.len() == ents.len() {
+            items.push(Item::cmd(Cmd::OpenInNewWindow));
+            if let [m] = mounted.as_slice() {
+                items.push(Item { id: "terminal_here".into(), label: "Open Terminal Here".into(), act: Act::Terminal((*m).clone()), children: vec![] });
+            }
+        }
+        items.push(Item::sep());
+        items.push(Item::sub("copy_as", "Copy as", vec![Item::cmd(Cmd::CopyPath), Item::cmd(Cmd::CopyPathRaw)]));
+        let d = Item::drive_items(&drives);
+        if !d.is_empty() {
+            items.push(Item::sep());
+            items.extend(d);
+        }
+        if !mounted.is_empty() {
+            items.push(Item::sep());
+            items.push(Item::cmd(Cmd::Properties));
+        }
+    } else {
+        let single = ents.len() == 1;
+        let any_file = ents.iter().any(|e| !e.1);
+        let all_dirs = ents.iter().all(|e| e.1);
+        items.push(Item::cmd(Cmd::Activate));
+        if any_file {
+            let db = crate::mime::mime_db();
+            let first_file = ents.iter().find(|e| !e.1).unwrap();
+            let mime = db.for_path(&first_file.0, false);
+            let mut kids: Vec<Item> = crate::mime::apps()
+                .for_mime(&mime)
+                .into_iter()
+                .take(12)
+                .map(|a| Item { id: format!("app:{}", a.id), label: a.name.clone(), act: Act::OpenWith(a.id.clone()), children: vec![] })
+                .collect();
+            kids.push(Item { id: "other_app".into(), label: "Other application…".into(), act: Act::OtherApp, children: vec![] });
+            items.push(Item::sub("open_with_menu", "Open with", kids));
+        }
+        items.push(Item::cmd(Cmd::OpenInNewTab));
+        items.push(Item::cmd(Cmd::OpenInRightSplit));
+        items.push(Item::cmd(Cmd::OpenInBottomSplit));
+        items.push(Item::cmd(Cmd::OpenInNewWindow));
+        let term_dir = if single && ents[0].1 { ents[0].0.clone() } else { here.clone() };
+        items.push(Item { id: "terminal_here".into(), label: "Open Terminal Here".into(), act: Act::Terminal(term_dir), children: vec![] });
+        if single && ents[0].2 {
+            items.push(Item::cmd(Cmd::OpenLinkTarget));
+        }
+        // Custom actions applicable to the selection.
+        let custom: Vec<Item> = app
+            .cfg
+            .custom_actions
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| {
+                let exts: Vec<String> = a.extensions.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+                ents.iter().all(|(_, d, _, ext)| if *d { a.folders } else { a.files && (exts.is_empty() || exts.contains(ext)) })
+            })
+            .map(|(i, a)| Item { id: format!("custom:{}", a.name), label: a.name.clone(), act: Act::Custom(i), children: vec![] })
+            .collect();
+        if !custom.is_empty() {
+            items.push(Item::sub("custom", "Custom actions", custom));
+        }
+        items.push(Item::sep());
+        items.push(Item::cmd(Cmd::Cut));
+        items.push(Item::cmd(Cmd::Copy));
+        if single && all_dirs {
+            items.push(Item::labeled(Cmd::Paste, "Paste Into Folder"));
+        }
+        items.push(Item::sub("copy_as", "Copy as", vec![Item::cmd(Cmd::CopyPath), Item::cmd(Cmd::CopyPathRaw), Item::cmd(Cmd::CopyName)]));
+        items.push(Item::sep());
+        items.push(Item::labeled(Cmd::Rename, if single { "Rename" } else { "Rename All (inline)" }));
+        items.push(Item::cmd(Cmd::Duplicate));
+        items.push(Item::cmd(Cmd::CreateLink));
+        if in_trash {
+            items.push(Item::cmd(Cmd::RestoreTrash));
+        } else {
+            items.push(Item::cmd(Cmd::Trash));
+        }
+        items.push(Item::cmd(Cmd::DeletePermanent));
+        items.push(Item::sep());
+        if all_dirs {
+            items.push(Item::cmd(Cmd::ToggleBookmark));
+        }
+        items.push(Item::cmd(Cmd::Properties));
+    }
+    let targets = ents.into_iter().map(|e| e.0).collect();
+    Popup::Ctx(CtxState { sidebar: None, pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets, focus: true })
+}
+
+/// Context menu for a sidebar place (recent, bookmark, drive or standard folder).
+pub fn build_place(panel: u64, path: PathBuf, bookmarked: bool, drive: Option<crate::drives::Drive>, pos: Pos2) -> Popup {
+    let place = |id: &str, label: &str, a: PlaceAct| Item { id: format!("place:{id}"), label: label.into(), act: Act::Place(a, panel), children: vec![] };
+    if let (Some(d), Some(_)) = (&drive, tab::drive_dev(&path)) {
+        // A drive that isn't mounted: opening it mounts it.
+        let mut items = vec![place("open", "Open", PlaceAct::Open), place("new_tab", "Open In New Tab", PlaceAct::NewTab), Item::sep()];
+        items.extend(Item::drive_items(std::slice::from_ref(d)));
+        return Popup::Ctx(CtxState { sidebar: Some(path.clone()), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![path], focus: true });
+    }
+    let computer = tab::is_computer(&path);
+    let mut items = vec![
+        place("open", "Open", PlaceAct::Open),
+        place("new_tab", "Open In New Tab", PlaceAct::NewTab),
+        place("right_split", "Open In Right Split", PlaceAct::RightSplit),
+        place("bottom_split", "Open In Bottom Split", PlaceAct::BottomSplit),
+        place("new_window", "Open In New Window", PlaceAct::NewWindow),
+    ];
+    if !computer {
+        items.push(Item { id: "terminal_here".into(), label: "Open Terminal Here".into(), act: Act::Terminal(path.clone()), children: vec![] });
+        items.push(Item::sep());
+        items.push(place("copy_path", "Copy As Path", PlaceAct::CopyPath));
+        items.push(Item::sep());
+        items.push(if bookmarked { place("unbookmark", "Remove Bookmark", PlaceAct::RemoveBookmark) } else { place("bookmark", "Add Bookmark", PlaceAct::AddBookmark) });
+        if let Some(d) = &drive {
+            let di = Item::drive_items(std::slice::from_ref(d));
+            if !di.is_empty() {
+                items.push(Item::sep());
+                items.extend(di);
+            }
+        }
+        items.push(Item::sep());
+        items.push(place("properties", "Properties", PlaceAct::Properties));
+    }
+    Popup::Ctx(CtxState { sidebar: Some(path.clone()), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![path], focus: true })
+}
+
+/// Visible rows: (depth, item, breadcrumb label)
+fn visible(st: &CtxState, pinned: &[String]) -> Vec<(usize, Item, String, bool)> {
+    let mut out = vec![];
+    let q = fuzzy::Query::new(&st.query);
+    if !q.is_empty() {
+        fn walk<'a>(items: &'a [Item], prefix: &str, q: &fuzzy::Query, out: &mut Vec<(i32, &'a Item, String)>) {
+            for it in items {
+                if it.id == "-" {
+                    continue;
+                }
+                let label = if prefix.is_empty() { it.label.clone() } else { format!("{prefix} › {}", it.label) };
+                if it.children.is_empty() {
+                    if let Some(s) = fuzzy::score(q, &label.to_lowercase()) {
+                        out.push((s, it, label));
+                    }
+                } else {
+                    walk(&it.children, &label, q, out);
+                }
+            }
+        }
+        let mut found = vec![];
+        walk(&st.items, "", &q, &mut found);
+        found.sort_by(|a, b| b.0.cmp(&a.0));
+        return found.into_iter().map(|(_, it, l)| (0, it.clone(), l, false)).collect();
+    }
+    // Pinned leaves first.
+    fn leaves<'a>(items: &'a [Item], out: &mut Vec<&'a Item>) {
+        for it in items {
+            if it.children.is_empty() {
+                out.push(it);
+            } else {
+                leaves(&it.children, out);
+            }
+        }
+    }
+    let mut all = vec![];
+    leaves(&st.items, &mut all);
+    let mut any_pinned = false;
+    for pid in pinned {
+        if let Some(it) = all.iter().find(|it| it.id == *pid) {
+            out.push((0, (*it).clone(), it.label.clone(), true));
+            any_pinned = true;
+        }
+    }
+    if any_pinned {
+        out.push((0, Item::sep(), String::new(), false));
+    }
+    fn tree(items: &[Item], depth: usize, st: &CtxState, out: &mut Vec<(usize, Item, String, bool)>) {
+        for it in items {
+            out.push((depth, it.clone(), it.label.clone(), false));
+            if !it.children.is_empty() && st.expanded.contains(&it.id) {
+                tree(&it.children, depth + 1, st, out);
+            }
+        }
+    }
+    tree(&st.items, 0, st, &mut out);
+    out
+}
+
+
+pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
+    let pal = app.pal;
+    let pinned = app.ud.pinned_ctx.clone();
+    let rows = visible(st, &pinned);
+    let is_sep = |it: &Item| it.id == "-" || it.id.is_empty();
+    let (up, down, enter, esc, right, left) = ctx.input_mut(|i| {
+        (
+            i.consume_key(Modifiers::NONE, Key::ArrowUp),
+            i.consume_key(Modifiers::NONE, Key::ArrowDown),
+            i.consume_key(Modifiers::NONE, Key::Enter),
+            i.consume_key(Modifiers::NONE, Key::Escape),
+            i.consume_key(Modifiers::NONE, Key::ArrowRight),
+            i.consume_key(Modifiers::NONE, Key::ArrowLeft),
+        )
+    });
+    if esc {
+        return false;
+    }
+    let n = rows.len();
+    if n > 0 {
+        let mut s = st.sel.min(n - 1) as isize;
+        let d = if down { 1 } else if up { -1 } else { 0 };
+        if d != 0 {
+            loop {
+                s = (s + d).rem_euclid(n as isize);
+                if !is_sep(&rows[s as usize].1) {
+                    break;
+                }
+            }
+        } else if is_sep(&rows[s as usize].1) {
+            s = (s + 1).min(n as isize - 1);
+        }
+        st.sel = s as usize;
+    }
+    let mut run: Option<Item> = None;
+    let mut toggle: Option<String> = None;
+    let mut pin: Option<String> = None;
+    if let Some((_, it, _, _)) = rows.get(st.sel) {
+        if enter || right {
+            if it.children.is_empty() {
+                if enter {
+                    run = Some(it.clone());
+                }
+            } else if !st.expanded.contains(&it.id) || enter {
+                toggle = Some(it.id.clone());
+            }
+        }
+        if left && !it.children.is_empty() && st.expanded.contains(&it.id) {
+            toggle = Some(it.id.clone());
+        }
+    }
+    // Current choices, shown as radio marks on View / Sort by / Group by entries.
+    let (cur_group, cur_sort, cur_zoom) = app.panels.get(&app.active).map(|p| {
+        let s = &p.tab().settings;
+        (s.group, s.sort, s.zoom)
+    }).unwrap_or((crate::config::GroupBy::None, crate::config::SortKey::Name, 0.0));
+    let radio_of = |c: Cmd| -> Option<bool> {
+        if let Some(g) = c.group_key() {
+            return Some(g == cur_group);
+        }
+        use crate::config::SortKey as K;
+        let sk = match c {
+            Cmd::SortName => Some(K::Name),
+            Cmd::SortSize => Some(K::Size),
+            Cmd::SortModified => Some(K::Modified),
+            Cmd::SortType => Some(K::Type),
+            Cmd::SortCreated => Some(K::Created),
+            _ => None,
+        };
+        if let Some(k) = sk {
+            return Some(k == cur_sort);
+        }
+        let vz = match c {
+            Cmd::ViewDetails => Some(0.0),
+            Cmd::ViewTree => Some(0.1),
+            Cmd::ViewList => Some(0.2),
+            Cmd::ViewMedium => Some(0.3),
+            Cmd::ViewLarge => Some(0.65),
+            Cmd::ViewXL => Some(1.0),
+            _ => None,
+        };
+        vz.map(|z: f32| crate::listing::view_name(z) == crate::listing::view_name(cur_zoom))
+    };
+    let screen = ctx.content_rect();
+    let row_h = 24.0;
+    let w = 340.0;
+    let est_h = (n as f32 * row_h + 50.0).min(screen.height() - 20.0);
+    let x = st.pos.x.min(screen.right() - w - 6.0).max(4.0);
+    let y = if st.pos.y + est_h > screen.bottom() { (screen.bottom() - est_h - 6.0).max(4.0) } else { st.pos.y };
+    let mut close_now = false;
+    let resp = egui::Area::new(Id::new("ctxmenu")).order(egui::Order::Foreground).fixed_pos(pos2(x, y)).show(ctx, |ui| {
+        egui::Frame::NONE
+            .fill(pal.raised)
+            .stroke(Stroke::new(1.0, pal.border))
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(egui::Margin::same(5))
+            .shadow(egui::epaint::Shadow { offset: [0, 6], blur: 22, spread: 0, color: egui::Color32::from_black_alpha(90) })
+            .show(ui, |ui| {
+                ui.set_width(w - 10.0);
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+                    paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(13.0)), Glyph::Search, pal.text_dim);
+                    let before = st.query.clone();
+                    let te = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text("Select a command…").frame(false).desired_width(ui.available_width() - 26.0));
+                    let (cr, cresp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+                    if cresp.hovered() {
+                        ui.painter().rect_filled(cr, CornerRadius::same(4), pal.hover);
+                    }
+                    paint_glyph(ui.painter(), Rect::from_center_size(cr.center(), Vec2::splat(10.0)), Glyph::Close, pal.text_dim);
+                    if cresp.on_hover_text("Close (Esc)").clicked() {
+                        close_now = true;
+                    }
+                    if st.focus {
+                        te.request_focus();
+                        st.focus = false;
+                    }
+                    if st.query != before {
+                        st.sel = 0;
+                    }
+                });
+                {
+                    let yy = ui.cursor().top() + 2.0;
+                    let x = ui.min_rect().x_range();
+                    ui.painter().line_segment([pos2(x.min - 5.0, yy), pos2(x.max + 5.0, yy)], Stroke::new(1.0, pal.border));
+                    ui.add_space(5.0);
+                }
+                // The area holding the menu remembers its last size, which would cap a
+                // longer menu opened after a shorter one: let the list claim its full
+                // height (it still shrinks to fit).
+                egui::ScrollArea::vertical().max_height(screen.height() - 80.0).min_scrolled_height(screen.height() - 80.0).auto_shrink([false, true]).show(ui, |ui| {
+                    for (i, (depth, it, label, is_pinned)) in rows.iter().enumerate() {
+                        if is_sep(&it) {
+                            ui.add_space(3.0);
+                            let yy = ui.cursor().top();
+                            ui.painter().line_segment([pos2(ui.min_rect().left() + 6.0, yy), pos2(ui.min_rect().right() - 6.0, yy)], Stroke::new(1.0, pal.border));
+                            ui.add_space(4.0);
+                            continue;
+                        }
+                        let sel = i == st.sel;
+                        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                        let hovered = resp.hovered();
+                        if hovered && !sel {
+                            st.sel = i;
+                        }
+                        if sel {
+                            ui.painter().rect_filled(r, CornerRadius::same(4), pal.selected);
+                        }
+                        let on = if sel { egui::Color32::WHITE } else { pal.text };
+                        // Fixed icon column; nested entries indent one step per level.
+                        let ic = Rect::from_center_size(pos2(r.left() + 14.0, r.center().y), Vec2::splat(16.0));
+                        if let Act::OpenWith(id) = &it.act {
+                            if let Some(a) = crate::mime::apps().by_id(id) {
+                                crate::icons::named(ui.painter(), ic, &a.icon);
+                            }
+                        }
+                        if let Act::Terminal(_) = &it.act {
+                            crate::icons::named(ui.painter(), ic, "utilities-terminal");
+                        }
+                        let x0 = r.left() + 32.0 + *depth as f32 * 22.0;
+                        let enabled = match &it.act {
+                            Act::Cmd(c) => !matches!(c, Cmd::Paste) || app.clipboard.is_some() || true,
+                            _ => true,
+                        };
+                        let q = fuzzy::Query::new(&st.query);
+                        let job = {
+                            let hits: HashSet<usize> = fuzzy::positions(&q, label).map(|(_, p)| p.into_iter().collect()).unwrap_or_default();
+                            let mut job = egui::text::LayoutJob::default();
+                            for (ci, ch) in label.chars().enumerate() {
+                                let col = if hits.contains(&ci) && !sel { pal.accent } else if enabled { on } else { pal.text_dim };
+                                job.append(&ch.to_string(), 0.0, egui::TextFormat { font_id: FontId::proportional(12.5), color: col, ..Default::default() });
+                            }
+                            job
+                        };
+                        let g = ui.fonts_mut(|f| f.layout_job(job));
+                        ui.painter().galley(pos2(x0, r.center().y - g.size().y / 2.0), g, pal.text);
+                        let dimc = if sel { egui::Color32::from_white_alpha(190) } else { pal.text_dim };
+                        let mut rx = r.right() - 10.0;
+                        if !it.children.is_empty() {
+                            let c = pos2(rx - 4.0, r.center().y);
+                            let g = if st.expanded.contains(&it.id) { Glyph::ChevronDown } else { Glyph::ChevronRight };
+                            paint_glyph(ui.painter(), Rect::from_center_size(c, Vec2::splat(12.0)), g, dimc);
+                        } else {
+                            if let Act::Cmd(c) = &it.act {
+                                // Radio mark for the current view / sort / grouping.
+                                if let Some(on_now) = radio_of(*c) {
+                                    let cc = pos2(rx - 6.0, r.center().y);
+                                    if on_now {
+                                        ui.painter().circle_filled(cc, 6.5, if sel { egui::Color32::WHITE } else { pal.accent });
+                                        ui.painter().circle_filled(cc, 2.5, if sel { pal.selected } else { egui::Color32::WHITE });
+                                    } else {
+                                        ui.painter().circle_stroke(cc, 6.0, Stroke::new(1.2, dimc.gamma_multiply(0.7)));
+                                    }
+                                    rx -= 22.0;
+                                } else {
+                                    // Shortcuts as plain dim text, right-aligned.
+                                    for b in app.keymap.bindings(*c).iter().take(2).rev() {
+                                        let g = ui.painter().layout_no_wrap(crate::commands::binding_to_string(b), FontId::proportional(11.5), dimc);
+                                        ui.painter().galley(pos2(rx - g.size().x, r.center().y - g.size().y / 2.0), g.clone(), dimc);
+                                        rx -= g.size().x + 10.0;
+                                    }
+                                }
+                            }
+                            // Pin toggle on hover.
+                            if hovered || sel || *is_pinned {
+                                let sr = Rect::from_center_size(pos2(rx - 10.0, r.center().y), Vec2::splat(18.0));
+                                let pinned_now = pinned.contains(&it.id);
+                                let sresp = ui.interact(sr, Id::new(("pin", &it.id, i)), Sense::click()).on_hover_text(if pinned_now { "Unpin" } else { "Pin to top" });
+                                crate::ui::star(ui.painter(), sr.center(), 5.5, if pinned_now { if sel { egui::Color32::WHITE } else { pal.accent } } else { dimc }, pinned_now);
+                                if sresp.clicked() {
+                                    pin = Some(it.id.clone());
+                                    continue;
+                                }
+                            }
+                        }
+                        if resp.clicked() {
+                            if it.children.is_empty() {
+                                run = Some(it.clone());
+                            } else {
+                                toggle = Some(it.id.clone());
+                            }
+                        }
+                    }
+                    if rows.is_empty() {
+                        ui.label(egui::RichText::new("No matching actions").color(pal.text_dim));
+                    }
+                });
+            });
+    });
+    let rect = resp.response.rect;
+    if close_now {
+        return false;
+    }
+    if let Some(id) = toggle {
+        if !st.expanded.remove(&id) {
+            st.expanded.insert(id);
+        }
+    }
+    if let Some(id) = pin {
+        if let Some(i) = app.ud.pinned_ctx.iter().position(|p| *p == id) {
+            app.ud.pinned_ctx.remove(i);
+        } else {
+            app.ud.pinned_ctx.push(id);
+        }
+        app.ud_dirty = true;
+    }
+    if let Some(it) = run {
+        match it.act {
+            Act::Cmd(c) => app.actions.push(Action::Cmd(c)),
+            Act::OpenWith(id) => {
+                if let Some(a) = crate::mime::apps().by_id(&id) {
+                    let files: Vec<PathBuf> = st.targets.iter().filter(|p| !p.is_dir()).cloned().collect();
+                    let cwd = files.first().and_then(|f| f.parent().map(|p| p.to_path_buf()));
+                    if let Err(e) = crate::mime::launch(a, &files, cwd.as_deref()) {
+                        app.toast(format!("Couldn't launch {}: {e}", a.name));
+                    }
+                }
+            }
+            Act::OtherApp => app.actions.push(Action::Open(Popup::OpenWith { paths: st.targets.iter().filter(|p| !p.is_dir()).cloned().collect(), query: String::new(), all: true })),
+            Act::Custom(i) => run_custom(app, i, &st.targets),
+            Act::Terminal(dir) => {
+                if let Err(e) = crate::mime::open_terminal(&dir) {
+                    app.toast(format!("Couldn't start a terminal: {e}"));
+                }
+            }
+            Act::Place(a, panel) => {
+                let Some(path) = st.targets.first().cloned() else { return false };
+                match a {
+                    PlaceAct::Open => app.actions.push(Action::Navigate { panel, path }),
+                    PlaceAct::NewTab => app.actions.push(Action::NewTab { panel, path, select: None, focus: true }),
+                    PlaceAct::RightSplit => app.actions.push(Action::Split { panel, path, side: crate::panel::Side::Right, select: None }),
+                    PlaceAct::BottomSplit => app.actions.push(Action::Split { panel, path, side: crate::panel::Side::Bottom, select: None }),
+                    PlaceAct::NewWindow => {
+                        let _ = crate::mime::new_window(&path);
+                    }
+                    PlaceAct::CopyPath => crate::clipboard::set_text(&path.display().to_string()),
+                    PlaceAct::AddBookmark => app.actions.push(Action::BookmarkAdd(path)),
+                    PlaceAct::RemoveBookmark => app.actions.push(Action::BookmarkRemove(path)),
+                    PlaceAct::Properties => app.actions.push(Action::Open(Popup::properties(vec![path]))),
+                }
+            }
+            Act::Drive(op) => {
+                for t in &st.targets {
+                    if let Some(d) = app.drive_at(t) {
+                        let applies = match op {
+                            crate::drives::Op::Mount => !d.mounted(),
+                            crate::drives::Op::Unmount => crate::drives::can_unmount(&d),
+                            crate::drives::Op::Eject => d.removable,
+                        };
+                        // Ejecting one partition ejects its whole disk: once is enough.
+                        if applies && !crate::drives::busy(&d.dev) && !(op == crate::drives::Op::Eject && app.drive_jobs.iter().any(|j| j.drive.disk == d.disk)) {
+                            app.drive_op(op, &d.dev, None);
+                        }
+                    }
+                }
+            }
+            Act::None => {}
+        }
+        return false;
+    }
+    let outside = ctx.input(|i| i.pointer.any_pressed()) && ctx.pointer_interact_pos().map(|p| !rect.contains(p)).unwrap_or(false);
+    !outside
+}
+
+fn run_custom(app: &mut App, i: usize, targets: &[PathBuf]) {
+    let Some(a) = app.cfg.custom_actions.get(i).cloned() else { return };
+    let dir = app.panels.get(&app.active).map(|p| p.path()).unwrap_or_default();
+    let q = |p: &std::path::Path| crate::clipboard::quote_if_needed(&p.to_string_lossy());
+    let cmdline = a
+        .command
+        .replace("%F", &targets.iter().map(|p| q(p)).collect::<Vec<_>>().join(" "))
+        .replace("%f", &targets.first().map(|p| q(p)).unwrap_or_default())
+        .replace("%d", &q(&dir))
+        .replace("%n", &targets.iter().filter_map(|p| p.file_name()).map(|n| crate::clipboard::quote_if_needed(&n.to_string_lossy())).collect::<Vec<_>>().join(" "));
+    let exec = move |app: &mut App| {
+        let res = if a.terminal {
+            let entry = crate::mime::App { id: "custom".into(), name: a.name.clone(), exec: format!("sh -c \"{}\"", cmdline.replace('"', "\\\"")), mimes: vec![], terminal: true, hidden: false, icon: String::new() };
+            crate::mime::launch(&entry, &[], Some(&dir))
+        } else {
+            let mut c = std::process::Command::new("sh");
+            c.arg("-c").arg(&cmdline).current_dir(&dir);
+            crate::mime::spawn_detached(c)
+        };
+        match res {
+            Ok(()) => app.toast(format!("Ran “{}”", a.name)),
+            Err(e) => app.toast(format!("“{}” failed: {e}", a.name)),
+        }
+    };
+    if app.cfg.custom_actions[i].confirm {
+        let name = app.cfg.custom_actions[i].name.clone();
+        app.actions.push(Action::Open(Popup::confirm(format!("Run “{name}” on {} item(s)?", targets.len()), "Run", Box::new(exec))));
+    } else {
+        exec(app);
+    }
+}
+
+#[allow(dead_code)]
+fn _unused(_: Align2) {}

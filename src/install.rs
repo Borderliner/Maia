@@ -1,0 +1,128 @@
+//! Desktop integration: install to ~/.local, launcher entry, icon, default file manager.
+
+use std::path::PathBuf;
+use std::process::Command;
+
+/// Maia, the brightest star of the Pleiades, crossing a dark tile.
+pub const ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#1d2130"/>
+<stop offset="1" stop-color="#101218"/>
+</linearGradient>
+<linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#ffffff" stop-opacity="0.14"/>
+<stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+</linearGradient>
+<linearGradient id="t" gradientUnits="userSpaceOnUse" x1="28" y1="100" x2="82" y2="46">
+<stop offset="0" stop-color="#5b9cff" stop-opacity="0"/>
+<stop offset="0.75" stop-color="#6fb8ff" stop-opacity="0.75"/>
+<stop offset="1" stop-color="#9ad8ff"/>
+</linearGradient>
+<radialGradient id="glow" cx="82" cy="46" r="30" gradientUnits="userSpaceOnUse">
+<stop offset="0" stop-color="#9fd6ff" stop-opacity="0.55"/>
+<stop offset="1" stop-color="#5b9cff" stop-opacity="0"/>
+</radialGradient>
+</defs>
+<rect x="6" y="6" width="116" height="116" rx="28" fill="url(#bg)"/>
+<rect x="6.5" y="6.5" width="115" height="115" rx="27.5" fill="none" stroke="url(#rim)"/>
+<circle cx="30" cy="34" r="1.6" fill="#cfe6ff" opacity="0.7"/>
+<circle cx="102" cy="88" r="1.3" fill="#cfe6ff" opacity="0.55"/>
+<circle cx="48" cy="24" r="1.1" fill="#cfe6ff" opacity="0.5"/>
+<circle cx="104" cy="22" r="1.2" fill="#cfe6ff" opacity="0.5"/>
+<path d="M28 100 Q58.0 77.4 84.5 51.3 L76.7 43.5 Q52.0 71.4 28 100 Z" fill="url(#t)"/>
+<circle cx="82" cy="46" r="30" fill="url(#glow)"/>
+<path d="M82 24 C83.1 41.6 86.4 44.9 104 46 C86.4 47.1 83.1 50.4 82 68 C80.9 50.4 77.6 47.1 60 46 C77.6 44.9 80.9 41.6 82 24 Z" fill="#ffffff"/>
+</svg>
+"##;
+
+fn local() -> PathBuf {
+    dirs::data_dir().unwrap_or_else(|| crate::fsx::home().join(".local/share"))
+}
+
+fn bin_path() -> PathBuf {
+    dirs::executable_dir().unwrap_or_else(|| crate::fsx::home().join(".local/bin")).join("maia")
+}
+
+fn desktop_path() -> PathBuf {
+    local().join("applications/io.github.yappologistic.Maia.desktop")
+}
+
+fn icon_path() -> PathBuf {
+    local().join("icons/hicolor/scalable/apps/io.github.yappologistic.Maia.svg")
+}
+
+pub fn install() -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let bin = bin_path();
+    std::fs::create_dir_all(bin.parent().unwrap()).map_err(|e| e.to_string())?;
+    if exe != bin {
+        // Copy to a temp name then rename, so a running copy isn't clobbered mid-write.
+        let tmp = bin.with_extension("new");
+        std::fs::copy(&exe, &tmp).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &bin).map_err(|e| e.to_string())?;
+    }
+    std::fs::create_dir_all(icon_path().parent().unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(icon_path(), ICON_SVG).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(desktop_path().parent().unwrap()).map_err(|e| e.to_string())?;
+    let desktop = format!(
+        "[Desktop Entry]\nType=Application\nName=Maia\nGenericName=File Manager\nComment=Fast, keyboard-first file manager\nExec={} %U\nIcon=io.github.yappologistic.Maia\nTerminal=false\nCategories=System;FileTools;FileManager;\nMimeType=inode/directory;\nKeywords=files;folders;explorer;browser;\nStartupWMClass=io.github.yappologistic.Maia\nActions=new-window;\n\n[Desktop Action new-window]\nName=New Window\nExec={} --window \"{}\"\n",
+        bin.display(),
+        bin.display(),
+        crate::fsx::home().display()
+    );
+    std::fs::write(desktop_path(), desktop).map_err(|e| e.to_string())?;
+    let _ = Command::new("update-desktop-database").arg(local().join("applications")).status();
+    let on_path = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).any(|d| Some(d.as_path()) == bin.parent())).unwrap_or(false);
+    Ok(if on_path {
+        format!("Installed to {}", bin.display())
+    } else {
+        format!("Installed to {} (add {} to your PATH)", bin.display(), bin.parent().unwrap().display())
+    })
+}
+
+pub fn set_default() -> Result<String, String> {
+    if !desktop_path().exists() {
+        install()?;
+    }
+    // Remember the previous handler so uninstall can restore it.
+    if let Ok(out) = Command::new("xdg-mime").args(["query", "default", "inode/directory"]).output() {
+        let prev = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !prev.is_empty() && prev != "io.github.yappologistic.Maia.desktop" {
+            let _ = std::fs::create_dir_all(crate::config::data_dir());
+            let _ = std::fs::write(crate::config::data_dir().join("previous-file-manager"), prev);
+        }
+    }
+    crate::mime::set_default("io.github.yappologistic.Maia.desktop", "inode/directory")?;
+    Ok("Maia is now the default file manager".into())
+}
+
+pub fn uninstall() -> Result<String, String> {
+    let prev = std::fs::read_to_string(crate::config::data_dir().join("previous-file-manager")).ok();
+    if let Some(p) = prev {
+        let _ = crate::mime::set_default(p.trim(), "inode/directory");
+    }
+    for p in [desktop_path(), icon_path()] {
+        let _ = std::fs::remove_file(p);
+    }
+    let bin = bin_path();
+    if bin.exists() {
+        std::fs::remove_file(&bin).map_err(|e| e.to_string())?;
+    }
+    let _ = Command::new("update-desktop-database").arg(local().join("applications")).status();
+    Ok("Maia uninstalled (settings were kept)".into())
+}
+
+/// The window icon: the launcher icon rendered at 64 px (straight alpha, as winit wants).
+pub fn window_icon() -> (Vec<u8>, u32, u32) {
+    let Some((w, h, mut px)) = crate::svg::render(ICON_SVG.as_bytes(), 64) else { return (vec![0; 4], 1, 1) };
+    for p in px.chunks_exact_mut(4) {
+        let a = p[3] as u32;
+        if a > 0 && a < 255 {
+            for c in &mut p[..3] {
+                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+    (px, w, h)
+}

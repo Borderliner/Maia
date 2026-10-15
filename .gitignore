@@ -1,0 +1,28 @@
+# An allowlist: everything is ignored unless named here.
+/*
+!/.gitignore
+!/Cargo.toml
+!/Cargo.lock
+!/README.md
+!/LICENSE
+!/build-dist.sh
+
+!/src/
+/src/**
+!/src/*.rs
+
+!/assets/
+/assets/**
+!/assets/*.ttf
+!/assets/*.txt
+
+!/tools/
+/tools/**
+!/tools/sim.sh
+!/tools/window.sh
+!/tools/lucide_subset.py
+
+# The README screenshot, allowed by name once it exists.
+!/docs/
+/docs/**
+!/docs/maia.png

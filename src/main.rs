@@ -1,0 +1,116 @@
+//! Maia: a fast, keyboard-first file manager for Linux.
+
+mod app;
+mod clipboard;
+mod commands;
+mod config;
+mod drives;
+mod ctxmenu;
+mod fsx;
+mod fuzzy;
+mod icons;
+mod imgdec;
+mod inspector;
+mod install;
+mod listing;
+mod media;
+mod lucide_map;
+mod mime;
+mod ops;
+mod panel;
+mod popups;
+mod rename;
+mod runner;
+mod sidebar;
+mod signals;
+mod svg;
+mod syntax;
+mod stats;
+mod tab;
+#[cfg(any(test, feature = "testkit"))]
+mod testkit;
+#[cfg(test)]
+mod sim;
+mod timefmt;
+mod trashcan;
+mod theme;
+mod thumbcache;
+mod thumbs;
+mod ui;
+mod watch;
+mod wlclip;
+
+#[cfg(test)]
+mod tests;
+
+use std::path::PathBuf;
+
+
+
+const HELP: &str = "Maia: fast, keyboard-first file manager
+
+Usage: maia [OPTIONS] [PATH...]
+
+Options:
+  --install        Install to ~/.local/bin and add a launcher entry
+  --set-default    Make Maia the default file manager (inode/directory)
+  --uninstall      Remove the launcher entry and installed binary
+  --window PATH    Open PATH in a new window
+  -h, --help       Show this help
+  -V, --version    Show the version
+";
+
+fn main() {
+    let mut paths: Vec<PathBuf> = vec![];
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "-h" | "--help" => {
+                print!("{HELP}");
+                return;
+            }
+            "-V" | "--version" => {
+                println!("maia {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
+            "--install" | "--set-default" | "--uninstall" => {
+                let r = match a.as_str() {
+                    "--install" => install::install(),
+                    "--set-default" => install::set_default(),
+                    _ => install::uninstall(),
+                };
+                match r {
+                    Ok(m) => println!("{m}"),
+                    Err(e) => {
+                        eprintln!("maia: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+            "--which" => {
+                // Diagnostics: how each file would be opened.
+                for p in args.by_ref() {
+                    let (label, mime, app, argv) = mime::describe_open(std::path::Path::new(&p));
+                    println!("{p}\n  type: {label} ({mime})\n  app:  {app}\n  cmd:  {}", argv.join(" "));
+                }
+                return;
+            }
+            "--window" => {
+                if let Some(p) = args.next() {
+                    paths.push(PathBuf::from(p));
+                }
+            }
+            other => {
+                // Accept plain paths and file:// URIs (from %U).
+                let p = clipboard::uri_to_path(other).unwrap_or_else(|| PathBuf::from(other));
+                let p = if p.is_absolute() { p } else { std::env::current_dir().unwrap_or_default().join(p) };
+                paths.push(p);
+            }
+        }
+    }
+    runner::run(
+        runner::Options { title: "Maia", app_id: "io.github.yappologistic.Maia", size: [1240.0, 780.0], min_size: [520.0, 340.0], icon: install::window_icon() },
+        paths,
+    );
+}

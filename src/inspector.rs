@@ -1,0 +1,1046 @@
+//! Inspector: previews the item under the cursor (images, text, folders, volumes).
+
+use std::path::{Path, PathBuf};
+
+use egui::{self, Align2, Color32, CornerRadius, FontId, Id, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2, pos2, vec2};
+
+use crate::config::InspectorLayout;
+use crate::fsx::{self, Entry};
+use crate::listing::Env;
+use crate::panel::Panel;
+use crate::tab;
+use crate::theme::{self, Glyph, paint_glyph};
+use crate::thumbs;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Fit {
+    Fit,
+    Actual,
+    Fill,
+}
+
+enum Content {
+    None,
+    /// Folder listing or text being read in the background.
+    Loading,
+    /// `spans`: syntax highlighting per line (code and markup only).
+    Text { lines: Vec<String>, truncated: bool, spans: Option<Vec<Vec<(usize, usize, crate::syntax::Kind)>>> },
+    Binary(Vec<u8>),
+    Image,
+    Folder(Vec<Entry>),
+    Volume,
+    Pdf(Box<PdfView>),
+    Media(Box<MediaView>),
+    Other,
+}
+
+pub struct PdfView {
+    path: PathBuf,
+    pages: Option<usize>,
+    pages_rx: Option<std::sync::mpsc::Receiver<Option<usize>>>,
+    /// 1-based page shown.
+    pub page: usize,
+    tex: Option<egui::TextureHandle>,
+    /// (page, pixel size) of `tex`.
+    shown: Option<(usize, u32)>,
+    job: Option<std::sync::mpsc::Receiver<(usize, u32, Option<egui::ColorImage>)>>,
+    failed: bool,
+}
+
+pub struct MediaView {
+    path: PathBuf,
+    pub probe: Option<crate::media::Probe>,
+    probe_rx: Option<std::sync::mpsc::Receiver<Option<crate::media::Probe>>>,
+    pub player: Option<crate::media::Player>,
+    tex: Option<egui::TextureHandle>,
+    seq: u64,
+    failed: bool,
+}
+
+pub struct Inspector {
+    pub layout: Option<InspectorLayout>,
+    pub line_numbers: bool,
+    pub minimap: bool,
+    pub pixel_grid: bool,
+    pub folder_path: Option<PathBuf>,
+    current: Option<(PathBuf, Option<std::time::SystemTime>)>,
+    content: Content,
+    fit: Fit,
+    /// Image scale relative to "fit" (1.0 = fit) and pan in screen points.
+    zoom: f32,
+    pan: Vec2,
+    text_size: f32,
+    show_meta: bool,
+    /// Background load of the current item's content (folder listing / text).
+    pending: Option<std::sync::mpsc::Receiver<Content>>,
+    /// Metadata card shows every known field, not just the basics.
+    extra_meta: bool,
+}
+
+/// Test-only views of the preview state (simulations check behaviour, not pixels).
+#[cfg(test)]
+impl Inspector {
+    /// (page, pages, rendered (page, px)) for a PDF preview.
+    pub fn pdf_state(&self) -> Option<(usize, Option<usize>, Option<(usize, u32)>)> {
+        match &self.content {
+            Content::Pdf(v) => Some((v.page, v.pages, v.shown)),
+            _ => None,
+        }
+    }
+    /// (playing, position, duration, decoder pids, frames received) for a media preview.
+    pub fn media_state(&self) -> Option<(bool, f64, f64, Vec<u32>, u64)> {
+        match &self.content {
+            Content::Media(v) => v.player.as_ref().map(|p| (p.playing(), p.position(), p.duration, p.pids(), v.seq)),
+            _ => None,
+        }
+    }
+    pub fn media_probe(&self) -> Option<crate::media::Probe> {
+        match &self.content {
+            Content::Media(v) => v.probe.clone(),
+            _ => None,
+        }
+    }
+    /// Highlighted spans in a text preview (None: plain text or not text).
+    pub fn text_spans(&self) -> Option<usize> {
+        match &self.content {
+            Content::Text { spans, .. } => spans.as_ref().map(|s| s.iter().map(|l| l.len()).sum()),
+            _ => None,
+        }
+    }
+}
+
+impl Inspector {
+    /// Page Up / Page Down turn pages while the pointer is over this preview.
+    pub fn wants_page_keys(&self) -> bool {
+        matches!(self.content, Content::Pdf(_))
+    }
+}
+
+impl Default for Inspector {
+    fn default() -> Self {
+        Inspector {
+            layout: None,
+            line_numbers: true,
+            minimap: true,
+            pixel_grid: true,
+            folder_path: None,
+            current: None,
+            content: Content::None,
+            fit: Fit::Fit,
+            zoom: 1.0,
+            pan: Vec2::ZERO,
+            text_size: 0.0,
+            show_meta: false,
+            pending: None,
+            extra_meta: false,
+        }
+    }
+}
+
+impl Inspector {
+    pub fn invalidate(&mut self) {
+        self.current = None;
+    }
+
+    /// Start showing `e`. Anything that touches the disk (folder listings, file contents)
+    /// runs on a worker thread, so a huge folder, a slow or hung network mount, or a FIFO
+    /// can never stall the UI.
+    fn load(&mut self, e: &Entry, computer: bool, ctx: &egui::Context) {
+        self.folder_path = None;
+        self.zoom = 1.0;
+        self.pan = Vec2::ZERO;
+        self.fit = Fit::Fit;
+        self.pending = None;
+        if computer {
+            self.content = Content::Volume;
+            return;
+        }
+        if e.special {
+            // Sockets, FIFOs and device nodes: opening or reading them can block forever.
+            self.content = Content::Other;
+            return;
+        }
+        if !e.is_dir {
+            let mime = crate::mime::mime_db().for_name(&e.name, false, false);
+            if (e.ext() == "pdf" || mime == "application/pdf") && crate::media::have("pdftoppm") {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (path, ctx) = (e.path.clone(), ctx.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::media::pdf_pages(&path));
+                    ctx.request_repaint();
+                });
+                self.content = Content::Pdf(Box::new(PdfView { path: e.path.clone(), pages: None, pages_rx: Some(rx), page: 1, tex: None, shown: None, job: None, failed: false }));
+                return;
+            }
+            if (mime.starts_with("video/") || mime.starts_with("audio/")) && crate::media::have("ffprobe") {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (path, ctx) = (e.path.clone(), ctx.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::media::probe(&path));
+                    ctx.request_repaint();
+                });
+                self.content = Content::Media(Box::new(MediaView { path: e.path.clone(), probe: None, probe_rx: Some(rx), player: None, tex: None, seq: 0, failed: false }));
+                return;
+            }
+        }
+        if !e.is_dir && thumbs::can_thumb(e) {
+            self.content = Content::Image;
+            return;
+        }
+        if e.is_dir {
+            self.folder_path = Some(e.path.clone());
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (path, is_dir, ctx) = (e.path.clone(), e.is_dir, ctx.clone());
+        std::thread::spawn(move || {
+            let c = if is_dir {
+                let mut v = fsx::list_dir(&path).unwrap_or_default();
+                v.retain(|x| !x.hidden);
+                v.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| tab::natural_cmp(&a.lname(), &b.lname())));
+                v.truncate(5000);
+                Content::Folder(v)
+            } else {
+                read_text(&path)
+            };
+            let _ = tx.send(c);
+            ctx.request_repaint();
+        });
+        self.pending = Some(rx);
+        self.content = Content::Loading;
+    }
+
+    fn poll(&mut self) {
+        if let Some(rx) = &self.pending {
+            match rx.try_recv() {
+                Ok(c) => {
+                    self.content = c;
+                    self.pending = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.content = Content::Other;
+                    self.pending = None;
+                }
+                Err(_) => {}
+            }
+        }
+    }
+}
+
+fn read_text(p: &Path) -> Content {
+    use std::io::Read;
+    // Only regular files (a symlink may point at a FIFO or device).
+    if !std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) {
+        return Content::Other;
+    }
+    let Ok(mut f) = std::fs::File::open(p) else { return Content::Other };
+    let mut buf = Vec::with_capacity(64 << 10);
+    let limit = 1 << 20;
+    if f.by_ref().take(limit as u64 + 1).read_to_end(&mut buf).is_err() {
+        return Content::Other;
+    }
+    if buf.is_empty() {
+        return Content::Text { lines: vec![], truncated: false, spans: None };
+    }
+    let truncated = buf.len() > limit;
+    buf.truncate(limit);
+    let sniff = &buf[..buf.len().min(8192)];
+    if sniff.contains(&0) || std::str::from_utf8(sniff).is_err() && sniff.iter().filter(|b| **b < 9).count() > 4 {
+        buf.truncate(4096);
+        return Content::Binary(buf);
+    }
+    let s = String::from_utf8_lossy(&buf);
+    // Normalize CRLF and lone CR.
+    let s = s.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<String> = s.lines().map(|l| if l.len() > 2000 { format!("{}…", &l[..l.floor_char_boundary(2000)]) } else { l.replace('\t', "    ") }).collect();
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let spans = crate::syntax::lang_for(&name).map(|lang| crate::syntax::highlight(lang, &lines, 20_000));
+    Content::Text { lines, truncated, spans }
+}
+
+/// One icon button of a toolbar segment; `paint` draws the icon in the given color.
+fn seg_button(ui: &mut Ui, on: bool, tip: &str, pal: &theme::Palette, paint: impl FnOnce(&egui::Painter, Rect, Color32)) -> bool {
+    // Narrow inspector: leave out what doesn't fit rather than spill into the next panel.
+    if crate::ui::no_room(ui, 24.0) {
+        return false;
+    }
+    let (r, resp) = ui.allocate_exact_size(vec2(24.0, 20.0), Sense::click());
+    crate::ui::note_control(ui, r, "inspector button");
+    if on {
+        ui.painter().rect_filled(r, CornerRadius::same(4), pal.accent.gamma_multiply(0.85));
+    } else if resp.hovered() {
+        ui.painter().rect_filled(r, CornerRadius::same(4), pal.hover);
+    }
+    paint(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(14.0)), if on { Color32::WHITE } else { pal.text_dim });
+    resp.on_hover_text(tip).clicked()
+}
+
+/// Dashed rounded outline around a group of toolbar buttons.
+fn seg_frame(ui: &mut Ui, pal: &theme::Palette, add: impl FnOnce(&mut Ui)) {
+    let start = ui.cursor().min;
+    let inner = ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 1.0;
+        ui.add_space(2.0);
+        add(ui);
+        ui.add_space(2.0);
+    });
+    let r = Rect::from_min_max(pos2(start.x, inner.response.rect.top() - 2.0), pos2(inner.response.rect.right(), inner.response.rect.bottom() + 2.0));
+    let st = Stroke::new(1.0, pal.border);
+    let dash = |a: egui::Pos2, b: egui::Pos2| ui.painter().extend(egui::Shape::dashed_line(&[a, b], st, 3.0, 2.0));
+    let k = 4.0;
+    dash(pos2(r.left() + k, r.top()), pos2(r.right() - k, r.top()));
+    dash(pos2(r.left() + k, r.bottom()), pos2(r.right() - k, r.bottom()));
+    dash(pos2(r.left(), r.top() + k), pos2(r.left(), r.bottom() - k));
+    dash(pos2(r.right(), r.top() + k), pos2(r.right(), r.bottom() - k));
+    ui.add_space(6.0);
+}
+
+/// Window outline with a highlighted region (layout icons).
+fn layout_icon(p: &egui::Painter, r: Rect, which: InspectorLayout, col: Color32) {
+    let b = r.shrink2(vec2(0.5, 1.5));
+    p.rect_stroke(b, CornerRadius::same(2), Stroke::new(1.2, col), StrokeKind::Middle);
+    match which {
+        InspectorLayout::Auto => {
+            p.line_segment([pos2(b.left() + b.width() * 0.38, b.top()), pos2(b.left() + b.width() * 0.38, b.bottom())], Stroke::new(1.2, col));
+            p.line_segment([pos2(b.left() + 2.5, b.top() + 3.5), pos2(b.left() + b.width() * 0.38 - 2.0, b.top() + 3.5)], Stroke::new(1.2, col));
+        }
+        InspectorLayout::Right => {
+            let x = b.left() + b.width() * 0.58;
+            p.rect_filled(Rect::from_min_max(pos2(x, b.top()), b.max).shrink(1.5), CornerRadius::same(1), col);
+        }
+        InspectorLayout::Bottom => {
+            let y = b.top() + b.height() * 0.55;
+            p.rect_filled(Rect::from_min_max(pos2(b.left(), y), b.max).shrink(1.5), CornerRadius::same(1), col);
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn tool_button(ui: &mut Ui, label: &str, on: bool, tip: &str, pal: &theme::Palette) -> bool {
+    let txt = egui::RichText::new(label).size(11.5).color(if on { pal.accent } else { pal.text_dim });
+    let b = egui::Button::new(txt).fill(if on { pal.accent.gamma_multiply(0.18) } else { Color32::TRANSPARENT }).corner_radius(4.0).min_size(vec2(22.0, 20.0));
+    ui.add(b).on_hover_text(tip).clicked()
+}
+
+pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
+    let pal = *env.pal;
+    let computer = tab::is_computer(&panel.tab().path);
+    let target: Option<Entry> = {
+        let t = panel.tab();
+        let idx = t.cursor.or_else(|| if t.selected.len() == 1 { t.selected.iter().next().copied() } else { None });
+        idx.and_then(|i| t.entries.get(i as usize).cloned())
+    };
+    let vol = target.as_ref().and_then(|e| panel.tab().vols.get(&e.path).cloned());
+    let Some(ins) = panel.inspector.as_mut() else { return };
+    // Too short to hold even its toolbar (a squeezed panel): draw nothing rather than
+    // spill over the status bar.
+    if rect.height() < 34.0 || rect.width() < 40.0 {
+        return;
+    }
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, pal.bg);
+    let key = target.as_ref().map(|e| (e.path.clone(), e.modified));
+    if key != ins.current {
+        ins.current = key;
+        match &target {
+            Some(e) => ins.load(e, computer, ui.ctx()),
+            None => {
+                ins.content = Content::None;
+                ins.folder_path = None;
+            }
+        }
+    }
+    ins.poll();
+    // ---------------------------------------------------------- header
+    let hdr = Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + 30.0));
+    ui.painter().line_segment([hdr.left_bottom(), hdr.right_bottom()], Stroke::new(1.0, pal.border));
+    let mut close = false;
+    let mut hui = ui.new_child(UiBuilder::new().max_rect(hdr.shrink2(vec2(6.0, 3.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    hui.set_clip_rect(hdr.intersect(ui.clip_rect()));
+    hui.spacing_mut().item_spacing.x = 2.0;
+    if crate::ui::glyph_button(&mut hui, Glyph::Close, "Close inspector (Space)", true, &pal).clicked() {
+        close = true;
+    }
+    hui.add_space(4.0);
+    // Toolbar segments, each in a dashed outline: layout | fit, 1:1, fill | grid, minimap.
+    let cur_layout = ins.layout.unwrap_or(env.cfg.inspector_layout);
+    seg_frame(&mut hui, &pal, |ui| {
+        for (l, tip) in [(InspectorLayout::Auto, "Place automatically"), (InspectorLayout::Right, "Dock right"), (InspectorLayout::Bottom, "Dock bottom")] {
+            if seg_button(ui, cur_layout == l, tip, &pal, |p, r, c| layout_icon(p, r, l, c)) {
+                ins.layout = Some(l);
+            }
+        }
+    });
+    match ins.content {
+        Content::Image => {
+            seg_frame(&mut hui, &pal, |ui| {
+                for (f, tip) in [(Fit::Fit, "Zoom to fit"), (Fit::Actual, "Actual pixels (1:1)"), (Fit::Fill, "Fill the inspector")] {
+                    let on = ins.fit == f && ins.zoom == 1.0;
+                    let clicked = seg_button(ui, on, tip, &pal, |p, r, c| match f {
+                        Fit::Fit => {
+                            theme::paint_lucide(p, r, "minimize-2", c);
+                        }
+                        Fit::Actual => {
+                            p.text(r.center(), Align2::CENTER_CENTER, "1:1", FontId::proportional(10.5), c);
+                        }
+                        Fit::Fill => {
+                            theme::paint_lucide(p, r, "maximize-2", c);
+                        }
+                    });
+                    if clicked {
+                        ins.fit = f;
+                        ins.zoom = 1.0;
+                        ins.pan = Vec2::ZERO;
+                    }
+                }
+            });
+            if seg_button(&mut hui, ins.pixel_grid, "Pixel grid at high zoom", &pal, |p, r, c| {
+                theme::paint_lucide(p, r, "grid-3x3", c);
+            }) {
+                ins.pixel_grid = !ins.pixel_grid;
+            }
+            if seg_button(&mut hui, ins.minimap, "Minimap while zoomed", &pal, |p, r, c| {
+                theme::paint_lucide(p, r, "diamond", c);
+            }) {
+                ins.minimap = !ins.minimap;
+            }
+        }
+        Content::Pdf(ref v) => {
+            let (page, pages) = (v.page, v.pages.unwrap_or(0));
+            let mut go = None;
+            seg_frame(&mut hui, &pal, |ui| {
+                if seg_button(ui, false, "Previous page", &pal, |p, r, c| {
+                    theme::paint_lucide(p, r, "chevron-left", c);
+                }) && page > 1
+                {
+                    go = Some(page - 1);
+                }
+                if seg_button(ui, false, "Next page", &pal, |p, r, c| {
+                    theme::paint_lucide(p, r, "chevron-right", c);
+                }) && page < pages
+                {
+                    go = Some(page + 1);
+                }
+            });
+            if pages > 0 {
+                hui.label(egui::RichText::new(format!("{page} / {pages}")).size(11.5).color(pal.text_dim));
+            }
+            if let (Some(p), Content::Pdf(v)) = (go, &mut ins.content) {
+                v.page = p;
+            }
+        }
+        Content::Text { .. } => {
+            seg_frame(&mut hui, &pal, |ui| {
+                if seg_button(ui, ins.line_numbers, "Line numbers", &pal, |p, r, c| {
+                    theme::paint_lucide(p, r, "list-ordered", c);
+                }) {
+                    ins.line_numbers = !ins.line_numbers;
+                }
+                if seg_button(ui, false, "Smaller text", &pal, |p, r, c| {
+                    theme::paint_lucide(p, r, "a-arrow-down", c);
+                }) {
+                    ins.text_size = (ins.text_size - 1.0).max(-6.0);
+                }
+                if seg_button(ui, false, "Larger text", &pal, |p, r, c| {
+                    theme::paint_lucide(p, r, "a-arrow-up", c);
+                }) {
+                    ins.text_size = (ins.text_size + 1.0).min(16.0);
+                }
+            });
+        }
+        _ => {}
+    }
+    // File name as a tinted pill; its chevron opens the metadata card.
+    if let Some(e) = &target {
+        hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Fit the space the toolbar buttons leave: elide the name, show just the
+            // chevron when no name fits, and nothing at all when even that doesn't.
+            let room = ui.available_width() - 6.0;
+            if room < 24.0 {
+                return;
+            }
+            let name_w = (room - 34.0).min(260.0);
+            let g = (name_w >= 24.0).then(|| crate::listing::elided(ui, &e.name, FontId::proportional(12.0), name_w, pal.text));
+            let w = g.as_ref().map(|g| g.size().x + 34.0).unwrap_or(24.0);
+            let (r, resp) = ui.allocate_exact_size(vec2(w, 22.0), Sense::click());
+            let fill = if ins.show_meta { pal.accent.gamma_multiply(0.45) } else if resp.hovered() { pal.accent.gamma_multiply(0.35) } else { pal.accent.gamma_multiply(0.22) };
+            ui.painter().rect_filled(r, CornerRadius::same(11), fill);
+            if let Some(g) = g {
+                ui.painter().galley(pos2(r.left() + 10.0, r.center().y - g.size().y / 2.0), g, pal.text);
+            }
+            paint_glyph(ui.painter(), Rect::from_center_size(pos2(r.right() - 12.0, r.center().y), Vec2::splat(11.0)), if ins.show_meta { Glyph::ChevronDown } else { Glyph::ChevronRight }, pal.text);
+            if resp.on_hover_text("Details").clicked() {
+                ins.show_meta = !ins.show_meta;
+            }
+        });
+    }
+    if close {
+        panel.inspector = None;
+        return;
+    }
+    let body = Rect::from_min_max(pos2(rect.left(), hdr.bottom() + 1.0), rect.max);
+    let mut bui = ui.new_child(UiBuilder::new().max_rect(body).id_salt(("insp", env.panel_id)));
+    bui.set_clip_rect(body.intersect(ui.clip_rect()));
+    let Some(e) = target else {
+        bui.painter().text(body.center(), Align2::CENTER_CENTER, "Nothing to preview", FontId::proportional(env.cfg.font_size), pal.text_dim);
+        return;
+    };
+    match &mut ins.content {
+        Content::Pdf(v) => {
+            pdf_view(&mut bui, body, v, &pal);
+            return;
+        }
+        Content::Media(v) => {
+            media_view(&mut bui, body, &e, v, env);
+            return;
+        }
+        _ => {}
+    }
+    match &ins.content {
+        Content::Pdf(_) | Content::Media(_) => {}
+        Content::Image => image_view(&mut bui, body, &e, ins, env),
+        Content::Text { lines, truncated, spans } => {
+            text_view(&mut bui, body, lines, *truncated, spans.as_deref(), ins.line_numbers, env.cfg.inspector_font_size + ins.text_size, &pal);
+        }
+        Content::Binary(bytes) => {
+            let mut lines = vec!["Binary file: first 4 KB shown as hex".to_string(), String::new()];
+            for (i, chunk) in bytes.chunks(16).enumerate() {
+                let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+                let ascii: String = chunk.iter().map(|&b| if (32..127).contains(&b) { b as char } else { '.' }).collect();
+                lines.push(format!("{:08x}  {:<47}  {}", i * 16, hex.join(" "), ascii));
+            }
+            text_view(&mut bui, body, &lines, false, None, false, env.cfg.inspector_font_size + ins.text_size, &pal);
+        }
+        Content::Folder(entries) => folder_view(&mut bui, body, entries, env),
+        Content::Volume => volume_view(&mut bui, body, &e, vol.as_ref(), &pal),
+        Content::Loading => {}
+        Content::Other | Content::None => {
+            let ic = Rect::from_center_size(body.center() - vec2(0.0, 30.0), Vec2::splat(96.0));
+            if !crate::icons::entry(bui.painter(), ic, &e) {
+                theme::paint_icon(bui.painter(), ic, theme::categorize(&e.ext(), e.is_dir, e.is_executable()), &e.ext(), e.is_link);
+            }
+            bui.painter().text(pos2(body.center().x, ic.bottom() + 14.0), Align2::CENTER_TOP, &e.name, FontId::proportional(env.cfg.font_size), pal.text);
+            bui.painter().text(pos2(body.center().x, ic.bottom() + 34.0), Align2::CENTER_TOP, fsx::fmt_size(e.size), FontId::proportional(env.cfg.font_size - 1.5), pal.text_dim);
+        }
+    }
+    // Metadata dropdown overlays the body.
+    if ins.show_meta {
+        let w = 360.0f32.min(body.width() - 16.0);
+        let area = Rect::from_min_size(pos2(body.right() - w - 8.0, body.top() + 6.0), vec2(w, 10.0));
+        let mut toggle_extra = false;
+        egui::Area::new(Id::new(("meta", env.panel_id))).order(egui::Order::Foreground).fixed_pos(area.min).show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).fill(pal.raised).stroke(Stroke::new(1.0, pal.border)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                ui.set_width(w - 20.0);
+                // Card header: the name, the extra-details toggle and the fold chevron.
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&e.name).size(12.5).color(pal.text));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (r, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+                        paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(11.0)), Glyph::ChevronDown, pal.text_dim);
+                        if resp.clicked() {
+                            ins.show_meta = false;
+                        }
+                        let (r, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+                        if ins.extra_meta {
+                            ui.painter().rect_filled(r, CornerRadius::same(4), pal.accent.gamma_multiply(0.85));
+                        } else if resp.hovered() {
+                            ui.painter().rect_filled(r, CornerRadius::same(4), pal.hover);
+                        }
+                        theme::paint_lucide(ui.painter(), r.shrink(3.0), "info", if ins.extra_meta { Color32::WHITE } else { pal.text_dim });
+                        if resp.on_hover_text("Toggle extra details").clicked() {
+                            toggle_extra = true;
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                let extra = ins.extra_meta;
+                egui::Grid::new(("metagrid", env.panel_id)).num_columns(2).spacing(vec2(14.0, 3.0)).show(ui, |ui| {
+                    let mut row = |k: &str, v: String| {
+                        ui.label(egui::RichText::new(k).color(pal.text_dim).size(11.5));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add(egui::Label::new(egui::RichText::new(v).size(11.5)).truncate());
+                        });
+                        ui.end_row();
+                    };
+                    if extra {
+                        use std::os::unix::fs::MetadataExt;
+                        if let Ok(m) = std::fs::symlink_metadata(&e.path) {
+                            row("Accessed", fsx::fmt_time(m.accessed().ok()));
+                            row("Changed", fsx::fmt_time(Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(m.ctime().max(0) as u64))));
+                            row("Owner", format!("{} ({})", user_name(m.uid()), m.uid()));
+                            row("Group", format!("{}", m.gid()));
+                            row("Links", m.nlink().to_string());
+                            row("Inode", m.ino().to_string());
+                            row("Device", format!("{}:{}", libc::major(m.dev()), libc::minor(m.dev())));
+                            row("Blocks", format!("{} ({})", m.blocks(), fsx::fmt_size(m.blocks() * 512)));
+                        }
+                    }
+                    row("Path", e.path.display().to_string());
+                    let db = crate::mime::mime_db();
+                    let m = db.for_name(&e.name, e.is_dir, e.is_executable());
+                    row("Type", format!("{} ({m})", db.comment(&m)));
+                    let size = if e.is_dir { env.stats.map.get(&e.path).map(|s| format!("{} · {} files · {} folders", fsx::fmt_size(s.size), s.files, s.folders)).unwrap_or_else(|| "—".into()) } else { format!("{} ({} bytes)", fsx::fmt_size(e.size), e.size) };
+                    row("Size", size);
+                    row("Created", fsx::fmt_time(e.created));
+                    row("Modified", fsx::fmt_time(e.modified));
+                    row("Permissions", format!("{} ({:o})", fsx::fmt_mode(e.mode, e.is_dir), e.mode & 0o7777));
+                    if e.is_link {
+                        row("Link target", std::fs::read_link(&e.path).map(|p| p.display().to_string()).unwrap_or_default());
+                    }
+                    if thumbs::is_image_ext(&e.ext()) {
+                        if let Some(l) = env.thumbs.get(&e.path, e.modified, 64.0) {
+                            row("Dimensions", format!("{} × {}", l.dims[0], l.dims[1]));
+                            if extra {
+                                let mp = l.dims[0] as f64 * l.dims[1] as f64 / 1e6;
+                                row("Megapixels", format!("{mp:.2}"));
+                            }
+                        }
+                    }
+                });
+            });
+        });
+        if toggle_extra {
+            ins.extra_meta = !ins.extra_meta;
+        }
+    }
+}
+
+fn checkerboard(p: &egui::Painter, r: Rect, pal: &theme::Palette) {
+    let s = 10.0;
+    let (a, b) = if pal.dark { (Color32::from_gray(48), Color32::from_gray(64)) } else { (Color32::from_gray(225), Color32::from_gray(245)) };
+    p.rect_filled(r, CornerRadius::ZERO, a);
+    let nx = (r.width() / s).ceil() as i32;
+    let ny = (r.height() / s).ceil() as i32;
+    if nx * ny > 40_000 {
+        return;
+    }
+    for y in 0..ny {
+        for x in 0..nx {
+            if (x + y) % 2 == 0 {
+                let cell = Rect::from_min_size(r.min + vec2(x as f32 * s, y as f32 * s), Vec2::splat(s)).intersect(r);
+                p.rect_filled(cell, CornerRadius::ZERO, b);
+            }
+        }
+    }
+}
+
+fn image_view(ui: &mut Ui, body: Rect, e: &Entry, ins: &mut Inspector, env: &mut Env) {
+    let pal = *env.pal;
+    let ppp = ui.ctx().pixels_per_point();
+    let area = body.shrink(10.0);
+    let want = (area.width().max(area.height()) * ppp * ins.zoom.max(1.0)).min(4096.0);
+    let Some(l) = env.thumbs.get(&e.path, e.modified, want) else {
+        let msg = if env.thumbs.failed(&e.path) { "Can't decode this image" } else { "Loading…" };
+        ui.painter().text(body.center(), Align2::CENTER_CENTER, msg, FontId::proportional(13.0), pal.text_dim);
+        return;
+    };
+    let [ow, oh] = [l.dims[0] as f32, l.dims[1] as f32];
+    let tex = l.tex.id();
+    let dims = l.dims;
+    let base = match ins.fit {
+        Fit::Fit => (area.width() / ow).min(area.height() / oh).min(1.0 / ppp * 8.0).max(0.0001),
+        Fit::Fill => (area.width() / ow).max(area.height() / oh),
+        Fit::Actual => 1.0 / ppp,
+    };
+    let fit_scale = (area.width() / ow).min(area.height() / oh);
+    let scale = base * ins.zoom;
+    let size = vec2(ow * scale, oh * scale);
+    let resp = ui.interact(body, Id::new(("imgview", env.panel_id)), Sense::click_and_drag());
+    // Wheel zoom around the pointer.
+    if resp.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        let zd = ui.input(|i| i.zoom_delta());
+        let factor = if (zd - 1.0).abs() > 1e-4 { zd } else if scroll != 0.0 { (scroll / 300.0).exp() } else { 1.0 };
+        if factor != 1.0 {
+            let old = ins.zoom;
+            ins.zoom = (ins.zoom * factor).clamp(0.05, 200.0 / base.max(1e-4));
+            if let Some(pp) = ui.ctx().pointer_hover_pos() {
+                let c = area.center() + ins.pan;
+                let rel = pp - c;
+                ins.pan += rel - rel * (ins.zoom / old);
+            }
+        }
+    }
+    if resp.dragged() {
+        ins.pan += resp.drag_delta();
+    }
+    if resp.double_clicked() {
+        ins.zoom = 1.0;
+        ins.pan = Vec2::ZERO;
+    }
+    let img_rect = Rect::from_center_size(area.center() + ins.pan, size);
+    let clip = body;
+    let painter = ui.painter().with_clip_rect(clip);
+    checkerboard(&painter, img_rect.intersect(clip), &pal);
+    painter.image(tex, img_rect, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+    // Pixel grid at high magnification.
+    let px = scale * ppp;
+    if ins.pixel_grid && px >= 12.0 {
+        let vis = img_rect.intersect(clip);
+        let step = scale;
+        let x0 = ((vis.left() - img_rect.left()) / step).floor() as i32;
+        let x1 = ((vis.right() - img_rect.left()) / step).ceil() as i32;
+        let y0 = ((vis.top() - img_rect.top()) / step).floor() as i32;
+        let y1 = ((vis.bottom() - img_rect.top()) / step).ceil() as i32;
+        if (x1 - x0) < 400 && (y1 - y0) < 400 {
+            let st = Stroke::new(1.0, Color32::from_black_alpha(60));
+            for x in x0..=x1 {
+                let xx = img_rect.left() + x as f32 * step;
+                painter.line_segment([pos2(xx, vis.top()), pos2(xx, vis.bottom())], st);
+            }
+            for y in y0..=y1 {
+                let yy = img_rect.top() + y as f32 * step;
+                painter.line_segment([pos2(vis.left(), yy), pos2(vis.right(), yy)], st);
+            }
+        }
+    }
+    // Minimap
+    if ins.minimap && (size.x > area.width() + 1.0 || size.y > area.height() + 1.0) {
+        let mw = 120.0;
+        let mh = mw * oh / ow;
+        let mr = Rect::from_min_size(pos2(body.right() - mw - 12.0, body.bottom() - mh - 30.0), vec2(mw, mh));
+        painter.rect_filled(mr.expand(3.0), CornerRadius::same(4), pal.raised);
+        painter.image(tex, mr, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE.gamma_multiply(0.85));
+        let vis = clip.intersect(img_rect);
+        let to_m = |p: Pos2| pos2(mr.left() + (p.x - img_rect.left()) / size.x * mw, mr.top() + (p.y - img_rect.top()) / size.y * mh);
+        painter.rect_stroke(Rect::from_min_max(to_m(vis.min), to_m(vis.max)), CornerRadius::ZERO, Stroke::new(1.5, pal.accent), StrokeKind::Middle);
+    }
+    // Footer zoom %
+    let pct = scale * ppp * 100.0;
+    let label = format!("{} × {}  ·  {:.0}%", dims[0], dims[1], pct);
+    let g = ui.painter().layout_no_wrap(label, FontId::proportional(11.5), pal.text_dim);
+    let r = Rect::from_min_size(pos2(body.right() - g.size().x - 18.0, body.bottom() - 24.0), g.size() + vec2(10.0, 6.0));
+    ui.painter().rect_filled(r, CornerRadius::same(4), pal.raised.gamma_multiply(0.9));
+    ui.painter().galley(r.min + vec2(5.0, 3.0), g, pal.text_dim);
+    let _ = fit_scale;
+}
+
+/// Draw `tex` fitted (aspect kept) and centred in `area`; returns where it went.
+fn fit_texture(ui: &Ui, area: Rect, tex: &egui::TextureHandle) -> Rect {
+    let [w, h] = tex.size();
+    let k = (area.width() / w.max(1) as f32).min(area.height() / h.max(1) as f32);
+    let r = Rect::from_center_size(area.center(), vec2(w as f32 * k, h as f32 * k));
+    ui.painter().image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    r
+}
+
+fn pdf_view(ui: &mut Ui, body: Rect, v: &mut PdfView, pal: &theme::Palette) {
+    if let Some(rx) = &v.pages_rx {
+        if let Ok(n) = rx.try_recv() {
+            v.pages = n;
+            v.pages_rx = None;
+            v.failed = n.is_none();
+            v.page = v.page.clamp(1, n.unwrap_or(1).max(1));
+        }
+    }
+    let ctx = ui.ctx().clone();
+    if let Some(rx) = &v.job {
+        if let Ok((pg, px, img)) = rx.try_recv() {
+            v.job = None;
+            match img {
+                Some(ci) => {
+                    v.tex = Some(ctx.load_texture("pdf-page", ci, egui::TextureOptions::LINEAR));
+                    v.shown = Some((pg, px));
+                }
+                None => v.failed = true,
+            }
+        }
+    }
+    let area = body.shrink(14.0);
+    // Render at the size the page is shown (in 128 px steps, so resizing doesn't
+    // re-render constantly); the previous page stays up until the new one is ready.
+    let want = ((area.width().max(area.height() * 0.71) * ctx.pixels_per_point() / 128.0).ceil() * 128.0).clamp(256.0, 2048.0) as u32;
+    if v.job.is_none() && !v.failed && v.pages.is_some() && v.shown != Some((v.page, want)) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (path, page, c2) = (v.path.clone(), v.page, ctx.clone());
+        std::thread::spawn(move || {
+            let img = crate::media::pdf_page(&path, page, want).map(|i| egui::ColorImage::from_rgba_unmultiplied([i.w as usize, i.h as usize], &i.px));
+            let _ = tx.send((page, want, img));
+            c2.request_repaint();
+        });
+        v.job = Some(rx);
+    }
+    let font = FontId::proportional(12.5);
+    if v.failed {
+        ui.painter().text(body.center(), Align2::CENTER_CENTER, "Can't render this PDF", font, pal.text_dim);
+        return;
+    }
+    match &v.tex {
+        Some(tex) => {
+            let r = fit_texture(ui, area, tex);
+            ui.painter().rect_stroke(r, CornerRadius::same(2), Stroke::new(1.0, pal.border), StrokeKind::Outside);
+        }
+        None => {
+            ui.painter().text(body.center(), Align2::CENTER_CENTER, "Rendering page…", font, pal.text_dim);
+        }
+    }
+    // Wheel / Page keys over the page turn pages.
+    if ui.rect_contains_pointer(body) {
+        let pages = v.pages.unwrap_or(1);
+        let (pd, pu) = ui.input(|i| (i.key_pressed(egui::Key::PageDown), i.key_pressed(egui::Key::PageUp)));
+        if pd && v.page < pages {
+            v.page += 1;
+        }
+        if pu && v.page > 1 {
+            v.page -= 1;
+        }
+    }
+}
+
+fn media_view(ui: &mut Ui, body: Rect, e: &Entry, v: &mut MediaView, env: &mut Env) {
+    let pal = *env.pal;
+    let ctx = ui.ctx().clone();
+    if let Some(rx) = &v.probe_rx {
+        if let Ok(p) = rx.try_recv() {
+            v.probe_rx = None;
+            match p {
+                Some(p) => {
+                    let max_w = ((body.width() * ctx.pixels_per_point()) as u32).clamp(320, 1280);
+                    v.player = Some(crate::media::Player::new(&v.path, &p, max_w, &ctx));
+                    v.probe = Some(p);
+                }
+                None => v.failed = true,
+            }
+        }
+    }
+    let font = FontId::proportional(12.5);
+    if v.failed {
+        ui.painter().text(body.center(), Align2::CENTER_CENTER, "Can't play this file", font, pal.text_dim);
+        return;
+    }
+    let (Some(p), Some(pl)) = (v.probe.clone(), v.player.as_mut()) else {
+        ui.painter().text(body.center(), Align2::CENTER_CENTER, "Loading…", font, pal.text_dim);
+        return;
+    };
+    if let Some(px) = pl.tick(&mut v.seq) {
+        if let Some((w, h)) = pl.size {
+            let ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &px);
+            match &mut v.tex {
+                Some(t) => t.set(ci, egui::TextureOptions::LINEAR),
+                None => v.tex = Some(ctx.load_texture("media-frame", ci, egui::TextureOptions::LINEAR)),
+            }
+        }
+    }
+    let bar_h = 40.0;
+    let stage = Rect::from_min_max(body.min + vec2(10.0, 10.0), pos2(body.right() - 10.0, body.bottom() - bar_h - 6.0));
+    let ppp = ctx.pixels_per_point();
+    if p.video.is_some() {
+        // The live frame once playback has started; the poster frame before.
+        let started = pl.playing() || pl.position() > 0.0;
+        match (&v.tex, started) {
+            (Some(t), true) => {
+                fit_texture(ui, stage, t);
+            }
+            _ => {
+                if let Some(l) = env.thumbs.get(&e.path, e.modified, stage.width().max(stage.height()) * ppp) {
+                    fit_texture(ui, stage, &l.tex);
+                }
+            }
+        }
+    } else {
+        // Audio: cover art and tags.
+        let side = (stage.width().min(stage.height() - 60.0)).max(48.0).min(320.0);
+        let cover = Rect::from_center_size(pos2(stage.center().x, stage.top() + side / 2.0 + 8.0), Vec2::splat(side));
+        match env.thumbs.get(&e.path, e.modified, side * ppp) {
+            Some(l) => {
+                fit_texture(ui, cover, &l.tex);
+            }
+            None => {
+                ui.painter().rect_filled(cover.shrink(side * 0.2), CornerRadius::same(12), pal.raised);
+                theme::paint_lucide(ui.painter(), Rect::from_center_size(cover.center(), Vec2::splat(side * 0.3)), "music", pal.text_dim);
+            }
+        }
+        let mut y = cover.bottom() + 14.0;
+        let lines = [(p.title.clone().unwrap_or_else(|| e.name.clone()), 14.0, pal.text), (p.artist.clone().unwrap_or_default(), 12.5, pal.text_dim), (p.album.clone().unwrap_or_default(), 12.0, pal.text_dim)];
+        for (t, size, col) in lines {
+            if t.is_empty() {
+                continue;
+            }
+            let g = crate::listing::elided(ui, &t, FontId::proportional(size), stage.width() - 8.0, col);
+            ui.painter().galley(pos2(stage.center().x - g.size().x / 2.0, y), g.clone(), col);
+            y += g.size().y + 4.0;
+        }
+    }
+    // Clicking the picture plays / pauses.
+    let stage_resp = ui.interact(stage, egui::Id::new(("media-stage", &v.path)), Sense::click());
+    if stage_resp.clicked() {
+        pl.toggle();
+    }
+    // Control bar: play/pause, mute, time, seek.
+    let bar = Rect::from_min_max(pos2(body.left() + 8.0, body.bottom() - bar_h), pos2(body.right() - 8.0, body.bottom() - 4.0));
+    ui.painter().rect_filled(bar, CornerRadius::same(8), pal.raised);
+    let btn = |ui: &mut Ui, r: Rect, icon: &str, tip: &str, id: &str| -> bool {
+        let resp = ui.interact(r, egui::Id::new((id, &v.path)), Sense::click());
+        crate::ui::note_control(ui, r, "media button");
+        if resp.hovered() {
+            ui.painter().rect_filled(r, CornerRadius::same(6), pal.hover);
+        }
+        theme::paint_lucide(ui.painter(), r.shrink(5.0), icon, pal.text);
+        resp.on_hover_text(tip).clicked()
+    };
+    let play_r = Rect::from_min_size(pos2(bar.left() + 4.0, bar.center().y - 14.0), vec2(28.0, 28.0));
+    if btn(ui, play_r, if pl.playing() { "pause" } else { "play" }, if pl.playing() { "Pause" } else { "Play" }, "media-play") {
+        pl.toggle();
+    }
+    let mute_r = Rect::from_min_size(pos2(play_r.right() + 2.0, play_r.top()), vec2(28.0, 28.0));
+    if p.audio && btn(ui, mute_r, if pl.muted { "volume-x" } else { "volume-2" }, if pl.muted { "Unmute" } else { "Mute" }, "media-mute") {
+        let m = !pl.muted;
+        pl.set_muted(m);
+    }
+    let time = format!("{} / {}", crate::media::fmt_time(pl.position()), crate::media::fmt_time(pl.duration));
+    let tg = ui.painter().layout_no_wrap(time, FontId::proportional(11.5), pal.text_dim);
+    let tx = bar.right() - tg.size().x - 10.0;
+    ui.painter().galley(pos2(tx, bar.center().y - tg.size().y / 2.0), tg, pal.text_dim);
+    let track = Rect::from_min_max(pos2(mute_r.right() + 10.0, bar.center().y - 2.0), pos2(tx - 12.0, bar.center().y + 2.0));
+    if track.width() > 20.0 {
+        let frac = if pl.duration > 0.0 { (pl.position() / pl.duration).clamp(0.0, 1.0) as f32 } else { 0.0 };
+        ui.painter().rect_filled(track, CornerRadius::same(2), pal.border);
+        ui.painter().rect_filled(Rect::from_min_size(track.min, vec2(track.width() * frac, track.height())), CornerRadius::same(2), pal.accent);
+        ui.painter().circle_filled(pos2(track.left() + track.width() * frac, track.center().y), 5.0, pal.accent);
+        let hit = track.expand2(vec2(6.0, 10.0));
+        let resp = ui.interact(hit, egui::Id::new(("media-seek", &v.path)), Sense::click_and_drag());
+        crate::ui::note_control(ui, hit, "seek bar");
+        if resp.clicked() || resp.drag_stopped() {
+            if let Some(pp) = resp.interact_pointer_pos() {
+                let t = ((pp.x - track.left()) / track.width()).clamp(0.0, 1.0) as f64 * pl.duration;
+                pl.seek(t);
+            }
+        }
+    }
+    if pl.playing() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+    }
+}
+
+/// Highlight colours that read on the theme's background (light or dark).
+fn syntax_color(k: crate::syntax::Kind, pal: &theme::Palette) -> Color32 {
+    use crate::syntax::Kind;
+    let dark = pal.bg.r() as u32 + pal.bg.g() as u32 + pal.bg.b() as u32 <= 384;
+    let pick = |d: (u8, u8, u8), l: (u8, u8, u8)| if dark { Color32::from_rgb(d.0, d.1, d.2) } else { Color32::from_rgb(l.0, l.1, l.2) };
+    match k {
+        Kind::Plain => pal.text,
+        Kind::Keyword => pick((0xc6, 0x92, 0xf2), (0x7a, 0x2e, 0xb8)),
+        Kind::Type => pick((0x5e, 0xc4, 0xd8), (0x0b, 0x6e, 0x8a)),
+        Kind::Str => pick((0x9c, 0xcf, 0x7a), (0x3a, 0x7d, 0x1e)),
+        Kind::Comment => pal.text_dim.gamma_multiply(0.85),
+        Kind::Number => pick((0xf0, 0xa0, 0x6a), (0xb0, 0x52, 0x10)),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bool, spans: Option<&[Vec<(usize, usize, crate::syntax::Kind)>]>, numbers: bool, size: f32, pal: &theme::Palette) {
+    let font = FontId::monospace(size);
+    let row_h = ui.fonts_mut(|f| f.row_height(&font)) + 1.0;
+    let gutter = if numbers { (lines.len().max(1).to_string().len() as f32) * size * 0.62 + 16.0 } else { 6.0 };
+    let n = lines.len() + if truncated { 1 } else { 0 };
+    let mut inner = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(4.0, 4.0))));
+    egui::ScrollArea::both().auto_shrink([false, false]).id_salt("insp_text").show_viewport(&mut inner, |ui, vp| {
+        let maxw = 2000.0 * size * 0.62;
+        let (r, _) = ui.allocate_exact_size(vec2(maxw.min(lines.iter().map(|l| l.len()).max().unwrap_or(0) as f32 * size * 0.62 + gutter + 20.0).max(vp.width()), n as f32 * row_h + 8.0), Sense::hover());
+        let first = (vp.min.y / row_h).floor().max(0.0) as usize;
+        let last = ((vp.max.y / row_h).ceil() as usize + 1).min(n);
+        let p = ui.painter();
+        for i in first..last {
+            let y = r.top() + i as f32 * row_h;
+            if i == lines.len() {
+                p.text(pos2(r.left() + gutter, y), Align2::LEFT_TOP, "… (preview truncated at 1 MB)", font.clone(), pal.text_dim);
+                continue;
+            }
+            if numbers {
+                p.text(pos2(r.left() + gutter - 10.0, y), Align2::RIGHT_TOP, (i + 1).to_string(), font.clone(), pal.text_dim.gamma_multiply(0.7));
+            }
+            match spans.and_then(|s| s.get(i)).filter(|s| !s.is_empty()) {
+                Some(sp) => {
+                    // Coloured sections between the spans; plain text in the gaps.
+                    let line = &lines[i];
+                    let mut job = egui::text::LayoutJob::default();
+                    let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
+                    let mut at = 0;
+                    for &(a, b, k) in sp {
+                        if a < at || b > line.len() {
+                            continue;
+                        }
+                        if a > at {
+                            job.append(&line[at..a], 0.0, fmt(pal.text));
+                        }
+                        job.append(&line[a..b], 0.0, fmt(syntax_color(k, pal)));
+                        at = b;
+                    }
+                    if at < line.len() {
+                        job.append(&line[at..], 0.0, fmt(pal.text));
+                    }
+                    let g = ui.fonts_mut(|f| f.layout_job(job));
+                    p.galley(pos2(r.left() + gutter, y), g, pal.text);
+                }
+                None => {
+                    p.text(pos2(r.left() + gutter, y), Align2::LEFT_TOP, &lines[i], font.clone(), pal.text);
+                }
+            }
+        }
+    });
+}
+
+fn folder_view(ui: &mut Ui, body: Rect, entries: &[Entry], env: &mut Env) {
+    let pal = *env.pal;
+    let row_h = (env.cfg.font_size + 8.0).round();
+    let font = FontId::proportional(env.cfg.font_size - 0.5);
+    let small = FontId::proportional(env.cfg.font_size - 2.0);
+    if entries.is_empty() {
+        ui.painter().text(body.center(), Align2::CENTER_CENTER, "Empty folder", font, pal.text_dim);
+        return;
+    }
+    let mut inner = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(6.0, 4.0))));
+    egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("insp_folder").show_rows(&mut inner, row_h, entries.len(), |ui, range| {
+        for i in range {
+            let e = &entries[i];
+            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
+            if resp.hovered() {
+                ui.painter().rect_filled(r, CornerRadius::same(4), pal.hover);
+            }
+            let ic = Rect::from_min_size(pos2(r.left() + 4.0, r.center().y - 7.0), Vec2::splat(14.0));
+            if !crate::icons::entry(ui.painter(), ic, &e) {
+                theme::paint_icon(ui.painter(), ic, theme::categorize(&e.ext(), e.is_dir, e.is_executable()), "", e.is_link);
+            }
+            let g = crate::listing::elided(ui, &e.name, font.clone(), r.width() - 110.0, pal.text);
+            ui.painter().galley(pos2(ic.right() + 6.0, r.center().y - g.size().y / 2.0), g, pal.text);
+            if !e.is_dir {
+                ui.painter().text(pos2(r.right() - 4.0, r.center().y), Align2::RIGHT_CENTER, fsx::fmt_size(e.size), small.clone(), pal.text_dim);
+            }
+        }
+    });
+}
+
+fn volume_view(ui: &mut Ui, body: Rect, e: &Entry, v: Option<&tab::VolInfo>, pal: &theme::Palette) {
+    let c = body.center();
+    let g = if v.is_some_and(|v| v.removable) { Glyph::Usb } else { Glyph::Drive };
+    let mounted = v.is_none_or(|v| v.mounted);
+    theme::paint_glyph(ui.painter(), Rect::from_center_size(c - vec2(0.0, 60.0), Vec2::splat(64.0)), g, if mounted { pal.text_dim } else { pal.text_dim.gamma_multiply(0.55) });
+    ui.painter().text(c - vec2(0.0, 14.0), Align2::CENTER_CENTER, &e.name, FontId::proportional(16.0), pal.text);
+    if let Some(v) = v {
+        let lines = if v.mounted {
+            let used = v.total.saturating_sub(v.free);
+            let frac = if v.total > 0 { used as f32 / v.total as f32 } else { 0.0 };
+            let bar = Rect::from_center_size(c + vec2(0.0, 12.0), vec2(body.width().min(320.0) - 40.0, 8.0));
+            ui.painter().rect_filled(bar, CornerRadius::same(4), pal.raised);
+            ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * frac, 8.0)), CornerRadius::same(4), if frac > 0.9 { pal.danger } else { pal.accent });
+            [format!("{} free of {}", fsx::fmt_size(v.free), fsx::fmt_size(v.total)), format!("{} · {}", v.fstype, v.device), e.path.display().to_string()]
+        } else {
+            [format!("{} · Not mounted", fsx::fmt_size(v.total)), format!("{} · {}", v.fstype, v.device), "Open it to mount".into()]
+        };
+        for (i, l) in lines.iter().enumerate() {
+            let g = crate::listing::elided(ui, l, FontId::proportional(12.5), body.width() - 16.0, pal.text_dim);
+            ui.painter().galley(c + vec2(-g.size().x / 2.0, 34.0 + i as f32 * 18.0 - g.size().y / 2.0), g, pal.text_dim);
+        }
+    }
+}
+
+/// Login name for a uid (from /etc/passwd), or the number.
+fn user_name(uid: u32) -> String {
+    std::fs::read_to_string("/etc/passwd")
+        .ok()
+        .and_then(|s| s.lines().find_map(|l| {
+            let mut f = l.split(':');
+            let name = f.next()?;
+            f.next();
+            (f.next()?.parse::<u32>().ok()? == uid).then(|| name.to_string())
+        }))
+        .unwrap_or_else(|| uid.to_string())
+}
