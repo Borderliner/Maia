@@ -334,6 +334,11 @@ impl Sim {
         let ctx = egui::Context::default();
         let app = App::new(&ctx, vec![path.to_path_buf()]);
         let mut s = Sim { ctx, app, size, ppp: 1.6, time: 0.0, pointer: pos2(-10.0, -10.0), frame_ms: vec![], log: VecDeque::new(), check_overlap: false, slow: vec![], popup_checks: Default::default(), texts: vec![] };
+        // COMET_SIM_LOOK=FONT,SPACING runs a session at another font size and Spacing.
+        if let Some((f, sp)) = std::env::var("COMET_SIM_LOOK").ok().and_then(|v| v.split_once(',').and_then(|(f, sp)| Some((f.trim().parse().ok()?, sp.trim().parse().ok()?)))) {
+            s.app.cfg.font_size = f;
+            s.app.cfg.spacing = sp;
+        }
         s.settle();
         s
     }
@@ -1659,6 +1664,23 @@ mod journeys {
         std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|st| !st.split_whitespace().nth(2).is_some_and(|s| s == "Z"))
     }
 
+    /// Every inspector toolbar button (and any label beside them, such as a page count)
+    /// sits centred on the 30 px header, inside it.
+    fn toolbar_centred(s: &mut Sim, what: &str, labels: &[&str]) {
+        s.idle(2);
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("inspector shown"));
+        let cy = ir.top() + 15.0;
+        let buttons: Vec<Rect> = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == "inspector button").map(|(_, r, _)| *r).collect());
+        assert!(buttons.len() >= 3, "{what}: toolbar buttons drawn");
+        for b in &buttons {
+            assert!((b.center().y - cy).abs() <= 0.5 && b.top() > ir.top() && b.bottom() < ir.top() + 30.0, "{what}: button {b:?} off the header's centre {cy}");
+        }
+        for l in labels {
+            let r = s.text_rect(l);
+            assert!((r.center().y - cy).abs() <= 1.5, "{what}: {l:?} at {r:?}, header centre {cy}");
+        }
+    }
+
     fn click_control(s: &mut Sim, what: &str) {
         s.idle(1);
         let r = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == what).map(|(_, r, _)| *r));
@@ -1682,6 +1704,7 @@ mod journeys {
         select_path(&mut s, &d.join("main.rs"));
         wait_until(&mut s, "highlighted code", 10, |s| inspector(s).text_spans().is_some_and(|n| n >= 6));
         look(&mut s, "code preview");
+        toolbar_centred(&mut s, "code", &[]);
         // PDF: page 1, then Page Down with the pointer over the preview.
         select_path(&mut s, &d.join("doc.pdf"));
         wait_until(&mut s, "PDF page 1", 20, |s| inspector(s).pdf_state().is_some_and(|(p, n, shown)| p == 1 && n == Some(3) && shown.is_some_and(|x| x.0 == 1)));
@@ -1694,6 +1717,15 @@ mod journeys {
         assert!(s.texts.iter().any(|(_, t)| t == "2 / 3"), "page counter follows");
         s.act("move -50 -50");
         look(&mut s, "pdf preview");
+        toolbar_centred(&mut s, "pdf", &["2 / 3"]);
+        // Font size and Spacing change every row's height; the toolbar stays centred.
+        for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
+            s.app.cfg.font_size = font;
+            s.app.cfg.spacing = spacing;
+            s.idle(3);
+            toolbar_centred(&mut s, &format!("pdf at font {font}, spacing {spacing}"), &["2 / 3"]);
+            look(&mut s, &format!("pdf at font {font}, spacing {spacing}"));
+        }
         // Video.
         select_path(&mut s, &d.join("clip.mp4"));
         wait_until(&mut s, "video probed", 15, |s| inspector(s).media_state().is_some());
@@ -1725,6 +1757,7 @@ mod journeys {
         let pids = inspector(&s).media_state().unwrap().3;
         select_path(&mut s, &d.join("photo.png"));
         s.idle(3);
+        toolbar_centred(&mut s, "image", &[]);
         assert!(pids.iter().all(|&p| !alive(p)), "changing selection killed the decoders");
         // Audio: tags shown; play starts the sound process; mute ends it, the clock goes on.
         select_path(&mut s, &d.join("song.mp3"));

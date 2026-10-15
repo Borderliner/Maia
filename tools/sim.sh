@@ -23,5 +23,5 @@ exec systemd-run --user --scope --quiet -p MemoryMax=4G -p MemorySwapMax=0 \
   --unshare-all --die-with-parent --new-session \
   --unsetenv WAYLAND_DISPLAY --unsetenv DISPLAY --unsetenv DBUS_SESSION_BUS_ADDRESS \
   --setenv SDL_AUDIODRIVER dummy ${COMET_PROF:+--setenv COMET_PROF 1} ${COMET_SIM_DEBUG:+--setenv COMET_SIM_DEBUG 1} --setenv COMET_SIM_SANDBOX 1 --setenv COMET_SIM_ROOT "$SIM" --setenv HOME "$SIM/home" \
-  ${COMET_SIM_SEED:+--setenv COMET_SIM_SEED $COMET_SIM_SEED} --setenv COMET_SIM_SEEDS "${COMET_SIM_SEEDS:-10}" --setenv COMET_SIM_STEPS "${COMET_SIM_STEPS:-300}" \
+  ${COMET_SIM_SEED:+--setenv COMET_SIM_SEED $COMET_SIM_SEED} ${COMET_SIM_LOOK:+--setenv COMET_SIM_LOOK $COMET_SIM_LOOK} --setenv COMET_SIM_SEEDS "${COMET_SIM_SEEDS:-10}" --setenv COMET_SIM_STEPS "${COMET_SIM_STEPS:-300}" \
   "$C/$BIN" "$F" --test-threads=1 --nocapture "$@"

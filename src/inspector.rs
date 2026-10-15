@@ -276,14 +276,17 @@ fn seg_button(ui: &mut Ui, on: bool, tip: &str, pal: &theme::Palette, paint: imp
 
 /// Dashed rounded outline around a group of toolbar buttons.
 fn seg_frame(ui: &mut Ui, pal: &theme::Palette, add: impl FnOnce(&mut Ui)) {
-    let start = ui.cursor().min;
-    let inner = ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 1.0;
-        ui.add_space(2.0);
-        add(ui);
-        ui.add_space(2.0);
-    });
-    let r = Rect::from_min_max(pos2(start.x, inner.response.rect.top() - 2.0), pos2(inner.response.rect.right(), inner.response.rect.bottom() + 2.0));
+    // The buttons go straight into the toolbar row, so they centre on it like the close
+    // button does; the outline is a fixed 24 px around that centre (buttons are 20 high).
+    let x0 = ui.cursor().min.x;
+    let gap = ui.spacing().item_spacing.x;
+    ui.spacing_mut().item_spacing.x = 1.0;
+    ui.add_space(2.0);
+    add(ui);
+    ui.add_space(2.0);
+    ui.spacing_mut().item_spacing.x = gap;
+    let cy = ui.max_rect().center().y;
+    let r = Rect::from_min_max(pos2(x0, cy - 12.0), pos2(ui.cursor().min.x, cy + 12.0));
     let st = Stroke::new(1.0, pal.border);
     let dash = |a: egui::Pos2, b: egui::Pos2| ui.painter().extend(egui::Shape::dashed_line(&[a, b], st, 3.0, 2.0));
     let k = 4.0;
@@ -419,10 +422,13 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                 {
                     go = Some(page + 1);
                 }
+                // The page count belongs to the arrows, inside their outline.
+                if pages > 0 && !crate::ui::no_room(ui, 40.0) {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(format!("{page} / {pages}")).size(11.5).color(pal.text_dim));
+                    ui.add_space(3.0);
+                }
             });
-            if pages > 0 {
-                hui.label(egui::RichText::new(format!("{page} / {pages}")).size(11.5).color(pal.text_dim));
-            }
             if let (Some(p), Content::Pdf(v)) = (go, &mut ins.content) {
                 v.page = p;
             }

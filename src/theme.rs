@@ -227,9 +227,11 @@ pub fn apply(ctx: &egui::Context, p: &Palette, font_size: f32, spacing: f32, ani
             (TextStyle::Monospace, FontId::monospace(font_size - 1.0)),
         ]
         .into();
-        s.spacing.item_spacing = vec2(6.0 * spacing, 4.0 * spacing);
-        s.spacing.button_padding = vec2(8.0 * spacing, 3.0 * spacing);
-        s.spacing.interact_size.y = 20.0 * spacing;
+        // Whole points: a fractional gap (9.6 at Spacing 1.6) puts every widget after it
+        // between pixels, softening edges.
+        s.spacing.item_spacing = vec2((6.0 * spacing).round(), (4.0 * spacing).round());
+        s.spacing.button_padding = vec2((8.0 * spacing).round(), (3.0 * spacing).round());
+        s.spacing.interact_size.y = (20.0 * spacing).round();
         s.animation_time = if animations { 0.12 } else { 0.0 };
         s.interaction.selectable_labels = false;
     });
