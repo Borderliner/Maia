@@ -547,6 +547,8 @@ pub enum Glyph {
     LockOpen,
     Usb,
     Eject,
+    Globe,
+    Phone,
 }
 
 /// Draw a Lucide icon by name, centered in `rect` (the icon's stroke box roughly fills it).
@@ -595,6 +597,8 @@ fn glyph_name(g: Glyph) -> &'static str {
         Glyph::CollapseLeft => "panel-left-close",
         Glyph::Menu => "menu",
         Glyph::Usb => "usb",
+        Glyph::Globe => "globe",
+        Glyph::Phone => "smartphone",
         Glyph::Eject => "", // not in Lucide: drawn below
     }
 }
@@ -721,7 +725,7 @@ pub fn paint_glyph(painter: &Painter, rect: Rect, g: Glyph, col: Color32) {
             line(p(0.34, 0.0), p(-0.16, 0.0));
             painter.add(Shape::line(vec![p(0.0, -0.16), p(-0.16, 0.0), p(0.0, 0.16)], st));
         }
-        Glyph::ChevronRight | Glyph::ChevronDown | Glyph::Lock | Glyph::LockOpen | Glyph::Usb => {}
+        Glyph::ChevronRight | Glyph::ChevronDown | Glyph::Lock | Glyph::LockOpen | Glyph::Usb | Glyph::Globe | Glyph::Phone => {}
         Glyph::Eject => {
             // Rounded triangle over a bar, in Lucide's stroke style.
             let tri = vec![p(0.0, -0.34), p(0.34, 0.06), p(-0.34, 0.06)];

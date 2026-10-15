@@ -17,6 +17,7 @@ mod listing;
 mod media;
 mod lucide_map;
 mod mime;
+mod network;
 mod ops;
 mod panel;
 mod popups;

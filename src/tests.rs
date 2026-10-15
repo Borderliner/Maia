@@ -1374,3 +1374,22 @@ fn merge_sort_is_stable_and_matches_sort_by() {
         }
     }
 }
+
+#[test]
+fn network_places_parse_from_gio() {
+    use crate::network::{is_uri, label, normalize, parse_mounts};
+    let text = "Drive(0): Micron MTFDKBA1T0TFH\n  Type: GProxyDrive (GProxyVolumeMonitorUDisks2)\n  Volume(0): 681 GB Volume\n    Type: GProxyVolume (GProxyVolumeMonitorUDisks2)\n    can_mount=1\nVolume(0): Pixel 7\n  Type: GProxyVolume (GProxyVolumeMonitorMTP)\n  activation_root=mtp://Google_Pixel_7_2A09/\n  can_mount=1\nVolume(1): Camera\n  Type: GProxyVolume (GProxyVolumeMonitorGPhoto2)\n  activation_root=gphoto2://Canon_EOS/\n  Mount(0): Camera -> gphoto2://Canon_EOS/\n    Type: GProxyShadowMount (GProxyVolumeMonitorGPhoto2)\nMount(0): media on nas -> smb://nas/media/\n  Type: GDaemonMount\n  default_location=smb://nas/media/\nMount(1): me on host -> sftp://me@host/\n  Type: GDaemonMount\nMount(2): Backup -> file:///run/media/me/Backup\n  Type: GProxyMount (GProxyVolumeMonitorUDisks2)\n";
+    let p = parse_mounts(text);
+    let got: Vec<(String, bool, bool)> = p.iter().map(|x| (x.uri.clone(), x.device, x.mounted)).collect();
+    assert_eq!(
+        got,
+        [("mtp://Google_Pixel_7_2A09/".into(), true, false), ("gphoto2://Canon_EOS/".into(), true, true), ("smb://nas/media/".into(), false, true), ("sftp://me@host/".into(), false, true)],
+        "local disks left to Drives, phones and shares kept"
+    );
+    assert_eq!(p[0].name, "Pixel 7");
+    assert!(is_uri("smb://nas/media") && is_uri("SFTP://me@host") && !is_uri("/home/me") && !is_uri("smb://") && !is_uri("http://x"));
+    assert_eq!(normalize(" ssh://me@host/srv "), "sftp://me@host/srv");
+    assert_eq!(label("smb://nas/media/"), "media on nas");
+    assert_eq!(label("sftp://me@host/"), "me@host");
+    assert!(parse_mounts("garbage\nMount(\nVolume(3)\n").is_empty());
+}

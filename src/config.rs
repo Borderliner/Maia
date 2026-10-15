@@ -475,6 +475,8 @@ pub struct UserData {
     pub default_view: Option<ViewSettings>,
     pub collapsed_groups: Vec<String>,
     pub sidebar_collapsed: Vec<String>,
+    /// Network addresses connected to before, newest first (no passwords).
+    pub servers: Vec<String>,
 }
 
 impl UserData {

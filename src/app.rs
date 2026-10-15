@@ -135,6 +135,18 @@ pub struct App {
     default_fm: std::sync::Arc<std::sync::atomic::AtomicU8>,
     /// Messages from background work, shown as toasts.
     notes: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Network places being mounted.
+    net_jobs: Vec<NetJob>,
+    /// How the Connect dialog's last attempt ended: (address, Ok or the reason).
+    dialog_result: Option<(String, Result<(), String>)>,
+}
+
+/// A network place being mounted, and where to show it once it is.
+struct NetJob {
+    uri: String,
+    open_in: Option<(u64, bool)>,
+    from_dialog: bool,
+    rx: std::sync::mpsc::Receiver<Result<PathBuf, String>>,
 }
 
 impl App {
@@ -203,6 +215,8 @@ impl App {
             requests: None,
             default_fm: Default::default(),
             notes: Default::default(),
+            net_jobs: vec![],
+            dialog_result: None,
             cfg,
             ud,
         };
@@ -349,6 +363,109 @@ impl App {
             notes.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
             ctx.request_repaint();
         });
+    }
+
+    /// Mount a network place in the background, then show it in `open_in`.
+    pub fn connect(&mut self, uri: String, login: crate::network::Login, open_in: Option<(u64, bool)>) {
+        self.start_net(uri, login, open_in, false);
+    }
+
+    pub fn connect_from_dialog(&mut self, uri: String, login: crate::network::Login, panel: u64) {
+        self.dialog_result = None;
+        self.start_net(uri, login, Some((panel, false)), true);
+    }
+
+    fn start_net(&mut self, uri: String, login: crate::network::Login, open_in: Option<(u64, bool)>, from_dialog: bool) {
+        let Some(tools) = crate::drives::Tools::current().filter(|t| t.has("gio")) else {
+            self.toast("Network places need GVFS (the gio command)");
+            return;
+        };
+        if self.connecting(&uri) {
+            return;
+        }
+        let u = uri.clone();
+        let rx = crate::network::spawn(&self.ctx, move || crate::network::mount(&tools, &u, &login));
+        self.net_jobs.push(NetJob { uri, open_in, from_dialog, rx });
+    }
+
+    pub fn connecting(&self, uri: &str) -> bool {
+        self.net_jobs.iter().any(|j| j.uri == uri)
+    }
+
+    /// The dialog's attempt at `uri` failed: why (once).
+    pub fn take_connect_error(&mut self, uri: &str) -> Option<String> {
+        match &self.dialog_result {
+            Some((u, Err(_))) if u == uri => self.dialog_result.take().and_then(|r| r.1.err()),
+            _ => None,
+        }
+    }
+
+    /// The dialog's attempt at `uri` succeeded (the dialog can close).
+    pub fn connected(&mut self, uri: &str) -> bool {
+        let ok = matches!(&self.dialog_result, Some((u, Ok(()))) if u == uri);
+        if ok {
+            self.dialog_result = None;
+        }
+        ok
+    }
+
+    /// Unmount a network place; tabs inside it move to Computer first.
+    pub fn disconnect(&mut self, uri: String, path: Option<PathBuf>) {
+        let Some(tools) = crate::drives::Tools::current().filter(|t| t.has("gio")) else { return };
+        if let Some(path) = path {
+            let s = self.view_for(Path::new(tab::COMPUTER));
+            for p in self.panels.values_mut() {
+                for t in &mut p.tabs {
+                    if t.path.starts_with(&path) {
+                        t.navigate(PathBuf::from(tab::COMPUTER), Some(s.clone()));
+                    }
+                }
+            }
+        }
+        let (notes, ctx) = (self.notes.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let msg = match crate::network::unmount(&tools, &uri) {
+                Ok(()) => format!("Disconnected {}", crate::network::label(&uri)),
+                Err(e) => format!("Couldn't disconnect {}: {e}", crate::network::label(&uri)),
+            };
+            notes.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+            crate::sidebar::invalidate();
+            ctx.request_repaint();
+        });
+    }
+
+    fn pump_net(&mut self) {
+        let mut i = 0;
+        while i < self.net_jobs.len() {
+            let Ok(r) = self.net_jobs[i].rx.try_recv() else {
+                i += 1;
+                continue;
+            };
+            let job = self.net_jobs.remove(i);
+            crate::sidebar::invalidate();
+            match r {
+                Ok(path) => {
+                    self.ud.servers.retain(|s| *s != job.uri);
+                    if !job.uri.starts_with("mtp://") && !job.uri.starts_with("gphoto2://") {
+                        self.ud.servers.insert(0, job.uri.clone());
+                        self.ud.servers.truncate(10);
+                        self.ud_dirty = true;
+                    }
+                    match job.open_in {
+                        Some((panel, true)) => self.actions.push(Action::NewTab { panel, path, select: None, focus: true }),
+                        Some((panel, false)) => self.navigate(panel, path),
+                        None => self.toast(format!("Connected to {}", crate::network::label(&job.uri))),
+                    }
+                    if job.from_dialog {
+                        self.dialog_result = Some((job.uri, Ok(())));
+                    }
+                }
+                Err(e) if job.from_dialog => self.dialog_result = Some((job.uri, Err(e))),
+                // The server wants a login: ask for it.
+                Err(e) if e.to_lowercase().contains("password") || e.to_lowercase().contains("denied") => self.popup = Popup::connect(job.uri, Some(e)),
+                Err(e) => self.toast(format!("Couldn't connect to {}: {e}", crate::network::label(&job.uri))),
+            }
+        }
     }
 
     /// Later launches: their folders open as tabs here (files in their folder, selected),
@@ -660,6 +777,7 @@ impl App {
     fn pump(&mut self, ctx: &egui::Context) {
         self.pump_drives(ctx);
         self.pump_requests(ctx);
+        self.pump_net();
         let notes = std::mem::take(&mut *self.notes.lock().unwrap_or_else(|e| e.into_inner()));
         if let Some(n) = notes.into_iter().last() {
             self.toast(n);
@@ -1651,6 +1769,7 @@ impl App {
                     Err(e) => self.toast(format!("Couldn't create: {e}")),
                 }
             }
+            Cmd::ConnectServer => self.popup = Popup::connect(String::new(), None),
             Cmd::ExtractHere => {
                 let t = self.tab();
                 let targets = t.targets();

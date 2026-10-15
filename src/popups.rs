@@ -165,6 +165,17 @@ pub enum Popup {
     TabsOptions { panel: u64, pos: Pos2 },
     GroupMenu { panel: u64, label: String, pos: Pos2 },
     DropMenu { paths: Vec<PathBuf>, dest: PathBuf, pos: Pos2 },
+    Connect(ConnectState),
+}
+
+/// Connect to a network place: address, and a login when the server wants one.
+pub struct ConnectState {
+    pub uri: String,
+    pub user: String,
+    pub password: String,
+    pub anonymous: bool,
+    pub error: Option<String>,
+    focus: bool,
 }
 
 impl Popup {
@@ -189,6 +200,7 @@ impl Popup {
             Popup::Properties(..) => "Properties",
             Popup::OpenWith { .. } => "OpenWith",
             Popup::RunExec { .. } => "RunExec",
+            Popup::Connect(..) => "Connect",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -243,6 +255,10 @@ impl Popup {
     pub fn open_with(paths: Vec<PathBuf>) -> Popup {
         Popup::OpenWith { paths, query: String::new(), all: false }
     }
+    pub fn connect(uri: String, error: Option<String>) -> Popup {
+        Popup::Connect(ConnectState { uri, user: String::new(), password: String::new(), anonymous: false, error, focus: true })
+    }
+
     pub fn run_exec(path: PathBuf) -> Popup {
         Popup::RunExec { path }
     }
@@ -576,6 +592,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::Properties(st) => properties(app, ctx, st),
         Popup::OpenWith { paths, query, all } => open_with(app, ctx, paths, query, all),
         Popup::RunExec { path } => run_exec(app, ctx, path),
+        Popup::Connect(st) => connect(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -804,6 +821,12 @@ fn goto(app: &mut App, ctx: &egui::Context, st: &mut GoToState) -> bool {
     let mut close = false;
     let mut go: Option<(PathBuf, bool, bool)> = None; // path, is_dir, new_tab
     if k.esc {
+        return false;
+    }
+    // A network address connects (and opens) the place.
+    if (k.enter || k.ctrl_enter) && crate::network::is_uri(&st.input) {
+        let panel = app.active;
+        app.connect(crate::network::normalize(&st.input), crate::network::Login { user: String::new(), password: String::new(), anonymous: false }, Some((panel, k.ctrl_enter)));
         return false;
     }
     let cur = st.items.get(st.sel).filter(|i| !i.header).map(|i| (i.path.clone(), i.is_dir));
@@ -2227,6 +2250,91 @@ fn prompt(app: &mut App, ctx: &egui::Context, title: &str, text: &mut String, on
     !cancel
 }
 
+fn connect(app: &mut App, ctx: &egui::Context, st: &mut ConnectState) -> bool {
+    let pal = app.pal;
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        return false;
+    }
+    let uri = crate::network::normalize(&st.uri);
+    let busy = app.connecting(&uri);
+    // The dialog stays until the place opens; a failure comes back here as `error`.
+    if let Some(e) = app.take_connect_error(&uri) {
+        st.error = Some(e);
+        st.password.clear();
+    }
+    let valid = crate::network::is_uri(&st.uri);
+    let mut go = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) && valid && !busy;
+    let mut cancel = false;
+    let mut pick: Option<String> = None;
+    centered(ctx, "connect", 440.0, &pal, |ui| {
+        ui.label(egui::RichText::new("Connect to server").strong());
+        ui.add_space(6.0);
+        let field = |ui: &mut Ui, label: &str, text: &mut String, hint: &str, secret: bool, focus: bool| {
+            ui.label(egui::RichText::new(label).small().color(pal.text_dim));
+            let r = ui.add_enabled(!busy, egui::TextEdit::singleline(text).hint_text(hint).password(secret).desired_width(f32::INFINITY));
+            if focus {
+                r.request_focus();
+            }
+        };
+        field(ui, "Address", &mut st.uri, "smb://server/share, sftp://user@host, ftp://host", false, st.focus);
+        st.focus = false;
+        ui.add_space(4.0);
+        ui.columns(2, |cols| {
+            field(&mut cols[0], "User", &mut st.user, "Optional", false, false);
+            field(&mut cols[1], "Password", &mut st.password, "Optional", true, false);
+        });
+        ui.add_space(2.0);
+        ui.add_enabled(!busy, egui::Checkbox::new(&mut st.anonymous, "Connect as a guest"));
+        if let Some(e) = &st.error {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(e).color(pal.danger));
+        }
+        if !app.ud.servers.is_empty() {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Recent").small().color(pal.text_dim));
+            for s in app.ud.servers.iter().take(5) {
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+                if resp.hovered() {
+                    ui.painter().rect_filled(r, CornerRadius::same(5), pal.hover);
+                }
+                paint_glyph(ui.painter(), Rect::from_center_size(pos2(r.left() + 12.0, r.center().y), Vec2::splat(13.0)), Glyph::Globe, pal.text_dim);
+                let g = crate::listing::elided(ui, s, FontId::proportional(app.cfg.font_size - 1.0), r.width() - 30.0, pal.text);
+                ui.painter().galley(pos2(r.left() + 26.0, r.center().y - g.size().y / 2.0), g, pal.text);
+                if resp.clicked() && !busy {
+                    pick = Some(s.clone());
+                }
+            }
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(valid && !busy, egui::Button::new(egui::RichText::new("Connect").color(Color32::WHITE)).fill(pal.accent)).clicked() {
+                    go = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+                if busy {
+                    let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+                    crate::ui::spinner(ui.painter(), r.center(), 6.0, pal.accent, ui.input(|i| i.time));
+                    ui.ctx().request_repaint();
+                }
+            });
+        });
+    });
+    if let Some(s) = pick {
+        st.uri = s;
+        st.error = None;
+    }
+    if go {
+        st.error = None;
+        let login = crate::network::Login { user: st.user.trim().to_string(), password: st.password.clone(), anonymous: st.anonymous };
+        let panel = app.active;
+        app.connect_from_dialog(uri, login, panel);
+    }
+    !cancel && !app.connected(&crate::network::normalize(&st.uri))
+}
+
 fn confirm(app: &mut App, ctx: &egui::Context, msg: &str, ok_label: &str, on_ok: &mut Option<Box<dyn FnOnce(&mut App)>>) -> bool {
     let pal = app.pal;
     let mut ok = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
@@ -2602,7 +2710,7 @@ fn main_menu(app: &mut App, ctx: &egui::Context) -> bool {
             }
         }
         menu_sep(ui, &pal);
-        for c in [Cmd::Install, Cmd::SetDefault, Cmd::About, Cmd::Quit] {
+        for c in [Cmd::ConnectServer, Cmd::Install, Cmd::SetDefault, Cmd::About, Cmd::Quit] {
             if cmd_item(ui, app, c) {
                 run = Some(c);
             }

@@ -34,6 +34,8 @@ struct Cache {
     /// mounted, ejected) so Computer views reload.
     drives: Vec<crate::drives::Drive>,
     drives_gen: u64,
+    /// Mounted network shares and attached phones (gio).
+    net: Vec<crate::network::Place>,
 }
 
 struct Snapshot {
@@ -43,15 +45,20 @@ struct Snapshot {
     marks: std::collections::HashMap<PathBuf, (bool, bool)>,
     files: std::collections::HashSet<PathBuf>,
     drives: Vec<crate::drives::Drive>,
+    net: Vec<crate::network::Place>,
 }
 
 thread_local! {
-    static CACHE: RefCell<Cache> = RefCell::new(Cache { at: None, mounts: vec![], recents: vec![], places: vec![], marks: Default::default(), files: Default::default(), filter: String::new(), job: None, inputs: 0, generation: 0, drives: vec![], drives_gen: 0 });
+    static CACHE: RefCell<Cache> = RefCell::new(Cache { at: None, mounts: vec![], recents: vec![], places: vec![], marks: Default::default(), files: Default::default(), filter: String::new(), job: None, inputs: 0, generation: 0, drives: vec![], drives_gen: 0, net: vec![] });
 }
 
 /// Drives as of the last refresh.
 pub fn drives() -> Vec<crate::drives::Drive> {
     CACHE.with(|c| c.borrow().drives.clone())
+}
+
+pub fn net_places() -> Vec<crate::network::Place> {
+    CACHE.with(|c| c.borrow().net.clone())
 }
 
 pub fn drives_generation() -> u64 {
@@ -129,8 +136,9 @@ pub fn refresh(app: &App, ctx: &egui::Context) {
                     c.places = s.places;
                     c.marks = s.marks;
                     c.files = s.files;
-                    if c.drives != s.drives {
+                    if c.drives != s.drives || c.net != s.net {
                         c.drives = s.drives;
+                        c.net = s.net;
                         c.drives_gen += 1;
                     }
                     c.job = None;
@@ -159,7 +167,8 @@ pub fn refresh(app: &App, ctx: &egui::Context) {
         let (table, tools) = (crate::drives::mounts_table(), crate::drives::Tools::current());
         std::thread::spawn(move || {
             let (recent_in, marks_in) = inputs;
-            let drives = tools.map(|t| crate::drives::list(&t)).unwrap_or_default();
+            let drives = tools.as_ref().map(crate::drives::list).unwrap_or_default();
+            let net = tools.as_ref().filter(|t| t.has("gio")).map(crate::network::places).unwrap_or_default();
             let mounts = fsx::mounts_in(&table)
                 .into_iter()
                 .map(|m| {
@@ -180,7 +189,7 @@ pub fn refresh(app: &App, ctx: &egui::Context) {
                 }
                 marks.insert(b.clone(), (exists, link));
             }
-            let _ = tx.send(Snapshot { mounts, recents, places: places(), marks, files, drives });
+            let _ = tx.send(Snapshot { mounts, recents, places: places(), marks, files, drives, net });
             ctx.request_repaint();
         });
         c.job = Some(rx);
@@ -326,6 +335,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         };
         // Right-click opens the same searchable command menu as the file list.
         let drives = drives();
+        let net = net_places();
         let ctx_menu = |resp: &egui::Response, actions: &mut Vec<Action>, path: &Path, bookmark: bool| {
             if resp.secondary_clicked() {
                 let pos = resp.interact_pointer_pos().unwrap_or(resp.rect.left_bottom());
@@ -333,7 +343,8 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                     Some(dev) => drives.iter().find(|d| d.dev == dev).cloned(),
                     None => crate::drives::at_mount(&drives, path).cloned(),
                 };
-                actions.push(Action::Open(crate::ctxmenu::build_place(active, path.to_path_buf(), bookmark, drive, pos)));
+                let network = net.iter().find(|n| n.path.as_deref() == Some(path)).map(|n| n.uri.clone());
+                actions.push(Action::Open(crate::ctxmenu::build_place(active, path.to_path_buf(), bookmark, drive, network, pos)));
             }
         };
         let show_ext = app.cfg.show_ext;
@@ -494,6 +505,60 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             }
         }
         ui.add_space(6.0);
+        // ---------------- network: mounted shares and attached phones
+        if !net.is_empty() && section(ui, app, "network", "Network", Glyph::Globe) {
+            for place in net.iter() {
+                let name = if place.device { place.name.clone() } else { crate::network::label(&place.uri) };
+                if !matches(&name) {
+                    continue;
+                }
+                let (r, resp) = ui.allocate_exact_size(vec2(width, row_h), Sense::click());
+                let row_hover = ui.rect_contains_pointer(r) && app.drag.is_none();
+                if row_hover || (ctx_target.is_some() && ctx_target == place.path) {
+                    ui.painter().rect_filled(r.shrink2(vec2(6.0, 1.0)), CornerRadius::same(5), pal.row_hover);
+                }
+                let ic = Rect::from_center_size(pos2(r.left() + 36.0, r.center().y), Vec2::splat(15.0));
+                let busy = app.connecting(&place.uri);
+                let col = if place.mounted { pal.text_dim } else { pal.text_dim.gamma_multiply(0.6) };
+                paint_glyph(ui.painter(), ic, if place.device { Glyph::Phone } else { Glyph::Globe }, col);
+                let btn = Rect::from_center_size(pos2(r.right() - 20.0, r.center().y), Vec2::splat(20.0));
+                let reserve = if place.mounted || busy { 26.0 } else { 0.0 };
+                let tcol = if place.mounted { pal.text } else { pal.text_dim.gamma_multiply(0.75) };
+                let g = crate::listing::elided(ui, &name, font.clone(), r.width() - 60.0 - reserve, tcol);
+                ui.painter().galley(pos2(r.left() + 52.0, r.center().y - g.size().y / 2.0), g, tcol);
+                if busy {
+                    crate::ui::spinner(ui.painter(), btn.center(), 5.5, pal.accent, ui.input(|i| i.time));
+                    ui.ctx().request_repaint();
+                } else if place.mounted {
+                    let b = ui.interact(btn, Id::new(("disconnect", &place.uri)), Sense::click());
+                    if row_hover {
+                        if b.hovered() {
+                            ui.painter().rect_filled(btn, CornerRadius::same(4), pal.row_hover);
+                        }
+                        paint_glyph(ui.painter(), btn.shrink(4.0), Glyph::Eject, if b.hovered() { pal.text } else { pal.text_dim });
+                        crate::ui::note_control(ui, btn, "disconnect button");
+                    }
+                    if b.clicked() {
+                        app.disconnect(place.uri.clone(), place.path.clone());
+                    }
+                    let _ = b.on_hover_text(format!("Disconnect {name}"));
+                }
+                let resp = resp.on_hover_text(match &place.path {
+                    Some(p) => format!("{}\n{}", place.uri, p.display()),
+                    None => format!("{}\nClick to connect", place.uri),
+                });
+                match (&place.path, resp.clicked() || resp.middle_clicked()) {
+                    (Some(p), _) => nav(&mut actions, &resp, p),
+                    (None, true) => app.connect(place.uri.clone(), crate::network::Login { user: String::new(), password: String::new(), anonymous: false }, Some((active, mods.ctrl || resp.middle_clicked()))),
+                    _ => {}
+                }
+                if let Some(p) = &place.path {
+                    drop_files(ui, &app.drag, &mut actions, &resp, p);
+                    ctx_menu(&resp, &mut actions, p, false);
+                }
+            }
+            ui.add_space(6.0);
+        }
         // ---------------- places
         if section(ui, app, "places", "Places", Glyph::Folder) {
             let places = CACHE.with(|c| c.borrow().places.clone());
