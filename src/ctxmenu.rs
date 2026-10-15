@@ -106,7 +106,7 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
     let ents: Vec<(PathBuf, bool, bool, String)> = if background { vec![] } else { t.target_entries().iter().map(|e| (e.path.clone(), e.is_dir, e.is_link, e.ext().to_string())).collect() };
     let mut items = vec![];
     if ents.is_empty() {
-        if !computer {
+        if !computer && t.archive.is_none() {
             items.push(Item::cmd(Cmd::NewFolder));
             items.push(Item::cmd(Cmd::NewFile));
             items.push(Item::cmd(Cmd::Paste));
@@ -154,6 +154,11 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             items.push(Item::cmd(Cmd::ToggleBookmark));
             items.push(Item::cmd(Cmd::Properties));
         }
+    } else if t.archive.is_some() {
+        // Inside an archive: open, copy out, extract.
+        items.push(Item::labeled(Cmd::Activate, "Open"));
+        items.push(Item::cmd(Cmd::Copy));
+        items.push(Item::cmd(Cmd::ExtractHere));
     } else if computer {
         let drives: Vec<crate::drives::Drive> = ents.iter().filter_map(|e| app.drive_at(&e.0)).collect();
         let mounted: Vec<&PathBuf> = ents.iter().filter(|e| tab::drive_dev(&e.0).is_none()).map(|e| &e.0).collect();
@@ -230,6 +235,12 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         items.push(Item::sep());
         items.push(Item::labeled(Cmd::Rename, if single { "Rename" } else { "Rename All (inline)" }));
         items.push(Item::cmd(Cmd::Duplicate));
+        if crate::archive::available() {
+            if ents.iter().any(|e| !e.1 && crate::archive::is_archive(&e.0.to_string_lossy())) {
+                items.push(Item::cmd(Cmd::ExtractHere));
+            }
+            items.push(Item::sub("compress", "Compress", vec![Item::labeled(Cmd::CompressZip, "Zip (.zip)"), Item::labeled(Cmd::CompressTarGz, "Tar.gz (.tar.gz)"), Item::labeled(Cmd::CompressTarXz, "Tar.xz (.tar.xz)"), Item::labeled(Cmd::Compress7z, "7-Zip (.7z)")]));
+        }
         items.push(Item::cmd(Cmd::CreateLink));
         if in_trash {
             items.push(Item::cmd(Cmd::RestoreTrash));

@@ -75,6 +75,9 @@ pub struct Inspector {
     pending: Option<std::sync::mpsc::Receiver<Content>>,
     /// Metadata card shows every known field, not just the basics.
     extra_meta: bool,
+    /// A file inside an archive being extracted to preview (where it landed, and the
+    /// entry it stands for).
+    extracting: Option<(std::sync::mpsc::Receiver<Option<PathBuf>>, Entry)>,
 }
 
 /// Test-only views of the preview state (simulations check behaviour, not pixels).
@@ -133,6 +136,7 @@ impl Default for Inspector {
             show_meta: false,
             pending: None,
             extra_meta: false,
+            extracting: None,
         }
     }
 }
@@ -154,6 +158,23 @@ impl Inspector {
         if computer {
             self.content = Content::Volume;
             return;
+        }
+        self.extracting = None;
+        // Inside an archive: a file is extracted to the cache and previewed from there.
+        if !e.path.exists() {
+            if let Some((archive, inner)) = crate::archive::split(&e.path) {
+                self.content = Content::Other;
+                if !e.is_dir && e.size <= 64 << 20 {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let ctx = ctx.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(crate::archive::extract_for_open(&archive, &inner).ok());
+                        ctx.request_repaint();
+                    });
+                    self.extracting = Some((rx, e.clone()));
+                }
+                return;
+            }
         }
         if e.special {
             // Sockets, FIFOs and device nodes: opening or reading them can block forever.
@@ -352,6 +373,18 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         }
     }
     ins.poll();
+    if let Some((rx, e)) = &ins.extracting {
+        if let Ok(got) = rx.try_recv() {
+            let mut e = e.clone();
+            ins.extracting = None;
+            if let Some(path) = got {
+                e.path = path;
+                let key = ins.current.clone();
+                ins.load(&e, false, ui.ctx());
+                ins.current = key;
+            }
+        }
+    }
     // ---------------------------------------------------------- header
     let hdr = Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + 30.0));
     ui.painter().line_segment([hdr.left_bottom(), hdr.right_bottom()], Stroke::new(1.0, pal.border));

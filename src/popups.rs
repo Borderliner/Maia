@@ -1384,7 +1384,7 @@ fn remove_binding(app: &mut App, c: Cmd, b: &Binding) {
 
 // ------------------------------------------------------------------ options
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Opt {
     Theme,
     Font,
@@ -1430,6 +1430,8 @@ enum Opt {
     InspectorLayout,
     Startup,
     NewTab,
+    DefaultFm,
+    SingleInstance,
 }
 
 const OPTS: &[(Opt, &str, &str, &str)] = &[
@@ -1477,6 +1479,8 @@ const OPTS: &[(Opt, &str, &str, &str)] = &[
     (Opt::InspectorLayout, "Inspector & startup", "Inspector layout", "Where the inspector docks."),
     (Opt::Startup, "Inspector & startup", "On startup", "What to show when Maia starts."),
     (Opt::NewTab, "Inspector & startup", "New tab shows", "Folder opened by a new tab."),
+    (Opt::DefaultFm, "System", "Default file manager", "Open folders from other apps in Maia."),
+    (Opt::SingleInstance, "System", "Reuse the open window", "Folders from other apps and new launches open as tabs here."),
 ];
 
 /// Choice control: a box showing the value and a chevron; click steps
@@ -1507,6 +1511,7 @@ fn choice<T: PartialEq + Clone>(ui: &mut Ui, id: &str, cur: &mut T, opts: &[(T, 
 /// Switch: a pill whose knob carries a check (on) or a cross (off).
 fn toggle(ui: &mut Ui, on: &mut bool, pal: &Palette) -> bool {
     let (r, resp) = ui.allocate_exact_size(vec2(32.0, 16.0), Sense::click());
+    crate::ui::note_control(ui, r, "switch");
     let t = ui.ctx().animate_bool(resp.id, *on);
     let lerp_c = |a: Color32, b: Color32| Color32::from_rgb(egui::lerp(a.r() as f32..=b.r() as f32, t) as u8, egui::lerp(a.g() as f32..=b.g() as f32, t) as u8, egui::lerp(a.b() as f32..=b.b() as f32, t) as u8);
     let off_track = Color32::from_rgb(((pal.border.r() as u16 * 2 + pal.text_dim.r() as u16) / 3) as u8, ((pal.border.g() as u16 * 2 + pal.text_dim.g() as u16) / 3) as u8, ((pal.border.b() as u16 * 2 + pal.text_dim.b() as u16) / 3) as u8);
@@ -1554,6 +1559,9 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
     }
     match o {
         Opt::Theme => f!(theme),
+        // Lives in the desktop's settings, not Maia's: nothing to reset.
+        Opt::DefaultFm => true,
+        Opt::SingleInstance => f!(single_instance),
         Opt::Font => f!(font_family),
         Opt::InspectorFontSize => f!(inspector_font_size),
         Opt::RectButtons => f!(rect_buttons),
@@ -1613,6 +1621,13 @@ fn option_control(ui: &mut Ui, app: &mut App, o: Opt) -> bool {
 
 fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layouts: &[String], app_preview: &mut Option<ThemeName>) -> bool {
     let pal = *pal;
+    if o == Opt::DefaultFm {
+        let mut on = app.default_fm() == Some(true);
+        if toggle(ui, &mut on, &pal) {
+            app.set_default_fm(on);
+        }
+        return false;
+    }
     let c = &mut app.cfg;
     match o {
         Opt::Font => ui.add(egui::TextEdit::singleline(&mut c.font_family).hint_text("System font").desired_width(150.0)).lost_focus(),
@@ -1674,6 +1689,8 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         Opt::SizesNet => toggle(ui, &mut c.sizes_network, &pal),
         Opt::SelectionBoxes => toggle(ui, &mut c.selection_boxes, &pal),
         Opt::SystemIcons => toggle(ui, &mut c.system_icons, &pal),
+        Opt::SingleInstance => toggle(ui, &mut c.single_instance, &pal),
+        Opt::DefaultFm => false,
         Opt::InspectorFont => {
             let r = ui.add(egui::TextEdit::singleline(&mut c.inspector_font).hint_text("monospace").desired_width(150.0));
             r.changed()
@@ -1751,7 +1768,10 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
     st.sel = st.sel.min(visible.len().saturating_sub(1));
     if keys.2 {
         if let Some(&i) = visible.get(st.sel) {
-            if opt_flip(&mut app.cfg, OPTS[i].0) {
+            if OPTS[i].0 == Opt::DefaultFm {
+                let on = app.default_fm() == Some(true);
+                app.set_default_fm(!on);
+            } else if opt_flip(&mut app.cfg, OPTS[i].0) {
                 changed = true;
             }
         }
@@ -1828,7 +1848,7 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
             }
             ui.add_space(10.0);
             ui.horizontal_wrapped(|ui| {
-                for (label, c) in [("Open config file", Cmd::OpenConfig), ("Reset to defaults", Cmd::ResetConfig), ("Install Maia", Cmd::Install), ("Set as default file manager", Cmd::SetDefault)] {
+                for (label, c) in [("Open config file", Cmd::OpenConfig), ("Reset to defaults", Cmd::ResetConfig), ("Install Maia", Cmd::Install)] {
                     if ui.button(label).clicked() {
                         cmd = Some(c);
                     }
@@ -3154,6 +3174,7 @@ fn opt_flip(c: &mut crate::config::Config, o: Opt) -> bool {
         Opt::OpenFoldersNewTab => &mut c.open_folders_new_tab,
         Opt::DblClickParent => &mut c.dblclick_bg_parent,
         Opt::ReverseScroll => &mut c.reverse_scroll,
+        Opt::SingleInstance => &mut c.single_instance,
         _ => return false,
     };
     *b = !*b;

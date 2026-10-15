@@ -159,6 +159,8 @@ pub struct Config {
     pub single_click: bool,
     pub single_click_folders_only: bool,
     pub open_folders_new_tab: bool,
+    /// Folders opened from other apps or a second launch go to the open window as tabs.
+    pub single_instance: bool,
     pub dblclick_bg_parent: bool,
     pub reverse_scroll: bool,
     pub char_key_action: CharKeyAction,
@@ -215,6 +217,7 @@ impl Default for Config {
             single_click: false,
             single_click_folders_only: false,
             open_folders_new_tab: false,
+            single_instance: true,
             dblclick_bg_parent: false,
             reverse_scroll: false,
             char_key_action: CharKeyAction::TriggerHotkey,

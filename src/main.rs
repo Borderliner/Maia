@@ -1,6 +1,7 @@
 //! Maia: a fast, keyboard-first file manager for Linux.
 
 mod app;
+mod archive;
 mod clipboard;
 mod commands;
 mod contentsearch;
@@ -24,6 +25,7 @@ mod rename;
 mod runner;
 mod sidebar;
 mod signals;
+mod single;
 mod svg;
 mod syntax;
 mod stats;
@@ -63,6 +65,7 @@ Options:
 
 fn main() {
     let mut paths: Vec<PathBuf> = vec![];
+    let mut new_window = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -98,6 +101,7 @@ fn main() {
                 return;
             }
             "--window" => {
+                new_window = true;
                 if let Some(p) = args.next() {
                     paths.push(PathBuf::from(p));
                 }
@@ -110,8 +114,19 @@ fn main() {
             }
         }
     }
+    // A launch that isn't asking for its own window hands its folders to the open one.
+    let listener = if new_window || !config::load_config().single_instance {
+        None
+    } else {
+        let sock = single::socket_path();
+        if single::forward_to(&sock, &paths) {
+            return;
+        }
+        single::claim_at(&sock).map(|l| (l, sock))
+    };
     runner::run(
         runner::Options { title: "Maia", app_id: "io.github.yappologistic.Maia", size: [1240.0, 780.0], min_size: [520.0, 340.0], icon: install::window_icon() },
         paths,
+        listener,
     );
 }
