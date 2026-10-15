@@ -331,6 +331,36 @@ echo "gio: unknown $*" >&2; exit 1
     d
 }
 
+/// A fake `pkexec` for administrator tests: it plays root by making the folders the
+/// command touches writable for the moment it runs, and refuses (exit 126, as a dismissed
+/// password dialog does) while a file named `deny` exists beside it.
+pub fn fake_pkexec(name: &str) -> PathBuf {
+    let d = root().join("admin").join(name);
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let script = r#"#!/bin/bash
+D="$(dirname "$0")"
+echo "pkexec $*" >> "$D/log"
+[ -e "$D/deny" ] && { echo "Error executing command as another user: Request dismissed" >&2; exit 126; }
+opened=()
+after=0
+for a in "$@"; do
+  [ "$a" = -- ] && { after=1; continue; }
+  [ $after = 1 ] || continue
+  for d in "$a" "$(dirname "$a")"; do
+    if [ -d "$d" ] && [ ! -w "$d" ]; then chmod u+w "$d"; opened+=("$d"); fi
+  done
+done
+"$@"; rc=$?
+for d in "${opened[@]}"; do chmod u-w "$d" 2>/dev/null; done
+exit $rc
+"#;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(d.join("pkexec"), script).unwrap();
+    std::fs::set_permissions(d.join("pkexec"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    d
+}
+
 /// Real media for preview/thumbnail tests, made with ffmpeg inside the sandbox: a video,
 /// an MP3 with cover art, a hand-written one-page PDF, an SVG, a PNG and a corrupt video.
 pub fn media_fixture(name: &str) -> PathBuf {
@@ -2382,6 +2412,84 @@ mod journeys {
         let log = std::fs::read_to_string(d.join("log")).unwrap_or_default();
         assert!(log.contains("gio mount smb://nas/media") && log.contains("gio mount -u smb://nas/media"), "{log}");
         report("network", &s);
+    }
+
+    /// Administrator access, on a fake pkexec: pasting into, deleting in, creating in and
+    /// renaming in a folder the user may not write each fail first and then succeed through
+    /// "Retry as administrator" / "Use administrator"; a dismissed password dialog leaves
+    /// everything as it was and says so.
+    #[test]
+    fn administrator_retries_refused_operations() {
+        if !sandboxed() {
+            return;
+        }
+        let d = fake_pkexec("main");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(d.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let home = fixture("admin");
+        let locked = home.join("System");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("keep.conf"), "x").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let mut s = Sim::new(&home.join("Documents"), vec2(1280.0, 800.0));
+        s.cmd(ViewDetails);
+        s.settle();
+        let finished = |s: &Sim| !s.app.jobs.is_empty() && s.app.jobs.iter().all(|j| j.finished_at.is_some());
+        // Paste into it: refused, then copied as administrator.
+        select_path(&mut s, &home.join("Documents/notes.txt"));
+        s.act("key ctrl+c");
+        go(&mut s, &locked);
+        s.act("key ctrl+v");
+        wait_until(&mut s, "paste refused", 10, |s| s.texts.iter().any(|(_, t)| t == "Retry as administrator"));
+        look(&mut s, "permission refused");
+        s.click_text("Retry as administrator");
+        wait_until(&mut s, "copied as administrator", 10, |_| locked.join("notes.txt").exists());
+        assert!(std::fs::read_to_string(d.join("log")).unwrap().contains("cp -a -- "), "one cp through pkexec");
+        wait_until(&mut s, "job finished", 10, finished);
+        // Delete inside it (Shift+Delete asks first).
+        s.settle();
+        select_path(&mut s, &locked.join("keep.conf"));
+        s.act("key shift+Delete");
+        s.idle(2);
+        s.act("key Enter");
+        wait_until(&mut s, "delete refused", 10, |s| s.texts.iter().any(|(_, t)| t == "Retry as administrator"));
+        s.click_text("Retry as administrator");
+        wait_until(&mut s, "deleted as administrator", 10, |_| !locked.join("keep.conf").exists());
+        // A new folder: asked, then made.
+        s.settle();
+        s.act("key ctrl+shift+n");
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with("You don't have permission")), "asked first");
+        s.click_text("Use administrator");
+        wait_until(&mut s, "folder made", 10, |_| locked.join("New folder").is_dir());
+        // Rename: asked, then renamed.
+        s.settle();
+        select_path(&mut s, &locked.join("notes.txt"));
+        s.act("key F2");
+        s.act("key ctrl+a");
+        s.act("text settings.txt");
+        s.act("key Enter");
+        s.idle(2);
+        s.click_text("Use administrator");
+        wait_until(&mut s, "renamed", 10, |_| locked.join("settings.txt").exists() && !locked.join("notes.txt").exists());
+        // The password dialog dismissed: nothing changes, and the job says why.
+        std::fs::write(d.join("deny"), "").unwrap();
+        s.settle();
+        s.act("key ctrl+shift+n");
+        s.idle(2);
+        s.click_text("Use administrator");
+        wait_until(&mut s, "refusal reported", 10, |s| s.app.jobs.iter().any(|j| j.progress.lock().unwrap().errors.iter().any(|e| e == "Administrator access was not given")));
+        assert!(!locked.join("New folder (1)").exists());
+        look(&mut s, "after administrator work");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        report("admin", &s);
     }
 
     #[test]

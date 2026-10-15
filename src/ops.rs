@@ -30,6 +30,8 @@ pub enum OpKind {
     Extract { archive: PathBuf, members: Vec<PathBuf>, dest: PathBuf },
     /// `srcs` (all in one folder) packed into the archive `out`.
     Compress { srcs: Vec<PathBuf>, out: PathBuf },
+    /// One command run as administrator (through pkexec).
+    Admin { task: crate::admin::Task, tools: crate::drives::Tools },
 }
 
 impl OpKind {
@@ -41,6 +43,7 @@ impl OpKind {
             OpKind::Delete { .. } => "Deleting",
             OpKind::Extract { .. } => "Extracting",
             OpKind::Compress { .. } => "Compressing",
+            OpKind::Admin { .. } => "Working as administrator",
         }
     }
 }
@@ -56,6 +59,8 @@ pub struct Progress {
     pub finished: bool,
     /// (src, dst) pairs actually produced, for undo.
     pub produced: Vec<(PathBuf, PathBuf)>,
+    /// Items refused for lack of permission (offered again as administrator).
+    pub denied: Vec<PathBuf>,
 }
 
 pub struct Job {
@@ -77,10 +82,12 @@ pub fn spawn(id: u64, kind: OpKind, ctx: egui::Context) -> Job {
     let n = match &kind {
         OpKind::Copy { srcs, .. } | OpKind::Move { srcs, .. } | OpKind::Compress { srcs, .. } => srcs.len(),
         OpKind::Trash { paths } | OpKind::Delete { paths } | OpKind::Extract { members: paths, .. } => paths.len(),
+        OpKind::Admin { .. } => 1,
     };
     let label = match &kind {
         OpKind::Extract { archive, members, .. } if members.is_empty() => format!("Extracting {}", name_of(archive)),
         OpKind::Compress { out, .. } => format!("Compressing into {}", name_of(out)),
+        OpKind::Admin { task, .. } => task.label(),
         _ => format!("{} {} item{}", kind.verb(), n, if n == 1 { "" } else { "s" }),
     };
     let (p2, c2, k2, pa2) = (progress.clone(), cancel.clone(), kind.clone(), pause.clone());
@@ -130,7 +137,13 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 }
                 match copy_tree(s, &dst, p, cancel, ctx, policy == Conflict::Merge) {
                     Ok(()) => p.lock().unwrap().produced.push((s.clone(), dst)),
-                    Err(e) => p.lock().unwrap().errors.push(format!("{}: {e}", s.display())),
+                    Err(e) => {
+                        let mut g = p.lock().unwrap();
+                        if crate::admin::denied(&e) {
+                            g.denied.push(s.clone());
+                        }
+                        g.errors.push(format!("{}: {e}", s.display()));
+                    }
                 }
                 p.lock().unwrap().done_items += 1;
             }
@@ -164,7 +177,13 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 };
                 match r {
                     Ok(()) => p.lock().unwrap().produced.push((s.clone(), dst)),
-                    Err(e) => p.lock().unwrap().errors.push(format!("{}: {e}", s.display())),
+                    Err(e) => {
+                        let mut g = p.lock().unwrap();
+                        if crate::admin::denied(&e) {
+                            g.denied.push(s.clone());
+                        }
+                        g.errors.push(format!("{}: {e}", s.display()));
+                    }
                 }
                 p.lock().unwrap().done_items += 1;
                 ctx.request_repaint();
@@ -182,6 +201,13 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 }
                 p.lock().unwrap().done_items += 1;
                 ctx.request_repaint();
+            }
+        }
+        OpKind::Admin { task, tools } => {
+            p.lock().unwrap().total_items = 1;
+            match crate::admin::run(tools, task) {
+                Ok(()) => p.lock().unwrap().done_items = 1,
+                Err(e) => p.lock().unwrap().errors.push(e),
             }
         }
         OpKind::Extract { archive, members, dest } => {
@@ -210,7 +236,11 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 }
                 p.lock().unwrap().current = name_of(s);
                 if let Err(e) = remove_tree(s) {
-                    p.lock().unwrap().errors.push(format!("{}: {e}", s.display()));
+                    let mut g = p.lock().unwrap();
+                    if crate::admin::denied(&e) {
+                        g.denied.push(s.clone());
+                    }
+                    g.errors.push(format!("{}: {e}", s.display()));
                 }
                 p.lock().unwrap().done_items += 1;
                 ctx.request_repaint();

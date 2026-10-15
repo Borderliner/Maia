@@ -909,12 +909,24 @@ impl App {
         }
         // Jobs: mark finished, drop after a moment.
         let mut finished_dirs = vec![];
+        let mut admin_dirs: Vec<PathBuf> = vec![];
         for j in &mut self.jobs {
             if j.finished_at.is_none() && j.progress.lock().unwrap().finished {
                 j.finished_at = Some(Instant::now());
                 match &j.kind {
                     OpKind::Copy { dest, .. } | OpKind::Move { dest, .. } | OpKind::Extract { dest, .. } => finished_dirs.push(dest.clone()),
                     OpKind::Compress { out, .. } => finished_dirs.extend(out.parent().map(Path::to_path_buf)),
+                    // Done by another process: show the result now rather than wait for the watcher.
+                    OpKind::Admin { task, .. } => {
+                        use crate::admin::Task;
+                        let dirs: Vec<PathBuf> = match task {
+                            Task::Copy { dest, .. } | Task::Move { dest, .. } => vec![dest.clone()],
+                            Task::Delete { paths } => paths.iter().filter_map(|p| p.parent().map(Path::to_path_buf)).collect(),
+                            Task::NewFolder(p) | Task::NewFile(p) | Task::Rename { from: p, .. } => p.parent().map(Path::to_path_buf).into_iter().collect(),
+                        };
+                        admin_dirs.extend(dirs.iter().cloned());
+                        finished_dirs.extend(dirs);
+                    }
                     _ => {}
                 }
                 let p = j.progress.lock().unwrap();
@@ -935,6 +947,13 @@ impl App {
         }
         for d in finished_dirs {
             self.stats.invalidate(&d);
+        }
+        for p in self.panels.values_mut() {
+            for t in &mut p.tabs {
+                if admin_dirs.contains(&t.path) {
+                    t.reload();
+                }
+            }
         }
         self.jobs.retain(|j| match j.finished_at {
             Some(t) => {
@@ -1766,7 +1785,17 @@ impl App {
                         t.pending_rename = Some(dest);
                         t.reload();
                     }
-                    Err(e) => self.toast(format!("Couldn't create: {e}")),
+                    Err(e) => match crate::drives::Tools::current().filter(|t| crate::admin::denied(&e) && t.has("pkexec")) {
+                        // Not ours to write: offer to do it with administrator rights.
+                        Some(tools) => {
+                            let task = if cmd == Cmd::NewFolder { crate::admin::Task::NewFolder(dest.clone()) } else { crate::admin::Task::NewFile(dest.clone()) };
+                            let msg = format!("You don't have permission to change “{}”. Create “{name}” as administrator?", dir.display());
+                            self.popup = Popup::confirm(msg, "Use administrator", Box::new(move |app: &mut App| {
+                                app.actions.push(Action::StartJob(OpKind::Admin { task, tools }));
+                            }));
+                        }
+                        None => self.toast(format!("Couldn't create: {e}")),
+                    },
                 }
             }
             Cmd::ConnectServer => self.popup = Popup::connect(String::new(), None),
@@ -2447,9 +2476,22 @@ impl App {
         t.pending_restore = Some(tab::HistState { path: t.path.clone(), cursor: new_paths.first().cloned(), selected: new_paths.clone(), scroll: t.current_scroll });
         t.reload();
         let pairs: Vec<(PathBuf, PathBuf)> = plan.iter().map(|(p, _)| p.clone()).zip(new_paths).collect();
-        self.undo.push(UndoEntry { label: if batch { format!("Rename {} items", pairs.len()) } else { "Rename".into() }, kind: UndoKind::Rename(pairs) });
-        if !errors.is_empty() {
-            self.toast(errors.join("; "));
+        self.undo.push(UndoEntry { label: if batch { format!("Rename {} items", pairs.len()) } else { "Rename".into() }, kind: UndoKind::Rename(pairs.clone()) });
+        if errors.is_empty() {
+            return;
+        }
+        // One rename refused for lack of permission: offer it as administrator.
+        let tools = crate::drives::Tools::current().filter(|t| t.has("pkexec"));
+        match (&pairs[..], tools) {
+            ([(from, to)], Some(tools)) if errors[0].contains("os error 13") || errors[0].contains("os error 1)") => {
+                self.undo.pop();
+                let task = crate::admin::Task::Rename { from: from.clone(), to: to.clone() };
+                let name = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.popup = Popup::confirm(format!("You don't have permission to rename “{name}”. Rename it as administrator?"), "Use administrator", Box::new(move |app: &mut App| {
+                    app.actions.push(Action::StartJob(OpKind::Admin { task, tools }));
+                }));
+            }
+            _ => self.toast(errors.join("; ")),
         }
     }
 }

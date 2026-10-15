@@ -1393,3 +1393,17 @@ fn network_places_parse_from_gio() {
     assert_eq!(label("sftp://me@host/"), "me@host");
     assert!(parse_mounts("garbage\nMount(\nVolume(3)\n").is_empty());
 }
+
+#[test]
+fn administrator_commands_are_exact() {
+    use crate::admin::{Task, denied};
+    let s = |v: Vec<std::ffi::OsString>| v.into_iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
+    let a = s(Task::Copy { srcs: vec!["/home/me/a b".into(), "/home/me/-x".into()], dest: "/etc".into() }.argv());
+    assert!(a[0].ends_with("/cp"), "absolute program: {}", a[0]);
+    assert_eq!(&a[1..], ["-a", "--", "/home/me/a b", "/home/me/-x", "/etc"], "-- before names that look like options");
+    assert_eq!(&s(Task::Delete { paths: vec!["/srv/x".into()] }.argv())[1..], ["-rf", "--", "/srv/x"]);
+    assert_eq!(&s(Task::Rename { from: "/etc/a".into(), to: "/etc/b".into() }.argv())[1..], ["-T", "--", "/etc/a", "/etc/b"]);
+    assert!(s(Task::NewFolder("/opt/n".into()).argv())[0].ends_with("/mkdir"));
+    assert!(denied(&std::io::Error::from_raw_os_error(libc::EACCES)) && denied(&std::io::Error::from_raw_os_error(libc::EPERM)));
+    assert!(!denied(&std::io::Error::from_raw_os_error(libc::EROFS)), "a read-only disk isn't a permission problem");
+}

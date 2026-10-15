@@ -1,5 +1,6 @@
 //! Maia: a fast, keyboard-first file manager for Linux.
 
+mod admin;
 mod app;
 mod archive;
 mod clipboard;
