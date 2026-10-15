@@ -18,8 +18,13 @@ cargo build --release
 ```
 
 `--install` copies the binary to `~/.local/bin/maia` and adds Maia to your app
-launcher. `maia --set-default` makes it the file manager other apps open folders
-with, and `maia --uninstall` removes both again (your settings stay).
+launcher. To make it the file manager other apps open folders with, turn on
+Options > System > Default file manager (or run `maia --set-default`); turning it
+off gives folders back to the one you had before. `maia --uninstall` removes the
+launcher entry and binary again (your settings stay).
+
+While Maia is open, opening a folder from another app or the terminal shows it as
+a new tab in that window. `maia --window PATH` always opens a window of its own.
 
 `./build-dist.sh` makes the smallest build (about 3 MB instead of 4.6). It needs a
 nightly toolchain with `rust-src` and the `lld` linker.
@@ -28,6 +33,10 @@ These are optional. Maia works without them and uses them when they are there:
 
 | Program | Used for |
 |---|---|
+| `bsdtar` (libarchive) | opening zip, tar, 7z, rar and iso archives like folders; extracting and compressing |
+| `gio` (GVFS) | network places (smb, sftp, ftp, WebDAV) and phones over MTP |
+| `pkexec` (polkit) | retrying a refused copy, move, delete or rename as administrator |
+| `git` | change marks on files in git repositories |
 | `ffmpeg`, `ffprobe`, `ffplay` | video and audio previews and thumbnails |
 | `pdfinfo`, `pdftoppm` (poppler) | PDF pages in the inspector |
 | `udisksctl` (udisks2), `lsblk` | mounting, unmounting and ejecting drives |
@@ -58,6 +67,11 @@ Start typing to filter the folder you are in. Some keys to start with:
 | Options | Ctrl+, |
 
 Every binding can be changed from the command palette.
+
+An archive opens like a folder; right-click it for Extract Here, or right-click
+files for Compress. Connect To Server (in the menu, or type an `smb://`, `sftp://`
+or `ftp://` address into Go To) opens network shares, which then stay in the
+sidebar's Network section.
 
 Settings live in `~/.config/maia/config.json`, bookmarks and layouts in
 `~/.local/share/maia/userdata.json`.
