@@ -1925,7 +1925,8 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
             ui.add_space(10.0);
             ui.horizontal_wrapped(|ui| {
                 for (label, c) in [("Open config file", Cmd::OpenConfig), ("Reset to defaults", Cmd::ResetConfig), ("Install Maia", Cmd::Install)] {
-                    if ui.button(label).clicked() {
+                    // The popup's own size, like the option rows above, not the list's font.
+                    if ui.button(egui::RichText::new(label).size(12.5)).clicked() {
                         cmd = Some(c);
                     }
                 }
