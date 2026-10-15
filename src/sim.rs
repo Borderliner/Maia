@@ -2707,7 +2707,7 @@ mod journeys {
         s.act("key ctrl+p");
         s.act("text smb://nohost/x");
         s.act("key Enter");
-        wait_until(&mut s, "failure reported", 10, |s| s.app.toast.as_ref().is_some_and(|t| t.0 == "Couldn't connect to x on nohost: No such file or directory"));
+        wait_until(&mut s, "failure reported", 10, |s| s.app.toast.as_ref().is_some_and(|t| t.0 == "Couldn't connect to x on nohost: No server or share by that name"));
         // Recent servers fill the address.
         s.cmd(ConnectServer);
         s.idle(3);

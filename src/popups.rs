@@ -2324,7 +2324,7 @@ fn connect(app: &mut App, ctx: &egui::Context, st: &mut ConnectState) -> bool {
         ui.add_space(6.0);
         let field = |ui: &mut Ui, label: &str, id: &'static str, text: &mut String, hint: &str, secret: bool, focus: bool| {
             ui.label(egui::RichText::new(label).small().color(pal.text_dim));
-            let r = ui.add_enabled(!busy, egui::TextEdit::singleline(text).hint_text(hint).password(secret).desired_width(f32::INFINITY));
+            let r = ui.add_enabled(!busy, egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_dim)).password(secret).desired_width(f32::INFINITY));
             crate::ui::note_control(ui, r.rect, id);
             if focus {
                 r.request_focus();

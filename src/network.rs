@@ -104,6 +104,10 @@ fn gio(t: &Tools, args: &[&str]) -> Result<String, String> {
 fn clean(err: &str) -> String {
     let line = err.lines().map(str::trim).filter(|l| !l.is_empty()).last().unwrap_or("Failed");
     let line = line.rsplit(": ").next().unwrap_or(line).trim().trim_end_matches('.');
+    // What gio says for a host or share that isn't there.
+    if line == "No such file or directory" {
+        return "No server or share by that name".into();
+    }
     let mut s = line.to_string();
     if let Some(c) = s.get(..1) {
         s = c.to_uppercase() + &s[1..];
