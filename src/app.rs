@@ -614,6 +614,7 @@ impl App {
                         t.load_children(&d);
                     }
                 }
+                crate::contentsearch::pump(t, self.cfg.show_hidden);
                 if t.poll() {
                     t.dirty = true;
                 }
@@ -1342,6 +1343,7 @@ impl App {
                 }
             }
             Cmd::FocusFilter => self.panel().focus_filter = true,
+            Cmd::ContentSearch => crate::contentsearch::toggle(self.panel()),
             Cmd::TypesFilter => self.popup = Popup::types(self.active),
             Cmd::ToggleHidden => {
                 self.cfg.show_hidden = !self.cfg.show_hidden;

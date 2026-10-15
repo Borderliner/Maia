@@ -165,6 +165,7 @@ commands! {
 
     ToggleFlatten, "toggle_flatten", View, "Toggle Expand Folder", "Show every file under this folder in one flat, searchable list.", ["Ctrl+E"];
     FocusFilter, "focus_filter", View, "Focus Filter", "Put the cursor in the filter box.", ["Ctrl+F"];
+    ContentSearch, "search_contents", View, "Search File Contents", "Switch the filter between file names and the text inside files.", ["Ctrl+Shift+F"];
     TypesFilter, "types_filter", View, "Filter By Type", "Choose which file types are shown.", ["Alt+T"];
     ToggleHidden, "toggle_hidden", View, "Toggle Hidden Files", "Show or hide dotfiles.", ["Ctrl+H"];
     ToggleSystem, "toggle_system", View, "Toggle System Files", "Show or hide backup files and special files (sockets, devices).", [];

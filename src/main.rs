@@ -3,6 +3,7 @@
 mod app;
 mod clipboard;
 mod commands;
+mod contentsearch;
 mod config;
 mod drives;
 mod ctxmenu;

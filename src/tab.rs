@@ -148,6 +148,8 @@ pub struct Tab {
     cursor_first: bool,
     /// Drag across checkboxes: the state being painted onto rows.
     pub check_drag: Option<bool>,
+    /// The filter's contents mode and its running search.
+    pub content: crate::contentsearch::State,
 }
 
 /// Rubber-band selection in content coordinates.
@@ -222,6 +224,7 @@ impl Tab {
             walk_secs: None,
             cursor_first: true,
             check_drag: None,
+            content: Default::default(),
         };
         t.reload();
         t
@@ -239,7 +242,7 @@ impl Tab {
     }
 
     pub fn is_loading(&self) -> bool {
-        self.loading.is_some() || !self.tree_loads.is_empty() || self.walk.as_ref().map(|w| !w.done.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(false)
+        self.loading.is_some() || !self.tree_loads.is_empty() || self.walk.as_ref().map(|w| !w.done.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(false) || self.content.busy()
     }
 
     // ------------------------------------------------------------ loading
@@ -807,16 +810,19 @@ impl Tab {
 
     pub fn rebuild(&mut self, c: &ViewCtx) {
         let t0 = std::time::Instant::now();
-        self.rebuild_inner(c);
+        // Contents mode filters by the files its search found instead of by name.
+        let content = self.content.take();
+        self.rebuild_inner(c, content.as_ref());
+        self.content.put(content);
         self.last_rebuild = Some(std::time::Instant::now());
         self.last_rebuild_ms = t0.elapsed().as_secs_f32() * 1000.0;
     }
 
-    fn rebuild_inner(&mut self, c: &ViewCtx) {
+    fn rebuild_inner(&mut self, c: &ViewCtx, content: Option<&crate::contentsearch::Hits>) {
         self.dirty = false;
         self.stream_dirty = false;
         let walking = self.walk.as_ref().map(|w| !w.done.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(false);
-        let q = fuzzy::Query::new(&self.filter);
+        let q = fuzzy::Query::new(if content.is_some() { "" } else { &self.filter });
         let only: HashSet<String> = self.settings.only_types.iter().cloned().collect();
         let (show_folders, show_files) = (self.settings.show_folders, self.settings.show_files);
         let flatten = self.flatten;
@@ -832,6 +838,9 @@ impl Tab {
             if e.is_dir && (!show_folders || flatten) || !e.is_dir && !show_files {
                 return false;
             }
+            if content.is_some_and(|h| e.is_dir || !h.contains_key(&e.path)) {
+                return false;
+            }
             only.is_empty() || only.contains(e.special_kind().map(String::from).unwrap_or_else(|| db.label(&e.name, &e.ext(), e.is_dir, e.is_executable())).as_str())
         };
         let mut hidden_count = 0;
@@ -841,7 +850,7 @@ impl Tab {
         // Fuzzy score of each entry in `top` (same order), when filtering.
         let mut scores: Vec<i32> = vec![];
         let tree_view = self.tree_active();
-        let tree = tree_view && q.is_empty() && only.is_empty();
+        let tree = tree_view && q.is_empty() && only.is_empty() && content.is_none();
         self.dimmed.clear();
         if tree_view && !tree {
             self.rebuild_tree_filtered(c, &q, &hidden_ok, &row_ok);

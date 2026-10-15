@@ -1244,3 +1244,89 @@ fn finished_jobs_read_in_the_past_tense() {
     assert_eq!(finished_label("Moving to trash 2 items"), "Moved to trash 2 items");
     assert_eq!(finished_label("Deleting 1 item"), "Deleted 1 item");
 }
+
+/// Run a tab's contents search to the end and rebuild its view.
+fn pump_contents(t: &mut Tab, hidden: bool) -> Vec<String> {
+    let stats = HashMap::new();
+    let recents = HashSet::new();
+    let ctx = ViewCtx { show_hidden: hidden, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, stats: &stats };
+    let start = Instant::now();
+    loop {
+        crate::contentsearch::pump(t, hidden);
+        t.poll();
+        if !t.is_loading() {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(10), "contents search finished");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    crate::contentsearch::pump(t, hidden);
+    t.rebuild(&ctx);
+    let mut v: Vec<String> = t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn contents_search_finds_text_and_skips_binary_big_and_hidden() {
+    let d = tmpdir("contents");
+    touch(&d.join("a.txt"), "Hello World\n\tsecond   line has Needle here\nthird needle\n");
+    touch(&d.join("b.md"), "nothing to see");
+    touch(&d.join("needle-in-name.txt"), "the name matches, the text does not");
+    std::fs::write(d.join("c.bin"), b"\x7fELF\x00\x00 needle").unwrap();
+    touch(&d.join(".hidden.txt"), "a hidden needle");
+    touch(&d.join("sub/deep.txt"), "NEEDLE at depth");
+    touch(&d.join("long.txt"), &format!("{}needle{}\n", "x".repeat(500), "y".repeat(500)));
+    touch(&d.join("grüße.txt"), "Viel ÄRGER heute\n");
+    // A match across the 64 KB read boundary is still found.
+    let mut seam = vec![b'.'; (64 << 10) - 3];
+    seam.extend_from_slice(b"needle\n");
+    std::fs::write(d.join("seam.txt"), seam).unwrap();
+    // Over the size cap (sparse, so it costs no disk): skipped although it matches.
+    let big = std::fs::File::create(d.join("big.log")).unwrap();
+    std::io::Write::write_all(&mut &big, b"needle\n").unwrap();
+    big.set_len(crate::contentsearch::MAX_BYTES + 1).unwrap();
+    drop(big);
+
+    let mut t = Tab::new(40, d.clone(), ViewSettings::default(), egui::Context::default());
+    pump(&mut t, &HashMap::new());
+    t.content.on = true;
+    t.filter = "needle".into();
+    assert_eq!(pump_contents(&mut t, false), vec!["a.txt", "long.txt", "seam.txt"]);
+    assert_eq!(t.content.snippet(&d.join("a.txt")), Some("second line has Needle here"));
+    let long = t.content.snippet(&d.join("long.txt")).unwrap_or_default().to_string();
+    assert!(long.starts_with('…') && long.contains("needle") && long.chars().count() < 140, "{long}");
+    // Hidden files once they are shown; the subfolder only when flattened.
+    assert_eq!(pump_contents(&mut t, true), vec![".hidden.txt", "a.txt", "long.txt", "seam.txt"]);
+    t.set_flatten(true);
+    assert_eq!(pump_contents(&mut t, false), vec!["a.txt", "deep.txt", "long.txt", "seam.txt"]);
+    t.set_flatten(false);
+    pump(&mut t, &HashMap::new());
+    // Case-insensitive outside ASCII too.
+    t.filter = "ärger".into();
+    assert_eq!(pump_contents(&mut t, false), vec!["grüße.txt"]);
+    assert_eq!(t.content.snippet(&d.join("grüße.txt")), Some("Viel ÄRGER heute"));
+    // Back to names: the same query matches the file name, not the text.
+    t.filter = "needle".into();
+    t.content.on = false;
+    assert_eq!(pump_contents(&mut t, false), vec!["needle-in-name.txt"]);
+    assert!(t.content.take().is_none());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn contents_search_never_opens_a_fifo_and_stops_when_cancelled() {
+    let d = tmpdir("contents_fifo");
+    let fifo = std::ffi::CString::new(d.join("pipe").as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+    touch(&d.join("x.txt"), "needle");
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let mut buf = vec![0u8; 64 << 10];
+    let t = Instant::now();
+    assert_eq!(crate::contentsearch::find(&d.join("pipe"), "needle", &mut buf, &stop), None);
+    assert!(t.elapsed() < Duration::from_secs(1), "the FIFO was not waited on");
+    assert_eq!(crate::contentsearch::find(&d.join("x.txt"), "needle", &mut buf, &stop).as_deref(), Some("needle"));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(crate::contentsearch::find(&d.join("x.txt"), "needle", &mut buf, &stop), None, "a cancelled search reads nothing");
+    let _ = std::fs::remove_dir_all(&d);
+}

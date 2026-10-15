@@ -1207,12 +1207,15 @@ impl App {
         ui.allocate_rect(frame_rect, Sense::hover());
         ui.painter().rect(frame_rect, CornerRadius::same(6), pal.bg, Stroke::new(1.0, if p_filter_active(t) { pal.accent.gamma_multiply(0.7) } else { pal.border }), StrokeKind::Inside);
         paint_glyph(ui.painter(), Rect::from_center_size(pos2(frame_rect.left() + 12.0, frame_rect.center().y), Vec2::splat(12.0)), Glyph::Search, pal.text_dim);
-        let btns = 1.0 + if t.filter.is_empty() { 0.0 } else { 1.0 } + if types_on { 1.0 } else { 0.0 };
+        // A narrow box keeps its room for typing; the palette still switches contents mode.
+        let cont_btn = fw >= 110.0;
+        let btns = 1.0 + if cont_btn { 1.0 } else { 0.0 } + if t.filter.is_empty() { 0.0 } else { 1.0 } + if types_on { 1.0 } else { 0.0 };
         let edit_rect = Rect::from_min_max(pos2(frame_rect.left() + 22.0, frame_rect.top() + 1.0), pos2(frame_rect.right() - 22.0 * btns - 2.0, frame_rect.bottom() - 1.0));
         let shown = vf + vfi;
         let hint = format!("Filter {} {}…", fmt_count(shown), if t.flatten || vf == 0 { if shown == 1 { "file" } else { "files" } } else if shown == 1 { "item" } else { "items" });
         // Short form when the full hint wouldn't fit.
         let hint = if fw < 150.0 { "Filter…".to_string() } else { hint };
+        let hint = if t.content.on { if fw < 150.0 { "Find…".into() } else { "Find in files…".into() } } else { hint };
         let before = t.filter.clone();
         let mut fui = ui.new_child(UiBuilder::new().max_rect(edit_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
         let resp = fui.add(egui::TextEdit::singleline(&mut t.filter).hint_text(hint).frame(false).desired_width(edit_rect.width()).font(egui::TextStyle::Body));
@@ -1251,6 +1254,22 @@ impl App {
             }
         }
         bx -= 22.0;
+        // Contents mode: the filter looks inside files instead of at their names.
+        if cont_btn {
+            let on = t.content.on;
+            let cr = Rect::from_center_size(pos2(bx, frame_rect.center().y), Vec2::splat(18.0));
+            note_control(ui, cr, "contents toggle");
+            let cresp = ui.interact(cr, Id::new(("fcont", id)), Sense::click()).on_hover_text("Search inside files (Ctrl+Shift+F)");
+            if cresp.hovered() || on {
+                ui.painter().rect_filled(cr, CornerRadius::same(4), if on { pal.accent.gamma_multiply(0.35) } else { pal.hover });
+            }
+            paint_glyph(ui.painter(), cr.shrink(3.0), Glyph::Docs, if on { pal.accent } else { pal.text_dim });
+            if cresp.clicked() {
+                t.content.on = !on;
+                t.dirty = true;
+            }
+            bx -= 22.0;
+        }
         if !t.filter.is_empty() {
             let cr = Rect::from_center_size(pos2(bx, frame_rect.center().y), Vec2::splat(18.0));
             let cresp = ui.interact(cr, Id::new(("fclr", id)), Sense::click()).on_hover_text("Clear filter (Esc)");

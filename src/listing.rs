@@ -235,7 +235,8 @@ pub fn listing(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
     if t.check_drag.is_some() && !ui.input(|i| i.pointer.primary_down()) {
         t.check_drag = None;
     }
-    let q = fuzzy::Query::new(&t.filter);
+    // Contents mode matched inside the files: no letters of the name to highlight.
+    let q = fuzzy::Query::new(if t.content.on { "" } else { &t.filter });
     let mut ui = ui.new_child(UiBuilder::new().max_rect(rect).id_salt(("listing", env.panel_id, t.id)));
     ui.set_clip_rect(rect.intersect(ui.clip_rect()));
     match mode_for(t.shown_zoom) {
@@ -255,8 +256,8 @@ pub fn listing(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             "This folder is empty".into()
         };
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, msg, FontId::proportional(env.cfg.font_size), env.pal.text_dim);
-    } else if t.view.is_empty() && t.flatten {
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, "Indexing…", FontId::proportional(env.cfg.font_size), env.pal.text_dim);
+    } else if t.view.is_empty() && (t.flatten || t.content.busy()) {
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, if t.content.busy() { "Searching…" } else { "Indexing…" }, FontId::proportional(env.cfg.font_size), env.pal.text_dim);
     }
     // Files dragged inside Maia and released over this list but not on a folder row
     // (rows got the first chance above) go into this folder. Pointer position, not
@@ -823,7 +824,11 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                 let name_r = Rect::from_min_max(pos2(ic.right() + 7.0, cell.top()), pos2(inner.right() - if env.recents.contains(&e.path) && env.cfg.highlight_recents { 10.0 } else { 0.0 }, cell.bottom()));
                                 if !rename_field(ui, name_r, idx, t, env, &font) {
                                     let name = display_name(&e, env.cfg);
-                                    let rel = e.rel(); let suffix = rel.as_deref().and_then(|r| std::path::Path::new(r).parent()).filter(|p| !p.as_os_str().is_empty()).map(|p| format!("› {}", p.display()));
+                                    let rel = e.rel(); let mut suffix = rel.as_deref().and_then(|r| std::path::Path::new(r).parent()).filter(|p| !p.as_os_str().is_empty()).map(|p| format!("› {}", p.display()));
+                                    // The line that matched, after the name (elided with it).
+                                    if let Some(line) = t.content.snippet(&e.path) {
+                                        suffix = Some(format!("{}{line}", suffix.map(|s| s + "  ").unwrap_or_default()));
+                                    }
                                     let job = name_job(&name, suffix.as_deref(), q, &font, dimc(pal.text), dimc(pal.text_dim), pal.accent, name_r.width(), 1);
                                     let g = ui.fonts_mut(|f| f.layout_job(job));
                                     ui.painter().galley(pos2(name_r.left(), cell.center().y - g.size().y / 2.0), g, pal.text);

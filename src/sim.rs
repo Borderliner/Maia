@@ -689,6 +689,14 @@ impl Rng {
     }
 }
 
+/// Click the control registered as `what` this frame, when there is one.
+pub fn click_control_at(s: &mut Sim, what: &str) {
+    let r = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == what).map(|(_, r, _)| *r));
+    if let Some(r) = r {
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+    }
+}
+
 /// One random user action. Returns a description.
 pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const KEYS: &[&str] = &[
@@ -699,7 +707,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(100) {
+    match rng.below(104) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -771,6 +779,12 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.app.on_dnd(Dnd::Left);
             }
             s.idle(2);
+        }
+        98 => {
+            // Contents mode: the filter's toggle, then a query typed into the listing.
+            click_control_at(s, "contents toggle");
+            let t = *rng.pick(&["line", "fn", "zzz", "Report", "ü"]);
+            s.act(&format!("text {t}"));
         }
         97 => {
             // A drag that leaves the window (handed to the system when it carries files).
@@ -2056,6 +2070,69 @@ mod journeys {
         s.settle();
         look(&mut s, "after drag and drop");
         report("dnd", &s);
+    }
+
+    /// Search inside files: the filter's contents toggle, a typed query with the matching
+    /// line beside each name, binary files left out, flattened search, every view and
+    /// width, a new query, and back to matching names.
+    #[test]
+    fn search_inside_files() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("contents");
+        let d = home.join("Documents");
+        std::fs::write(d.join("todo.txt"), "buy xyzzy\n\tCall the Plumber about the leak\n").unwrap();
+        std::fs::write(d.join("blob.bin"), b"\x00\x01plumber").unwrap();
+        std::fs::write(d.join("Taxes/2025/letter.txt"), "plumber invoice attached").unwrap();
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        let names = |s: &Sim| -> Vec<String> {
+            let t = s.tab();
+            let mut v: Vec<String> = t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect();
+            v.sort();
+            v
+        };
+        click_control(&mut s, "contents toggle");
+        assert!(s.tab().content.on, "the toggle switches contents mode on");
+        s.act("text plumber");
+        wait_until(&mut s, "contents search", 10, |s| !s.tab().is_loading());
+        s.settle();
+        assert_eq!(names(&s), vec!["todo.txt"], "only the text file that contains the word");
+        look(&mut s, "contents results");
+        assert!(s.texts.iter().any(|(_, t)| t.ends_with("Call the Plumber about the leak")), "the matching line is shown beside the name");
+        for v in [ViewTree, ViewList, ViewMedium, ViewLarge, ViewXL, ViewDetails] {
+            s.cmd(v);
+            look(&mut s, &format!("contents {v:?}"));
+        }
+        for (w, h) in [(640.0, 480.0), (520.0, 340.0), (1280.0, 800.0)] {
+            s.resize(w, h);
+            look(&mut s, &format!("contents {w}x{h}"));
+        }
+        // Flattened: the letter two folders down matches too.
+        s.act("key ctrl+e");
+        wait_until(&mut s, "flattened contents search", 10, |s| !s.tab().is_loading());
+        s.settle();
+        assert_eq!(names(&s), vec!["letter.txt", "todo.txt"]);
+        look(&mut s, "flattened contents");
+        // A new query replaces the matches.
+        s.act("key ctrl+f");
+        s.act("key ctrl+a");
+        s.act("text xyzzy");
+        wait_until(&mut s, "second query", 10, |s| s.tab().filter == "xyzzy" && !s.tab().is_loading());
+        s.settle();
+        assert_eq!(names(&s), vec!["todo.txt"]);
+        // The palette command switches back to names: nothing is called "xyzzy".
+        s.act("key ctrl+shift+p");
+        s.act("text Search File Contents");
+        s.act("key Enter");
+        s.settle();
+        assert!(!s.tab().content.on, "the palette command switches contents mode off");
+        assert!(names(&s).is_empty(), "names are matched again: {:?}", names(&s));
+        s.act("key Escape");
+        s.settle();
+        assert!(s.tab().filter.is_empty());
+        look(&mut s, "after contents search");
+        report("contents", &s);
     }
 
     #[test]
