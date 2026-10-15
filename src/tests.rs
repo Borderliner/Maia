@@ -1648,3 +1648,33 @@ fn administrator_commands_are_exact() {
     assert!(denied(&std::io::Error::from_raw_os_error(libc::EACCES)) && denied(&std::io::Error::from_raw_os_error(libc::EPERM)));
     assert!(!denied(&std::io::Error::from_raw_os_error(libc::EROFS)), "a read-only disk isn't a permission problem");
 }
+
+#[test]
+fn hand_written_png_is_valid_and_compact() {
+    // A photo-like 256 x 192 image: smooth gradients with some noise.
+    let (w, h) = (256u32, 192u32);
+    let mut x: u32 = 7;
+    let px: Vec<u8> = (0..w * h).flat_map(|i| {
+        x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+        let (cx, cy) = (i % w, i / w);
+        [(cx / 2) as u8, (cy + (x >> 29)) as u8, ((cx + cy) / 3) as u8, 255]
+    }).collect();
+    let img = crate::imgdec::Rgba { w, h, px };
+    let ours = crate::thumbcache::encode_png(&img, &[("Thumb::URI", "file:///x/a%20b.jpg".into()), ("Software", "Maia".into())]).unwrap();
+    let (back, text) = crate::imgdec::png_with_text(&ours).expect("decodes");
+    assert_eq!((back.w, back.h), (w, h));
+    assert_eq!(back.px, img.px, "lossless");
+    assert!(text.iter().any(|(k, v)| k == "Thumb::URI" && v == "file:///x/a%20b.jpg"));
+    // Within reach of png's own default encoder (which is what other apps write).
+    let mut theirs = vec![];
+    {
+        let mut e = png::Encoder::new(&mut theirs, w, h);
+        e.set_color(png::ColorType::Rgba);
+        e.write_header().unwrap().write_image_data(&img.px).unwrap();
+    }
+    assert!(ours.len() < theirs.len() * 2, "ours {} vs png {}", ours.len(), theirs.len());
+    eprintln!("png sizes: ours {} png crate {}", ours.len(), theirs.len());
+    if let Some(d) = std::env::var_os("COMET_ICON_DUMP") {
+        std::fs::write(std::path::Path::new(&d).join("hand.png"), &ours).unwrap();
+    }
+}

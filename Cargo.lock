@@ -863,6 +863,7 @@ dependencies = [
  "egui",
  "egui-winit",
  "egui_glow",
+ "fdeflate",
  "gif",
  "glutin",
  "glutin-winit",

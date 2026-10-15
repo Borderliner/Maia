@@ -174,20 +174,68 @@ fn write_png(dest: &Path, img: &Rgba, text: &[(&str, String)]) {
     let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir);
     let tmp = dir.join(format!(".maia-{}-{}.png", std::process::id(), md5_hex(dest.as_os_str().as_encoded_bytes())));
     let ok = (|| -> Option<()> {
-        let f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).ok()?;
-        let mut e = png::Encoder::new(std::io::BufWriter::new(f), img.w, img.h);
-        e.set_color(png::ColorType::Rgba);
-        e.set_depth(png::BitDepth::Eight);
-        for (k, v) in text {
-            e.add_text_chunk(k.to_string(), v.clone()).ok()?;
-        }
-        e.write_header().ok()?.write_image_data(&img.px).ok()
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).ok()?;
+        std::io::Write::write_all(&mut f, &encode_png(img, text)?).ok()
     })();
     if ok.is_some() {
         let _ = std::fs::rename(&tmp, dest);
     } else {
         let _ = std::fs::remove_file(&tmp);
     }
+}
+
+/// An RGBA8 PNG with tEXt chunks: rows filtered against the one above (Up), compressed
+/// with fdeflate. Written by hand because png's encoder brings a second deflate
+/// implementation into the binary.
+pub fn encode_png(img: &Rgba, text: &[(&str, String)]) -> Option<Vec<u8>> {
+    let stride = img.w as usize * 4;
+    if img.px.len() != stride * img.h as usize || img.w == 0 || img.h == 0 {
+        return None;
+    }
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend(img.w.to_be_bytes());
+    ihdr.extend(img.h.to_be_bytes());
+    ihdr.extend([8, 6, 0, 0, 0]); // 8 bits, RGBA, deflate, adaptive filters, no interlace
+    chunk(&mut out, b"IHDR", &ihdr);
+    for (k, v) in text {
+        let mut d = k.as_bytes().to_vec();
+        d.push(0);
+        d.extend(v.as_bytes());
+        chunk(&mut out, b"tEXt", &d);
+    }
+    let mut z = fdeflate::Compressor::new(Vec::new()).ok()?;
+    let mut row = vec![0u8; stride + 1];
+    for (y, cur) in img.px.chunks_exact(stride).enumerate() {
+        if y == 0 {
+            row[0] = 0;
+            row[1..].copy_from_slice(cur);
+        } else {
+            let prev = &img.px[(y - 1) * stride..y * stride];
+            row[0] = 2;
+            for (o, (c, p)) in row[1..].iter_mut().zip(cur.iter().zip(prev)) {
+                *o = c.wrapping_sub(*p);
+            }
+        }
+        z.write_data(&row).ok()?;
+    }
+    chunk(&mut out, b"IDAT", &z.finish().ok()?);
+    chunk(&mut out, b"IEND", &[]);
+    Some(out)
+}
+
+fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    out.extend((data.len() as u32).to_be_bytes());
+    out.extend(kind);
+    out.extend(data);
+    let mut c = !0u32;
+    for &b in kind.iter().chain(data) {
+        c ^= b as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+        }
+    }
+    out.extend((!c).to_be_bytes());
 }
 
 // ------------------------------------------------------------------ thumbnailers
