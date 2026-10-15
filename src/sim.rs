@@ -792,6 +792,15 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 }
             }
         }
+        101 => {
+            // Give the selected palette command an alias (F2), sometimes one already taken.
+            s.act("key ctrl+shift+p");
+            s.act(&format!("text {}", rng.pick(&["Toggle", "tab", "sort"])));
+            s.act("key F2");
+            s.act(&format!("text {}", rng.pick(&["t", "x1", "hh", "sb"])));
+            s.act("key Enter");
+            s.act("key Escape");
+        }
         100 => {
             // Compare two panels (splitting first if there is one), then act on the marks.
             if s.app.panels.len() < 2 {
@@ -2445,6 +2454,69 @@ mod journeys {
         assert_eq!(mark(&a.join("size.txt")), None, "marks clear when a panel moves");
         look(&mut s, "after compare");
         report("compare", &s);
+    }
+
+    /// Command aliases from the palette: set one with the row's alias button, find and
+    /// run the command by typing it, a duplicate refused with the reason, change and clear
+    /// with F2, and the result saved with user data.
+    #[test]
+    fn palette_aliases() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("aliases");
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        let alias = |s: &Sim, id: &str| s.app.ud.aliases.get(id).cloned();
+        s.act("key ctrl+shift+p");
+        s.act("text Toggle Hidden Files");
+        click_control(&mut s, "alias button");
+        assert!(matches!(s.app.popup, Popup::Prompt { .. }), "the alias prompt opens");
+        s.act("text hh");
+        s.act("key Enter");
+        assert_eq!(alias(&s, "toggle_hidden").as_deref(), Some("hh"));
+        assert!(matches!(s.app.popup, Popup::Palette(_)), "saving returns to the palette");
+        // Typing the alias finds the command first; Enter runs it.
+        let hidden = s.app.cfg.show_hidden;
+        s.act("text hh");
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t == "Toggle Hidden Files“hh”"), "the alias shows beside the title");
+        s.act("key Enter");
+        assert_eq!(s.app.cfg.show_hidden, !hidden, "the alias ran Toggle Hidden Files");
+        // The same alias for another command is refused, with the reason in the prompt.
+        s.act("key ctrl+shift+p");
+        s.act("text Toggle Sidebar");
+        s.act("key F2");
+        s.act("text HH");
+        s.act("key Enter");
+        assert!(matches!(s.app.popup, Popup::Prompt { .. }), "the prompt stays");
+        assert!(s.texts.iter().any(|(_, t)| t.contains("already finds “Toggle Hidden Files”")), "the reason is shown");
+        assert_eq!(alias(&s, "toggle_sidebar"), None);
+        s.act("key ctrl+a");
+        s.act("text sb");
+        s.act("key Enter");
+        assert_eq!(alias(&s, "toggle_sidebar").as_deref(), Some("sb"));
+        look(&mut s, "palette with aliases");
+        // Change, then clear, with F2 on the selected command.
+        for (new, want) in [("hid", Some("hid")), ("", None)] {
+            s.act("key Escape");
+            s.act("key ctrl+shift+p");
+            s.act("text Toggle Hidden Files");
+            s.act("key F2");
+            s.act("key ctrl+a");
+            s.act("key Backspace");
+            if !new.is_empty() {
+                s.act(&format!("text {new}"));
+            }
+            s.act("key Enter");
+            assert_eq!(alias(&s, "toggle_hidden").as_deref(), want);
+        }
+        s.act("key Escape");
+        let ctx = s.ctx.clone();
+        s.app.save_all(&ctx);
+        let saved = crate::config::load_userdata().aliases;
+        assert_eq!((saved.get("toggle_sidebar").map(String::as_str), saved.get("toggle_hidden")), (Some("sb"), None), "saved with user data");
+        look(&mut s, "after aliases");
+        report("aliases", &s);
     }
 
     #[test]

@@ -1597,3 +1597,21 @@ fn compare_marks_only_newer_and_size_differences() {
     assert_eq!(m, want, "identical files, the older side and folders on both sides stay unmarked");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn aliases_set_change_clear_and_refuse_duplicates() {
+    use crate::popups::set_alias;
+    let mut ud = crate::config::UserData::default();
+    assert_eq!(set_alias(&mut ud, Cmd::ToggleHidden, "  hh "), Ok(()));
+    assert_eq!(ud.aliases.get("toggle_hidden").map(String::as_str), Some("hh"), "trimmed and stored by command id");
+    assert_eq!(set_alias(&mut ud, Cmd::ToggleSidebar, "HH"), Err(Cmd::ToggleHidden), "another command's alias, in any case, is refused");
+    assert!(!ud.aliases.contains_key("toggle_sidebar"));
+    assert_eq!(set_alias(&mut ud, Cmd::ToggleHidden, "hid"), Ok(()));
+    assert_eq!(set_alias(&mut ud, Cmd::ToggleSidebar, "hh"), Ok(()), "a changed alias frees the old one");
+    assert_eq!(set_alias(&mut ud, Cmd::ToggleHidden, "hid"), Ok(()), "setting the same alias again is fine");
+    assert_eq!(set_alias(&mut ud, Cmd::ToggleHidden, ""), Ok(()));
+    assert!(!ud.aliases.contains_key("toggle_hidden"), "empty text clears it");
+    // An alias left behind by a command that no longer exists blocks nothing.
+    ud.aliases.insert("gone_command".into(), "zz".into());
+    assert_eq!(set_alias(&mut ud, Cmd::GoTo, "zz"), Ok(()));
+}

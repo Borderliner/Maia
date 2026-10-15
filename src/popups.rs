@@ -1183,6 +1183,11 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
     let mut add_key: Option<Cmd> = None;
     let mut remove: Option<(Cmd, Binding)> = None;
     let mut reset: Option<Cmd> = None;
+    // F2 names the selected command's alias, as it renames a file.
+    let mut alias: Option<Cmd> = match rows.get(st.sel) {
+        Some(PRow::Cmd(c, _)) if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F2)) => Some(*c),
+        _ => None,
+    };
     if k.enter {
         match rows.get(st.sel) {
             Some(PRow::Cmd(c, _)) => run = Some(*c),
@@ -1258,7 +1263,10 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
                             paint_glyph(ui.painter(), Rect::from_center_size(pos2(r.left() + 108.0, cy), Vec2::splat(8.0)), Glyph::ChevronRight, pal.text_dim);
                             tx = r.left() + 122.0;
                         }
-                        let job = highlight_job(info.title, &q, FontId::proportional(13.5), tcol, pal.accent);
+                        let mut job = highlight_job(info.title, &q, FontId::proportional(13.5), tcol, pal.accent);
+                        if let Some(a) = app.ud.aliases.get(info.id) {
+                            job.append(&format!("“{a}”"), 8.0, egui::TextFormat { font_id: FontId::proportional(12.0), color: pal.text_dim, ..Default::default() });
+                        }
                         let g = ui.fonts_mut(|f| f.layout_job(job));
                         if compact {
                             ui.painter().galley(pos2(tx, r.center().y - g.size().y / 2.0), g, tcol);
@@ -1302,6 +1310,18 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
                                 add_key = Some(*c);
                             }
                             x -= 24.0;
+                            let ag = ui.painter().layout_no_wrap("alias".into(), FontId::proportional(11.0), pal.text_dim);
+                            let ar = Rect::from_min_max(pos2(x - ag.size().x - 8.0, r.center().y - 10.0), pos2(x, r.center().y + 10.0));
+                            crate::ui::note_control(ui, ar, "alias button");
+                            let aresp = ui.interact(ar, Id::new(("alias", i)), Sense::click()).on_hover_text("Set the alias that finds this command (F2)");
+                            if aresp.hovered() {
+                                ui.painter().rect_filled(ar, CornerRadius::same(4), pal.raised);
+                            }
+                            ui.painter().galley(pos2(ar.left() + 4.0, r.center().y - ag.size().y / 2.0), ag, pal.text_dim);
+                            if aresp.clicked() {
+                                alias = Some(*c);
+                            }
+                            x = ar.left() - 4.0;
                             let sr = Rect::from_center_size(pos2(x - 10.0, r.center().y), Vec2::splat(20.0));
                             let sresp = ui.interact(sr, Id::new(("star", i)), Sense::click()).on_hover_text(if starred { "Remove from Quick" } else { "Add to Quick" });
                             crate::ui::star(ui.painter(), sr.center(), 6.5, if starred { pal.accent } else { pal.text_dim }, starred);
@@ -1311,14 +1331,14 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
                         } else if starred {
                             crate::ui::star(ui.painter(), pos2(x - 10.0, r.center().y), 5.0, pal.accent.gamma_multiply(0.7), true);
                         }
-                        if resp.clicked() && remove.is_none() && add_key.is_none() && star.is_none() && reset.is_none() {
+                        if resp.clicked() && remove.is_none() && add_key.is_none() && star.is_none() && reset.is_none() && alias.is_none() {
                             run = Some(*c);
                         }
                     }
                 }
             }
         });
-        hints(ui, &[("↑↓", "navigate"), ("Enter", "run"), ("☆", "quick"), ("+", "add hotkey"), ("Esc", "close")], &pal);
+        hints(ui, &[("↑↓", "navigate"), ("Enter", "run"), ("☆", "quick"), ("+", "add hotkey"), ("F2", "alias"), ("Esc", "close")], &pal);
     });
     if toggle_compact {
         app.cfg.compact_lists = !app.cfg.compact_lists;
@@ -1342,6 +1362,11 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
         }
         app.ud_dirty = true;
     }
+    if let Some(c) = alias {
+        let text = app.ud.aliases.get(c.info().id).cloned().unwrap_or_default();
+        edit_alias(app, c, text, format!("Alias for “{}” (empty removes it)", c.info().title));
+        return false;
+    }
     if let Some(c) = add_key {
         st.capture = Some(Capture { cmd: c, seq: vec![], last: Instant::now() });
         return true;
@@ -1360,6 +1385,33 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
         return false;
     }
     !(close || clicked_outside(ctx, rect))
+}
+
+/// Set, change or (with empty text) clear a command's alias. An alias another command
+/// already answers to is refused: typing it could only ever find one of them first.
+pub fn set_alias(ud: &mut crate::config::UserData, c: Cmd, text: &str) -> Result<(), Cmd> {
+    let (id, t) = (c.info().id, text.trim());
+    if let Some(other) = ud.aliases.iter().filter(|(k, a)| *k != id && a.eq_ignore_ascii_case(t)).find_map(|(k, _)| Cmd::from_id(k)) {
+        return Err(other);
+    }
+    if t.is_empty() {
+        ud.aliases.remove(id);
+    } else {
+        ud.aliases.insert(id.to_string(), t.to_string());
+    }
+    Ok(())
+}
+
+/// The alias prompt; a refused alias brings it back with the reason, and saving returns
+/// to the palette.
+fn edit_alias(app: &mut App, c: Cmd, text: String, title: String) {
+    app.popup = Popup::prompt(&title, text, Box::new(move |app: &mut App, t: String| match set_alias(&mut app.ud, c, &t) {
+        Ok(()) => {
+            app.ud_dirty = true;
+            app.popup = Popup::palette();
+        }
+        Err(o) => edit_alias(app, c, t.clone(), format!("“{}” already finds “{}”: pick another for “{}”", t.trim(), o.info().title, c.info().title)),
+    }));
 }
 
 fn current_bindings(app: &App, c: Cmd) -> Vec<String> {
