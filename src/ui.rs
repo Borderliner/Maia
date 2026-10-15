@@ -240,6 +240,16 @@ pub fn drag_picture(ctx: &egui::Context, paths: &[std::path::PathBuf], pal: &cra
     crate::wlclip::Picture { w, h, scale: s as i32, px }
 }
 
+/// A job's label once it is done: "Copying 3 items" becomes "Copied 3 items".
+pub fn finished_label(label: &str) -> String {
+    for (now, done) in [("Copying", "Copied"), ("Moving to trash", "Moved to trash"), ("Moving", "Moved"), ("Deleting", "Deleted")] {
+        if let Some(rest) = label.strip_prefix(now) {
+            return format!("{done}{rest}");
+        }
+    }
+    label.to_string()
+}
+
 pub fn spinner(p: &egui::Painter, c: egui::Pos2, r: f32, col: Color32, t: f64) {
     let a0 = (t * 6.0) as f32;
     let pts: Vec<egui::Pos2> = (0..=16).map(|i| {
@@ -1390,7 +1400,7 @@ impl App {
                         let p = j.progress.lock().unwrap();
                         let done = p.finished;
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(if done { j.label.replace("ing ", "ed ").replace("Moving to trash", "Moved to trash") } else { j.label.clone() }).strong());
+                            ui.label(egui::RichText::new(if done { finished_label(&j.label) } else { j.label.clone() }).strong());
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if done {
                                     if ui.small_button("×").clicked() {

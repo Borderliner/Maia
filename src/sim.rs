@@ -811,7 +811,8 @@ mod journeys {
         s.act("move -50 -50");
         s.settle();
         s.idle(2);
-        s.check_overlap = !s.popup_open() && s.app.toast.is_none();
+        // Toasts and job cards float over the list by design.
+        s.check_overlap = !s.popup_open() && s.app.toast.is_none() && s.app.jobs.is_empty();
         s.idle(2);
         s.check_overlap = false;
     }

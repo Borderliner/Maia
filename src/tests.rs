@@ -1235,3 +1235,12 @@ fn window_icon_is_the_launcher_icon() {
         e.write_header().unwrap().write_image_data(&px).unwrap();
     }
 }
+
+#[test]
+fn finished_jobs_read_in_the_past_tense() {
+    use crate::ui::finished_label;
+    assert_eq!(finished_label("Copying 1 item"), "Copied 1 item");
+    assert_eq!(finished_label("Moving 3 items"), "Moved 3 items");
+    assert_eq!(finished_label("Moving to trash 2 items"), "Moved to trash 2 items");
+    assert_eq!(finished_label("Deleting 1 item"), "Deleted 1 item");
+}
