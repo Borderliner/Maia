@@ -2691,6 +2691,12 @@ mod journeys {
         wait_until(&mut s, "share opened", 10, |s| s.tab().path == share && !s.popup_open());
         assert_eq!(s.app.ud.servers.first().map(String::as_str), Some("smb://nas/media"), "remembered");
         wait_until(&mut s, "share in the sidebar", 10, |s| sidebar_text(s, "media on nas").is_some());
+        // The tab and the path bar name the share, not GVFS's folder for it.
+        s.idle(2);
+        assert_eq!(s.tab().title(), "media on nas");
+        let bar = s.app.panels[&s.app.active].list_rect.top();
+        assert!(s.texts.iter().filter(|(r, _)| r.top() < bar).filter(|(_, t)| t == "media on nas").count() >= 2, "tab and path bar");
+        assert!(!s.texts.iter().any(|(_, t)| t.contains("smb___nas_media") || t == "gvfs"), "no GVFS folder names on screen");
         look(&mut s, "inside the share");
         // Go To: an address connects; an FTP site as a guest.
         s.act("key ctrl+p");

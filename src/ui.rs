@@ -957,10 +957,17 @@ impl App {
                     segs.push((label, acc.clone()));
                 }
             }
-            segs.insert(0, ("Computer".into(), PathBuf::from(tab::COMPUTER)));
-            if !self.cfg.compact_paths || compact_home {
-                // keep
+            // A network place reads as its name, not as GVFS's folder for it.
+            if let Some((root, name)) = crate::sidebar::net_root(path) {
+                segs.clear();
+                segs.push((name, root.clone()));
+                let mut acc = root.clone();
+                for c in path.strip_prefix(&root).map(|r| r.components()).into_iter().flatten() {
+                    acc.push(c);
+                    segs.push((c.as_os_str().to_string_lossy().into_owned(), acc.clone()));
+                }
             }
+            segs.insert(0, ("Computer".into(), PathBuf::from(tab::COMPUTER)));
         }
         if flatten {
             if let Some(last) = segs.last_mut() {

@@ -61,6 +61,11 @@ pub fn net_places() -> Vec<crate::network::Place> {
     CACHE.with(|c| c.borrow().net.clone())
 }
 
+/// The mounted network place `path` is in: its folder and its name.
+pub fn net_root(path: &Path) -> Option<(PathBuf, String)> {
+    CACHE.with(|c| c.borrow().net.iter().find_map(|n| n.path.as_ref().filter(|r| path.starts_with(r)).map(|r| (r.clone(), n.name.clone()))))
+}
+
 pub fn drives_generation() -> u64 {
     CACHE.with(|c| c.borrow().drives_gen)
 }

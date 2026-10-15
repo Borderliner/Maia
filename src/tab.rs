@@ -238,6 +238,8 @@ impl Tab {
             "Computer".to_string()
         } else if self.path == Path::new("/") {
             "/".to_string()
+        } else if let Some((_, name)) = crate::sidebar::net_root(&self.path).filter(|r| r.0 == self.path) {
+            name
         } else {
             self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.path.display().to_string())
         };
