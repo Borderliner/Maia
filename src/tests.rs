@@ -1460,3 +1460,89 @@ fn merge_sort_is_stable_and_matches_sort_by() {
         }
     }
 }
+
+/// Run git in `dir` (as a fixed test identity), failing the test if it fails.
+pub(crate) fn git(dir: &Path, args: &[&str]) {
+    let ok = std::process::Command::new("git")
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args(args)
+        .current_dir(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    assert!(ok || args.first() == Some(&"merge"), "git {args:?}");
+}
+
+/// A work tree with one change of every kind: a merge conflict, a modification, a staged
+/// new file, an untracked file, a staged deletion, a rename and a change two folders down.
+pub(crate) fn git_fixture(d: &Path) {
+    touch(&d.join("keep.txt"), "same\n");
+    touch(&d.join("mod.txt"), "one\n");
+    touch(&d.join("old.txt"), "to be renamed\n");
+    touch(&d.join("gone.txt"), "to be removed\n");
+    touch(&d.join("conflict.txt"), "base\n");
+    touch(&d.join("sub/inner/deep.txt"), "deep\n");
+    git(d, &["init", "-q"]);
+    git(d, &["add", "-A"]);
+    git(d, &["commit", "-qm", "base"]);
+    git(d, &["checkout", "-qb", "other"]);
+    touch(&d.join("conflict.txt"), "theirs\n");
+    git(d, &["commit", "-qam", "theirs"]);
+    git(d, &["checkout", "-q", "main"]);
+    touch(&d.join("conflict.txt"), "ours\n");
+    git(d, &["commit", "-qam", "ours"]);
+    git(d, &["merge", "-q", "other"]);
+    touch(&d.join("mod.txt"), "two\n");
+    touch(&d.join("staged.txt"), "new\n");
+    git(d, &["add", "staged.txt"]);
+    touch(&d.join("new.txt"), "untracked\n");
+    git(d, &["rm", "-q", "gone.txt"]);
+    git(d, &["mv", "old.txt", "renamed.txt"]);
+    touch(&d.join("sub/inner/deep.txt"), "deeper\n");
+}
+
+#[test]
+fn git_status_marks_every_kind_of_change() {
+    use crate::gitstatus::{Mark, query};
+    if !crate::media::have("git") {
+        eprintln!("git not installed: skipped");
+        return;
+    }
+    let d = tmpdir("git");
+    git_fixture(&d);
+    let r = query(&d.join("sub")).expect("a work tree");
+    assert_eq!(r.root, d);
+    assert_eq!(r.branch, "main");
+    let m = |p: &str| r.marks.get(&d.join(p)).copied();
+    assert_eq!(m("conflict.txt"), Some(Mark::Conflict));
+    assert_eq!(m("mod.txt"), Some(Mark::Modified));
+    assert_eq!(m("staged.txt"), Some(Mark::Staged));
+    assert_eq!(m("new.txt"), Some(Mark::Untracked));
+    assert_eq!(m("gone.txt"), Some(Mark::Deleted));
+    assert_eq!(m("renamed.txt"), Some(Mark::Renamed));
+    assert_eq!(m("old.txt"), None, "a rename's source is not marked");
+    assert_eq!(m("sub/inner/deep.txt"), Some(Mark::Modified));
+    assert_eq!(m("sub"), Some(Mark::Inside));
+    assert_eq!(m("sub/inner"), Some(Mark::Inside));
+    assert_eq!(m("keep.txt"), None);
+    // Reached through a symlink, marks use the path as the user sees it.
+    let link = std::env::temp_dir().join(format!("maia-test-gitlink-{}", std::process::id()));
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&d, &link).unwrap();
+    let r = query(&link.join("sub/inner")).expect("a work tree through a link");
+    assert_eq!(r.root, link);
+    assert_eq!(r.marks.get(&link.join("mod.txt")), Some(&Mark::Modified));
+    let _ = std::fs::remove_file(&link);
+    // Outside a work tree, and inside .git itself, there is nothing to mark.
+    let plain = tmpdir("nogit");
+    assert!(query(&plain).is_none());
+    assert!(query(&d.join(".git")).is_none());
+    // A fresh repository with no commits yet still names its branch.
+    git(&plain, &["init", "-q"]);
+    touch(&plain.join("a.txt"), "a");
+    let r = query(&plain).expect("an empty repository");
+    assert_eq!((r.branch.as_str(), r.marks.get(&plain.join("a.txt"))), ("main", Some(&Mark::Untracked)));
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&plain);
+}

@@ -1074,6 +1074,7 @@ impl App {
             None
         };
         let loading = t.is_loading();
+        let branch = crate::gitstatus::repo_for(&t.path).map(|r| r.branch.clone()).filter(|b| !b.is_empty());
         let nsel = t.selected.len();
         let sel_size: u64 = if nsel > 1 && nsel < 200_000 {
             let stats = &self.stats.map;
@@ -1168,6 +1169,12 @@ impl App {
             if let Some(label) = &walk_label {
                 let clock = move |p: &egui::Painter, r: Rect| paint_glyph(p, r, Glyph::Clock, pal.text_dim);
                 chip(ui, Some(&clock), label, pal.text_dim, false, "Time taken to list every subfolder");
+            }
+            if let Some(b) = &branch {
+                let icon = move |p: &egui::Painter, r: Rect| {
+                    crate::theme::paint_lucide(p, r.expand(1.0), "git-branch", pal.text_dim);
+                };
+                chip(ui, Some(&icon), b, pal.text_dim, false, "Git branch");
             }
             if nsel > 1 {
                 let layers = move |p: &egui::Painter, r: Rect| {

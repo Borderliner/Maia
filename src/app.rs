@@ -726,6 +726,7 @@ impl App {
                 want.insert(ip);
             }
         }
+        crate::gitstatus::pump(&self.panels, &changed_dirs, &mut want, ctx);
         self.watch.sync(&want);
         let recents = &self.recents_set;
         let stats = &self.stats.map;

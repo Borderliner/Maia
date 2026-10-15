@@ -24,7 +24,7 @@ pub fn have(tool: &str) -> bool {
 }
 
 /// A command whose process ends when Maia does (even on a crash).
-fn tool(bin: &str) -> Command {
+pub(crate) fn tool(bin: &str) -> Command {
     let mut c = Command::new(bin);
     c.stdin(Stdio::null()).stderr(Stdio::null());
     unsafe {
@@ -38,7 +38,7 @@ fn tool(bin: &str) -> Command {
 }
 
 /// Output of a short-lived tool, or None after `timeout`.
-fn output(mut c: Command, timeout: Duration) -> Option<Vec<u8>> {
+pub(crate) fn output(mut c: Command, timeout: Duration) -> Option<Vec<u8>> {
     let mut child = c.stdout(Stdio::piped()).spawn().ok()?;
     let mut out = child.stdout.take()?;
     let reader = std::thread::spawn(move || {

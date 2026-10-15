@@ -704,6 +704,7 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
     t.page_items = ((body.height() / row_h) as usize).max(1);
     t.nav_row_step = 1;
     t.nav_col_step = 0;
+    let git = crate::gitstatus::repo_for(&t.path);
     let mut sa = egui::ScrollArea::both().id_salt(("details", t.id)).auto_shrink([false, false]);
     if let Some(s) = t.restore_scroll.take() {
         sa = sa.vertical_scroll_offset(s).horizontal_scroll_offset(0.0);
@@ -821,6 +822,7 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                         theme::paint_icon(&ip, ic, cat, "", e.is_link);
                                     }
                                 }
+                                crate::gitstatus::paint(ui.painter(), ic, git.as_deref(), &e.path, &pal);
                                 let name_r = Rect::from_min_max(pos2(ic.right() + 7.0, cell.top()), pos2(inner.right() - if env.recents.contains(&e.path) && env.cfg.highlight_recents { 10.0 } else { 0.0 }, cell.bottom()));
                                 if !rename_field(ui, name_r, idx, t, env, &font) {
                                     let name = display_name(&e, env.cfg);
@@ -1077,6 +1079,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
     // Cloned: item handlers mutate selection using `t.view`.
     let view = t.view.clone();
     let now = std::time::Instant::now();
+    let git = crate::gitstatus::repo_for(&t.path);
     let out = sa.show_viewport(&mut body_ui, |ui, vp| {
         // Vertical wheel scrolls the horizontal List view.
         if horizontal && ui.rect_contains_pointer(body) {
@@ -1144,6 +1147,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                             theme::paint_icon(ui.painter(), ic, cat, "", e.is_link);
                         }
                     }
+                    crate::gitstatus::paint(ui.painter(), ic, git.as_deref(), &e.path, &pal);
                     let name_r = Rect::from_min_max(pos2(ic.right() + 7.0, r.top()), pos2(r.right() - 8.0, r.bottom()));
                     if !rename_field(ui, name_r, idx, t, env, &font) {
                         let job = name_job(&display_name(&e, env.cfg), None, q, &font, dimc(pal.text), pal.text_dim, pal.accent, name_r.width(), 1);
@@ -1192,6 +1196,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                             }
                         }
                     }
+                    crate::gitstatus::paint(ui.painter(), icon_r.shrink(s * 0.1), git.as_deref(), &e.path, &pal);
                     let text_r = Rect::from_min_max(pos2(r.left() + 5.0, icon_r.bottom() + 5.0), pos2(r.right() - 5.0, r.bottom() - 3.0));
                     let name_line = Rect::from_min_size(text_r.min, vec2(text_r.width(), font.size + 6.0));
                     if !rename_field(ui, name_line, idx, t, env, &font) {

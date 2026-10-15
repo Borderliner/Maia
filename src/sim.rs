@@ -780,6 +780,18 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             }
             s.idle(2);
         }
+        99 => {
+            // Into the git work tree (Go To), then edit a file there now and then.
+            let repo = std::fs::read_dir(root().join("home")).ok().and_then(|r| r.flatten().map(|d| d.path().join("Code/repo")).find(|p| p.is_dir()));
+            if let Some(repo) = repo {
+                s.act("key ctrl+p");
+                s.act(&format!("text {}/", repo.display()));
+                s.act("key Enter");
+                if rng.below(2) == 0 {
+                    let _ = std::fs::write(repo.join("keep.txt"), format!("edit {}\n", rng.next()));
+                }
+            }
+        }
         98 => {
             // Contents mode: the filter's toggle, then a query typed into the listing.
             click_control_at(s, "contents toggle");
@@ -2304,6 +2316,58 @@ mod journeys {
         report("archives", &s);
     }
 
+    /// Git status marks: a work tree with every kind of change, the branch in the status
+    /// bar, marks in every view, refreshed when a file changes and when git itself changes
+    /// the index, and nothing outside a work tree.
+    #[test]
+    fn git_status_marks() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let home = fixture("gitmarks");
+        let repo = home.join("Code/proj");
+        crate::tests::git_fixture(&repo);
+        let mut s = Sim::new(&repo, vec2(1280.0, 800.0));
+        let mark = |s: &Sim, p: &str| crate::gitstatus::repo_for(&s.tab().path).and_then(|r| r.marks.get(&repo.join(p)).copied());
+        use crate::gitstatus::Mark;
+        wait_until(&mut s, "status read", 10, |s| mark(s, "mod.txt") == Some(Mark::Modified));
+        assert_eq!(mark(&s, "new.txt"), Some(Mark::Untracked));
+        assert_eq!(mark(&s, "sub"), Some(Mark::Inside));
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t == "main"), "the branch is in the status bar");
+        for v in [ViewTree, ViewList, ViewMedium, ViewLarge, ViewXL, ViewDetails] {
+            s.cmd(v);
+            look(&mut s, &format!("git {v:?}"));
+        }
+        for (w, h) in [(520.0, 340.0), (1280.0, 800.0)] {
+            s.resize(w, h);
+            look(&mut s, &format!("git {w}x{h}"));
+        }
+        // A file edited outside Maia: the watcher's change brings a fresh status.
+        std::fs::write(repo.join("keep.txt"), "changed\n").unwrap();
+        wait_until(&mut s, "edit seen", 10, |s| mark(s, "keep.txt") == Some(Mark::Modified));
+        // git itself changing the index (only .git changes): staged now.
+        crate::tests::git(&repo, &["add", "keep.txt"]);
+        wait_until(&mut s, "staging seen", 10, |s| mark(s, "keep.txt") == Some(Mark::Staged));
+        // Into a subfolder: same repository, marks below.
+        s.act("text sub");
+        s.act("key Enter");
+        s.settle();
+        assert_eq!(s.tab().path, repo.join("sub"));
+        wait_until(&mut s, "subfolder marks", 10, |s| mark(s, "sub/inner") == Some(Mark::Inside));
+        look(&mut s, "git subfolder");
+        // Outside any work tree: no repository, no branch.
+        let plain = std::env::temp_dir().join("plain-folder");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("a.txt"), "a").unwrap();
+        go(&mut s, &plain);
+        s.idle(10);
+        assert!(crate::gitstatus::repo_for(&plain).is_none(), "no repository outside a work tree");
+        assert!(!s.texts.iter().any(|(_, t)| t == "main"), "no branch outside a work tree");
+        look(&mut s, "outside git");
+        report("git", &s);
+    }
+
     #[test]
     fn monkey_sessions() {
         if !sandboxed() {
@@ -2315,6 +2379,8 @@ mod journeys {
         let only: Option<u64> = std::env::var("COMET_SIM_SEED").ok().and_then(|v| v.parse().ok());
         for seed in only.map(|o| o..=o).unwrap_or(1..=seeds) {
             let home = fixture(&format!("monkey{seed}"));
+            // A git work tree with every kind of change, for the status marks.
+            crate::tests::git_fixture(&home.join("Code/repo"));
             // Fake drives to mount and eject at random (never the real tools).
             let drv = fake_drives(&format!("monkey{seed}"));
             crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(drv));

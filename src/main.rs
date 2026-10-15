@@ -10,6 +10,7 @@ mod drives;
 mod ctxmenu;
 mod fsx;
 mod fuzzy;
+mod gitstatus;
 mod icons;
 mod imgdec;
 mod inspector;
