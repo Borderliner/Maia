@@ -479,7 +479,8 @@ fn tree_chevron(ui: &Ui, r: Rect, id: Id, expanded: bool, pal: &Palette) -> bool
 fn drop_target(ui: &Ui, rect: Rect, e: &Entry, env: &mut Env) -> bool {
     let Some(Drag::Files { paths, .. }) = env.drag.as_ref() else { return false };
     let Some(pp) = ui.ctx().pointer_hover_pos() else { return false };
-    if !rect.contains(pp) || paths.contains(&e.path) {
+    // An unmounted drive has no folder to drop into yet.
+    if !rect.contains(pp) || paths.contains(&e.path) || tab::drive_dev(&e.path).is_some() {
         return false;
     }
     let runnable = !e.is_dir && (e.is_executable() || e.ext() == "desktop");

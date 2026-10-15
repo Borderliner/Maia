@@ -1848,6 +1848,16 @@ mod journeys {
         look(&mut s, "inspector on an unmounted drive");
         s.cmd(ToggleInspector);
 
+        // Files dropped on a drive that isn't mounted go nowhere.
+        let wr = list_text(&s, "Windows").center();
+        let note = root().join("dropped.txt");
+        std::fs::write(&note, "x").unwrap();
+        s.app.on_dnd(crate::clipboard::Dnd::Over { x: wr.x, y: wr.y, paths: vec![note.clone()], own: false });
+        s.idle(2);
+        s.app.on_dnd(crate::clipboard::Dnd::Dropped { x: wr.x, y: wr.y, paths: vec![note], own: false });
+        s.idle(3);
+        assert!(s.app.jobs.is_empty() && !s.popup_open(), "no transfer into an unmounted drive");
+
         // Copy, delete or rename a drive: nothing happens (the root would take everything).
         select_name(&mut s, "Root");
         for k in ["key Delete", "key shift+Delete", "key F2", "key ctrl+x"] {
@@ -2013,12 +2023,13 @@ mod journeys {
         s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
         assert_eq!(s.tab().cursor_path().as_deref(), Some(docs.join("notes.txt").as_path()), "clicks select again");
 
-        // Computer takes nothing.
+        // Computer's empty space takes nothing (below the last drive, at any row height).
         s.cmd(Computer);
         s.settle();
         let jobs = s.app.jobs.len();
-        over(&mut s, pos2(600.0, 200.0), &both);
-        drop(&mut s, pos2(600.0, 200.0), &both, false);
+        let below = s.app.panels[&s.app.active].list_rect.bottom() - 20.0;
+        over(&mut s, pos2(600.0, below), &both);
+        drop(&mut s, pos2(600.0, below), &both, false);
         s.idle(3);
         assert_eq!(s.app.jobs.len(), jobs, "no transfer into Computer");
         go(&mut s, &docs);
