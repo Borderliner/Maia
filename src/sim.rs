@@ -218,7 +218,7 @@ while IFS=$'\t' read -r path pk label fs size rm hp type; do
   [ "$pk" = - ] && pk=""; [ "$label" = - ] && label=""; [ "$fs" = - ] && fs=""
   name="${path##*/}"; disk="${pk:-$name}"
   [ -e "$D/gone/$disk" ] && continue
-  mp=""; [ -f "$D/mounted/$name" ] && mp="$(cat "$D/mounted/$name")"
+  mp=""; [ -f "$D/netmounts/$name" ] && mp="$(cat "$D/netmounts/$name")"
   printf 'PATH="%s" PKNAME="%s" LABEL="%s" FSTYPE="%s" SIZE="%s" RM="%s" HOTPLUG="%s" TYPE="%s" MOUNTPOINTS="%s"\n' "$path" "$pk" "${label// /\\x20}" "$fs" "$size" "$rm" "$hp" "$type" "${mp// /\\x20}"
 done < "$D/devices"
 "#;
@@ -229,7 +229,7 @@ op="$1"; dev="$3"; name="${dev##*/}"
 field() { awk -F'\t' -v p="${2:-$dev}" -v f="$1" '$1==p{print $f}' "$D/devices"; }
 regen() {
   local f n m
-  for f in "$D"/mounted/*; do
+  for f in "$D"/netmounts/*; do
     [ -f "$f" ] || continue
     n="${f##*/}"; m="$(cat "$f")"
     echo "/dev/$n ${m// /\\040} $(field 4 "/dev/$n") rw 0 0"
@@ -239,15 +239,15 @@ sleep 0.15
 if [ -f "$D/fail/$name" ]; then echo "Error ${op}ing $dev: GDBus.Error:org.freedesktop.UDisks2.Error.Failed: $(cat "$D/fail/$name")" >&2; exit 1; fi
 case "$op" in
   mount)
-    if [ -f "$D/mounted/$name" ]; then echo "Error mounting $dev: GDBus.Error:org.freedesktop.UDisks2.Error.AlreadyMounted: Device $dev is already mounted" >&2; exit 1; fi
+    if [ -f "$D/netmounts/$name" ]; then echo "Error mounting $dev: GDBus.Error:org.freedesktop.UDisks2.Error.AlreadyMounted: Device $dev is already mounted" >&2; exit 1; fi
     label="$(field 3)"; [ "$label" = - ] && label="$name"
     mp="$D/media/$label"; mkdir -p "$mp"; echo "files on $label" > "$mp/readme.txt"
-    printf '%s' "$mp" > "$D/mounted/$name"; regen
+    printf '%s' "$mp" > "$D/netmounts/$name"; regen
     echo "Mounted $dev at $mp" ;;
   unmount)
     if [ -e "$D/busy/$name" ]; then echo "Error unmounting $dev: GDBus.Error:org.freedesktop.UDisks2.Error.DeviceBusy: Error unmounting $dev: target is busy" >&2; exit 1; fi
-    if [ ! -f "$D/mounted/$name" ]; then echo "Error unmounting $dev: GDBus.Error:org.freedesktop.UDisks2.Error.NotMounted: Device is not mounted" >&2; exit 1; fi
-    mp="$(cat "$D/mounted/$name")"; rm -f "$D/mounted/$name"; regen; rm -rf "$mp" ;;
+    if [ ! -f "$D/netmounts/$name" ]; then echo "Error unmounting $dev: GDBus.Error:org.freedesktop.UDisks2.Error.NotMounted: Device is not mounted" >&2; exit 1; fi
+    mp="$(cat "$D/netmounts/$name")"; rm -f "$D/netmounts/$name"; regen; rm -rf "$mp" ;;
   power-off)
     touch "$D/gone/$name" ;;
   *) echo "unknown $op" >&2; exit 1 ;;
@@ -270,10 +270,10 @@ esac
 pub fn fake_network(name: &str) -> PathBuf {
     let d = root().join("net").join(name);
     let _ = std::fs::remove_dir_all(&d);
-    for sub in ["gvfs", "mounted"] {
+    for sub in ["gvfs", "netmounts"] {
         std::fs::create_dir_all(d.join(sub)).unwrap();
     }
-    std::fs::write(d.join("devices"), "Pixel 7\tmtp://Google_Pixel_7/\n").unwrap();
+    std::fs::write(d.join("phones"), "Pixel 7\tmtp://Google_Pixel_7/\n").unwrap();
     let gio = r#"#!/bin/bash
 D="$(dirname "$0")"
 echo "gio $*" >> "$D/log"
@@ -281,15 +281,15 @@ id() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '_'; }
 do_mount() {
   local uri="$1" name="$2" i; i=$(id "$uri")
   mkdir -p "$D/gvfs/$i"; echo "on $name" > "$D/gvfs/$i/hello.txt"
-  printf '%s\t%s\n' "$name" "$uri" > "$D/mounted/$i"
+  printf '%s\t%s\n' "$name" "$uri" > "$D/netmounts/$i"
 }
 if [ "$1" = mount ] && [ "$2" = -l ]; then
   while IFS=$'\t' read -r name uri; do
     [ -z "$uri" ] && continue
     echo "Volume(0): $name"; echo "  Type: GProxyVolume (GProxyVolumeMonitorMTP)"; echo "  activation_root=$uri"
-    [ -f "$D/mounted/$(id "$uri")" ] && { echo "  Mount(0): $name -> $uri"; echo "    Type: GProxyShadowMount"; }
-  done < "$D/devices"
-  for f in "$D"/mounted/*; do
+    [ -f "$D/netmounts/$(id "$uri")" ] && { echo "  Mount(0): $name -> $uri"; echo "    Type: GProxyShadowMount"; }
+  done < "$D/phones"
+  for f in "$D"/netmounts/*; do
     [ -f "$f" ] || continue
     IFS=$'\t' read -r name uri < "$f"
     case "$uri" in mtp://*) continue ;; esac
@@ -298,12 +298,12 @@ if [ "$1" = mount ] && [ "$2" = -l ]; then
   exit 0
 fi
 if [ "$1" = info ]; then
-  i=$(id "$2"); [ -f "$D/mounted/$i" ] || { echo "gio: $2: Operation not supported" >&2; exit 1; }
+  i=$(id "$2"); [ -f "$D/netmounts/$i" ] || { echo "gio: $2: Operation not supported" >&2; exit 1; }
   echo "name: x"; echo "uri: $2"; echo "local path: $D/gvfs/$i"; exit 0
 fi
 if [ "$1" = mount ] && [ "$2" = -u ]; then
-  i=$(id "$3"); [ -f "$D/mounted/$i" ] || { echo "gio: $3: Containing mount does not exist" >&2; exit 1; }
-  rm -f "$D/mounted/$i"; rm -rf "$D/gvfs/$i"; exit 0
+  i=$(id "$3"); [ -f "$D/netmounts/$i" ] || { echo "gio: $3: Containing mount does not exist" >&2; exit 1; }
+  rm -f "$D/netmounts/$i"; rm -rf "$D/gvfs/$i"; exit 0
 fi
 if [ "$1" = mount ]; then
   anon=0; uri="$2"; [ "$2" = -a ] && { anon=1; uri="$3"; }
@@ -2503,13 +2503,34 @@ mod journeys {
         let only: Option<u64> = std::env::var("COMET_SIM_SEED").ok().and_then(|v| v.parse().ok());
         for seed in only.map(|o| o..=o).unwrap_or(1..=seeds) {
             let home = fixture(&format!("monkey{seed}"));
-            // Fake drives to mount and eject at random (never the real tools).
+            // Fake drives, network places and pkexec to use at random (never the real tools).
             let drv = fake_drives(&format!("monkey{seed}"));
+            let net = fake_network(&format!("monkey{seed}"));
+            let adm = fake_pkexec(&format!("monkey{seed}"));
+            for (dir, f) in [(&net, "gio"), (&net, "phones"), (&adm, "pkexec")] {
+                let _ = std::fs::copy(dir.join(f), drv.join(f));
+            }
+            for sub in ["gvfs", "netmounts"] {
+                let _ = std::fs::create_dir_all(drv.join(sub));
+            }
             crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(drv));
+            // An archive to wander into.
+            if crate::archive::available() {
+                let _ = crate::archive::create(&home.join("bundle.zip"), &home.join("Documents"), &["notes.txt".into(), "Taxes".into()]);
+            }
             let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+            // Later launches handing folders over (single instance).
+            let (tx, rx) = std::sync::mpsc::channel();
+            s.app.requests = Some(rx);
             let mut rng = Rng::new(seed);
             s.note(format!("seed {seed}"));
             for k in 0..steps {
+                if rng.below(80) == 0 {
+                    let picks = [home.join("Music"), home.join("Documents/notes.txt"), home.join("bundle.zip"), home.join("gone")];
+                    let p = rng.pick(&picks).clone();
+                    s.note(format!("second launch with {}", p.display()));
+                    let _ = tx.send(crate::single::Request::Open(vec![p]));
+                }
                 monkey_step(&mut s, &mut rng);
                 // Every so often: dismiss whatever is open and check the layout of the
                 // state the random walk has reached (feature combinations no script has).
