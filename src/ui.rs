@@ -1263,7 +1263,7 @@ impl App {
             if cresp.hovered() || on {
                 ui.painter().rect_filled(cr, CornerRadius::same(4), if on { pal.accent.gamma_multiply(0.35) } else { pal.hover });
             }
-            paint_glyph(ui.painter(), cr.shrink(3.0), Glyph::Docs, if on { pal.accent } else { pal.text_dim });
+            crate::theme::paint_lucide(ui.painter(), cr.shrink(3.0), "text-search", if on { pal.accent } else { pal.text_dim });
             if cresp.clicked() {
                 t.content.on = !on;
                 t.dirty = true;
