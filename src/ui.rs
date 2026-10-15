@@ -242,7 +242,7 @@ pub fn drag_picture(ctx: &egui::Context, paths: &[std::path::PathBuf], pal: &cra
 
 /// A job's label once it is done: "Copying 3 items" becomes "Copied 3 items".
 pub fn finished_label(label: &str) -> String {
-    for (now, done) in [("Copying", "Copied"), ("Moving to trash", "Moved to trash"), ("Moving", "Moved"), ("Deleting", "Deleted")] {
+    for (now, done) in [("Copying", "Copied"), ("Moving to trash", "Moved to trash"), ("Moving", "Moved"), ("Deleting", "Deleted"), ("Extracting", "Extracted"), ("Compressing", "Compressed")] {
         if let Some(rest) = label.strip_prefix(now) {
             return format!("{done}{rest}");
         }

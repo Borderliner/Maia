@@ -1279,3 +1279,69 @@ fn default_file_manager_is_read_from_mimeapps() {
     assert_eq!(default_in("[Added Associations]\ninode/directory=x.desktop\n"), None, "only Default Applications counts");
     assert_eq!(default_in(""), None);
 }
+
+#[test]
+fn archive_listings_parse_like_bsdtar_prints_them() {
+    use crate::archive::parse_list;
+    let now = std::time::SystemTime::now();
+    // Captured from bsdtar 3.8: a zip (entries stored as "./name"), a tar.gz with a
+    // symlink, and a 7z that lists a folder after its file.
+    let zip = "drwxr-xr-x  0 1000   1000        0 Oct 14 22:57 ./\n-rw-r--r--  0 1000   1000        0 Mar  5  2020 ./old.txt\nlrwxrwxrwx  0 1000   1000        0 Oct 14 22:57 ./link -> top.txt\n-rw-r--r--  0 1000   1000        2 Oct 14 22:57 ./top.txt\ndrwxr-xr-x  0 1000   1000        0 Oct 14 22:57 ./docs dir/\n-rw-r--r--  0 1000   1000        6 Oct 14 22:57 ./docs dir/read me.md\n";
+    let items = parse_list(zip, now);
+    let names: Vec<String> = items.iter().map(|i| i.path.display().to_string()).collect();
+    assert_eq!(names, ["old.txt", "link", "top.txt", "docs dir", "docs dir/read me.md"], "./ stripped, the root entry dropped");
+    assert!(items.iter().all(|i| i.dot), "stored with ./");
+    let link = &items[1];
+    assert!(link.link && !link.is_dir, "symlink without its target");
+    assert!(items[3].is_dir && items[4].size == 6);
+    // "Mar  5  2020" is that day; "Oct 14 22:57" is this year (or the last).
+    let year_of = |t: std::time::SystemTime| crate::timefmt::format(t, "%Y");
+    assert_eq!(year_of(items[0].modified.unwrap()), "2020");
+    assert!(items[2].modified.unwrap() <= now + std::time::Duration::from_secs(86_400));
+    // Folders that are only prefixes get rows; "../" escapes are refused.
+    let bare = "-rw-r--r--  0 0      0           2 Oct 14 22:57 a/b/c.txt\n-rw-r--r--  0 0 0 1 Oct 14 22:57 ../evil\n";
+    let items = parse_list(bare, now);
+    let mut names: Vec<String> = items.iter().map(|i| format!("{}{}", i.path.display(), if i.is_dir { "/" } else { "" })).collect();
+    names.sort();
+    assert_eq!(names, ["a/", "a/b/", "a/b/c.txt"]);
+    // bsdtar's escapes for odd names, and garbage lines.
+    let odd = "-rw-r--r--  0 0      0           2 Oct 14 22:57 back\\\\slash \\303\\251.txt\nnonsense\n\n-rw-r--r-- 0\n";
+    assert_eq!(parse_list(odd, now).iter().map(|i| i.path.display().to_string()).collect::<Vec<_>>(), ["back\\slash é.txt"]);
+    assert_eq!(crate::archive::stem("photos.tar.gz"), "photos");
+    assert_eq!(crate::archive::stem("Doc.ZIP"), "Doc");
+    assert!(crate::archive::is_archive("x.tar.zst") && !crate::archive::is_archive(".zip") && !crate::archive::is_archive("notes.txt"));
+}
+
+#[test]
+fn archives_round_trip_through_bsdtar() {
+    if !crate::archive::available() {
+        eprintln!("bsdtar missing: skipped");
+        return;
+    }
+    let d = tmpdir("archive");
+    let src = d.join("src");
+    std::fs::create_dir_all(src.join("Trip photos")).unwrap();
+    std::fs::write(src.join("Trip photos/beach – é.txt"), "sand").unwrap();
+    std::fs::write(src.join("notes.txt"), "hello").unwrap();
+    let names = vec![std::ffi::OsString::from("Trip photos"), std::ffi::OsString::from("notes.txt")];
+    for ext in ["zip", "tar.gz", "tar.xz", "7z"] {
+        let out = d.join(format!("pack.{ext}"));
+        crate::archive::create(&out, &src, &names).unwrap_or_else(|e| panic!("{ext}: {e}"));
+        assert!(out.is_file() && !d.join(format!(".pack.{ext}.part")).exists(), "{ext}: written in one go");
+        let top: Vec<String> = crate::archive::entries(&out, std::path::Path::new("")).unwrap().iter().map(|e| e.name.clone()).collect();
+        assert!(top.contains(&"Trip photos".into()) && top.contains(&"notes.txt".into()), "{ext}: {top:?}");
+        let inner = crate::archive::entries(&out, std::path::Path::new("Trip photos")).unwrap();
+        assert_eq!(inner.len(), 1, "{ext}");
+        assert_eq!(inner[0].path, out.join("Trip photos/beach – é.txt"), "{ext}: rows continue the archive's path");
+        assert!(crate::archive::entries(&out, std::path::Path::new("nope")).is_err());
+        let x = d.join(format!("x-{ext}"));
+        crate::archive::extract(&out, &[std::path::PathBuf::from("Trip photos")], &x).unwrap();
+        assert_eq!(std::fs::read_to_string(x.join("Trip photos/beach – é.txt")).unwrap(), "sand", "{ext}");
+        assert!(!x.join("notes.txt").exists(), "{ext}: only what was asked");
+        let (a, i) = crate::archive::split(&out.join("Trip photos/beach – é.txt")).unwrap();
+        assert_eq!((a, i), (out.clone(), std::path::PathBuf::from("Trip photos/beach – é.txt")));
+    }
+    assert!(crate::archive::split(&src.join("notes.txt")).is_none());
+    assert!(crate::archive::create(&d.join("bad.zip"), &src, &[std::ffi::OsString::from("missing")]).is_err(), "errors come back");
+    assert!(!d.join("bad.zip").exists() && !d.join(".bad.zip.part").exists(), "nothing left behind");
+}

@@ -1015,7 +1015,8 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
 // ------------------------------------------------------------------ list / columns / icons
 
 fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, mode: Mode) {
-    let thumbs_here = env.cfg.thumbs_on(crate::fsx::drive_kind_cached(&t.path, ui.ctx()));
+    // Nothing inside an archive is on disk to make a thumbnail from.
+    let thumbs_here = t.archive.is_none() && env.cfg.thumbs_on(crate::fsx::drive_kind_cached(&t.path, ui.ctx()));
     let pal = *env.pal;
     let font = FontId::proportional(env.cfg.font_size);
     let small = FontId::proportional(env.cfg.font_size - 1.5);

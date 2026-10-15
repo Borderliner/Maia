@@ -714,7 +714,7 @@ impl App {
                 if t.is_loading() {
                     any_loading = true;
                 }
-                if ti == p.active && !tab::is_computer(&t.path) && !t.flatten {
+                if ti == p.active && !tab::is_computer(&t.path) && !t.flatten && t.archive.is_none() {
                     want.insert(t.path.clone());
                     if t.tree_active() {
                         want.extend(t.expanded.iter().filter(|d| d.starts_with(&t.path)).take(64).cloned());
@@ -771,7 +771,7 @@ impl App {
         let mut req = vec![];
         for p in self.panels.values() {
             let t = p.tab();
-            if t.flatten || tab::is_computer(&t.path) {
+            if t.flatten || tab::is_computer(&t.path) || t.archive.is_some() {
                 continue;
             }
             for &i in t.view.iter().take(2000) {
@@ -795,7 +795,8 @@ impl App {
             if j.finished_at.is_none() && j.progress.lock().unwrap().finished {
                 j.finished_at = Some(Instant::now());
                 match &j.kind {
-                    OpKind::Copy { dest, .. } | OpKind::Move { dest, .. } => finished_dirs.push(dest.clone()),
+                    OpKind::Copy { dest, .. } | OpKind::Move { dest, .. } | OpKind::Extract { dest, .. } => finished_dirs.push(dest.clone()),
+                    OpKind::Compress { out, .. } => finished_dirs.extend(out.parent().map(Path::to_path_buf)),
                     _ => {}
                 }
                 let p = j.progress.lock().unwrap();
@@ -804,7 +805,7 @@ impl App {
                         self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Move(p.produced.clone()) });
                     }
                 }
-                if let OpKind::Copy { .. } = j.kind {
+                if let OpKind::Copy { .. } | OpKind::Extract { .. } | OpKind::Compress { .. } = j.kind {
                     if !p.produced.is_empty() {
                         self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Created(p.produced.iter().map(|x| x.1.clone()).collect()) });
                     }
@@ -1146,6 +1147,11 @@ impl App {
         // Drives aren't files: in the Computer view nothing can be cut, deleted, linked or
         // duplicated (a mounted volume's root would take its whole contents with it).
         if tab::is_computer(&self.panel().path()) && matches!(cmd, Cmd::Cut | Cmd::Trash | Cmd::DeletePermanent | Cmd::Duplicate | Cmd::CreateLink | Cmd::Paste | Cmd::Rename) {
+            return;
+        }
+        // Inside an archive nothing changes; copying out (Copy, then Paste elsewhere) works.
+        if self.tab().archive.is_some() && matches!(cmd, Cmd::Cut | Cmd::Trash | Cmd::DeletePermanent | Cmd::Duplicate | Cmd::CreateLink | Cmd::Paste | Cmd::Rename | Cmd::NewFolder | Cmd::NewFile) {
+            self.toast("Archives are read-only here: extract it to change it");
             return;
         }
         match cmd {
@@ -1645,6 +1651,51 @@ impl App {
                     Err(e) => self.toast(format!("Couldn't create: {e}")),
                 }
             }
+            Cmd::ExtractHere => {
+                let t = self.tab();
+                let targets = t.targets();
+                if let Some(archive) = t.archive.clone() {
+                    // Inside an archive: what is selected (or all of it) goes beside the archive.
+                    let members: Vec<PathBuf> = targets.iter().filter_map(|p| p.strip_prefix(&archive).ok().map(Path::to_path_buf)).collect();
+                    let dest = archive.parent().map(Path::to_path_buf).unwrap_or_default();
+                    self.actions.push(Action::StartJob(OpKind::Extract { archive, members, dest }));
+                    return;
+                }
+                let archives: Vec<PathBuf> = targets.into_iter().filter(|p| p.file_name().is_some_and(|n| crate::archive::is_archive(&n.to_string_lossy())) && p.is_file()).collect();
+                if archives.is_empty() {
+                    self.toast("Select an archive to extract");
+                }
+                for a in archives {
+                    let dest = a.parent().map(Path::to_path_buf).unwrap_or_default();
+                    self.actions.push(Action::StartJob(OpKind::Extract { archive: a, members: vec![], dest }));
+                }
+            }
+            Cmd::CompressZip | Cmd::CompressTarGz | Cmd::CompressTarXz | Cmd::Compress7z => {
+                let t = self.tab();
+                if t.archive.is_some() || tab::is_computer(&t.path) {
+                    return;
+                }
+                let srcs = t.targets();
+                if srcs.is_empty() {
+                    return;
+                }
+                let ext = match cmd {
+                    Cmd::CompressTarGz => "tar.gz",
+                    Cmd::CompressTarXz => "tar.xz",
+                    Cmd::Compress7z => "7z",
+                    _ => "zip",
+                };
+                // One item is named after itself ("photo.png" -> "photo.zip"); several, "Archive".
+                let base = match srcs.as_slice() {
+                    [one] => {
+                        let n = one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        if one.is_dir() { n } else { std::path::Path::new(&n).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or(n) }
+                    }
+                    _ => "Archive".to_string(),
+                };
+                let out = fsx::unique_dest(&t.path, &format!("{base}.{ext}"));
+                self.actions.push(Action::StartJob(OpKind::Compress { srcs, out }));
+            }
             Cmd::CreateLink => {
                 let paths = self.tab().targets();
                 let dir = self.panel().path();
@@ -1913,6 +1964,17 @@ impl App {
 
     /// Start a copy/move, asking about conflicts first.
     pub fn begin_transfer(&mut self, srcs: Vec<PathBuf>, dest: PathBuf, mv: bool) {
+        // Out of an archive: extracted (always a copy; the archive stays as it is).
+        if crate::archive::split(&dest).is_some() && !dest.is_dir() {
+            self.toast("Archives are read-only here: extract it to change it");
+            return;
+        }
+        if srcs.iter().any(|s| !s.exists() && crate::archive::split(s).is_some()) {
+            for (archive, members) in crate::archive::group(&srcs) {
+                self.actions.push(Action::StartJob(OpKind::Extract { archive, members, dest: dest.clone() }));
+            }
+            return;
+        }
         let conflicts: Vec<ConflictItem> = srcs
             .iter()
             .filter_map(|s| {
@@ -2154,11 +2216,16 @@ impl App {
             self.drive_op(crate::drives::Op::Mount, &dev, Some((panel, mods.ctrl || mods.command)));
             return;
         }
-        if mods.alt {
+        let in_archive = t.archive.is_some();
+        if mods.alt && !in_archive {
             self.popup = Popup::properties(vec![e.path.clone()]);
             return;
         }
-        if e.is_dir {
+        // Archives open like folders; what is inside one is extracted to be opened.
+        let archive = !e.is_dir && !in_archive && crate::archive::is_archive(&e.name) && crate::archive::available();
+        if in_archive && !e.is_dir {
+            self.open_from_archive(e.path);
+        } else if e.is_dir || archive {
             if mods.ctrl || mods.command {
                 self.actions.push(Action::NewTab { panel, path: e.path, select: None, focus: false });
             } else {
@@ -2171,6 +2238,19 @@ impl App {
             let path = e.path.clone();
             self.popup = Popup::run_exec(path);
         }
+    }
+
+    /// Extract a file from an archive to the cache, then open it like any file.
+    fn open_from_archive(&mut self, path: PathBuf) {
+        let Some((archive, inner)) = crate::archive::split(&path) else { return };
+        let (notes, ctx) = (self.notes.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let r = crate::archive::extract_for_open(&archive, &inner).and_then(|f| crate::mime::open_default(&f));
+            if let Err(e) = r {
+                notes.lock().unwrap_or_else(|e| e.into_inner()).push(format!("Couldn't open {}: {e}", inner.display()));
+            }
+            ctx.request_repaint();
+        });
     }
 
     fn move_tab(&mut self, from: u64, idx: usize, to: u64, to_idx: Option<usize>, side: Option<Side>, copy: bool) {

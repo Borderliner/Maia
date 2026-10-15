@@ -85,6 +85,8 @@ pub struct Tab {
     pub error: Option<String>,
     /// The folder no longer exists (deleted, renamed away, drive removed).
     pub gone: bool,
+    /// The archive file this tab is looking inside (read-only), if any.
+    pub archive: Option<PathBuf>,
     pub selected: HashSet<u32>,
     pub cursor: Option<u32>,
     pub anchor: Option<u32>,
@@ -196,6 +198,7 @@ impl Tab {
             counts: (0, 0, 0, 0),
             hidden_count: 0,
             gone: false,
+            archive: None,
             dimmed: HashSet::new(),
             trash_meta: HashMap::new(),
             loaded_at: None,
@@ -247,9 +250,19 @@ impl Tab {
     /// Re-read the current location (keeps selection & scroll).
     pub fn reload(&mut self) {
         self.error = None;
+        self.archive = None;
         if is_computer(&self.path) {
             self.load_computer();
             return;
+        }
+        if !self.path.is_dir() {
+            if let Some((archive, inner)) = crate::archive::split(&self.path) {
+                self.flatten = false;
+                self.walk = None;
+                self.archive = Some(archive.clone());
+                self.loading = Some(crate::archive::list_async(self.path.clone(), archive, inner, self.ctx.clone()));
+                return;
+            }
         }
         if self.flatten {
             self.start_walk();
@@ -411,7 +424,7 @@ impl Tab {
 
     /// Is the tree view active (Details view, not flattened)?
     pub fn tree_active(&self) -> bool {
-        !self.flatten && crate::listing::mode_for(self.settings.zoom) == crate::listing::Mode::Tree && !is_computer(&self.path)
+        !self.flatten && crate::listing::mode_for(self.settings.zoom) == crate::listing::Mode::Tree && !is_computer(&self.path) && self.archive.is_none()
     }
 
     pub fn toggle_expand(&mut self, dir: &Path) {
@@ -540,8 +553,9 @@ impl Tab {
     }
 
     pub fn navigate(&mut self, path: PathBuf, settings: Option<(ViewSettings, Option<SaveScope>)>) {
-        // A file path: go to its parent and select it.
-        if !is_computer(&path) && path.is_file() {
+        // A file path: go to its parent and select it (an archive opens like a folder).
+        let enters = path.file_name().is_some_and(|n| crate::archive::is_archive(&n.to_string_lossy())) && crate::archive::available();
+        if !is_computer(&path) && path.is_file() && !enters {
             if let Some(parent) = path.parent() {
                 let p = parent.to_path_buf();
                 self.navigate(p, settings);
@@ -652,7 +666,7 @@ impl Tab {
     }
 
     pub fn set_flatten(&mut self, on: bool) {
-        if is_computer(&self.path) || self.flatten == on {
+        if is_computer(&self.path) || self.archive.is_some() || self.flatten == on {
             return;
         }
         self.flatten = on;

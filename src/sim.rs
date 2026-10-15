@@ -2125,6 +2125,108 @@ mod journeys {
         report("single", &s);
     }
 
+    /// Archives as folders: Enter opens a zip, folders inside open and Up leaves them, a
+    /// file inside previews and opens (extracted to the cache), changes are refused, Copy
+    /// and Paste take files out, Extract Here and Compress work from the context menu and
+    /// undo removes what they made.
+    #[test]
+    fn archives_open_extract_compress() {
+        if !sandboxed() || !crate::archive::available() {
+            return;
+        }
+        let home = fixture("archives");
+        let docs = home.join("Documents");
+        let src = root().join("packsrc");
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(src.join("Trip")).unwrap();
+        std::fs::write(src.join("Trip/beach.txt"), "sand and sea").unwrap();
+        std::fs::write(src.join("readme.txt"), "inside the zip").unwrap();
+        let zip = docs.join("photos.zip");
+        crate::archive::create(&zip, &src, &["Trip".into(), "readme.txt".into()]).unwrap();
+        let mut s = Sim::new(&docs, vec2(1280.0, 800.0));
+        s.cmd(ViewDetails);
+        s.settle();
+        select_path(&mut s, &zip);
+        s.act("key Enter");
+        wait_until(&mut s, "inside the zip", 10, |s| s.tab().path == zip && s.tab().entries.len() == 2);
+        assert!(s.tab().archive.is_some());
+        for v in [ViewList, ViewLarge, ViewTree, ViewDetails] {
+            s.cmd(v);
+            look(&mut s, &format!("zip {v:?}"));
+        }
+        assert!(s.texts.iter().any(|(_, t)| t == "photos.zip"), "the archive in the path bar");
+        // Into a folder and back out.
+        select_path(&mut s, &zip.join("Trip"));
+        s.act("key Enter");
+        wait_until(&mut s, "folder in the zip", 10, |s| s.tab().path == zip.join("Trip") && s.tab().entries.iter().any(|e| e.name == "beach.txt"));
+        s.act("key Backspace");
+        wait_until(&mut s, "back at the top", 10, |s| s.tab().path == zip);
+        // Preview, then open.
+        s.cmd(ToggleInspector);
+        select_path(&mut s, &zip.join("readme.txt"));
+        wait_until(&mut s, "preview from the zip", 10, |s| s.texts.iter().any(|(_, t)| t.contains("inside the zip")));
+        look(&mut s, "zip preview");
+        s.cmd(ToggleInspector);
+        let launched = crate::mime::LAUNCHED.lock().unwrap().len();
+        s.act("key Enter");
+        wait_until(&mut s, "opened from the zip", 10, |_| crate::mime::LAUNCHED.lock().unwrap().len() > launched);
+        let cmd = crate::mime::LAUNCHED.lock().unwrap().last().cloned().unwrap_or_default();
+        assert!(cmd.contains("maia/archives") && cmd.contains("readme.txt"), "{cmd}");
+        let extracted = crate::archive::open_cache(&zip).join("readme.txt");
+        assert_eq!(std::fs::read_to_string(&extracted).unwrap(), "inside the zip");
+        // Read-only inside.
+        s.act("key Delete");
+        s.idle(2);
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0.contains("read-only")) && s.app.jobs.is_empty(), "no deleting inside an archive");
+        s.act("key F2");
+        assert!(s.tab().rename.is_none());
+        // Copy out.
+        s.act("key ctrl+c");
+        go(&mut s, &docs);
+        s.act("key ctrl+v");
+        wait_until(&mut s, "copied out", 10, |_| docs.join("readme.txt").exists());
+        assert_eq!(std::fs::read_to_string(docs.join("readme.txt")).unwrap(), "inside the zip");
+        // Extract Here: two things at the top go into a folder named after the archive.
+        s.settle();
+        let r = list_text(&s, "photos.zip");
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(20);
+        s.click_text("Extract Here");
+        wait_until(&mut s, "extracted", 10, |_| docs.join("photos/Trip/beach.txt").exists() && docs.join("photos/readme.txt").exists());
+        assert!(std::fs::read_dir(&docs).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".maia-extract")), "no staging left");
+        // Compress two files to zip, then undo it.
+        s.settle();
+        let id = s.app.active;
+        {
+            let t = s.app.panels.get_mut(&id).unwrap().tab_mut();
+            t.selected.clear();
+            for n in ["notes.txt", "budget 2026.csv"] {
+                if let Some(i) = t.entries.iter().position(|e| e.name == n) {
+                    t.selected.insert(i as u32);
+                }
+            }
+        }
+        let r = list_text(&s, "notes.txt");
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(20);
+        if !s.texts.iter().any(|(_, t)| t == "Zip (.zip)") {
+            s.click_text("Compress");
+            s.idle(10);
+        }
+        s.click_text("Zip (.zip)");
+        let out = docs.join("Archive.zip");
+        wait_until(&mut s, "compressed", 10, |_| out.exists());
+        wait_until(&mut s, "job done", 10, |s| s.app.jobs.iter().all(|j| j.finished_at.is_some()));
+        let mut names: Vec<String> = crate::archive::entries(&out, Path::new("")).unwrap().iter().map(|e| e.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, ["budget 2026.csv", "notes.txt"]);
+        s.act("key ctrl+z");
+        s.settle();
+        wait_until(&mut s, "undone", 10, |_| !out.exists());
+        look(&mut s, "after archives");
+        report("archives", &s);
+    }
+
     #[test]
     fn monkey_sessions() {
         if !sandboxed() {

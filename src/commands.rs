@@ -234,6 +234,11 @@ commands! {
     RestoreTrash, "restore_trash", Files, "Restore From Trash", "Put trashed items back where they came from.", [];
     Undo, "undo", Files, "Undo", "Reverse the last rename, move, copy, create or trash.", ["Ctrl+Z"];
     EmptyTrash, "empty_trash", Files, "Empty Trash", "Permanently remove everything in the trash (asks first).", [];
+    ExtractHere, "extract_here", Files, "Extract Here", "Unpack the selected archives (or what is selected inside one) beside them.", [];
+    CompressZip, "compress_zip", Files, "Compress To Zip", "Pack the selection into a .zip archive.", [];
+    CompressTarGz, "compress_tar_gz", Files, "Compress To Tar.gz", "Pack the selection into a .tar.gz archive.", [];
+    CompressTarXz, "compress_tar_xz", Files, "Compress To Tar.xz", "Pack the selection into a .tar.xz archive.", [];
+    Compress7z, "compress_7z", Files, "Compress To 7z", "Pack the selection into a .7z archive.", [];
 
     SelectAll, "select_all", Selection, "Select All", "Select every item without scrolling.", ["Ctrl+A"];
     SelectNone, "select_none", Selection, "Select None", "Clear the selection.", ["Ctrl+Shift+A"];

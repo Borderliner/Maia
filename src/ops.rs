@@ -25,6 +25,11 @@ pub enum OpKind {
     Move { srcs: Vec<PathBuf>, dest: PathBuf, decide: HashMap<PathBuf, Conflict> },
     Trash { paths: Vec<PathBuf> },
     Delete { paths: Vec<PathBuf> },
+    /// Paths inside `archive` (none: all of it, into its own folder when it holds
+    /// several things) extracted into `dest`.
+    Extract { archive: PathBuf, members: Vec<PathBuf>, dest: PathBuf },
+    /// `srcs` (all in one folder) packed into the archive `out`.
+    Compress { srcs: Vec<PathBuf>, out: PathBuf },
 }
 
 impl OpKind {
@@ -34,6 +39,8 @@ impl OpKind {
             OpKind::Move { .. } => "Moving",
             OpKind::Trash { .. } => "Moving to trash",
             OpKind::Delete { .. } => "Deleting",
+            OpKind::Extract { .. } => "Extracting",
+            OpKind::Compress { .. } => "Compressing",
         }
     }
 }
@@ -68,10 +75,14 @@ pub fn spawn(id: u64, kind: OpKind, ctx: egui::Context) -> Job {
     let cancel = Arc::new(AtomicBool::new(false));
     let pause = Arc::new(AtomicBool::new(false));
     let n = match &kind {
-        OpKind::Copy { srcs, .. } | OpKind::Move { srcs, .. } => srcs.len(),
-        OpKind::Trash { paths } | OpKind::Delete { paths } => paths.len(),
+        OpKind::Copy { srcs, .. } | OpKind::Move { srcs, .. } | OpKind::Compress { srcs, .. } => srcs.len(),
+        OpKind::Trash { paths } | OpKind::Delete { paths } | OpKind::Extract { members: paths, .. } => paths.len(),
     };
-    let label = format!("{} {} item{}", kind.verb(), n, if n == 1 { "" } else { "s" });
+    let label = match &kind {
+        OpKind::Extract { archive, members, .. } if members.is_empty() => format!("Extracting {}", name_of(archive)),
+        OpKind::Compress { out, .. } => format!("Compressing into {}", name_of(out)),
+        _ => format!("{} {} item{}", kind.verb(), n, if n == 1 { "" } else { "s" }),
+    };
     let (p2, c2, k2, pa2) = (progress.clone(), cancel.clone(), kind.clone(), pause.clone());
     std::thread::spawn(move || {
         let gate = Gate { cancel: &c2, pause: &pa2 };
@@ -173,6 +184,24 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 ctx.request_repaint();
             }
         }
+        OpKind::Extract { archive, members, dest } => {
+            p.lock().unwrap().current = name_of(archive);
+            extract(archive, members, dest, p);
+        }
+        OpKind::Compress { srcs, out } => {
+            p.lock().unwrap().total_items = srcs.len();
+            p.lock().unwrap().current = name_of(out);
+            let names: Vec<std::ffi::OsString> = srcs.iter().filter_map(|s| s.file_name().map(|n| n.to_os_string())).collect();
+            match out.parent().map(|parent| crate::archive::create(out, parent, &names)) {
+                Some(Ok(())) => {
+                    let mut g = p.lock().unwrap();
+                    g.produced.push((out.clone(), out.clone()));
+                    g.done_items = srcs.len();
+                }
+                Some(Err(e)) => p.lock().unwrap().errors.push(format!("{}: {e}", name_of(out))),
+                None => {}
+            }
+        }
         OpKind::Delete { paths } => {
             p.lock().unwrap().total_items = paths.len();
             for s in paths {
@@ -188,6 +217,49 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
             }
         }
     }
+}
+
+/// Extract into a hidden staging folder beside the results, then move each top-level
+/// result into place (renamed if the name is taken), so a failure leaves nothing half done.
+fn extract(archive: &Path, members: &[PathBuf], dest: &Path, p: &Mutex<Progress>) {
+    let fail = |e: String| p.lock().unwrap_or_else(|e| e.into_inner()).errors.push(format!("{}: {e}", name_of(archive)));
+    let (members, dest) = if members.is_empty() {
+        let tops: Vec<PathBuf> = match crate::archive::list(archive) {
+            Ok(all) => all.iter().filter(|i| i.path.components().count() == 1).map(|i| i.path.clone()).collect(),
+            Err(e) => return fail(e),
+        };
+        // Several things at the top go into a folder named after the archive.
+        let dest = if tops.len() > 1 {
+            let stem = name_of(archive);
+            let stem = crate::archive::stem(&stem);
+            let d = unique_dest(dest, stem);
+            if let Err(e) = fs::create_dir(&d) {
+                return fail(e.to_string());
+            }
+            d
+        } else {
+            dest.to_path_buf()
+        };
+        (tops, dest)
+    } else {
+        (members.to_vec(), dest.to_path_buf())
+    };
+    p.lock().unwrap_or_else(|e| e.into_inner()).total_items = members.len();
+    let stage = dest.join(format!(".maia-extract-{}", std::process::id()));
+    if let Err(e) = crate::archive::extract(archive, &members, &stage) {
+        let _ = fs::remove_dir_all(&stage);
+        return fail(e);
+    }
+    for m in &members {
+        let from = stage.join(m);
+        let to = unique_dest(&dest, &name_of(m));
+        match fs::rename(&from, &to) {
+            Ok(()) => p.lock().unwrap_or_else(|e| e.into_inner()).produced.push((archive.join(m), to)),
+            Err(e) => fail(format!("{}: {e}", m.display())),
+        }
+        p.lock().unwrap_or_else(|e| e.into_inner()).done_items += 1;
+    }
+    let _ = fs::remove_dir_all(&stage);
 }
 
 fn name_of(p: &Path) -> String {
