@@ -48,4 +48,13 @@ pub const LUCIDE: &[(&str, char)] = &[
     ("hard-drive-download", '\u{e4ea}'),
     ("usb", '\u{e35a}'),
     ("unplug", '\u{e462}'),
+    ("globe", '\u{e0eb}'),
+    ("smartphone", '\u{e167}'),
+    ("server", '\u{e157}'),
+    ("folder-archive", '\u{e331}'),
+    ("shield-check", '\u{e1ff}'),
+    ("git-branch", '\u{e0e5}'),
+    ("git-compare", '\u{e35d}'),
+    ("file-search", '\u{e0cf}'),
+    ("text-search", '\u{e5b2}'),
 ];

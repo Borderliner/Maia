@@ -2,7 +2,7 @@
 # Usage: python3 tools/lucide_subset.py lucide.css lucide.ttf assets/lucide-subset.ttf src/lucide_map.rs pyftsubset
 import re, sys, subprocess
 css, ttf, out_ttf, out_rs, pyft = sys.argv[1:6]
-want = """a-arrow-down a-arrow-up arrow-left arrow-right arrow-up bookmark chevron-down chevron-right clock columns-2 diamond download file file-text folder grid-3x3 hard-drive house image info list-ordered lock lock-open maximize-2 menu minimize-2 monitor music panel-left-close pin plus rotate-ccw scan-eye search slash trash-2 video x play pause volume-2 volume-x chevron-left skip-back skip-forward circle-eject hard-drive-download usb unplug""".split()
+want = """a-arrow-down a-arrow-up arrow-left arrow-right arrow-up bookmark chevron-down chevron-right clock columns-2 diamond download file file-text folder grid-3x3 hard-drive house image info list-ordered lock lock-open maximize-2 menu minimize-2 monitor music panel-left-close pin plus rotate-ccw scan-eye search slash trash-2 video x play pause volume-2 volume-x chevron-left skip-back skip-forward circle-eject hard-drive-download usb unplug globe smartphone server folder-archive shield-check git-branch git-compare file-search text-search""".split()
 cps = {}
 for m in re.finditer(r'\.icon-([a-z0-9-]+):before\s*\{\s*content:\s*"\\([0-9a-f]+)"', open(css).read()):
     cps[m.group(1)] = int(m.group(2), 16)
