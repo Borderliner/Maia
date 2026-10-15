@@ -242,9 +242,18 @@ pub fn drag_picture(ctx: &egui::Context, paths: &[std::path::PathBuf], pal: &cra
 
 /// A job's label once it is done: "Copying 3 items" becomes "Copied 3 items".
 pub fn finished_label(label: &str) -> String {
-    for (now, done) in [("Copying", "Copied"), ("Moving to trash", "Moved to trash"), ("Moving", "Moved"), ("Deleting", "Deleted"), ("Extracting", "Extracted"), ("Compressing", "Compressed")] {
+    job_title(label, false)
+}
+
+/// The card's title when nothing in the job succeeded: "Couldn't copy 1 item".
+pub fn failed_label(label: &str) -> String {
+    job_title(label, true)
+}
+
+fn job_title(label: &str, failed: bool) -> String {
+    for (now, done, verb) in [("Copying", "Copied", "copy"), ("Moving to trash", "Moved to trash", "move to trash"), ("Moving", "Moved", "move"), ("Deleting", "Deleted", "delete"), ("Extracting", "Extracted", "extract"), ("Compressing", "Compressed", "compress")] {
         if let Some(rest) = label.strip_prefix(now) {
-            return format!("{done}{rest}");
+            return if failed { format!("Couldn't {verb}{rest}") } else { format!("{done}{rest}") };
         }
     }
     label.to_string()
@@ -1434,8 +1443,10 @@ impl App {
                         ui.set_width(320.0);
                         let p = j.progress.lock().unwrap();
                         let done = p.finished;
+                        let failed = done && !p.errors.is_empty() && p.errors.len() >= p.total_items.max(1);
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(if done { finished_label(&j.label) } else { j.label.clone() }).strong());
+                            let title = if failed { failed_label(&j.label) } else if done { finished_label(&j.label) } else { j.label.clone() };
+                            ui.label(egui::RichText::new(title).strong());
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if done {
                                     if ui.small_button("×").clicked() {
@@ -1455,7 +1466,7 @@ impl App {
                         let frac = if p.total_bytes > 0 { p.done_bytes as f32 / p.total_bytes as f32 } else if p.total_items > 0 { p.done_items as f32 / p.total_items as f32 } else { 0.0 };
                         ui.add(egui::ProgressBar::new(if done { 1.0 } else { frac }).desired_height(5.0).fill(if p.errors.is_empty() { pal.accent } else { pal.danger }));
                         let el = j.started.elapsed().as_secs_f64().max(0.001);
-                        let mut line = format!("{} / {} items", p.done_items, p.total_items);
+                        let mut line = format!("{} / {} item{}", p.done_items, p.total_items, if p.total_items == 1 { "" } else { "s" });
                         if p.total_bytes > 0 {
                             let speed = p.done_bytes as f64 / el;
                             line = format!("{} of {} · {}/s", fsx::fmt_size(p.done_bytes), fsx::fmt_size(p.total_bytes), fsx::fmt_size(speed as u64));

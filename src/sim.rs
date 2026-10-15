@@ -2763,6 +2763,7 @@ mod journeys {
         go(&mut s, &locked);
         s.act("key ctrl+v");
         wait_until(&mut s, "paste refused", 10, |s| s.texts.iter().any(|(_, t)| t == "Retry as administrator"));
+        assert!(s.texts.iter().any(|(_, t)| t == "Couldn't copy 1 item"), "the card says nothing was copied");
         look(&mut s, "permission refused");
         s.click_text("Retry as administrator");
         wait_until(&mut s, "copied as administrator", 10, |_| locked.join("notes.txt").exists());

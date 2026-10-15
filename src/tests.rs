@@ -1243,6 +1243,9 @@ fn finished_jobs_read_in_the_past_tense() {
     assert_eq!(finished_label("Moving 3 items"), "Moved 3 items");
     assert_eq!(finished_label("Moving to trash 2 items"), "Moved to trash 2 items");
     assert_eq!(finished_label("Deleting 1 item"), "Deleted 1 item");
+    assert_eq!(crate::ui::failed_label("Copying 1 item"), "Couldn't copy 1 item");
+    assert_eq!(crate::ui::failed_label("Moving to trash 2 items"), "Couldn't move to trash 2 items");
+    assert_eq!(crate::ui::failed_label("Deleting 3 items as administrator"), "Couldn't delete 3 items as administrator");
 }
 
 /// Run a tab's contents search to the end and rebuild its view.
