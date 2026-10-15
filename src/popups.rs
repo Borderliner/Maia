@@ -996,6 +996,7 @@ fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::Forward => t.can_forward(),
         Cmd::ClosePanel | Cmd::FocusNextPanel | Cmd::FocusPrevPanel | Cmd::CopyToOther | Cmd::MoveToOther => panels > 1,
         Cmd::InspectorLineNumbers | Cmd::InspectorMinimap => p.inspector.is_some(),
+        Cmd::ComparePanels | Cmd::SelectDifferences | Cmd::SyncPanels => panels > 1,
         Cmd::OpenLinkTarget => t.target_entries().first().map(|e| e.is_link).unwrap_or(false),
         Cmd::RestoreTrash => t.path.starts_with(crate::sidebar::trash_dir()),
         Cmd::Undo => !app.undo.is_empty(),

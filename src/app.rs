@@ -855,6 +855,7 @@ impl App {
         if self.seq.len() > 0 && self.seq_time.elapsed() > Duration::from_millis(1100) {
             self.seq.clear();
         }
+        crate::compare::pump(self);
     }
 
     // ---------------------------------------------------------------- input
@@ -1425,6 +1426,7 @@ impl App {
             }
             Cmd::FocusFilter => self.panel().focus_filter = true,
             Cmd::ContentSearch => crate::contentsearch::toggle(self.panel()),
+            Cmd::ComparePanels | Cmd::SelectDifferences | Cmd::SyncPanels => crate::compare::run(self, cmd),
             Cmd::TypesFilter => self.popup = Popup::types(self.active),
             Cmd::ToggleHidden => {
                 self.cfg.show_hidden = !self.cfg.show_hidden;

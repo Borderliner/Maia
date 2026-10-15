@@ -4,6 +4,7 @@ mod app;
 mod archive;
 mod clipboard;
 mod commands;
+mod compare;
 mod contentsearch;
 mod config;
 mod drives;

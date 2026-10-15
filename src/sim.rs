@@ -792,6 +792,14 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 }
             }
         }
+        100 => {
+            // Compare two panels (splitting first if there is one), then act on the marks.
+            if s.app.panels.len() < 2 {
+                s.cmd(Cmd::SplitRight);
+            }
+            s.cmd(Cmd::ComparePanels);
+            s.cmd(*rng.pick(&[Cmd::SelectDifferences, Cmd::SyncPanels, Cmd::FocusNextPanel]));
+        }
         98 => {
             // Contents mode: the filter's toggle, then a query typed into the listing.
             click_control_at(s, "contents toggle");
@@ -2366,6 +2374,77 @@ mod journeys {
         assert!(!s.texts.iter().any(|(_, t)| t == "main"), "no branch outside a work tree");
         look(&mut s, "outside git");
         report("git", &s);
+    }
+
+    fn palette_run(s: &mut Sim, title: &str) {
+        s.act("key ctrl+shift+p");
+        s.act(&format!("text {title}"));
+        s.act("key Enter");
+        s.settle();
+    }
+
+    /// Folder compare between two panels: marks on both sides in every view, Select
+    /// Differences, Sync To Other Panel through the copy job and its conflict dialog, the
+    /// marks following the sync and its undo, and clearing when a panel moves.
+    #[test]
+    fn compare_and_sync_panels() {
+        if !sandboxed() {
+            return;
+        }
+        use crate::compare::{Diff, mark};
+        let home = fixture("compare");
+        let (a, b) = (home.join("A"), home.join("B"));
+        crate::tests::compare_fixture(&a, &b);
+        let mut s = Sim::new(&a, vec2(1280.0, 800.0));
+        s.act("key ctrl+shift+s");
+        s.settle();
+        go(&mut s, &b);
+        s.act("key Tab");
+        s.settle();
+        assert_eq!(s.tab().path, a);
+        palette_run(&mut s, "Compare Panels");
+        assert!(toast_is(&s, "5 different here, 3 there"), "{:?}", s.app.toast);
+        assert_eq!(mark(&a.join("newer.txt")), Some(Diff::Newer));
+        assert_eq!(mark(&b.join("newer.txt")), None, "the older side is not marked");
+        assert_eq!(mark(&b.join("size.txt")), Some(Diff::Size));
+        assert_eq!(mark(&b.join("only-b.txt")), Some(Diff::Only));
+        assert_eq!(mark(&a.join("same.txt")), None);
+        assert_eq!(mark(&a.join("both")), None);
+        for v in [ViewTree, ViewList, ViewMedium, ViewLarge, ViewXL, ViewDetails] {
+            s.cmd(v);
+            look(&mut s, &format!("compare {v:?}"));
+        }
+        s.resize(520.0, 340.0);
+        look(&mut s, "compare narrow");
+        s.resize(1280.0, 800.0);
+        palette_run(&mut s, "Select Differences");
+        let mut sel: Vec<String> = s.tab().selected_paths().iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
+        sel.sort();
+        assert_eq!(sel, vec!["folder-a", "kind", "newer.txt", "only-a.txt", "size.txt"]);
+        // Sync copies what is missing or newer (not the file that only differs in size);
+        // two names exist there already, so the conflict dialog asks.
+        palette_run(&mut s, "Sync To Other Panel");
+        for _ in 0..2 {
+            wait_until(&mut s, "conflict dialog", 10, |s| matches!(s.app.popup, Popup::Conflict(_)));
+            s.click_text("Replace");
+            s.settle();
+        }
+        wait_until(&mut s, "sync copied", 10, |_| b.join("only-a.txt").exists() && b.join("folder-a").is_dir() && b.join("kind").is_file());
+        assert_eq!(std::fs::read_to_string(b.join("newer.txt")).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(b.join("size.txt")).unwrap(), "short", "a size difference alone is not synced");
+        wait_until(&mut s, "marks follow the sync", 10, |_| mark(&a.join("newer.txt")).is_none() && mark(&a.join("only-a.txt")).is_none());
+        assert_eq!(mark(&b.join("only-b.txt")), Some(Diff::Only));
+        look(&mut s, "after sync");
+        // Undo removes the copies again, and the marks come back.
+        s.act("key ctrl+z");
+        wait_until(&mut s, "sync undone", 10, |s| !b.join("only-a.txt").exists() && mark(&a.join("only-a.txt")) == Some(Diff::Only));
+        // Either panel moving clears every mark.
+        s.act("key Tab");
+        s.act("key alt+ArrowUp");
+        s.settle();
+        assert_eq!(mark(&a.join("size.txt")), None, "marks clear when a panel moves");
+        look(&mut s, "after compare");
+        report("compare", &s);
     }
 
     #[test]

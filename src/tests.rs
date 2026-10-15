@@ -1546,3 +1546,54 @@ fn git_status_marks_every_kind_of_change() {
     let _ = std::fs::remove_dir_all(&d);
     let _ = std::fs::remove_dir_all(&plain);
 }
+
+/// Two folders with one difference of every kind (the compare journey uses them too):
+/// a newer file, a file of another size, files and folders on one side only, a name that
+/// is a file here and a folder there, and identical entries.
+pub(crate) fn compare_fixture(a: &Path, b: &Path) {
+    let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let file = |p: PathBuf, body: &str, when: std::time::SystemTime| {
+        touch(&p, body);
+        std::fs::File::options().write(true).open(&p).unwrap().set_modified(when).unwrap();
+    };
+    for d in [a, b] {
+        file(d.join("same.txt"), "same", t0);
+        std::fs::create_dir_all(d.join("both")).unwrap();
+    }
+    file(a.join("newer.txt"), "new", t0 + Duration::from_secs(3600));
+    file(b.join("newer.txt"), "old", t0);
+    file(a.join("size.txt"), "longer text", t0);
+    file(b.join("size.txt"), "short", t0);
+    file(a.join("only-a.txt"), "a", t0);
+    file(b.join("only-b.txt"), "b", t0);
+    std::fs::create_dir_all(a.join("folder-a")).unwrap();
+    file(a.join("kind"), "a file", t0);
+    std::fs::create_dir_all(b.join("kind")).unwrap();
+}
+
+#[test]
+fn compare_marks_only_newer_and_size_differences() {
+    use crate::compare::{Diff, side};
+    let d = tmpdir("compare");
+    let (a, b) = (d.join("a"), d.join("b"));
+    compare_fixture(&a, &b);
+    let (la, lb) = (crate::fsx::list_dir(&a).unwrap(), crate::fsx::list_dir(&b).unwrap());
+    let (ea, eb): (Vec<_>, Vec<_>) = (la.iter().collect(), lb.iter().collect());
+    let mut m = HashMap::new();
+    side(&ea, &eb, &mut m);
+    side(&eb, &ea, &mut m);
+    let want: HashMap<PathBuf, Diff> = [
+        (a.join("newer.txt"), Diff::Newer),
+        (a.join("size.txt"), Diff::Size),
+        (b.join("size.txt"), Diff::Size),
+        (a.join("only-a.txt"), Diff::Only),
+        (b.join("only-b.txt"), Diff::Only),
+        (a.join("folder-a"), Diff::Only),
+        (a.join("kind"), Diff::Only),
+        (b.join("kind"), Diff::Only),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(m, want, "identical files, the older side and folders on both sides stay unmarked");
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -782,6 +782,7 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                     // The item being renamed drops its highlight; the others fade back.
                     let editing = rename_focus(ui, rr, idx, t, env);
                     paint_item_bg(ui.painter(), rr.shrink2(vec2(3.0, 0.5)), selected && !editing, is_cursor && !editing, resp.hovered() && !editing, drop, env, 4);
+                    crate::compare::paint(ui.painter(), rr, &e.path, &pal);
                     handle_item(ui, &resp, idx, t, env);
                     // Cut items, and tree context rows that only lead to filter matches, are faded.
                     let faded = env.cut.contains(&e.path) || t.dimmed.contains(&idx) || unmounted(t, &e);
@@ -1135,6 +1136,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                 Mode::List => {
                     let editing = rename_focus(ui, r, idx, t, env);
                     paint_item_bg(ui.painter(), r.shrink2(vec2(2.0, 0.5)), selected && !editing, is_cursor && !editing, resp.hovered() && !editing, drop, env, 4);
+                    crate::compare::paint(ui.painter(), r, &e.path, &pal);
                     handle_item(ui, &resp, idx, t, env);
                     let ic = Rect::from_min_size(pos2(r.left() + 6.0, r.center().y - 8.0), Vec2::splat(16.0));
                     let boxed = !tab::is_computer(&t.path) && item_checkbox(ui, ic.shrink(1.0), idx, ui.rect_contains_pointer(r), t, env);
@@ -1161,6 +1163,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                     paint_item_bg(ui.painter(), r.shrink(2.0), selected && !editing, is_cursor && !editing, resp.hovered() && !editing, drop, env, rad);
                     handle_item(ui, &resp, idx, t, env);
                     let icon_r = Rect::from_min_size(pos2(r.center().x - s / 2.0, r.top() + 8.0), Vec2::splat(s));
+                    crate::compare::paint(ui.painter(), Rect::from_min_max(pos2(r.left() + 2.0, icon_r.top()), icon_r.max), &e.path, &pal);
                     let mut drew = false;
                     let want_thumb = thumbs_here && s >= 40.0 && thumbs::can_thumb(&e);
                     if want_thumb {

@@ -162,6 +162,9 @@ commands! {
     FocusPrevPanel, "focus_prev_panel", Panels, "Focus Previous Panel", "Move keyboard focus to the previous panel.", ["Shift+Tab"];
     CopyToOther, "copy_to_other_panel", Panels, "Copy To Other Panel", "Copy the selection into the folder of the previously focused panel.", ["F5"];
     MoveToOther, "move_to_other_panel", Panels, "Move To Other Panel", "Move the selection into the folder of the previously focused panel.", ["F6"];
+    ComparePanels, "compare_panels", Panels, "Compare Panels", "Mark what only one panel has, what is newer and what differs in size.", [];
+    SelectDifferences, "select_differences", Panels, "Select Differences", "Select the entries Compare Panels marks in this panel.", [];
+    SyncPanels, "sync_to_other_panel", Panels, "Sync To Other Panel", "Copy what is missing or newer here into the other panel's folder.", [];
 
     ToggleFlatten, "toggle_flatten", View, "Toggle Expand Folder", "Show every file under this folder in one flat, searchable list.", ["Ctrl+E"];
     FocusFilter, "focus_filter", View, "Focus Filter", "Put the cursor in the filter box.", ["Ctrl+F"];
