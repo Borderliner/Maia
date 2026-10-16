@@ -29,6 +29,8 @@ start)
   GPU=""; for d in /dev/dri /dev/nvidia*; do [ -e "$d" ] && GPU="$GPU --dev-bind $d $d"; done
   # Test builds have their own window class, so a rule can place them before they show.
   clients() { hyprctl -j clients 2>/dev/null | python3 -c 'import json,sys; [print(c["address"]) for c in json.load(sys.stdin) if c["class"]=="io.github.yappologistic.Maia.test"]' 2>/dev/null; }
+  # Two test windows starting at once would each take the other for its own.
+  exec 9> "${XDG_RUNTIME_DIR:-/tmp}/maia-window.lock"; flock 9
   BEFORE=$(clients)
   if [ -n "$MAIA_WS" ]; then
     hyprctl eval "hl.window_rule({ match = { class = \"^(io\\\\.github\\\\.yappologistic\\\\.Maia\\\\.test)\$\" }, workspace = \"$MAIA_WS silent\" })" > /dev/null 2>&1 ||
