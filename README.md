@@ -37,7 +37,7 @@ These are optional. Maia works without them and uses them when they are there:
 | `7z` | password-protected 7z archives (and quicker password checks for zip) |
 | `gio` (GVFS) | network places (smb, sftp, ftp, WebDAV) and phones over MTP |
 | `pkexec` (polkit) | retrying a refused copy, move, delete or rename as administrator |
-| `git` | change marks on files in git repositories, their history, staging and committing |
+| `git` | change marks on files in git repositories, their history, staging and committing, branches and the stash |
 | `ollama` | search by meaning, if you turn it on (it fetches a ~860 MB model only when you ask); `ollama-vulkan` lets it use the graphics card |
 | `ffmpeg`, `ffprobe`, `ffplay` | video and audio previews and thumbnails |
 | `pdfinfo`, `pdftoppm` (poppler) | PDF pages in the inspector |
@@ -76,11 +76,12 @@ files for Compress. Connect To Server (in the menu, or type an `smb://`, `sftp:/
 or `ftp://` address into Go To) opens network shares, which then stay in the
 sidebar's Network section. Right-click files for Tags to give them colour labels or
 named tags (kept on the files, where KDE's file managers see them too). In a git
-repository, the branch name in the status bar opens its commit history: a commit
-shows its files with their diffs, and right-clicking a file shows the commits that
-changed it. Changes, above the commits, stages files or single hunks, discards (into
-the stash, or the trash for a new file) and commits; Ctrl+Enter commits. Files git
-ignores are drawn faded, or hidden (Options, Git). Maia never pushes.
+repository, the branch name in the status bar opens a menu: the commit history, the
+branches to switch to or create, the stash and the other work trees. In the history a
+commit shows its files with their diffs, and right-clicking a file shows the commits
+that changed it. Changes, above the commits, stages files or single hunks, discards
+(into the stash, or the trash for a new file) and commits; Ctrl+Enter commits. Files
+git ignores are drawn faded, or hidden (Options, Git). Maia never pushes.
 
 Ctrl+K finds files and folders anywhere in your home folder by name, as you type.
 With search by meaning turned on, it also finds documents, PDFs and pictures by what

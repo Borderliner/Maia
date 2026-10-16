@@ -20,6 +20,9 @@ pub struct Panel {
     pub list_rect: Rect,
     /// Where the inspector was drawn last frame (None: closed).
     pub inspector_rect: Option<Rect>,
+    /// Where the status bar's branch chip was drawn last frame (the branch menu opens
+    /// above it).
+    pub branch_chip: Option<Rect>,
 }
 
 impl Panel {
@@ -35,6 +38,7 @@ impl Panel {
             rect: Rect::NOTHING,
             list_rect: Rect::NOTHING,
             inspector_rect: None,
+            branch_chip: None,
         }
     }
     pub fn tab(&self) -> &Tab {

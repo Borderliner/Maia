@@ -222,6 +222,7 @@ commands! {
     InspectorWrap, "inspector_word_wrap", Inspector, "Toggle Inspector Word Wrap", "Wrap long lines in text previews (remembered apart for code and for prose).", [];
     InspectorMinimap, "inspector_minimap", Inspector, "Toggle Inspector Image Minimap", "Show or hide the overview while zoomed into an image.", [];
     GitHistory, "show_git_history", Inspector, "Show Git History", "The commits of this folder's repository as a graph, in the inspector.", [];
+    GitBranches, "git_branches", Inspector, "Git Branches", "Switch or create a branch, use the stash, open another work tree.", [];
     GitChanges, "git_changes", Inspector, "Show Git Changes", "Stage, discard and commit this repository's changes, in the inspector.", [];
     Properties, "properties", Inspector, "Properties", "Details, sizes and permissions of the selection.", ["Alt+Enter"];
 

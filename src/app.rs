@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use egui::{self, Event, Key, Modifiers, Pos2};
+use egui::{self, Event, Key, Modifiers, Pos2, Rect, vec2};
 
 use crate::commands::{self, Chord, Cmd, Keymap};
 use crate::config::{self, Config, LayoutSnap, NewTabShows, SaveScope, Session, SortKey, Startup, TabSnap, UserData, ViewSettings};
@@ -902,6 +902,15 @@ impl App {
                 want.insert(ip);
             }
         }
+        // Changes started from the branch menu: said once done, and read again.
+        for (root, title, r) in crate::gitwork::finished() {
+            crate::gitstatus::rescan(&root);
+            match r {
+                Ok(msg) => self.toast(msg),
+                Err(e) if matches!(self.popup, Popup::None) => self.popup = Popup::notice(title, e),
+                Err(_) => self.toast(title),
+            }
+        }
         crate::gitstatus::pump(&self.panels, &changed_dirs, &mut want, self.cfg.git_ignored != crate::config::IgnoredFiles::Show, ctx);
         self.watch.sync(&want);
         let recents = &self.recents_set;
@@ -1792,6 +1801,15 @@ impl App {
                         p.inspector.get_or_insert_with(Inspector::default).show_history(crate::gitlog::History::new(r.root.clone(), r.branch.clone(), opened));
                     }
                     _ => {}
+                }
+            }
+            Cmd::GitBranches => {
+                let p = self.panel();
+                if let Some(r) = crate::gitstatus::repo_for(&p.path()) {
+                    // Above the branch chip; from the palette with no chip shown, above the
+                    // panel's lower right corner.
+                    let at = p.branch_chip.unwrap_or_else(|| Rect::from_min_size(p.rect.right_bottom() - vec2(120.0, 30.0), vec2(100.0, 20.0)));
+                    self.popup = Popup::branches(p.id, r.root.clone(), at);
                 }
             }
             Cmd::GitChanges => {

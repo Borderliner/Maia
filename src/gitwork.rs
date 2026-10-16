@@ -11,6 +11,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::gitlog::{Change, Spans};
@@ -589,4 +590,44 @@ pub fn run(root: &Path, op: &Op) -> Result<String, String> {
             exec(root, &["stash", "drop", "-q", &s.sel], None, quick).map(|_| format!("Dropped {}", s.sel))
         }
     }
+}
+
+/// A change started from a menu: the result is said once it is done.
+struct Pending {
+    root: PathBuf,
+    title: String,
+    slot: crate::gitlog::Slot<Result<String, String>>,
+}
+
+thread_local! {
+    static PENDING: std::cell::RefCell<Vec<Pending>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `op` on a worker; `title` heads its error ("Couldn't switch to docs").
+pub fn start(ctx: &egui::Context, root: &Path, op: Op, title: String) {
+    let r = root.to_path_buf();
+    let slot = crate::gitlog::spawn(ctx, move || run(&r, &op));
+    PENDING.with(|p| p.borrow_mut().push(Pending { root: root.to_path_buf(), title, slot }));
+}
+
+/// Changes started with `start` that have finished: (work tree, title, result).
+pub fn finished() -> Vec<(PathBuf, String, Result<String, String>)> {
+    PENDING.with(|p| {
+        let mut p = p.borrow_mut();
+        let mut done = vec![];
+        p.retain(|x| match x.slot.lock().ok().and_then(|mut s| s.take()) {
+            Some(r) => {
+                done.push((x.root.clone(), x.title.clone(), r));
+                false
+            }
+            None => true,
+        });
+        done
+    })
+}
+
+/// The branch menu's lists, read on a worker.
+pub fn refs_job(ctx: &egui::Context, root: &Path) -> Arc<Mutex<Option<Refs>>> {
+    let r = root.to_path_buf();
+    crate::gitlog::spawn(ctx, move || refs(&r))
 }

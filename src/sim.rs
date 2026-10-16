@@ -1182,6 +1182,33 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.act(&format!("up -40 {y:.0}"));
             }
         }
+        110 => {
+            into_repo(s, rng);
+            // The branch menu (the chip, or the palette's command), then a key or an item,
+            // and whatever that opens: a name for a new branch, a stash's menu, a refusal.
+            let branch = crate::gitstatus::repo_for(&s.tab().path).map(|r| r.branch.clone()).unwrap_or_default();
+            let chip = s.texts.iter().filter(|(r, t)| *t == branch && r.top() > s.size.y - 30.0).map(|(r, _)| r.center()).next();
+            match chip {
+                Some(c) if rng.below(2) == 0 => s.act(&format!("click {:.0} {:.0}", c.x, c.y)),
+                _ => s.cmd(Cmd::GitBranches),
+            }
+            s.idle(4);
+            for _ in 0..1 + rng.below(4) {
+                match &s.app.popup {
+                    Popup::Branches(_) | Popup::Stash { .. } => match rng.below(3) {
+                        0 => click_control_at(s, rng.pick(&["branch menu item", "stash menu item"])),
+                        _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowDown", "ArrowUp", "Enter", "Escape"]))),
+                    },
+                    Popup::Prompt { .. } => {
+                        s.act(&format!("text {}", rng.pick(&["spike", "fix/menu", "two..dots", "-x", "日本"])));
+                        s.act("key Enter");
+                    }
+                    Popup::Confirm { .. } | Popup::Notice { .. } => s.act(rng.pick(&["key Enter", "key Escape"])),
+                    _ => break,
+                }
+                s.idle(3);
+            }
+        }
         111 => {
             into_repo(s, rng);
             // The Changes page: rows hovered and their buttons, a hunk, everything at
@@ -3877,9 +3904,11 @@ mod journeys {
         look(&mut s, "ahead and behind");
         s.act(&format!("move {:.0} {:.0}", chip.center().x, chip.center().y));
         s.idle(40);
-        assert!(s.texts.iter().any(|(_, t)| t == "2 to push, 1 to pull · click for history"), "the tooltip says what the numbers are");
+        assert!(s.texts.iter().any(|(_, t)| t == "2 to push, 1 to pull · click for history and branches"), "the tooltip says what the numbers are");
         // The history: our branch alone, origin/main on their commit, docs with its remote.
         s.act(&format!("click {:.0} {:.0}", chip.center().x, chip.center().y));
+        wait_until(&mut s, "the branch menu", 5, |s| s.texts.iter().any(|(_, t)| t == "History"));
+        s.click_text("History");
         wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 4));
         s.idle(3);
         for t in ["origin/main", "docs · origin"] {
@@ -3911,7 +3940,7 @@ mod journeys {
         let mut s = Sim::new(&repo, vec2(1280.0, 800.0));
         wait_until(&mut s, "branch read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
         s.idle(2);
-        s.click_text("main");
+        open_history(&mut s);
         wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 2));
         s.idle(2);
         s.click_text("Write the long notes");
@@ -3940,6 +3969,15 @@ mod journeys {
         s.idle(2);
         assert_eq!(hist(&s), None);
         report("gitwrap", &s);
+    }
+
+    /// The branch chip (the lowest "main" on screen, drawn over everything), then
+    /// History in its menu.
+    fn open_history(s: &mut Sim) {
+        let chip = s.texts.iter().filter(|(_, t)| t == "main").max_by(|a, b| a.0.center().y.total_cmp(&b.0.center().y)).map(|(r, _)| *r).unwrap_or_else(|| s.fail("no branch chip"));
+        s.act(&format!("click {:.0} {:.0}", chip.center().x, chip.center().y));
+        wait_until(s, "the branch menu", 5, |s| matches!(s.app.popup, Popup::Branches(_)) && s.texts.iter().any(|(_, t)| t == "History"));
+        s.click_text("History");
     }
 
     fn probe(s: &Sim) -> crate::gitlog::Probe {
@@ -4017,7 +4055,7 @@ mod journeys {
         let mut s = Sim::new(&repo, vec2(1280.0, 800.0));
         wait_until(&mut s, "branch read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
         s.idle(2);
-        s.click_text("main");
+        open_history(&mut s);
         wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 5));
         look(&mut s, "graph");
         s.shot("graph");
@@ -4307,7 +4345,7 @@ mod journeys {
         let mut s = Sim::new(&repo, vec2(1280.0, 800.0));
         wait_until(&mut s, "branch read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
         s.idle(2);
-        s.click_text("main");
+        open_history(&mut s);
         wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 1));
         wait_until(&mut s, "the changes", 10, |s| changes(s).staged.len() == 1 && changes(s).unstaged.len() == 4);
         s.idle(2);
@@ -4515,6 +4553,204 @@ mod journeys {
         report("gitchanges", &s);
     }
 
+    fn branch_menu(s: &Sim) -> Option<&crate::popups::BranchState> {
+        match &s.app.popup {
+            Popup::Branches(st) => Some(st),
+            _ => None,
+        }
+    }
+
+    /// The branch chip, and its menu once its lists are read.
+    fn open_branches(s: &mut Sim) {
+        let chip = s.texts.iter().filter(|(_, t)| crate::gitstatus::repo_for(&s.tab().path).is_some_and(|r| *t == r.branch)).max_by(|a, b| a.0.center().y.total_cmp(&b.0.center().y)).map(|(r, _)| *r).unwrap_or_else(|| {
+            let low: Vec<&str> = s.texts.iter().filter(|(r, _)| r.top() > s.size.y - 30.0).map(|(_, t)| t.as_str()).collect();
+            s.fail(&format!("no branch chip for {:?} (popup {}); the status bar has {low:?}", branch_now(s), s.app.popup.kind_name()))
+        });
+        s.act(&format!("click {:.0} {:.0}", chip.center().x, chip.center().y));
+        wait_until(s, "the branch menu", 5, |s| branch_menu(s).is_some_and(|m| m.refs.is_some()));
+        s.idle(12);
+    }
+
+    fn branch_now(s: &Sim) -> String {
+        crate::gitstatus::repo_for(&s.tab().path).map(|r| r.branch.clone()).unwrap_or_default()
+    }
+
+    /// The branch chip's menu, by mouse and by keyboard: the branches with the current
+    /// one marked and what each has to push, switching (and being refused when local
+    /// changes would be lost), a new branch, a remote branch checked out to track it,
+    /// a stash applied and dropped, another work tree in a new tab, the history from
+    /// it, the palette command, then small windows and a light theme.
+    #[test]
+    fn git_branch_menu() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let home = fixture("gitbranches");
+        let d = home.join("Code");
+        let g = |at: &Path, args: &[&str]| crate::tests::git(at, args);
+        std::fs::create_dir_all(d.join("server.git")).unwrap();
+        g(&d.join("server.git"), &["init", "-q", "--bare"]);
+        let ours = d.join("ours");
+        std::fs::create_dir_all(&ours).unwrap();
+        crate::tests::work_repo(&ours);
+        std::fs::write(ours.join("a.txt"), "a\n").unwrap();
+        g(&ours, &["add", "-A"]);
+        g(&ours, &["commit", "-qm", "Start"]);
+        g(&ours, &["remote", "add", "origin", d.join("server.git").to_str().unwrap()]);
+        g(&ours, &["push", "-q", "-u", "origin", "main"]);
+        g(&ours, &["branch", "topic"]);
+        g(&ours, &["push", "-q", "origin", "topic"]);
+        g(&ours, &["branch", "-q", "-D", "topic"]);
+        g(&ours, &["checkout", "-qb", "docs"]);
+        std::fs::write(ours.join("a.txt"), "docs\n").unwrap();
+        g(&ours, &["commit", "-qam", "Docs"]);
+        g(&ours, &["checkout", "-q", "main"]);
+        for n in ["One", "Two"] {
+            std::fs::write(ours.join(n), n).unwrap();
+            g(&ours, &["add", "-A"]);
+            g(&ours, &["commit", "-qm", n]);
+        }
+        std::fs::write(ours.join("One"), "tweaked").unwrap();
+        g(&ours, &["stash", "push", "-q", "-m", "A tweak"]);
+        g(&ours, &["worktree", "add", "-q", d.join("wt").to_str().unwrap(), "-b", "spike"]);
+        let mut s = Sim::new(&ours, vec2(1280.0, 800.0));
+        wait_until(&mut s, "branch read", 10, |s| branch_now(s) == "main");
+        s.idle(2);
+        open_branches(&mut s);
+        let r = branch_menu(&s).unwrap().refs.clone().unwrap();
+        assert!(r.local.iter().any(|b| b.name == "main" && b.current && b.ahead == 2), "{:?}", r.local);
+        for t in ["History", "Branches", "main", "docs", "spike", "New branch…", "Remote branches", "origin/topic", "Stashes", "On main: A tweak", "stash@{0}", "Work trees", "wt"] {
+            assert!(s.texts.iter().any(|(_, x)| x == t), "{t:?} in the menu");
+        }
+        assert!(!s.texts.iter().any(|(_, x)| x == "origin/main"), "a tracked remote branch is its local one");
+        let menu = s.text_rect("New branch…");
+        assert!(menu.bottom() < s.text_rect("History").bottom() + 400.0 && s.text_rect("History").top() >= 0.0);
+        s.shot("branch-menu");
+        // By keyboard: down to docs, Enter.
+        let at = 1 + r.local.iter().position(|b| b.name == "docs").unwrap();
+        for _ in 0..at {
+            s.act("key ArrowDown");
+        }
+        assert_eq!(branch_menu(&s).unwrap().sel, at);
+        s.idle(4);
+        s.shot("branch-menu-keyboard");
+        s.act("key Enter");
+        assert!(!s.popup_open(), "the menu closes");
+        wait_until(&mut s, "switched", 10, |s| branch_now(s) == "docs");
+        wait_until(&mut s, "said so", 5, |s| toast_is(s, "Switched to docs"));
+        // Refused: a local change git would lose. Its words, in full.
+        std::fs::write(ours.join("a.txt"), "mine\n").unwrap();
+        open_branches(&mut s);
+        s.click_text("main");
+        wait_until(&mut s, "refused", 10, |s| matches!(s.app.popup, Popup::Notice { .. }));
+        s.idle(3);
+        assert!(s.texts.iter().any(|(_, t)| t == "Couldn't switch to main"));
+        assert!(s.texts.iter().any(|(_, t)| t.contains("would be overwritten") && t.contains("a.txt")), "git's reason");
+        s.idle(12);
+        s.shot("branch-refused");
+        s.act("key Enter");
+        assert!(!s.popup_open());
+        assert_eq!((branch_now(&s), std::fs::read_to_string(ours.join("a.txt")).unwrap()), ("docs".to_string(), "mine\n".to_string()), "nothing lost");
+        g(&ours, &["checkout", "-q", "--", "a.txt"]);
+        // The stash (made on main): applied, then dropped after asking.
+        g(&ours, &["checkout", "-q", "main"]);
+        crate::gitstatus::rescan(&ours);
+        wait_until(&mut s, "back on main", 10, |s| branch_now(s) == "main");
+        open_branches(&mut s);
+        s.click_text("On main: A tweak");
+        assert!(matches!(s.app.popup, Popup::Stash { .. }));
+        s.idle(12);
+        s.shot("stash-menu");
+        s.click_text("Apply");
+        wait_until(&mut s, "applied", 10, |s| toast_is(s, "Applied stash@{0}"));
+        assert_eq!(std::fs::read_to_string(ours.join("One")).unwrap(), "tweaked");
+        g(&ours, &["checkout", "-q", "--", "One"]);
+        open_branches(&mut s);
+        s.click_text("On main: A tweak");
+        for _ in 0..3 {
+            s.act("key ArrowDown");
+        }
+        s.act("key Enter");
+        assert!(matches!(s.app.popup, Popup::Confirm { .. }), "a drop asks first");
+        s.click_text("Drop");
+        wait_until(&mut s, "dropped", 10, |s| toast_is(s, "Dropped stash@{0}"));
+        assert_eq!(git_out(&ours, &["stash", "list"]), "");
+        // A new branch from here, named in a prompt.
+        open_branches(&mut s);
+        assert!(!s.texts.iter().any(|(_, t)| t == "Stashes"), "no stashes left");
+        s.click_text("New branch…");
+        assert!(matches!(s.app.popup, Popup::Prompt { .. }));
+        s.act("text feature/menu");
+        s.act("key Enter");
+        wait_until(&mut s, "created", 10, |s| branch_now(s) == "feature/menu");
+        assert!(toast_is(&s, "Created and switched to feature/menu"));
+        // A bad name is refused, plainly.
+        open_branches(&mut s);
+        s.click_text("New branch…");
+        s.act("text two..dots");
+        s.act("key Enter");
+        wait_until(&mut s, "refused", 10, |s| matches!(s.app.popup, Popup::Notice { .. }));
+        s.act("key Escape");
+        // A remote branch: a local one that tracks it.
+        open_branches(&mut s);
+        s.click_text("origin/topic");
+        wait_until(&mut s, "tracking", 10, |s| branch_now(s) == "topic");
+        assert_eq!(git_out(&ours, &["rev-parse", "--abbrev-ref", "topic@{upstream}"]), "origin/topic");
+        open_branches(&mut s);
+        assert!(!s.texts.iter().any(|(_, t)| t == "origin/topic"), "tracked now");
+        // Another work tree opens in a new tab.
+        s.click_text("wt");
+        s.settle();
+        assert_eq!((s.app.panels[&s.app.active].tabs.len(), s.tab().path.clone()), (2, d.join("wt")));
+        wait_until(&mut s, "its branch", 10, |s| branch_now(s) == "spike");
+        s.act("key ctrl+w");
+        s.settle();
+        // History from the menu, and closing it from there.
+        open_branches(&mut s);
+        s.click_text("History");
+        wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.0 > 0));
+        open_branches(&mut s);
+        assert!(s.texts.iter().any(|(_, t)| t == "Close history"));
+        s.click_text("Close history");
+        assert!(history(&s).is_none());
+        // The palette command; Escape closes the menu.
+        palette_run(&mut s, "Git Branches");
+        wait_until(&mut s, "the menu from the palette", 5, |s| branch_menu(s).is_some_and(|m| m.refs.is_some()));
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        // A clean work tree: the Changes page says so, and the graph has no such row.
+        s.cmd(GitChanges);
+        wait_until(&mut s, "read", 10, |s| s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_ref()).is_some_and(|h| h.changes().open && !h.changes().busy));
+        s.idle(3);
+        assert!(s.texts.iter().any(|(_, t)| t == "No changes"), "the empty page says so");
+        look(&mut s, "no changes");
+        s.shot("changes-none");
+        s.act("key Escape");
+        s.idle(2);
+        assert!(!s.texts.iter().any(|(_, t)| t == "Changes"), "no Changes row on a clean tree");
+        s.act("key Escape");
+        // Small windows, a light theme, no animations.
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        s.app.cfg.animations = false;
+        for (w, h) in [(520.0, 340.0), (640.0, 480.0), (1920.0, 1080.0)] {
+            s.resize(w, h);
+            look(&mut s, &format!("branches {w}x{h}"));
+            // A narrow status bar leaves the chip out: the palette opens the menu then.
+            if s.texts.iter().any(|(r, t)| t == "topic" && r.top() > h - 30.0) {
+                open_branches(&mut s);
+            } else {
+                palette_run(&mut s, "Git Branches");
+                wait_until(&mut s, "the menu", 5, |s| branch_menu(s).is_some_and(|m| m.refs.is_some()));
+                s.idle(12);
+            }
+            let pr = crate::ui::POPUPS.with(|p| p.borrow().first().copied()).unwrap_or_else(|| s.fail("no popup"));
+            assert!(pr.top() >= 0.0 && pr.bottom() <= h + 0.5 && pr.right() <= w + 0.5, "the menu inside a {w}x{h} window: {pr:?}");
+            s.shot(&format!("branch-menu-paper-{w}x{h}"));
+            s.act("key Escape");
+        }
+        report("gitbranches", &s);
+    }
+
     /// The colour `label` was last drawn in.
     fn color_of(s: &Sim, label: &str) -> egui::Color32 {
         let i = s.texts.iter().rposition(|(_, t)| t == label).unwrap_or_else(|| s.fail(&format!("no {label:?} on screen")));
@@ -4643,7 +4879,7 @@ mod journeys {
         s.idle(2);
         assert!(s.app.panels[&s.app.active].inspector.is_none());
         // The chip is drawn last, over everything: the topmost "main".
-        s.click_text("main");
+        open_history(&mut s);
         wait_until(&mut s, "first page", 10, |s| history(s).is_some_and(|h| h.0 == crate::gitlog::PAGE));
         look(&mut s, "history");
         for t in ["Join ten branches at once", "Wide branch 10", "wide-10"] {
@@ -4811,7 +5047,7 @@ mod journeys {
         };
         wait_until(&mut s, "branch read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
         s.idle(2);
-        s.click_text("main");
+        open_history(&mut s);
         wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 5));
         look(&mut s, "graph, pictures off");
         click_in_inspector(&mut s, "Add the octo", "click");
