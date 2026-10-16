@@ -23,8 +23,9 @@ enum Content {
     None,
     /// Folder listing or text being read in the background.
     Loading,
-    /// `spans`: syntax highlighting per line (code and markup only).
-    Text { lines: Vec<String>, truncated: bool, spans: Option<Vec<Vec<(usize, usize, crate::syntax::Kind)>>> },
+    /// `spans`: syntax highlighting per line (code and markup only). `prose`: plain text
+    /// or Markdown, which wrap by default where code does not.
+    Text { lines: Vec<String>, truncated: bool, spans: Option<Vec<Vec<(usize, usize, crate::syntax::Kind)>>>, prose: bool },
     Binary(Vec<u8>),
     Image,
     Folder(Vec<Entry>),
@@ -60,6 +61,11 @@ pub struct MediaView {
 pub struct Inspector {
     pub layout: Option<InspectorLayout>,
     pub line_numbers: bool,
+    /// Wrap long lines: remembered apart for highlighted code and for everything else.
+    pub wrap_code: bool,
+    pub wrap_prose: bool,
+    /// Where each wrapped row starts, for the text shown at the width it was made for.
+    wrapped: Option<Wrapped>,
     pub minimap: bool,
     pub pixel_grid: bool,
     pub folder_path: Option<PathBuf>,
@@ -103,6 +109,10 @@ impl Inspector {
             _ => None,
         }
     }
+    /// Rows the text preview is drawn in (wrapped rows when wrapping).
+    pub fn wrapped_rows(&self) -> Option<usize> {
+        self.wrapped.as_ref().filter(|_| self.wraps()).map(|w| w.rows.len())
+    }
     /// Highlighted spans in a text preview (None: plain text or not text).
     pub fn text_spans(&self) -> Option<usize> {
         match &self.content {
@@ -124,6 +134,9 @@ impl Default for Inspector {
         Inspector {
             layout: None,
             line_numbers: true,
+            wrap_code: false,
+            wrap_prose: true,
+            wrapped: None,
             minimap: true,
             pixel_grid: true,
             folder_path: None,
@@ -142,6 +155,22 @@ impl Default for Inspector {
 }
 
 impl Inspector {
+    /// Whether the text shown now wraps.
+    pub fn wraps(&self) -> bool {
+        match &self.content {
+            Content::Text { prose: false, .. } => self.wrap_code,
+            _ => self.wrap_prose,
+        }
+    }
+
+    pub fn toggle_wrap(&mut self) {
+        if matches!(self.content, Content::Text { prose: false, .. }) {
+            self.wrap_code = !self.wrap_code;
+        } else {
+            self.wrap_prose = !self.wrap_prose;
+        }
+    }
+
     pub fn invalidate(&mut self) {
         self.current = None;
     }
@@ -260,7 +289,7 @@ fn read_text(p: &Path) -> Content {
         return Content::Other;
     }
     if buf.is_empty() {
-        return Content::Text { lines: vec![], truncated: false, spans: None };
+        return Content::Text { lines: vec![], truncated: false, spans: None, prose: true };
     }
     let truncated = buf.len() > limit;
     buf.truncate(limit);
@@ -274,18 +303,20 @@ fn read_text(p: &Path) -> Content {
     let s = s.replace("\r\n", "\n").replace('\r', "\n");
     let lines: Vec<String> = s.lines().map(|l| if l.len() > 2000 { format!("{}…", &l[..l.floor_char_boundary(2000)]) } else { l.replace('\t', "    ") }).collect();
     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let spans = crate::syntax::lang_for(&name).map(|lang| crate::syntax::highlight(lang, &lines, 20_000));
-    Content::Text { lines, truncated, spans }
+    let lang = crate::syntax::lang_for(&name);
+    let prose = lang.is_none_or(crate::syntax::is_markdown);
+    let spans = lang.map(|lang| crate::syntax::highlight(lang, &lines, 20_000));
+    Content::Text { lines, truncated, spans, prose }
 }
 
 /// One icon button of a toolbar segment; `paint` draws the icon in the given color.
-fn seg_button(ui: &mut Ui, on: bool, tip: &str, pal: &theme::Palette, paint: impl FnOnce(&egui::Painter, Rect, Color32)) -> bool {
+fn seg_button(ui: &mut Ui, on: bool, tip: &'static str, pal: &theme::Palette, paint: impl FnOnce(&egui::Painter, Rect, Color32)) -> bool {
     // Narrow inspector: leave out what doesn't fit rather than spill into the next panel.
     if crate::ui::no_room(ui, 24.0) {
         return false;
     }
     let (r, resp) = ui.allocate_exact_size(vec2(24.0, 20.0), Sense::click());
-    crate::ui::note_control(ui, r, "inspector button");
+    crate::ui::note_control(ui, r, tip);
     if on {
         ui.painter().rect_filled(r, CornerRadius::same(4), pal.accent.gamma_multiply(0.85));
     } else if resp.hovered() {
@@ -473,6 +504,11 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                 }) {
                     ins.line_numbers = !ins.line_numbers;
                 }
+                if seg_button(ui, ins.wraps(), "Wrap lines", &pal, |p, r, c| {
+                    paint_glyph(p, r, Glyph::Wrap, c);
+                }) {
+                    ins.toggle_wrap();
+                }
                 if seg_button(ui, false, "Smaller text", &pal, |p, r, c| {
                     theme::paint_lucide(p, r, "a-arrow-down", c);
                 }) {
@@ -536,8 +572,10 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
     match &ins.content {
         Content::Pdf(_) | Content::Media(_) => {}
         Content::Image => image_view(&mut bui, body, &e, ins, env),
-        Content::Text { lines, truncated, spans } => {
-            text_view(&mut bui, body, lines, *truncated, spans.as_deref(), ins.line_numbers, env.cfg.inspector_font_size + ins.text_size, &pal);
+        Content::Text { lines, truncated, spans, prose } => {
+            let wrap = if *prose { ins.wrap_prose } else { ins.wrap_code };
+            let wrapped = if wrap { Some(&mut ins.wrapped) } else { None };
+            text_view(&mut bui, body, lines, *truncated, spans.as_deref(), ins.line_numbers, wrapped, env.cfg.inspector_font_size + ins.text_size, &pal);
         }
         Content::Binary(bytes) => {
             let mut lines = vec!["Binary file: first 4 KB shown as hex".to_string(), String::new()];
@@ -546,7 +584,7 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                 let ascii: String = chunk.iter().map(|&b| if (32..127).contains(&b) { b as char } else { '.' }).collect();
                 lines.push(format!("{:08x}  {:<47}  {}", i * 16, hex.join(" "), ascii));
             }
-            text_view(&mut bui, body, &lines, false, None, false, env.cfg.inspector_font_size + ins.text_size, &pal);
+            text_view(&mut bui, body, &lines, false, None, false, None, env.cfg.inspector_font_size + ins.text_size, &pal);
         }
         Content::Folder(entries) => folder_view(&mut bui, body, entries, env),
         Content::Volume => volume_view(&mut bui, body, &e, vol.as_ref(), &pal),
@@ -964,53 +1002,125 @@ fn syntax_color(k: crate::syntax::Kind, pal: &theme::Palette) -> Color32 {
     }
 }
 
+/// Rows of wrapped text: each is (line, byte where the row starts in that line).
+struct Wrapped {
+    /// Columns, and which text (its line count and where its lines live) they are for.
+    key: (usize, usize, usize),
+    rows: Vec<(u32, u32)>,
+}
+
+/// Columns a character takes in a monospace font: wide East Asian scripts and emoji
+/// take two.
+pub fn char_cols(c: char) -> usize {
+    let u = c as u32;
+    if u < 0x1100 {
+        return 1;
+    }
+    let wide = matches!(u, 0x1100..=0x115F | 0x2E80..=0x303E | 0x3041..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6 | 0x1F300..=0x1FAFF | 0x20000..=0x3FFFD);
+    if wide { 2 } else { 1 }
+}
+
+/// Where the rows of `line` start when it is wrapped at `cols` columns: after the last
+/// space that fits, or mid-word when a word is longer than a row.
+pub fn wrap_line(line: &str, cols: usize, out: &mut Vec<u32>) {
+    out.push(0);
+    let (mut start, mut width, mut space) = (0usize, 0usize, None);
+    for (i, c) in line.char_indices() {
+        let w = char_cols(c);
+        if width + w > cols && i > start {
+            // Break after the last space on this row, else right here.
+            let at = space.filter(|&s| s > start).unwrap_or(i);
+            out.push(at as u32);
+            width = line[at..i].chars().map(char_cols).sum();
+            start = at;
+            space = None;
+        }
+        width += w;
+        if c == ' ' {
+            space = Some(i + 1);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bool, spans: Option<&[Vec<(usize, usize, crate::syntax::Kind)>]>, numbers: bool, size: f32, pal: &theme::Palette) {
+fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bool, spans: Option<&[Vec<(usize, usize, crate::syntax::Kind)>]>, numbers: bool, wrapped: Option<&mut Option<Wrapped>>, size: f32, pal: &theme::Palette) {
     let font = FontId::monospace(size);
-    let row_h = ui.fonts_mut(|f| f.row_height(&font)) + 1.0;
+    let (row_h, cw) = ui.fonts_mut(|f| (f.row_height(&font) + 1.0, f.glyph_width(&font, 'M')));
     let gutter = if numbers { (lines.len().max(1).to_string().len() as f32) * size * 0.62 + 16.0 } else { 6.0 };
-    let n = lines.len() + if truncated { 1 } else { 0 };
     let mut inner = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(4.0, 4.0))));
-    egui::ScrollArea::both().auto_shrink([false, false]).id_salt("insp_text").show_viewport(&mut inner, |ui, vp| {
-        let maxw = 2000.0 * size * 0.62;
-        let (r, _) = ui.allocate_exact_size(vec2(maxw.min(lines.iter().map(|l| l.len()).max().unwrap_or(0) as f32 * size * 0.62 + gutter + 20.0).max(vp.width()), n as f32 * row_h + 8.0), Sense::hover());
+    // Wrapping: rows are (line, start byte), made again only when the width or the text
+    // changes. The scroll bar's room is left free so a row never runs under it.
+    let rows: Option<&[(u32, u32)]> = match wrapped {
+        Some(slot) => {
+            let cols = (((inner.max_rect().width() - gutter - 22.0) / cw.max(1.0)) as usize).max(8);
+            let key = (cols, lines.len(), lines.as_ptr() as usize);
+            if slot.as_ref().map(|w| w.key) != Some(key) {
+                let mut rows = Vec::with_capacity(lines.len());
+                let mut starts = vec![];
+                for (i, l) in lines.iter().enumerate() {
+                    starts.clear();
+                    wrap_line(l, cols, &mut starts);
+                    rows.extend(starts.iter().map(|&b| (i as u32, b)));
+                }
+                *slot = Some(Wrapped { key, rows });
+            }
+            slot.as_ref().map(|w| w.rows.as_slice())
+        }
+        None => None,
+    };
+    let total = rows.map_or(lines.len(), |r| r.len());
+    let n = total + if truncated { 1 } else { 0 };
+    let area = if rows.is_some() { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
+    area.auto_shrink([false, false]).id_salt("insp_text").show_viewport(&mut inner, |ui, vp| {
+        let w = if rows.is_some() { vp.width() } else { (2000.0 * size * 0.62).min(lines.iter().map(|l| l.len()).max().unwrap_or(0) as f32 * size * 0.62 + gutter + 20.0).max(vp.width()) };
+        let (r, _) = ui.allocate_exact_size(vec2(w, n as f32 * row_h + 8.0), Sense::hover());
         let first = (vp.min.y / row_h).floor().max(0.0) as usize;
         let last = ((vp.max.y / row_h).ceil() as usize + 1).min(n);
         let p = ui.painter();
         for i in first..last {
             let y = r.top() + i as f32 * row_h;
-            if i == lines.len() {
+            if i == total {
                 p.text(pos2(r.left() + gutter, y), Align2::LEFT_TOP, "… (preview truncated at 1 MB)", font.clone(), pal.text_dim);
                 continue;
             }
-            if numbers {
-                p.text(pos2(r.left() + gutter - 10.0, y), Align2::RIGHT_TOP, (i + 1).to_string(), font.clone(), pal.text_dim.gamma_multiply(0.7));
+            // This row's line and the part of it shown.
+            let (li, a, b) = match rows {
+                Some(rows) => {
+                    let (li, a) = (rows[i].0 as usize, rows[i].1 as usize);
+                    let b = rows.get(i + 1).filter(|n| n.0 as usize == li).map_or(lines[li].len(), |n| n.1 as usize);
+                    (li, a, b)
+                }
+                None => (i, 0, lines[i].len()),
+            };
+            let line = &lines[li];
+            if numbers && a == 0 {
+                p.text(pos2(r.left() + gutter - 10.0, y), Align2::RIGHT_TOP, (li + 1).to_string(), font.clone(), pal.text_dim.gamma_multiply(0.7));
             }
-            match spans.and_then(|s| s.get(i)).filter(|s| !s.is_empty()) {
+            match spans.and_then(|s| s.get(li)).filter(|s| !s.is_empty()) {
                 Some(sp) => {
                     // Coloured sections between the spans; plain text in the gaps.
-                    let line = &lines[i];
                     let mut job = egui::text::LayoutJob::default();
                     let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
-                    let mut at = 0;
-                    for &(a, b, k) in sp {
-                        if a < at || b > line.len() {
+                    let mut at = a;
+                    for &(sa, sb, k) in sp {
+                        let (sa, sb) = (sa.max(a), sb.min(b));
+                        if sa < at || sb > line.len() || sa >= sb {
                             continue;
                         }
-                        if a > at {
-                            job.append(&line[at..a], 0.0, fmt(pal.text));
+                        if sa > at {
+                            job.append(&line[at..sa], 0.0, fmt(pal.text));
                         }
-                        job.append(&line[a..b], 0.0, fmt(syntax_color(k, pal)));
-                        at = b;
+                        job.append(&line[sa..sb], 0.0, fmt(syntax_color(k, pal)));
+                        at = sb;
                     }
-                    if at < line.len() {
-                        job.append(&line[at..], 0.0, fmt(pal.text));
+                    if at < b {
+                        job.append(&line[at..b], 0.0, fmt(pal.text));
                     }
                     let g = ui.fonts_mut(|f| f.layout_job(job));
                     p.galley(pos2(r.left() + gutter, y), g, pal.text);
                 }
                 None => {
-                    p.text(pos2(r.left() + gutter, y), Align2::LEFT_TOP, &lines[i], font.clone(), pal.text);
+                    p.text(pos2(r.left() + gutter, y), Align2::LEFT_TOP, &line[a..b], font.clone(), pal.text);
                 }
             }
         }

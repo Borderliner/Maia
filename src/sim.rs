@@ -1829,7 +1829,8 @@ mod journeys {
         s.idle(2);
         let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("inspector shown"));
         let cy = ir.top() + 15.0;
-        let buttons: Vec<Rect> = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == "inspector button").map(|(_, r, _)| *r).collect());
+        let header = Rect::from_min_max(ir.min, pos2(ir.right(), ir.top() + 30.0));
+        let buttons: Vec<Rect> = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, r, _)| header.contains(r.center())).map(|(_, r, _)| *r).collect());
         assert!(buttons.len() >= 3, "{what}: toolbar buttons drawn");
         for b in &buttons {
             assert!((b.center().y - cy).abs() <= 0.5 && b.top() > ir.top() && b.bottom() < ir.top() + 30.0, "{what}: button {b:?} off the header's centre {cy}");
@@ -1864,6 +1865,39 @@ mod journeys {
         wait_until(&mut s, "highlighted code", 10, |s| inspector(s).text_spans().is_some_and(|n| n >= 6));
         look(&mut s, "code preview");
         toolbar_centred(&mut s, "code", &[]);
+        // Word wrap: off for code until asked, on for prose; each kind keeps its own.
+        assert_eq!(inspector(&s).wrapped_rows(), None, "code starts unwrapped");
+        let para = "Wrapped prose keeps every word on screen, however narrow the preview is made. ".repeat(12);
+        std::fs::write(d.join("notes.md"), format!("# Notes\n\n{para}\n\n- short item\n{para}\n")).unwrap();
+        s.cmd(Refresh);
+        select_path(&mut s, &d.join("notes.md"));
+        wait_until(&mut s, "prose wrapped", 10, |s| inspector(s).wrapped_rows().is_some_and(|n| n > 10));
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
+        let rows: Vec<Rect> = s.texts.iter().filter(|(_, t)| t.starts_with("Wrapped prose") || t.starts_with("prose keeps")).map(|(r, _)| *r).collect();
+        assert!(rows.len() >= 2, "wrapped rows drawn");
+        for r in s.texts.iter().filter(|(r, _)| r.top() > ir.top() + 30.0 && r.left() >= ir.left()).map(|(r, _)| *r) {
+            assert!(r.right() <= ir.right() + 0.5, "wrapped text runs past the preview: {r:?} in {ir:?}");
+        }
+        look(&mut s, "wrapped prose");
+        click_control(&mut s, "Wrap lines");
+        wait_until(&mut s, "prose unwrapped", 5, |s| inspector(s).wrapped_rows().is_none());
+        click_control(&mut s, "Wrap lines");
+        wait_until(&mut s, "prose wrapped again", 5, |s| inspector(s).wrapped_rows().is_some());
+        // Larger text fits fewer columns: the rows are made again, more of them.
+        let before = inspector(&s).wrapped_rows().unwrap();
+        click_control(&mut s, "Larger text");
+        click_control(&mut s, "Larger text");
+        s.idle(2);
+        assert!(inspector(&s).wrapped_rows().unwrap() > before, "larger text, more rows");
+        click_control(&mut s, "Smaller text");
+        click_control(&mut s, "Smaller text");
+        select_path(&mut s, &d.join("main.rs"));
+        wait_until(&mut s, "code again", 10, |s| inspector(s).text_spans().is_some());
+        assert_eq!(inspector(&s).wrapped_rows(), None, "code still unwrapped");
+        s.cmd(InspectorWrap);
+        s.idle(2);
+        assert!(inspector(&s).wrapped_rows().is_some(), "code wrapped from the palette");
+        look(&mut s, "wrapped code");
         // PDF: page 1, then Page Down with the pointer over the preview.
         select_path(&mut s, &d.join("doc.pdf"));
         wait_until(&mut s, "PDF page 1", 20, |s| inspector(s).pdf_state().is_some_and(|(p, n, shown)| p == 1 && n == Some(3) && shown.is_some_and(|x| x.0 == 1)));

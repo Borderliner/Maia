@@ -549,6 +549,8 @@ pub enum Glyph {
     Eject,
     Globe,
     Phone,
+    Wrap,
+    Tag,
 }
 
 /// Draw a Lucide icon by name, centered in `rect` (the icon's stroke box roughly fills it).
@@ -599,7 +601,7 @@ fn glyph_name(g: Glyph) -> &'static str {
         Glyph::Usb => "usb",
         Glyph::Globe => "globe",
         Glyph::Phone => "smartphone",
-        Glyph::Eject => "", // not in Lucide: drawn below
+        Glyph::Eject | Glyph::Wrap | Glyph::Tag => "", // drawn below
     }
 }
 
@@ -726,6 +728,27 @@ pub fn paint_glyph(painter: &Painter, rect: Rect, g: Glyph, col: Color32) {
             painter.add(Shape::line(vec![p(0.0, -0.16), p(-0.16, 0.0), p(0.0, 0.16)], st));
         }
         Glyph::ChevronRight | Glyph::ChevronDown | Glyph::Lock | Glyph::LockOpen | Glyph::Usb | Glyph::Globe | Glyph::Phone => {}
+        // On Lucide's 24-unit grid, so they sit with the font's icons.
+        Glyph::Wrap => {
+            let m = |x: f32, y: f32| p((x - 12.0) * 0.036, (y - 12.0) * 0.036);
+            line(m(3.0, 6.0), m(21.0, 6.0));
+            line(m(3.0, 18.0), m(10.0, 18.0));
+            // Out along the middle row, round the end and back under it.
+            let mut pts = vec![m(3.0, 12.0)];
+            pts.extend((0..=12).map(|k| {
+                let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * k as f32 / 12.0;
+                m(18.0 + 3.0 * a.cos(), 15.0 + 3.0 * a.sin())
+            }));
+            pts.push(m(14.0, 18.0));
+            painter.add(Shape::line(pts, st));
+            painter.add(Shape::line(vec![m(16.0, 16.0), m(14.0, 18.0), m(16.0, 20.0)], st));
+        }
+        Glyph::Tag => {
+            let m = |x: f32, y: f32| p((x - 12.0) * 0.036, (y - 12.0) * 0.036);
+            let outline = vec![m(2.5, 2.5), m(11.2, 2.5), m(21.0, 12.3), m(12.3, 21.0), m(2.5, 11.2)];
+            painter.add(Shape::Path(egui::epaint::PathShape { points: outline, closed: true, fill: Color32::TRANSPARENT, stroke: st.into() }));
+            painter.circle_filled(m(7.5, 7.5), st.width * 0.9, col);
+        }
         Glyph::Eject => {
             // Rounded triangle over a bar, in Lucide's stroke style.
             let tri = vec![p(0.0, -0.34), p(0.34, 0.06), p(-0.34, 0.06)];

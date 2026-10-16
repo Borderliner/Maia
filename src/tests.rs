@@ -1681,3 +1681,45 @@ fn hand_written_png_is_valid_and_compact() {
         std::fs::write(std::path::Path::new(&d).join("hand.png"), &ours).unwrap();
     }
 }
+
+/// Rows of `line` wrapped at `cols`, as text.
+fn wrapped(line: &str, cols: usize) -> Vec<String> {
+    let mut starts = vec![];
+    crate::inspector::wrap_line(line, cols, &mut starts);
+    starts.iter().enumerate().map(|(k, &a)| line[a as usize..starts.get(k + 1).map_or(line.len(), |&b| b as usize)].to_string()).collect()
+}
+
+#[test]
+fn word_wrap_keeps_every_character_and_breaks_at_spaces() {
+    let width = |s: &str| s.chars().map(crate::inspector::char_cols).sum::<usize>();
+    // Real text: the licence and this crate's own sources, at narrow to wide columns.
+    let mut text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/LICENSE")).unwrap();
+    text.push_str(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/inspector.rs")).unwrap());
+    let mut wrapped_some = 0;
+    for cols in [8, 13, 40, 79] {
+        for line in text.lines() {
+            let rows = wrapped(line, cols);
+            assert_eq!(rows.concat(), line, "nothing lost or doubled at {cols}");
+            for (k, r) in rows.iter().enumerate() {
+                assert!(width(r) <= cols, "{r:?} wider than {cols}");
+                // A row ends at a space unless its next word would not fit on any row.
+                if let Some(next) = rows.get(k + 1) {
+                    let word = next.split(' ').next().unwrap_or("");
+                    assert!(r.ends_with(' ') || !r.contains(' ') || width(word) + width(r.rsplit(' ').next().unwrap()) > cols, "{r:?} | {next:?} broke mid-word at {cols}");
+                }
+            }
+            if rows.len() > 1 {
+                wrapped_some += 1;
+            }
+            if width(line) <= cols {
+                assert_eq!(rows.len(), 1, "{line:?} fits in {cols}");
+            }
+        }
+    }
+    assert!(wrapped_some > 1000, "long lines wrapped: {wrapped_some}");
+    // A word longer than a row breaks inside it; wide characters count twice.
+    assert_eq!(wrapped("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+    assert_eq!(wrapped("the quick brown fox", 10), ["the quick ", "brown fox"]);
+    assert_eq!(wrapped("日本語のテキスト", 6), ["日本語", "のテキ", "スト"]);
+    assert_eq!(wrapped("", 10), [""]);
+}

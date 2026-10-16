@@ -1680,6 +1680,11 @@ impl App {
                     i.line_numbers = !i.line_numbers;
                 }
             }
+            Cmd::InspectorWrap => {
+                if let Some(i) = self.panel().inspector.as_mut() {
+                    i.toggle_wrap();
+                }
+            }
             Cmd::InspectorMinimap => {
                 if let Some(i) = self.panel().inspector.as_mut() {
                     i.minimap = !i.minimap;

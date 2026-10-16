@@ -61,6 +61,10 @@ pub fn lang_for(name: &str) -> Option<&'static Lang> {
     LANGS.iter().find(|(exts, _)| exts.contains(&ext)).map(|(_, l)| l)
 }
 
+pub fn is_markdown(lang: &Lang) -> bool {
+    lang.markup && lang.quotes == ["`"]
+}
+
 /// Spans (byte ranges and kinds) for each line, carrying block comments and multi-line
 /// strings across lines. Lines beyond `max_lines` get no spans (plain).
 pub fn highlight(lang: &Lang, lines: &[String], max_lines: usize) -> Vec<Vec<(usize, usize, Kind)>> {
@@ -77,7 +81,7 @@ pub fn highlight(lang: &Lang, lines: &[String], max_lines: usize) -> Vec<Vec<(us
                 spans.push((s, e, k));
             }
         };
-        if lang.markup && lang.quotes == ["`"] {
+        if is_markdown(lang) {
             // Markdown: headings, fences and inline code.
             let t = line.trim_start();
             if t.starts_with('#') || t.starts_with("```") || t.starts_with("~~~") {
