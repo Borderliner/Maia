@@ -35,6 +35,9 @@ enum UserEvent {
 /// GL state. Field order is drop order: the EGL surface and context must go before the
 /// window, or the driver talks to an already-destroyed Wayland surface (crash on close).
 struct Gl {
+    /// Wayland: frames are paced by the compositor's frame callbacks, not by blocking
+    /// in the buffer swap.
+    wayland: bool,
     glow: Arc<egui_glow::glow::Context>,
     surface: glutin::surface::Surface<glutin::surface::WindowSurface>,
     context: glutin::context::PossiblyCurrentContext,
@@ -125,9 +128,16 @@ fn create_gl(el: &ActiveEventLoop, o: &Options) -> Gl {
     );
     let surface = unsafe { display.create_window_surface(&config, &surf_attrs).or_die("Could not create a GL surface") };
     let context = not_current.make_current(&surface).or_die("Could not make the GL context current");
-    let _ = surface.set_swap_interval(&context, glutin::surface::SwapInterval::Wait(NonZeroU32::MIN));
+    // A hidden window (another workspace, minimised) gets no frame callbacks, and on
+    // Wayland a vsynced swap waits for one with no timeout: the window froze and stopped
+    // answering the compositor, which then offered to kill it. There the swap never waits;
+    // winit holds redraws until the next frame callback instead (pre_present_notify).
+    use winit::raw_window_handle::{HasDisplayHandle as _, RawDisplayHandle};
+    let wayland = window.display_handle().is_ok_and(|h| matches!(h.as_raw(), RawDisplayHandle::Wayland(_)));
+    let interval = if wayland { glutin::surface::SwapInterval::DontWait } else { glutin::surface::SwapInterval::Wait(NonZeroU32::MIN) };
+    let _ = surface.set_swap_interval(&context, interval);
     let glow = unsafe { egui_glow::glow::Context::from_loader_function_cstr(|s| display.get_proc_address(s)) };
-    Gl { window, context, surface, glow: Arc::new(glow) }
+    Gl { wayland, window, context, surface, glow: Arc::new(glow) }
 }
 
 impl Runner {
@@ -191,6 +201,9 @@ impl Runner {
         if let Some(path) = shot {
             crate::testkit::save_frame(&gl.glow, size, &path);
         }
+        if gl.wayland {
+            window.pre_present_notify();
+        }
         let _ = gl.surface.swap_buffers(&gl.context);
         if !self.shown {
             window.set_visible(true);
@@ -215,7 +228,7 @@ impl Runner {
         }
         self.state = None;
         if let Some(gl) = self.gl.take() {
-            let Gl { glow, surface, context, window } = gl;
+            let Gl { glow, surface, context, window, .. } = gl;
             drop(glow);
             drop(surface);
             drop(context);
