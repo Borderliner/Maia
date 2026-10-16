@@ -1778,6 +1778,11 @@ pub(crate) fn find_options(query: &str) -> Vec<usize> {
         }
     };
     let mut ranked: Vec<(i32, usize)> = OPTS.iter().enumerate().filter_map(|(i, (_, sec, group, title, desc))| rank(title, desc, &format!("{} {group}", sec.name())).map(|r| (r, i))).collect();
+    // The loose matches only when nothing matches better ("size" isn't in "Square
+    // minimize, maximize and close", though its letters are, in order).
+    if ranked.iter().any(|r| r.0 >= 500) {
+        ranked.retain(|r| r.0 >= 500);
+    }
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     ranked.into_iter().map(|(_, i)| i).collect()
 }
@@ -1963,7 +1968,7 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         Opt::SyntaxTheme => toggle(ui, &mut c.syntax_theme, &pal),
         Opt::Round => toggle(ui, &mut c.round_corners, &pal),
         Opt::FontSize => stepper(ui, &mut c.font_size, 0.5, 9.0, 24.0, &pal),
-        Opt::Spacing => ui.add(egui::Slider::new(&mut c.spacing, 0.8..=1.6).step_by(0.05)).changed(),
+        Opt::Spacing => ui.add(egui::Slider::new(&mut c.spacing, 0.8..=1.6).step_by(0.05).fixed_decimals(2)).changed(),
         Opt::Animations => toggle(ui, &mut c.animations, &pal),
         Opt::Tooltips => toggle(ui, &mut c.tooltips, &pal),
         Opt::AltRows => toggle(ui, &mut c.alt_rows, &pal),
