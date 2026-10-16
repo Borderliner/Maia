@@ -3120,3 +3120,93 @@ fn github_picture_is_cut_round() {
     let small = crate::imgdec::decode_bytes(&png_bytes(20, 20, 2)).unwrap();
     assert_eq!(crate::avatars::round(&small, 96).size, [20, 20], "a small picture is not blown up here");
 }
+
+/// Every option is listed in Options exactly once, in one section, with its group's
+/// rows together and each sub-option right under the switch it belongs to.
+#[test]
+fn every_option_has_one_section() {
+    use crate::popups::{OPTS, Opt, Section, opt_parent};
+    // Exhaustive: a new option does not build until it is numbered here.
+    let index = |o: Opt| match o {
+        Opt::Theme => 0, Opt::Font => 1, Opt::InspectorFontSize => 2, Opt::RectButtons => 3, Opt::AssetCache => 4,
+        Opt::FollowSystem => 5, Opt::SyntaxTheme => 6, Opt::Round => 7, Opt::FontSize => 8, Opt::Spacing => 9,
+        Opt::Animations => 10, Opt::Tooltips => 11, Opt::AltRows => 12, Opt::InactiveOpacity => 13, Opt::Breadcrumbs => 14,
+        Opt::CompactPaths => 15, Opt::ShowExt => 16, Opt::ShowHidden => 17, Opt::ShowSystem => 18, Opt::FoldersFirst => 19,
+        Opt::HighlightRecents => 20, Opt::RecentsOnTop => 21, Opt::TrackRecents => 22, Opt::CalcSizes => 23, Opt::SizesSsd => 24,
+        Opt::SizesHdd => 25, Opt::SizesNet => 26, Opt::SelectionBoxes => 27, Opt::InspectorFont => 28, Opt::SystemIcons => 29,
+        Opt::Thumbnails => 30, Opt::ThumbFill => 31, Opt::ScrollBeyond => 32, Opt::DateFormat => 33, Opt::ActOnPress => 34,
+        Opt::SingleClick => 35, Opt::SingleClickFolders => 36, Opt::OpenFoldersNewTab => 37, Opt::DblClickParent => 38, Opt::ReverseScroll => 39,
+        Opt::CharKey => 40, Opt::MiddleClick => 41, Opt::InspectorLayout => 42, Opt::Startup => 43, Opt::NewTab => 44,
+        Opt::GitPictures => 45, Opt::DefaultFm => 46, Opt::SingleInstance => 47, Opt::Meaning => 48, Opt::MeaningFolders => 49,
+        Opt::MeaningPictures => 50, Opt::ConfigFile => 51, Opt::ResetAll => 52, Opt::Install => 53,
+    };
+    let mut seen = vec![0; 54];
+    for o in OPTS {
+        seen[index(o.0)] += 1;
+    }
+    for (i, n) in seen.iter().enumerate() {
+        assert_eq!(*n, 1, "option {i} listed {n} times");
+    }
+    // Sections in the order of the left column, each a block; groups never split.
+    let order: Vec<Section> = OPTS.iter().map(|o| o.1).fold(vec![], |mut v, s| {
+        if v.last() != Some(&s) {
+            v.push(s);
+        }
+        v
+    });
+    assert_eq!(order, Section::ALL.to_vec(), "every section has options, in one block, in order");
+    let mut groups: Vec<(Section, &str)> = vec![];
+    for o in OPTS {
+        if groups.last() != Some(&(o.1, o.2)) {
+            assert!(!groups.contains(&(o.1, o.2)), "{} / {:?} is split", o.1.name(), o.2);
+            groups.push((o.1, o.2));
+        }
+    }
+    for (k, o) in OPTS.iter().enumerate() {
+        if let Some(p) = opt_parent(o.0) {
+            let at = OPTS.iter().position(|x| x.0 == p).unwrap();
+            assert!(at < k && OPTS[at + 1..k].iter().all(|x| opt_parent(x.0) == Some(p)), "{:?} sits right under its switch", o.3);
+            assert_eq!((OPTS[at].1, OPTS[at].2), (o.1, o.2), "{:?} shares its switch's group", o.3);
+        }
+    }
+    // Short, plain lines.
+    for o in OPTS {
+        assert!(o.4.len() <= 60 && !o.4.contains('\u{2014}'), "{:?}: {:?} is long", o.3, o.4);
+        assert!(o.4.ends_with('.'), "{:?}", o.4);
+    }
+}
+
+/// The search covers every section: the words people type find their option first,
+/// and a word shared by options in several sections finds each of them.
+#[test]
+fn option_search_spans_sections() {
+    use crate::popups::{OPTS, Opt, Section, find_options};
+    let first = |q: &str| find_options(q).first().map(|&i| OPTS[i].0);
+    for (q, o) in [
+        ("color scheme", Opt::Theme),
+        ("default file manager", Opt::DefaultFm),
+        ("search by meaning", Opt::Meaning),
+        ("reuse the open window", Opt::SingleInstance),
+        ("show github pictures", Opt::GitPictures),
+        ("hidden", Opt::ShowHidden),
+        ("folders first", Opt::FoldersFirst),
+        ("install", Opt::Install),
+        ("config", Opt::ConfigFile),
+    ] {
+        assert_eq!(first(q), Some(o), "{q:?}");
+    }
+    assert!(find_options("").is_empty() && find_options("   ").is_empty(), "no search, no results");
+    assert!(find_options("qqzzx").is_empty());
+    let sections = |q: &str| find_options(q).iter().map(|&i| OPTS[i].1).collect::<HashSet<Section>>();
+    let size = sections("size");
+    for s in [Section::Appearance, Section::Files, Section::Preview, Section::System] {
+        assert!(size.contains(&s), "\"size\" reaches {}", s.name());
+    }
+    assert!(sections("font").is_superset(&[Section::Appearance, Section::Preview].into_iter().collect()));
+    // A section or group name finds what is in it.
+    assert!(find_options("thumbnails").iter().any(|&i| OPTS[i].0 == Opt::ThumbFill));
+    assert!(find_options("recents").iter().any(|&i| OPTS[i].0 == Opt::TrackRecents));
+    assert_eq!(Section::Appearance.step(-1), Section::System, "sections wrap");
+    assert_eq!(Section::System.step(1), Section::Appearance);
+    assert_eq!(Section::Files.step(1), Section::Mouse);
+}

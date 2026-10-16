@@ -19,9 +19,9 @@ cargo build --release
 
 `--install` copies the binary to `~/.local/bin/maia` and adds Maia to your app
 launcher. To make it the file manager other apps open folders with, turn on
-Options > System > Default file manager (or run `maia --set-default`); turning it
-off gives folders back to the one you had before. `maia --uninstall` removes the
-launcher entry and binary again (your settings stay).
+Options > Startup & system > Default file manager (or run `maia --set-default`);
+turning it off gives folders back to the one you had before. `maia --uninstall`
+removes the launcher entry and binary again (your settings stay).
 
 While Maia is open, opening a folder from another app or the terminal shows it as
 a new tab in that window. `maia --window PATH` always opens a window of its own.

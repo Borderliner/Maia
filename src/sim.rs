@@ -1126,6 +1126,25 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             let t = *rng.pick(&["line", "fn", "zzz", "Report", "ü"]);
             s.act(&format!("text {t}"));
         }
+        109 => {
+            // Options: a section by click or by keys, a row picked and acted on, now and
+            // then a search, a reset arrow or titles only.
+            s.act("key ctrl+Comma");
+            for _ in 0..1 + rng.below(5) {
+                match rng.below(7) {
+                    0 => {
+                        let sec = *rng.pick(&crate::popups::Section::ALL);
+                        click_control_at(s, sec.control());
+                    }
+                    1 => s.act(rng.pick(&["key ctrl+PageDown", "key ctrl+PageUp"])),
+                    2 => s.act(rng.pick(&["key ArrowDown", "key ArrowUp", "key Enter"])),
+                    3 => s.act(&format!("text {}", rng.pick(&["size", "font", "click", "zz", "git"]))),
+                    4 => click_control_at(s, "reset option"),
+                    5 => click_control_at(s, rng.pick(&["switch", "choice", "titles only"])),
+                    _ => s.act("key Escape"),
+                }
+            }
+        }
         97 => {
             // A drag that leaves the window (handed to the system when it carries files).
             let (x, y) = p(rng);
@@ -1893,6 +1912,230 @@ mod journeys {
         assert_eq!(first(&s), Some(false), "files first took effect");
         look(&mut s, "after options");
         report("options", &s);
+    }
+
+    /// The section on show in Options (None when Options is closed).
+    fn opt_section(s: &Sim) -> Option<crate::popups::Section> {
+        match &s.app.popup {
+            Popup::Options(st) => st.section,
+            _ => None,
+        }
+    }
+
+    /// Click the `what` control on the row titled `title` (the one nearest its title).
+    fn click_in_row(s: &mut Sim, what: &str, title: &str) {
+        s.idle(1);
+        let t = s.text_rect(title);
+        let r = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, r, w)| *w == what && r.left() > t.left()).map(|(_, r, _)| *r).min_by(|a, b| (a.center().y - t.center().y).abs().total_cmp(&(b.center().y - t.center().y).abs())));
+        let r = r.unwrap_or_else(|| s.fail(&format!("no {what} beside {title:?}")));
+        assert!((r.center().y - t.center().y).abs() < 22.0, "{what} on the row of {title:?}: {r:?} vs {t:?}");
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+    }
+
+    /// Options in sections: the left column walked with the mouse and with Ctrl+PageUp
+    /// and Ctrl+PageDown, a setting changed in every section, a search across all of
+    /// them acted on with the keys and the mouse, reset arrows, titles only with its
+    /// tooltips, the section remembered, a small window and a light theme.
+    #[test]
+    fn options_sections() {
+        if !sandboxed() {
+            return;
+        }
+        use crate::popups::{OPTS, Section};
+        let home = fixture("optsections");
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        let slug = |sec: Section| sec.name().to_lowercase().replace(" & ", "-").replace(' ', "-");
+        s.act("key ctrl+Comma");
+        s.settle();
+        assert_eq!(opt_section(&s), Some(Section::Appearance), "opens on Appearance");
+        // Every section with the mouse: its own rows and nothing else.
+        for sec in Section::ALL {
+            s.click_text(sec.name());
+            s.idle(2);
+            assert_eq!(opt_section(&s), Some(sec), "{} chosen", sec.name());
+            for (_, other, _, title, _) in OPTS {
+                let shown = s.texts.iter().any(|(_, t)| t == title);
+                if *other != sec {
+                    assert!(!shown, "{title:?} belongs to {}, not {}", other.name(), sec.name());
+                }
+            }
+            let first = OPTS.iter().find(|o| o.1 == sec).map(|o| o.3).unwrap();
+            assert!(s.texts.iter().any(|(_, t)| t == first), "{first:?} heads {}", sec.name());
+            look(&mut s, sec.name());
+            s.shot(&format!("options-{}", slug(sec)));
+        }
+        // Appearance: a switch with the mouse, and its reset arrow.
+        s.click_text("Appearance");
+        click_in_row(&mut s, "switch", "Round corners");
+        assert!(!s.app.cfg.round_corners, "round corners off");
+        click_in_row(&mut s, "reset option", "Round corners");
+        assert!(s.app.cfg.round_corners, "reset puts it back");
+        // Files & folders, one Ctrl+PageDown on: hidden files shown, and the drive
+        // switches inert while folder sizes are off.
+        s.act("key ctrl+PageDown");
+        assert_eq!(opt_section(&s), Some(Section::Files));
+        click_in_row(&mut s, "switch", "Show hidden files");
+        assert!(s.app.cfg.show_hidden);
+        s.app.cfg.folder_sizes = true;
+        s.idle(2);
+        click_in_row(&mut s, "switch", "Calculate folder sizes");
+        assert!(!s.app.cfg.folder_sizes);
+        let ssd = s.app.cfg.sizes_ssd;
+        click_in_row(&mut s, "switch", "Solid-state drives");
+        assert_eq!(s.app.cfg.sizes_ssd, ssd, "a sub-option does nothing while its switch is off");
+        s.shot("options-sub-off");
+        click_in_row(&mut s, "reset option", "Calculate folder sizes");
+        assert_eq!(s.app.cfg.folder_sizes, crate::config::Config::default().folder_sizes);
+        // Mouse & keyboard with the keys alone: Enter on the first row, then on the
+        // sub-option it wakes.
+        s.act("key ctrl+PageDown");
+        assert_eq!(opt_section(&s), Some(Section::Mouse));
+        assert!(!s.app.cfg.single_click && !s.app.cfg.single_click_folders_only);
+        s.act("key Enter");
+        assert!(s.app.cfg.single_click, "Enter flips the first row");
+        s.act("key ArrowDown");
+        s.act("key Enter");
+        assert!(s.app.cfg.single_click_folders_only, "then the sub-option under it");
+        look(&mut s, "keyboard ring");
+        s.shot("options-keys");
+        // Preview: a choice steps on with a click.
+        s.act("key ctrl+PageDown");
+        assert_eq!(opt_section(&s), Some(Section::Preview));
+        let layout = s.app.cfg.inspector_layout.clone();
+        click_in_row(&mut s, "choice", "Inspector layout");
+        assert!(s.app.cfg.inspector_layout != layout, "inspector layout changed");
+        // Search: pictures stay put while search by meaning is off, follow it when on.
+        s.act("key ctrl+PageDown");
+        assert_eq!(opt_section(&s), Some(Section::Search));
+        assert!(!s.app.cfg.semantic_search && s.app.cfg.semantic_pictures);
+        click_in_row(&mut s, "switch", "Include pictures");
+        assert!(s.app.cfg.semantic_pictures, "inert while search by meaning is off");
+        click_in_row(&mut s, "switch", "Search by meaning");
+        assert!(s.app.cfg.semantic_search);
+        click_in_row(&mut s, "switch", "Include pictures");
+        assert!(!s.app.cfg.semantic_pictures);
+        click_in_row(&mut s, "reset option", "Include pictures");
+        click_in_row(&mut s, "reset option", "Search by meaning");
+        assert!(!s.app.cfg.semantic_search && s.app.cfg.semantic_pictures, "both reset");
+        // Git, then Startup & system.
+        s.act("key ctrl+PageDown");
+        assert_eq!(opt_section(&s), Some(Section::Git));
+        click_in_row(&mut s, "switch", "Show GitHub pictures");
+        assert!(s.app.cfg.github_pictures);
+        click_in_row(&mut s, "reset option", "Show GitHub pictures");
+        assert!(!s.app.cfg.github_pictures);
+        s.act("key ctrl+PageDown");
+        assert_eq!(opt_section(&s), Some(Section::System));
+        let new_tab = s.app.cfg.new_tab.clone();
+        click_in_row(&mut s, "choice", "New tab shows");
+        assert!(s.app.cfg.new_tab != new_tab, "new tab changed");
+        assert!(s.texts.iter().any(|(_, t)| t == "Install"), "the install button is in its row");
+        // The ends wrap.
+        s.act("key ctrl+PageDown");
+        assert_eq!(opt_section(&s), Some(Section::Appearance), "past the last, the first");
+        s.act("key ctrl+PageUp");
+        assert_eq!(opt_section(&s), Some(Section::System), "and back");
+        // A search covers every section at once, each match labelled with its own;
+        // typing reaches it although a click took the keyboard from the field.
+        s.act("text size");
+        s.idle(2);
+        for label in ["Appearance · Font size", "Files & folders · Calculate folder sizes", "Preview · Inspector font size", "Startup & system · Asset cache size"] {
+            assert!(s.texts.iter().any(|(_, t)| t == label), "{label:?} found");
+        }
+        look(&mut s, "search");
+        s.shot("options-find");
+        let at = crate::popups::find_options("size").iter().position(|&i| OPTS[i].3 == "Calculate folder sizes").unwrap();
+        for _ in 0..at {
+            s.act("key ArrowDown");
+        }
+        let sizes = s.app.cfg.folder_sizes;
+        s.act("key Enter");
+        assert_eq!(s.app.cfg.folder_sizes, !sizes, "Enter acts on the result picked");
+        click_in_row(&mut s, "reset option", "Files & folders · Calculate folder sizes");
+        assert_eq!(s.app.cfg.folder_sizes, sizes, "and its reset arrow puts it back");
+        // With the mouse, in another search.
+        let r = s.text_rect("size");
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        s.act("key ctrl+a");
+        s.act("text animations");
+        s.idle(2);
+        click_in_row(&mut s, "switch", "Appearance · Animations");
+        assert!(!s.app.cfg.animations);
+        click_in_row(&mut s, "reset option", "Appearance · Animations");
+        assert!(s.app.cfg.animations);
+        s.act("text zzzq");
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t == "No option matches"));
+        // Clearing the search brings the section back.
+        let r = s.text_rect("animationszzzq");
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        s.act("key ctrl+a");
+        s.act("key Backspace");
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t == "On startup"), "the section again");
+        // Titles only: the lines go, and come back as tooltips.
+        click_control(&mut s, "titles only");
+        assert!(s.app.cfg.compact_lists);
+        s.click_text("Appearance");
+        s.idle(2);
+        assert!(!s.texts.iter().any(|(_, t)| t == "Size of all text."), "no descriptions");
+        look(&mut s, "titles only");
+        s.shot("options-titles-only");
+        let r = s.text_rect("Font size");
+        s.act(&format!("move {:.0} {:.0}", r.center().x, r.center().y));
+        s.idle(50);
+        assert!(s.texts.iter().any(|(_, t)| t == "Size of all text."), "the description as a tooltip");
+        s.shot("options-titles-only-tooltip");
+        click_control(&mut s, "titles only");
+        assert!(!s.app.cfg.compact_lists);
+        // Closed and opened again: the same section.
+        s.click_text("Git");
+        s.act("key Escape");
+        s.settle();
+        assert!(!s.popup_open());
+        s.act("key ctrl+Comma");
+        s.settle();
+        assert_eq!(opt_section(&s), Some(Section::Git), "the last section again");
+        // A small window: glyphs only on the left, every row still in reach.
+        s.resize(520.0, 340.0);
+        s.idle(3);
+        assert!(!s.texts.iter().any(|(_, t)| t == "Mouse & keyboard"), "names give way to glyphs");
+        click_control(&mut s, "section Files & folders");
+        assert_eq!(opt_section(&s), Some(Section::Files));
+        let last = OPTS.iter().filter(|o| o.1 == Section::Files).count();
+        for _ in 0..last {
+            s.act("key ArrowDown");
+        }
+        s.idle(3);
+        let popup = crate::ui::POPUPS.with(|p| p.borrow().first().copied()).unwrap();
+        let r = s.text_rect("Recents on top");
+        assert!(popup.contains_rect(r), "the last row scrolled into view: {r:?} in {popup:?}");
+        look(&mut s, "small window");
+        s.shot("options-small");
+        click_control(&mut s, "section Startup & system");
+        look(&mut s, "small window, system");
+        s.shot("options-small-system");
+        s.act("text default");
+        s.idle(2);
+        look(&mut s, "small window, search");
+        s.shot("options-small-search");
+        s.act("key Escape");
+        s.resize(1280.0, 800.0);
+        // A light theme.
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        s.act("key ctrl+Comma");
+        s.settle();
+        for sec in [Section::Appearance, Section::Files, Section::System] {
+            click_control(&mut s, sec.control());
+            look(&mut s, "light");
+            s.shot(&format!("options-light-{}", slug(sec)));
+        }
+        s.act("text font");
+        s.idle(2);
+        look(&mut s, "light search");
+        s.shot("options-light-search");
+        s.act("key Escape");
+        report("option sections", &s);
     }
 
     /// Bookmarks (Ctrl+D, click in the sidebar, remove) and tab commands (new, jump by
@@ -3134,7 +3377,7 @@ mod journeys {
             s.idle(3);
             s.shot(if compact { "options-compact" } else { "options" });
             let rows = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == "choose theme").map(|(_, r, _)| *r).collect::<Vec<_>>());
-            let h = if compact { 26.0 } else { 36.0 };
+            let h = if compact { 32.0 } else { 44.0 };
             assert!(rows.iter().all(|r| r.height() <= h), "the theme row's button fits a {h}-point row: {rows:?}");
         }
         s.app.cfg.compact_lists = false;
@@ -3955,7 +4198,7 @@ mod journeys {
         s.shot("option-no-curl");
         s.app.avatars.set_curl(true);
         s.idle(2);
-        assert!(s.texts.iter().any(|(_, t)| t == "Looks authors up on GitHub by username or email; pictures are saved on this computer."), "what it does and what GitHub learns");
+        assert!(s.texts.iter().any(|(_, t)| t == "Asks GitHub by username or email; kept on this computer."), "what it does and what GitHub learns");
         look(&mut s, "the option");
         s.shot("option");
         // Still inside its window when that is small.

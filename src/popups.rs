@@ -66,9 +66,18 @@ pub struct PaletteState {
 pub struct OptState {
     pub query: String,
     focus: bool,
-    /// Keyboard-selected row (index among the visible options).
+    /// Keyboard-selected row (index among the rows on show).
     sel: usize,
     scroll_to_sel: bool,
+    /// The section on show; until the first frame, the one shown last.
+    pub section: Option<Section>,
+    /// The arrows have been used: the selected row shows its ring.
+    keyed: bool,
+    search_id: Option<Id>,
+    /// Text typed while the search had no focus: its cursor goes to the end.
+    cursor_end: bool,
+    /// Scroll the settings back to the top (another section, another search).
+    top: bool,
 }
 
 pub struct PathDropState {
@@ -277,7 +286,7 @@ impl Popup {
         Popup::Palette(PaletteState { query: String::new(), sel: 0, capture: None, conflict: None, focus: true })
     }
     pub fn options() -> Popup {
-        Popup::Options(OptState { query: String::new(), focus: true, sel: 0, scroll_to_sel: false })
+        Popup::Options(OptState { query: String::new(), focus: true, sel: 0, scroll_to_sel: false, section: None, keyed: false, search_id: None, cursor_end: false, top: true })
     }
     pub fn types(panel: u64) -> Popup {
         Popup::Types { panel, query: String::new() }
@@ -545,13 +554,18 @@ fn row(ui: &mut Ui, h: f32, selected: bool, pal: &Palette, paint: impl FnOnce(&U
 }
 
 fn highlight_job(text: &str, q: &fuzzy::Query, font: FontId, col: Color32, accent: Color32) -> egui::text::LayoutJob {
-    let hits: std::collections::HashSet<usize> = fuzzy::positions(q, text).map(|(_, p)| p.into_iter().collect()).unwrap_or_default();
     let mut job = egui::text::LayoutJob::default();
+    highlight_into(&mut job, text, q, font, col, accent);
+    job
+}
+
+/// `text` added to `job`, the letters matching `q` in `accent`.
+fn highlight_into(job: &mut egui::text::LayoutJob, text: &str, q: &fuzzy::Query, font: FontId, col: Color32, accent: Color32) {
+    let hits: std::collections::HashSet<usize> = fuzzy::positions(q, text).map(|(_, p)| p.into_iter().collect()).unwrap_or_default();
     for (i, ch) in text.chars().enumerate() {
         let c = if hits.contains(&i) { accent } else { col };
         job.append(&ch.to_string(), 0.0, egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() });
     }
-    job
 }
 
 fn menu_item(ui: &mut Ui, label: &str, chip: Option<String>, pal: &Palette) -> bool {
@@ -1525,8 +1539,8 @@ fn remove_binding(app: &mut App, c: Cmd, b: &Binding) {
 
 // ------------------------------------------------------------------ options
 
-#[derive(Clone, Copy, PartialEq)]
-enum Opt {
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Opt {
     Theme,
     Font,
     InspectorFontSize,
@@ -1578,61 +1592,195 @@ enum Opt {
     Meaning,
     MeaningFolders,
     MeaningPictures,
+    ConfigFile,
+    ResetAll,
+    Install,
 }
 
-const OPTS: &[(Opt, &str, &str, &str)] = &[
-    (Opt::Theme, "Appearance", "Color scheme", "Overall colors of the window. Choose shows every theme side by side."),
-    (Opt::SyntaxTheme, "Appearance", "Code colors follow the theme", "Highlighted code in previews and diffs takes the theme's own colors; off uses the same set for every theme."),
-    (Opt::Font, "Appearance", "Font", "UI font family; empty uses the system font."),
-    (Opt::FollowSystem, "Appearance", "Follow system light/dark", "Switch to the light scheme when the desktop is light."),
-    (Opt::Round, "Appearance", "Round corners", "Rounded panels, buttons and selections."),
-    (Opt::FontSize, "Appearance", "Font size", "Size of all text."),
-    (Opt::SystemIcons, "Appearance", "System icon theme", "Use the desktop's file and folder icons; off uses Maia's built-in icons."),
-    (Opt::InspectorFont, "Appearance", "Inspector font", "Monospace family for text previews; empty uses the system monospace font."),
-    (Opt::InspectorFontSize, "Appearance", "Inspector font size", "Text size in inspector previews."),
-    (Opt::RectButtons, "Appearance", "Rectangular window buttons", "Square instead of rounded minimize / maximize / close."),
-    (Opt::Spacing, "Appearance", "Spacing", "From compact (more rows) to comfortable."),
-    (Opt::Animations, "Appearance", "Animations", "Turn every animation on or off."),
-    (Opt::Tooltips, "Appearance", "Tooltips", "Show hints when hovering buttons."),
-    (Opt::AltRows, "Appearance", "Alternating row colors", "Stripe rows in Details view."),
-    (Opt::InactiveOpacity, "Appearance", "Inactive panel opacity", "How visible unfocused panels stay."),
-    (Opt::Breadcrumbs, "Appearance", "Path breadcrumbs", "Clickable path segments instead of plain text."),
-    (Opt::CompactPaths, "Appearance", "Compact paths", "Show ~ for your home folder."),
-    (Opt::ShowExt, "Listing", "Show file extensions", "Display .txt, .png and so on."),
-    (Opt::ShowHidden, "Listing", "Show hidden files", "Show dotfiles."),
-    (Opt::ShowSystem, "Listing", "Show system files", "Show backups (*~, *.bak), sockets and device files."),
-    (Opt::FoldersFirst, "Listing", "Folders first", "List folders before files."),
-    (Opt::HighlightRecents, "Listing", "Highlight recents", "Mark recently used items with a dot."),
-    (Opt::RecentsOnTop, "Listing", "Recents on top", "Sort recently used items first."),
-    (Opt::TrackRecents, "Listing", "Remember recents", "Keep visited folders and opened files: across restarts, for this session, or not at all."),
-    (Opt::CalcSizes, "Listing", "Calculate folder sizes", "Scan folders in the background to show their sizes and item counts."),
-    (Opt::SizesSsd, "Listing", "Solid-state drives", "Scan folders on SSDs and other fast storage."),
-    (Opt::SizesHdd, "Listing", "Spinning hard drives", "Scan folders on rotational disks (slower, noisier)."),
-    (Opt::SizesNet, "Listing", "Network locations", "Scan folders on NFS, SMB and other remote mounts."),
-    (Opt::Thumbnails, "Listing", "Load thumbnails", "Where image previews are generated for icon views."),
-    (Opt::SelectionBoxes, "Mouse & keyboard", "Selection boxes", "Checkboxes on items for picking several with the mouse."),
-    (Opt::ThumbFill, "Listing", "Thumbnail fill", "Crop thumbnails to fill the square instead of fitting."),
-    (Opt::ScrollBeyond, "Listing", "Scroll beyond last item", "Allow scrolling past the end of the list."),
-    (Opt::AssetCache, "Listing", "Asset cache size", "Memory for thumbnails and previews (MB)."),
-    (Opt::DateFormat, "Listing", "Date format", "strftime pattern, e.g. %Y-%m-%d %H:%M."),
-    (Opt::ActOnPress, "Mouse & keyboard", "Act on press", "Select on mouse down instead of release."),
-    (Opt::SingleClick, "Mouse & keyboard", "Single click to open", "Open items with one click."),
-    (Opt::SingleClickFolders, "Mouse & keyboard", "…folders only", "Single click opens folders but not files."),
-    (Opt::OpenFoldersNewTab, "Mouse & keyboard", "Open folders in new tab", "Double-clicked folders open in a new tab."),
-    (Opt::DblClickParent, "Mouse & keyboard", "Double-click background goes up", "Double-click empty space to open the parent."),
-    (Opt::ReverseScroll, "Mouse & keyboard", "Reverse scroll direction", "Invert the mouse wheel."),
-    (Opt::CharKey, "Mouse & keyboard", "Character keys", "What typing letters in the list does."),
-    (Opt::MiddleClick, "Mouse & keyboard", "Middle-click on folder", "Open in a split or a new tab."),
-    (Opt::InspectorLayout, "Inspector & startup", "Inspector layout", "Where the inspector docks."),
-    (Opt::Startup, "Inspector & startup", "On startup", "What to show when Maia starts."),
-    (Opt::NewTab, "Inspector & startup", "New tab shows", "Folder opened by a new tab."),
-    (Opt::GitPictures, "Inspector & startup", "Show GitHub pictures", "Looks authors up on GitHub by username or email; pictures are saved on this computer."),
-    (Opt::DefaultFm, "System", "Default file manager", "Open folders from other apps in Maia."),
-    (Opt::SingleInstance, "System", "Reuse the open window", "Folders from other apps and new launches open as tabs here."),
-    (Opt::Meaning, "Search", "Search by meaning", "Find files by what they are about, with a local model through Ollama."),
-    (Opt::MeaningFolders, "Search", "Folders to search by meaning", "Separated by commas; ~ is your home folder."),
-    (Opt::MeaningPictures, "Search", "Include pictures", "Find pictures by what they show, too."),
+/// The pages of Options, in the order of its left column.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum Section {
+    Appearance,
+    Files,
+    Mouse,
+    Preview,
+    Search,
+    Git,
+    System,
+}
+
+impl Section {
+    pub(crate) const ALL: [Section; 7] = [Section::Appearance, Section::Files, Section::Mouse, Section::Preview, Section::Search, Section::Git, Section::System];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Section::Appearance => "Appearance",
+            Section::Files => "Files & folders",
+            Section::Mouse => "Mouse & keyboard",
+            Section::Preview => "Preview",
+            Section::Search => "Search",
+            Section::Git => "Git",
+            Section::System => "Startup & system",
+        }
+    }
+
+    /// The name the simulations click it by.
+    pub(crate) fn control(self) -> &'static str {
+        match self {
+            Section::Appearance => "section Appearance",
+            Section::Files => "section Files & folders",
+            Section::Mouse => "section Mouse & keyboard",
+            Section::Preview => "section Preview",
+            Section::Search => "section Search",
+            Section::Git => "section Git",
+            Section::System => "section Startup & system",
+        }
+    }
+
+    /// The section `d` places away, wrapping at either end.
+    pub(crate) fn step(self, d: isize) -> Section {
+        let i = Section::ALL.iter().position(|s| *s == self).unwrap_or(0) as isize;
+        Section::ALL[(i + d).rem_euclid(Section::ALL.len() as isize) as usize]
+    }
+
+    fn paint(self, p: &egui::Painter, r: Rect, col: Color32) {
+        match self {
+            // Half a disc: light and dark.
+            Section::Appearance => {
+                let (c, rad) = (r.center(), r.width() * 0.4);
+                p.circle_stroke(c, rad, Stroke::new(1.3, col));
+                let half: Vec<Pos2> = (0..=16).map(|k| {
+                    let a = std::f32::consts::PI * (0.5 + k as f32 / 16.0);
+                    c + vec2(a.cos(), a.sin()) * rad
+                }).collect();
+                p.add(egui::Shape::convex_polygon(half, col, Stroke::NONE));
+            }
+            Section::Files => paint_glyph(p, r, Glyph::Folder, col),
+            // A mouse: a rounded body split at the buttons.
+            Section::Mouse => {
+                let b = Rect::from_center_size(r.center(), vec2(r.width() * 0.56, r.height() * 0.84));
+                let st = Stroke::new(1.3, col);
+                p.rect_stroke(b, CornerRadius::same((b.width() / 2.0) as u8), st, StrokeKind::Middle);
+                p.line_segment([pos2(b.center().x, b.top() + 2.0), pos2(b.center().x, b.top() + b.height() * 0.36)], st);
+            }
+            Section::Preview => paint_glyph(p, r, Glyph::Eye, col),
+            Section::Search => paint_glyph(p, r, Glyph::Search, col),
+            Section::Git => {
+                theme::paint_lucide(p, r, "git-branch", col);
+            }
+            Section::System => paint_glyph(p, r, Glyph::Monitor, col),
+        }
+    }
+}
+
+/// Every option: its section, the group it is listed under there (empty: no heading),
+/// its title and a short line saying what it does. The order is the order on screen.
+pub(crate) const OPTS: &[(Opt, Section, &str, &str, &str)] = &[
+    (Opt::Theme, Section::Appearance, "Theme", "Color scheme", "The window's colors."),
+    (Opt::FollowSystem, Section::Appearance, "Theme", "Follow system light/dark", "Use a light scheme when the desktop is light."),
+    (Opt::SyntaxTheme, Section::Appearance, "Theme", "Code colors follow the theme", "Code in previews and diffs takes the theme's colors."),
+    (Opt::Font, Section::Appearance, "Text", "Font", "Empty uses the system font."),
+    (Opt::FontSize, Section::Appearance, "Text", "Font size", "Size of all text."),
+    (Opt::Spacing, Section::Appearance, "Layout & motion", "Spacing", "From compact to roomy."),
+    (Opt::Round, Section::Appearance, "Layout & motion", "Round corners", "Rounded panels, buttons and selections."),
+    (Opt::RectButtons, Section::Appearance, "Layout & motion", "Rectangular window buttons", "Square minimize, maximize and close."),
+    (Opt::AltRows, Section::Appearance, "Layout & motion", "Alternating row colors", "Stripe rows in Details view."),
+    (Opt::InactiveOpacity, Section::Appearance, "Layout & motion", "Inactive panel opacity", "How visible unfocused panels stay."),
+    (Opt::Animations, Section::Appearance, "Layout & motion", "Animations", "Turn every animation on or off."),
+    (Opt::Tooltips, Section::Appearance, "Layout & motion", "Tooltips", "Hints when hovering buttons."),
+    (Opt::SystemIcons, Section::Appearance, "Icons & paths", "System icon theme", "The desktop's file icons instead of Maia's."),
+    (Opt::Breadcrumbs, Section::Appearance, "Icons & paths", "Path breadcrumbs", "Clickable path segments instead of plain text."),
+    (Opt::CompactPaths, Section::Appearance, "Icons & paths", "Compact paths", "Show ~ for your home folder."),
+    (Opt::ShowHidden, Section::Files, "List", "Show hidden files", "Show dotfiles."),
+    (Opt::ShowSystem, Section::Files, "List", "Show system files", "Backups (*~, *.bak), sockets and devices."),
+    (Opt::ShowExt, Section::Files, "List", "Show file extensions", "Display .txt, .png and so on."),
+    (Opt::FoldersFirst, Section::Files, "List", "Folders first", "List folders before files."),
+    (Opt::DateFormat, Section::Files, "List", "Date format", "A strftime pattern, like %Y-%m-%d %H:%M."),
+    (Opt::CalcSizes, Section::Files, "Folder sizes", "Calculate folder sizes", "Count sizes and items in the background."),
+    (Opt::SizesSsd, Section::Files, "Folder sizes", "Solid-state drives", "SSDs and other fast storage."),
+    (Opt::SizesHdd, Section::Files, "Folder sizes", "Spinning hard drives", "Rotational disks: slower and noisier."),
+    (Opt::SizesNet, Section::Files, "Folder sizes", "Network locations", "NFS, SMB and other remote mounts."),
+    (Opt::Thumbnails, Section::Files, "Thumbnails", "Load thumbnails", "Where pictures get previews in icon views."),
+    (Opt::ThumbFill, Section::Files, "Thumbnails", "Thumbnail fill", "Crop to fill the square instead of fitting."),
+    (Opt::TrackRecents, Section::Files, "Recents", "Remember recents", "Visited folders and opened files."),
+    (Opt::HighlightRecents, Section::Files, "Recents", "Highlight recents", "Mark recently used items with a dot."),
+    (Opt::RecentsOnTop, Section::Files, "Recents", "Recents on top", "Sort recently used items first."),
+    (Opt::SingleClick, Section::Mouse, "Clicks", "Single click to open", "Open items with one click."),
+    (Opt::SingleClickFolders, Section::Mouse, "Clicks", "Folders only", "Files still open with a double click."),
+    (Opt::ActOnPress, Section::Mouse, "Clicks", "Act on press", "Select on mouse down, not on release."),
+    (Opt::OpenFoldersNewTab, Section::Mouse, "Clicks", "Open folders in new tab", "Double-clicked folders open in a new tab."),
+    (Opt::DblClickParent, Section::Mouse, "Clicks", "Double-click background goes up", "Double-click empty space for the parent."),
+    (Opt::MiddleClick, Section::Mouse, "Clicks", "Middle-click on folder", "Open it in a split or a new tab."),
+    (Opt::SelectionBoxes, Section::Mouse, "Clicks", "Selection boxes", "Checkboxes for picking several items."),
+    (Opt::ReverseScroll, Section::Mouse, "Scrolling", "Reverse scroll direction", "Invert the mouse wheel."),
+    (Opt::ScrollBeyond, Section::Mouse, "Scrolling", "Scroll beyond last item", "Scroll past the end of a list."),
+    (Opt::CharKey, Section::Mouse, "Keyboard", "Character keys", "What typing letters in a list does."),
+    (Opt::InspectorLayout, Section::Preview, "", "Inspector layout", "Where the inspector docks."),
+    (Opt::InspectorFont, Section::Preview, "", "Inspector font", "For text previews; empty uses monospace."),
+    (Opt::InspectorFontSize, Section::Preview, "", "Inspector font size", "Text size in previews."),
+    (Opt::Meaning, Section::Search, "", "Search by meaning", "Find files by topic, with a local Ollama model."),
+    (Opt::MeaningFolders, Section::Search, "", "Folders to search", "Separated by commas; ~ is your home folder."),
+    (Opt::MeaningPictures, Section::Search, "", "Include pictures", "Find pictures by what they show."),
+    (Opt::GitPictures, Section::Git, "", "Show GitHub pictures", "Asks GitHub by username or email; kept on this computer."),
+    (Opt::Startup, Section::System, "Startup", "On startup", "What Maia shows when it starts."),
+    (Opt::NewTab, Section::System, "Startup", "New tab shows", "The folder a new tab opens."),
+    (Opt::DefaultFm, Section::System, "System", "Default file manager", "Open folders from other apps in Maia."),
+    (Opt::SingleInstance, Section::System, "System", "Reuse the open window", "Other apps and new launches open tabs here."),
+    (Opt::AssetCache, Section::System, "System", "Asset cache size", "Memory for thumbnails and previews."),
+    (Opt::ConfigFile, Section::System, "Settings", "Config file", "Every option as text, in your editor."),
+    (Opt::ResetAll, Section::System, "Settings", "Reset to defaults", "Every option and hotkey; asks first."),
+    (Opt::Install, Section::System, "Settings", "Install Maia", "Add Maia to the app launcher and ~/.local/bin."),
 ];
+
+/// The switch a sub-option sits under: it is indented below it and inert while it is off.
+pub(crate) fn opt_parent(o: Opt) -> Option<Opt> {
+    match o {
+        Opt::SizesSsd | Opt::SizesHdd | Opt::SizesNet => Some(Opt::CalcSizes),
+        Opt::SingleClickFolders => Some(Opt::SingleClick),
+        Opt::MeaningFolders | Opt::MeaningPictures => Some(Opt::Meaning),
+        _ => None,
+    }
+}
+
+fn parent_on(c: &crate::config::Config, o: Opt) -> bool {
+    match opt_parent(o) {
+        Some(Opt::CalcSizes) => c.folder_sizes,
+        Some(Opt::SingleClick) => c.single_click,
+        Some(Opt::Meaning) => c.semantic_search,
+        _ => true,
+    }
+}
+
+/// Options matching `query` across every section, best first (rows of `OPTS`). The
+/// title (prefix, word, substring, fuzzy) outranks the description, section and group;
+/// a loose subsequence across everything only fills in at the end (on its own it
+/// matched half the list and Enter flipped the wrong switch).
+pub(crate) fn find_options(query: &str) -> Vec<usize> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return vec![];
+    }
+    let q = fuzzy::Query::new(query);
+    let rank = |title: &str, desc: &str, place: &str| -> Option<i32> {
+        let (t, d) = (title.to_lowercase(), desc.to_lowercase());
+        if t.starts_with(&needle) {
+            Some(3000)
+        } else if t.split(|c: char| !c.is_alphanumeric()).any(|w| w.starts_with(&needle)) {
+            Some(2500)
+        } else if t.contains(&needle) {
+            Some(2000)
+        } else if let Some(sc) = fuzzy::score(&q, &t) {
+            Some(1000 + sc)
+        } else if d.contains(&needle) || place.to_lowercase().contains(&needle) {
+            Some(500)
+        } else {
+            fuzzy::score(&q, &format!("{t} {d}")).map(|sc| sc / 4)
+        }
+    };
+    let mut ranked: Vec<(i32, usize)> = OPTS.iter().enumerate().filter_map(|(i, (_, sec, group, title, desc))| rank(title, desc, &format!("{} {group}", sec.name())).map(|r| (r, i))).collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    ranked.into_iter().map(|(_, i)| i).collect()
+}
 
 /// Choice control: a box showing the value and a chevron; click steps
 /// to the next value, right-click (or Shift+click) to the previous one.
@@ -1641,6 +1789,7 @@ fn choice<T: PartialEq + Clone>(ui: &mut Ui, id: &str, cur: &mut T, opts: &[(T, 
     let i = opts.iter().position(|(v, _)| v == cur).unwrap_or(0);
     let label = opts.get(i).map(|(_, l)| *l).unwrap_or("—");
     let (r, resp) = ui.allocate_exact_size(vec2(130.0, 20.0), Sense::click());
+    crate::ui::note_control(ui, r, "choice");
     let v = ui.visuals();
     let (fill, stroke, text) = (v.widgets.inactive.bg_fill, v.widgets.noninteractive.bg_stroke, v.text_color());
     let fill = if resp.hovered() { v.widgets.hovered.bg_fill } else { fill };
@@ -1712,6 +1861,8 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
         Opt::Theme => f!(theme),
         // Lives in the desktop's settings, not Maia's: nothing to reset.
         Opt::DefaultFm => true,
+        // Buttons, not settings.
+        Opt::ConfigFile | Opt::ResetAll | Opt::Install => true,
         Opt::SingleInstance => f!(single_instance),
         Opt::Meaning => f!(semantic_search),
         Opt::MeaningFolders => f!(semantic_folders),
@@ -1838,6 +1989,19 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         Opt::GitPictures => toggle(ui, &mut c.github_pictures, &pal),
         Opt::MeaningFolders => ui.add(egui::TextEdit::singleline(&mut c.semantic_folders).hint_text("~/Documents").desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).lost_focus(),
         Opt::DefaultFm => false,
+        Opt::ConfigFile | Opt::ResetAll | Opt::Install => {
+            let (label, c) = match o {
+                Opt::ConfigFile => ("Open", Cmd::OpenConfig),
+                Opt::ResetAll => ("Reset…", Cmd::ResetConfig),
+                _ => ("Install", Cmd::Install),
+            };
+            let b = ui.button(label);
+            crate::ui::note_control(ui, b.rect, "option button");
+            if b.clicked() {
+                app.actions.push(Action::Cmd(c));
+            }
+            false
+        }
         Opt::InspectorFont => {
             let r = ui.add(egui::TextEdit::singleline(&mut c.inspector_font).hint_text("monospace").desired_width(150.0).margin(egui::Margin::symmetric(5, 2)));
             r.changed()
@@ -1867,159 +2031,360 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
     }
 }
 
+/// How a row of Options is drawn.
+struct RowLook {
+    compact: bool,
+    /// A search result: the section's name goes before the title.
+    label: bool,
+    selected: bool,
+    scroll: bool,
+    first: bool,
+}
+
+/// One option in its card: the title, a dim line saying what it does (a tooltip with
+/// titles only, or when the line is cut), the control at the right edge and, while the
+/// value differs from the default, a reset arrow beside it. Returns (a setting changed,
+/// the row itself was clicked).
+fn option_row(ui: &mut Ui, app: &mut App, oi: usize, r: Rect, look: &RowLook, q: &fuzzy::Query, pal: &Palette) -> (bool, bool) {
+    let pal = *pal;
+    let (o, sec, _, title, desc) = OPTS[oi];
+    // Without curl there is no way to ask: said in place of what it would do.
+    let desc: &str = if o == Opt::GitPictures && app.avatars.curl() == Some(false) { "Needs curl, which isn't installed; authors keep their initials." } else { desc };
+    // Sub-options sit indented under their switch and fade while it is off.
+    let indent = if opt_parent(o).is_some() && !look.label { 20.0 } else { 0.0 };
+    let inert = !parent_on(&app.cfg, o);
+    let mut changed = false;
+    if !look.first {
+        let y = r.top().round() + 0.5;
+        ui.painter().line_segment([pos2(r.left() + 12.0 + indent, y), pos2(r.right() - 12.0, y)], Stroke::new(1.0, pal.border.gamma_multiply(0.7)));
+    }
+    let resp = ui.interact(r, Id::new(("optrow", oi)), Sense::click());
+    let inside = r.shrink(2.0);
+    if ui.rect_contains_pointer(r) {
+        ui.painter().rect_filled(inside, CornerRadius::same(6), pal.hover);
+    }
+    if look.selected {
+        ui.painter().rect_stroke(inside, CornerRadius::same(6), Stroke::new(1.0, pal.accent.gamma_multiply(0.8)), StrokeKind::Inside);
+    }
+    if look.scroll {
+        ui.scroll_to_rect(r, None);
+    }
+    let pad = if look.compact { 4.0 } else { 6.0 };
+    let ctrl_rect = Rect::from_min_max(pos2(r.left() + (r.width() * 0.4).max(150.0), r.top() + pad), pos2(r.right() - 12.0, r.bottom() - pad));
+    let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(ctrl_rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    // Controls at the popup's own size, as its titles are: at the window's font size
+    // they would overflow the rows.
+    {
+        use egui::TextStyle;
+        let st = cui.style_mut();
+        for (t, size) in [(TextStyle::Body, 12.5), (TextStyle::Button, 12.5), (TextStyle::Monospace, 12.0), (TextStyle::Small, 11.0)] {
+            let font = if t == TextStyle::Monospace { FontId::monospace(size) } else { FontId::proportional(size) };
+            st.text_styles.insert(t, font);
+        }
+        st.spacing.interact_size.y = ctrl_rect.height().min(22.0);
+        st.spacing.button_padding = vec2(7.0, 1.0);
+    }
+    if inert {
+        cui.disable();
+    }
+    if option_control(&mut cui, app, o) {
+        changed = true;
+    }
+    let mut left = cui.min_rect().left();
+    if !opt_default(&mut app.cfg, o, false) {
+        let rr = Rect::from_center_size(pos2(left - 16.0, r.center().y), Vec2::splat(20.0));
+        crate::ui::note_control(ui, rr, "reset option");
+        let rresp = ui.interact(rr, Id::new(("optreset", oi)), Sense::click()).on_hover_text("Reset to default");
+        paint_glyph(ui.painter(), rr.shrink(3.0), Glyph::Refresh, if rresp.hovered() { pal.text } else { pal.text_dim });
+        if rresp.clicked() {
+            opt_default(&mut app.cfg, o, true);
+            changed = true;
+        }
+        left = rr.left();
+    }
+    let x = r.left() + 12.0 + indent;
+    let room = (left - 8.0 - x).max(24.0);
+    let tc = if inert { pal.text_dim.gamma_multiply(0.6) } else { pal.text };
+    let font = FontId::proportional(12.5);
+    let mut job = egui::text::LayoutJob::default();
+    if look.label {
+        job.append(&format!("{} · ", sec.name()), 0.0, egui::TextFormat { font_id: font.clone(), color: pal.text_dim, ..Default::default() });
+    }
+    highlight_into(&mut job, title, q, font, tc, pal.accent);
+    job.wrap = egui::text::TextWrapping { max_width: room, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let g = ui.fonts_mut(|f| f.layout_job(job));
+    let ty = if look.compact { r.center().y - g.size().y / 2.0 } else { r.top() + 7.0 };
+    ui.painter().galley(pos2(x, ty.round()), g, tc);
+    let mut cut = true;
+    if !look.compact {
+        let dc = pal.text_dim.gamma_multiply(if inert { 0.6 } else { 1.0 });
+        let dfont = FontId::proportional(11.0);
+        cut = ui.painter().layout_no_wrap(desc.to_string(), dfont.clone(), dc).size().x > room;
+        let dg = crate::listing::elided(ui, desc, dfont, room, dc);
+        ui.painter().galley(pos2(x, (r.top() + 24.0).round()), dg, dc);
+    }
+    let resp = if cut { resp.on_hover_text(desc) } else { resp };
+    (changed, resp.clicked())
+}
+
+/// One line of key hints in `r`; those that would not fit are left out.
+fn hint_row(ui: &Ui, r: Rect, items: &[(&str, &str)], pal: &Palette) {
+    let p = ui.painter();
+    let cy = r.center().y;
+    let mut x = r.left();
+    for (k, label) in items {
+        let kg = p.layout_no_wrap(k.to_string(), FontId::proportional(10.5), pal.text_dim);
+        let lg = p.layout_no_wrap(label.to_string(), FontId::proportional(11.0), pal.text_dim);
+        let (ks, ls) = (kg.size(), lg.size());
+        if x + ks.x + 14.0 + ls.x > r.right() {
+            break;
+        }
+        let kr = Rect::from_min_size(pos2(x, (cy - (ks.y + 6.0) / 2.0).round()), ks + vec2(10.0, 6.0));
+        p.rect(kr, CornerRadius::same(4), pal.bg, Stroke::new(1.0, pal.border), StrokeKind::Inside);
+        p.galley(kr.min + vec2(5.0, 3.0), kg, pal.text_dim);
+        crate::ui::note_control(ui, kr, "key hint");
+        p.galley(pos2(kr.right() + 4.0, (cy - ls.y / 2.0).round()), lg, pal.text_dim);
+        x = kr.right() + 4.0 + ls.x + 14.0;
+    }
+}
+
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
+}
+
+/// Options: the sections on the left, the chosen one's settings in cards on the right.
+/// Typing searches every section at once and lists the matches with their section.
 fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
     let pal = app.pal;
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
         return false;
     }
-    let q = fuzzy::Query::new(&st.query);
-    let mut close = false;
-    let mut changed = false;
-    let mut cmd = None;
-    // Keyboard: Up/Down pick a row, Enter flips a switch (or resets text fields' focus).
-    let keys = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::ArrowUp), i.consume_key(Modifiers::NONE, Key::ArrowDown), i.consume_key(Modifiers::NONE, Key::Enter)));
-    // Best matches first: the title (prefix, word, substring, fuzzy) outranks the
-    // description; a loose subsequence across everything only fills in at the end
-    // (on its own it matched half the list and Enter flipped the wrong switch).
-    let needle = st.query.trim().to_lowercase();
-    let rank = |title: &str, desc: &str, group: &str| -> Option<i32> {
-        if needle.is_empty() {
-            return Some(0);
-        }
-        let (t, d) = (title.to_lowercase(), desc.to_lowercase());
-        if t.starts_with(&needle) {
-            Some(3000)
-        } else if t.split(|c: char| !c.is_alphanumeric()).any(|w| w.starts_with(&needle)) {
-            Some(2500)
-        } else if t.contains(&needle) {
-            Some(2000)
-        } else if let Some(sc) = fuzzy::score(&q, &t) {
-            Some(1000 + sc)
-        } else if d.contains(&needle) || group.to_lowercase().contains(&needle) {
-            Some(500)
-        } else {
-            fuzzy::score(&q, &format!("{t} {d}")).map(|sc| sc / 4)
-        }
+    // The section shown last is shown again, for as long as Maia runs.
+    let last_id = Id::new("options section");
+    let mut section = st.section.unwrap_or_else(|| ctx.data(|d| d.get_temp::<usize>(last_id)).and_then(|i| Section::ALL.get(i).copied()).unwrap_or(Section::Appearance));
+    // A text field other than the search (a font, a date format) keeps its keys.
+    let focused = ctx.memory(|m| m.focused());
+    let editing = focused.is_some_and(|f| Some(f) != st.search_id && egui::TextEdit::load_state(ctx, f).is_some());
+    let (up, down, enter, prev, next) = if editing {
+        (false, false, false, false, false)
+    } else {
+        ctx.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                i.consume_key(Modifiers::NONE, Key::ArrowDown),
+                i.consume_key(Modifiers::NONE, Key::Enter),
+                i.consume_key(Modifiers::CTRL, Key::PageUp),
+                i.consume_key(Modifiers::CTRL, Key::PageDown),
+            )
+        })
     };
-    let mut ranked: Vec<(i32, usize)> = OPTS.iter().enumerate().filter_map(|(i, (_, group, title, desc))| rank(title, desc, group).map(|r| (r, i))).collect();
-    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    let visible: Vec<usize> = ranked.into_iter().map(|(_, i)| i).collect();
-    if keys.0 && st.sel > 0 {
+    // Typing after a click on a switch (the search no longer has the keyboard) still
+    // searches.
+    if !editing && (focused.is_none() || focused != st.search_id) {
+        let typed = ctx.input_mut(|i| {
+            let mut t = String::new();
+            i.events.retain(|e| match e {
+                Event::Text(x) => {
+                    t.push_str(x);
+                    false
+                }
+                _ => true,
+            });
+            t
+        });
+        if !typed.is_empty() {
+            st.query.push_str(&typed);
+            st.focus = true;
+            st.cursor_end = true;
+            st.sel = 0;
+            st.top = true;
+        }
+    }
+    if prev || next {
+        section = section.step(if next { 1 } else { -1 });
+        st.query.clear();
+        st.sel = 0;
+        st.top = true;
+    }
+    let searching = !st.query.trim().is_empty();
+    let rows: Vec<usize> = if searching { find_options(&st.query) } else { (0..OPTS.len()).filter(|&i| OPTS[i].1 == section).collect() };
+    if up && st.sel > 0 {
         st.sel -= 1;
         st.scroll_to_sel = true;
     }
-    if keys.1 && st.sel + 1 < visible.len() {
+    if down && st.sel + 1 < rows.len() {
         st.sel += 1;
         st.scroll_to_sel = true;
     }
-    st.sel = st.sel.min(visible.len().saturating_sub(1));
-    if keys.2 {
-        if let Some(&i) = visible.get(st.sel) {
-            if OPTS[i].0 == Opt::DefaultFm {
-                let on = app.default_fm() == Some(true);
-                app.set_default_fm(!on);
-            } else if opt_flip(&mut app.cfg, OPTS[i].0) {
-                changed = true;
+    if up || down || enter {
+        st.keyed = true;
+    }
+    st.sel = st.sel.min(rows.len().saturating_sub(1));
+    let mut changed = false;
+    let mut cmd = None;
+    let actions_before = app.actions.len();
+    if enter {
+        // Enter flips a switch, opens the theme picker or presses a row's button; a
+        // sub-option does nothing while its switch is off.
+        if let Some(&i) = rows.get(st.sel) {
+            let o = OPTS[i].0;
+            if parent_on(&app.cfg, o) {
+                match o {
+                    Opt::DefaultFm => {
+                        let on = app.default_fm() == Some(true);
+                        app.set_default_fm(!on);
+                    }
+                    Opt::Theme => app.popup = Popup::Themes,
+                    Opt::ConfigFile => cmd = Some(Cmd::OpenConfig),
+                    Opt::ResetAll => cmd = Some(Cmd::ResetConfig),
+                    Opt::Install => cmd = Some(Cmd::Install),
+                    _ => changed |= opt_flip(&mut app.cfg, o),
+                }
             }
         }
     }
+    let q = fuzzy::Query::new(&st.query);
     let compact = app.cfg.compact_lists;
+    let row_h = if compact { 32.0 } else { 44.0 };
+    let card_fill = mix(pal.raised, pal.bg, 0.45);
+    let card_line = pal.border.gamma_multiply(0.8);
+    let mut close = false;
     let mut toggle_compact = false;
-    let (_, rect) = centered(ctx, "options", 660.0, &pal, |ui| {
-        ui.horizontal(|ui| {
-            let w = ui.available_width() - 58.0;
-            ui.scope(|ui| {
-                ui.set_width(w);
-                search_field(ui, &mut st.query, "Select an option…", &mut st.focus, &pal, Glyph::Search);
+    let mut go_section = None;
+    let mut clicked_row = None;
+    // A larger window than the other dialogs, of a fixed size so it does not jump
+    // between sections; it shrinks with the window.
+    let screen = ctx.content_rect();
+    let w = 860f32.min(screen.width() - 24.0).round();
+    let h = 600f32.min(screen.height() - 24.0).round();
+    let pos = pos2((screen.center().x - w / 2.0).round(), (screen.top() + ((screen.height() - h) / 2.0).clamp(12.0, 70.0)).round());
+    note_layer(Id::new("options"));
+    let area = egui::Area::new(Id::new("options")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+        popup_frame(&pal).show(ui, |ui| {
+            let (_, inner) = ui.allocate_space(vec2(w - 16.0, h - 16.0));
+            let top_down = egui::Layout::top_down(egui::Align::Min);
+            let mut head = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(top_down));
+            // The buttons first, from the right edge; the search takes what is left.
+            head.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                if crate::ui::glyph_button(ui, Glyph::Close, "Close (Esc)", true, &pal).clicked() {
+                    close = true;
+                }
+                let cb = compact_button(ui, compact, &pal);
+                crate::ui::note_control(ui, cb.rect, "titles only");
+                if cb.clicked() {
+                    toggle_compact = true;
+                }
+                let before = st.query.clone();
+                let fw = (ui.available_width() - 4.0).floor();
+                ui.allocate_ui_with_layout(vec2(fw, 0.0), top_down, |ui| {
+                    ui.set_width(fw);
+                    let r = search_field(ui, &mut st.query, "Search options…", &mut st.focus, &pal, Glyph::Search);
+                    st.search_id = Some(r.id);
+                    if std::mem::take(&mut st.cursor_end) {
+                        if let Some(mut s) = egui::TextEdit::load_state(ui.ctx(), r.id) {
+                            s.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(st.query.chars().count()))));
+                            s.store(ui.ctx(), r.id);
+                        }
+                    }
+                });
+                if st.query != before {
+                    st.sel = 0;
+                    st.top = true;
+                }
             });
-            if compact_button(ui, compact, &pal).clicked() {
-                toggle_compact = true;
-            }
-            if crate::ui::glyph_button(ui, Glyph::Close, "Close (Esc)", true, &pal).clicked() {
-                close = true;
-            }
-        });
-        egui::ScrollArea::vertical().max_height(480.0).auto_shrink([false, true]).show(ui, |ui| {
-            let mut last_group = "";
-            for (vi, &oi) in visible.iter().enumerate() {
-                let (o, group, title, desc) = &OPTS[oi];
-                // Without curl there is no way to ask: said in place of what it would do.
-                let desc: &str = if *o == Opt::GitPictures && app.avatars.curl() == Some(false) { "Needs curl, which isn't installed; authors keep their initials." } else { desc };
-                // A flat list: sections only add a little space.
-                if *group != last_group {
-                    if !last_group.is_empty() {
-                        ui.add_space(4.0);
-                    }
-                    last_group = group;
-                }
-                // Sub-options sit indented under their switch and fade while it is off.
-                let sub_of_sizes = matches!(o, Opt::SizesSsd | Opt::SizesHdd | Opt::SizesNet);
-                let indent = if sub_of_sizes { 22.0 } else { 0.0 };
-                let inert = sub_of_sizes && !app.cfg.folder_sizes;
-                let h = if compact { 26.0 } else { 36.0 };
-                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
-                if ui.rect_contains_pointer(r) {
-                    ui.painter().rect_filled(r, CornerRadius::same(6), pal.hover);
-                }
-                if vi == st.sel {
-                    ui.painter().rect_stroke(r.shrink(0.5), CornerRadius::same(6), Stroke::new(1.0, pal.accent.gamma_multiply(0.8)), StrokeKind::Inside);
-                    if st.scroll_to_sel {
-                        ui.scroll_to_rect(r, None);
-                        st.scroll_to_sel = false;
-                    }
-                }
-                let tc = if inert { pal.text_dim.gamma_multiply(0.6) } else { pal.text };
-                if compact {
-                    ui.painter().text(pos2(r.left() + 10.0 + indent, r.center().y), Align2::LEFT_CENTER, *title, FontId::proportional(12.5), tc);
-                } else {
-                    ui.painter().text(pos2(r.left() + 10.0 + indent, r.top() + 11.0), Align2::LEFT_CENTER, *title, FontId::proportional(12.5), tc);
-                    ui.painter().text(pos2(r.left() + 10.0 + indent, r.top() + 25.0), Align2::LEFT_CENTER, desc, FontId::proportional(10.5), pal.text_dim.gamma_multiply(if inert { 0.6 } else { 1.0 }));
-                }
-                let pad = if compact { 2.0 } else { 4.0 };
-                let ctrl_rect = Rect::from_min_max(pos2(r.right() - 230.0, r.top() + pad), pos2(r.right() - 8.0, r.bottom() - pad));
-                let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(ctrl_rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
-                // Controls at the popup's own size, as its titles are: at the window's font
-                // size they would overflow the rows.
-                {
-                    use egui::{FontId, TextStyle};
-                    let st = cui.style_mut();
-                    for (t, size) in [(TextStyle::Body, 12.5), (TextStyle::Button, 12.5), (TextStyle::Monospace, 12.0), (TextStyle::Small, 11.0)] {
-                        let font = if t == TextStyle::Monospace { FontId::monospace(size) } else { FontId::proportional(size) };
-                        st.text_styles.insert(t, font);
-                    }
-                    st.spacing.interact_size.y = ctrl_rect.height().min(22.0);
-                    st.spacing.button_padding = vec2(7.0, 1.0);
-                }
-                if inert {
-                    cui.disable();
-                }
-                if option_control(&mut cui, app, *o) {
-                    changed = true;
-                }
-                // Changed options show a reset button left of their control.
-                if !opt_default(&mut app.cfg, *o, false) {
-                    let left = cui.min_rect().left();
-                    let rr = Rect::from_center_size(pos2(left - 16.0, r.center().y), Vec2::splat(20.0));
-                    let rresp = ui.interact(rr, Id::new(("optreset", *title)), Sense::click()).on_hover_text("Reset to default");
-                    paint_glyph(ui.painter(), rr.shrink(3.0), Glyph::Refresh, if rresp.hovered() { pal.text } else { pal.text_dim });
-                    if rresp.clicked() {
-                        opt_default(&mut app.cfg, *o, true);
-                        changed = true;
-                    }
-                }
-            }
-            ui.add_space(10.0);
-            ui.horizontal_wrapped(|ui| {
-                for (label, c) in [("Open config file", Cmd::OpenConfig), ("Reset to defaults", Cmd::ResetConfig), ("Install Maia", Cmd::Install)] {
-                    // The popup's own size, like the option rows above, not the list's font.
-                    if ui.button(egui::RichText::new(label).size(12.5)).clicked() {
-                        cmd = Some(c);
+            let foot = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 22.0), inner.max);
+            hint_row(ui, foot, &[("↑↓", "options"), ("Ctrl PgUp PgDn", "sections"), ("Enter", "toggle"), ("Esc", "close")], &pal);
+            let body = Rect::from_min_max(pos2(inner.left(), head.min_rect().bottom().round() + 2.0), pos2(inner.right(), foot.top() - 6.0));
+            // A narrow window keeps only the sections' glyphs.
+            let narrow = inner.width() < 620.0;
+            let side = Rect::from_min_max(body.min, pos2(body.left() + if narrow { 36.0 } else { 172.0 }, body.bottom()));
+            let lx = side.right().round() + 6.5;
+            ui.painter().line_segment([pos2(lx, body.top()), pos2(lx, body.bottom())], Stroke::new(1.0, pal.border));
+            let main = Rect::from_min_max(pos2(lx + 7.5, body.top()), body.max);
+            let hits: Vec<Section> = if searching { rows.iter().map(|&i| OPTS[i].1).collect() } else { vec![] };
+            let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(side).layout(top_down));
+            egui::ScrollArea::vertical().id_salt("opt sections").max_height(side.height()).auto_shrink([false, false]).show(&mut sui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for sec in Section::ALL {
+                    // Chosen as a listing's selection is: its fill under the usual text.
+                    let on = !searching && sec == section;
+                    // While searching, sections without a match step back.
+                    let quiet = searching && !hits.contains(&sec);
+                    let resp = row(ui, 30.0, on, &pal, |ui, r| {
+                        let faint = pal.text_dim.gamma_multiply(0.55);
+                        let (gc, tc) = if on { (pal.text, pal.text) } else if quiet { (faint, faint) } else { (pal.text_dim, pal.text) };
+                        let gx = if narrow { r.center().x } else { r.left() + 16.0 };
+                        sec.paint(ui.painter(), Rect::from_center_size(pos2(gx.round(), r.center().y.round()), Vec2::splat(14.0)), gc);
+                        if !narrow {
+                            let g = crate::listing::elided(ui, sec.name(), FontId::proportional(13.0), r.width() - 42.0, tc);
+                            ui.painter().galley(pos2(r.left() + 34.0, (r.center().y - g.size().y / 2.0).round()), g, tc);
+                        }
+                    });
+                    crate::ui::note_control(ui, resp.rect, sec.control());
+                    let resp = if narrow { resp.on_hover_text(sec.name()) } else { resp };
+                    if resp.clicked() {
+                        go_section = Some(sec);
                     }
                 }
             });
+            let mut mui = ui.new_child(egui::UiBuilder::new().max_rect(main).layout(top_down));
+            let mut sa = egui::ScrollArea::vertical().id_salt("opt body").max_height(main.height()).auto_shrink([false, false]);
+            if std::mem::take(&mut st.top) {
+                sa = sa.vertical_scroll_offset(0.0);
+            }
+            sa.show(&mut mui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                // Room on the right for the scroll bar.
+                let cw = (ui.available_width() - 10.0).floor();
+                let mut k = 0;
+                while k < rows.len() {
+                    // Search results are one card; a section has a card per group.
+                    let group = if searching { "" } else { OPTS[rows[k]].2 };
+                    let n = if searching { rows.len() } else { rows[k..].iter().take_while(|&&i| OPTS[i].2 == group).count() };
+                    if k > 0 {
+                        ui.add_space(12.0);
+                    }
+                    if !group.is_empty() {
+                        let (hr, _) = ui.allocate_exact_size(vec2(cw, 20.0), Sense::hover());
+                        ui.painter().text(pos2(hr.left() + 4.0, hr.center().y - 1.0), Align2::LEFT_CENTER, group, FontId::proportional(11.5), pal.text_dim);
+                    }
+                    let (card, _) = ui.allocate_exact_size(vec2(cw, n as f32 * row_h), Sense::hover());
+                    ui.painter().rect(card, CornerRadius::same(8), card_fill, Stroke::new(1.0, card_line), StrokeKind::Inside);
+                    for j in 0..n {
+                        let vi = k + j;
+                        let r = Rect::from_min_size(card.min + vec2(0.0, j as f32 * row_h), vec2(cw, row_h));
+                        let look = RowLook { compact, label: searching, selected: (st.keyed || searching) && vi == st.sel, scroll: st.scroll_to_sel && vi == st.sel, first: j == 0 };
+                        let (c, clicked) = option_row(ui, app, rows[vi], r, &look, &q, &pal);
+                        changed |= c;
+                        if clicked {
+                            clicked_row = Some(vi);
+                        }
+                    }
+                    k += n;
+                }
+                if rows.is_empty() {
+                    ui.add_space(28.0);
+                    ui.vertical_centered(|ui| ui.label(egui::RichText::new("No option matches").size(12.5).color(pal.text_dim)));
+                }
+                ui.add_space(6.0);
+            });
+            st.scroll_to_sel = false;
         });
-        hints(ui, &[("Up", ""), ("Down", "to navigate"), ("Enter", "to toggle"), ("Esc", "to dismiss")], &pal);
     });
+    let rect = area.response.rect;
+    crate::ui::note_popup(rect);
+    if let Some(vi) = clicked_row {
+        st.sel = vi;
+    }
+    if let Some(sec) = go_section {
+        section = sec;
+        st.query.clear();
+        st.sel = 0;
+        st.top = true;
+    }
+    st.section = Some(section);
+    ctx.data_mut(|d| d.insert_temp(last_id, Section::ALL.iter().position(|s| *s == section).unwrap_or(0)));
     if toggle_compact {
         app.cfg.compact_lists = !app.cfg.compact_lists;
         changed = true;
@@ -2039,9 +2404,10 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
     }
     if let Some(c) = cmd {
         app.actions.push(Action::Cmd(c));
-        if c == Cmd::ResetConfig {
-            return false;
-        }
+    }
+    // Reset asks first, in a dialog of its own.
+    if app.actions[actions_before..].iter().any(|a| matches!(a, Action::Cmd(Cmd::ResetConfig))) {
+        return false;
     }
     let combo_open = egui::Popup::is_any_open(ctx);
     !(close || (!combo_open && clicked_outside(ctx, rect)))
