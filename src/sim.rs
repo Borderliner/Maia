@@ -804,7 +804,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(104) {
+    match rng.below(110) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -887,6 +887,56 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 if rng.below(2) == 0 {
                     let _ = std::fs::write(repo.join("keep.txt"), format!("edit {}\n", rng.next()));
                 }
+            }
+        }
+        104 => {
+            // Size, date and tag conditions in the filter, alone or with a name.
+            s.act("key ctrl+f");
+            s.act(&format!("text {}", rng.pick(&["size>1k", "modified<7d", "tag:red", "size<10 doc", "created:today", "date>2026-01", "size>huge", "tag:"])));
+        }
+        105 => {
+            // Tag what is under a random right-click, through the menu's search.
+            let (x, y) = p(rng);
+            s.act(&format!("click {x:.0} {y:.0} right"));
+            s.act(&format!("text tags {}", rng.pick(&["red", "blue", "new tag", "gray"])));
+            s.act("key Enter");
+            if matches!(s.app.popup, Popup::Prompt { .. }) {
+                s.act(&format!("text {}", rng.pick(&["work", "a,b", " ", "日本"])));
+                s.act("key Enter");
+            }
+        }
+        106 => {
+            // Properties: work out a checksum, or paste one to compare.
+            s.act("key alt+Enter");
+            if rng.below(2) == 0 {
+                click_control_at(s, "checksum button");
+            } else {
+                click_control_at(s, "checksum field");
+                s.act(&format!("text {}", rng.pick(&["900150983cd24fb0d6963f7d28e17f72", "zz", "SHA256 (x) = 00"])));
+            }
+            s.idle(3);
+        }
+        107 => {
+            // Wrap or unwrap the text preview.
+            if s.app.panels.get(&s.app.active).is_some_and(|p| p.inspector.is_none()) {
+                s.cmd(Cmd::ToggleInspector);
+            }
+            click_control_at(s, "Wrap lines");
+        }
+        108 => {
+            // A locked archive: into it, then a right or wrong password if asked.
+            if let Some(z) = s.tab().entries.iter().find(|e| e.name == "locked.zip").map(|e| e.path.clone()) {
+                s.cmd(Cmd::SelectNone);
+                if let Some(i) = s.tab().entries.iter().position(|e| e.path == z) {
+                    let id = s.app.active;
+                    s.app.panels.get_mut(&id).unwrap().tab_mut().select_only(i as u32);
+                }
+                s.cmd(*rng.pick(&[Cmd::ExtractHere, Cmd::Activate]));
+                s.idle(10);
+            }
+            if matches!(s.app.popup, Popup::ArchivePassword(_)) {
+                s.act(&format!("text {}", rng.pick(&["pw", "nope"])));
+                s.act("key Enter");
             }
         }
         101 => {
@@ -3108,6 +3158,8 @@ mod journeys {
             // An archive to wander into.
             if crate::archive::available() {
                 let _ = crate::archive::create(&home.join("bundle.zip"), &home.join("Documents"), &["notes.txt".into(), "Taxes".into()]);
+                // And a locked one (password "pw"), when zip is installed.
+                let _ = std::process::Command::new("zip").args(["-q", "-r", "-P", "pw"]).arg(home.join("locked.zip")).arg("Taxes").current_dir(home.join("Documents")).status();
             }
             let mut s = Sim::new(&home, vec2(1280.0, 800.0));
             // Later launches handing folders over (single instance).
