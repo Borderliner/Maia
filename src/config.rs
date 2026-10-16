@@ -38,6 +38,15 @@ pub enum ThumbMode {
     Never,
 }
 
+/// How the listing shows what git ignores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum IgnoredFiles {
+    #[default]
+    Dim,
+    Hide,
+    Show,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CharKeyAction {
     #[default]
@@ -181,6 +190,8 @@ pub struct Config {
     pub new_tab: NewTabShows,
     /// Authors' GitHub pictures in the history. Off: GitHub is never contacted.
     pub github_pictures: bool,
+    /// Files and folders git ignores: faded, left out, or shown like the rest.
+    pub git_ignored: IgnoredFiles,
     pub cross_filesystems: bool,
     // Hotkeys: command id -> bindings (overrides defaults when present).
     pub hotkeys: BTreeMap<String, Vec<String>>,
@@ -243,6 +254,7 @@ impl Default for Config {
             startup: Startup::LastSession,
             new_tab: NewTabShows::Current,
             github_pictures: false,
+            git_ignored: IgnoredFiles::Dim,
             cross_filesystems: false,
             hotkeys: BTreeMap::new(),
             custom_actions: vec![CustomAction {

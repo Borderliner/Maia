@@ -902,7 +902,7 @@ impl App {
                 want.insert(ip);
             }
         }
-        crate::gitstatus::pump(&self.panels, &changed_dirs, &mut want, ctx);
+        crate::gitstatus::pump(&self.panels, &changed_dirs, &mut want, self.cfg.git_ignored != crate::config::IgnoredFiles::Show, ctx);
         self.watch.sync(&want);
         let recents = &self.recents_set;
         let stats = &self.stats.map;
@@ -915,8 +915,16 @@ impl App {
             stats,
         };
         let mut new_renames = vec![];
+        let hide = self.cfg.git_ignored == crate::config::IgnoredFiles::Hide;
         for p in self.panels.values_mut() {
             for t in &mut p.tabs {
+                // What git ignores leaves the view when it is to be hidden, and comes back
+                // when it is not (or once the next status says otherwise).
+                let ig = hide.then(|| crate::gitstatus::repo_for(&t.path)).flatten().filter(|r| !r.ignored.is_empty() && !crate::gitstatus::inside_ignored(r, &t.path)).map(|r| r.ignored.clone());
+                if ig.as_ref().map(std::sync::Arc::as_ptr) != t.git_hide.as_ref().map(std::sync::Arc::as_ptr) {
+                    t.git_hide = ig;
+                    t.dirty = true;
+                }
                 if t.dirty || t.built_tree != t.tree_active() {
                     t.rebuild(&ctxv);
                 } else if t.stream_dirty {

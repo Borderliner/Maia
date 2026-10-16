@@ -795,6 +795,7 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
     t.nav_row_step = 1;
     t.nav_col_step = 0;
     let git = crate::gitstatus::repo_for(&t.path);
+    let dim_ignored = env.cfg.git_ignored == crate::config::IgnoredFiles::Dim && git.as_ref().is_some_and(|r| !crate::gitstatus::inside_ignored(r, &t.path));
     let mut sa = egui::ScrollArea::both().id_salt(("details", t.id)).auto_shrink([false, false]);
     if let Some(s) = t.restore_scroll.take() {
         sa = sa.vertical_scroll_offset(s).horizontal_scroll_offset(0.0);
@@ -874,8 +875,9 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                     paint_item_bg(ui.painter(), rr.shrink2(vec2(3.0, 0.5)), selected && !editing, is_cursor && !editing, resp.hovered() && !editing, drop, env, 4);
                     crate::compare::paint(ui.painter(), rr, &e.path, &pal);
                     handle_item(ui, &resp, idx, t, env);
-                    // Cut items, and tree context rows that only lead to filter matches, are faded.
-                    let faded = env.cut.contains(&e.path) || t.dimmed.contains(&idx) || unmounted(t, &e);
+                    // Cut items, tree context rows that only lead to filter matches, and
+                    // what git ignores, are faded.
+                    let faded = env.cut.contains(&e.path) || t.dimmed.contains(&idx) || unmounted(t, &e) || dim_ignored && crate::gitstatus::ignored(git.as_deref(), &e.path, &t.path);
                     let dimc = |c: Color32| if faded { c.gamma_multiply(0.45) } else { c };
                     let (sub, acc, ring) = sel_colors(&pal, selected && !editing);
                     let mut x = origin.x + pad;
@@ -1179,6 +1181,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
     let view = t.view.clone();
     let now = std::time::Instant::now();
     let git = crate::gitstatus::repo_for(&t.path);
+    let dim_ignored = env.cfg.git_ignored == crate::config::IgnoredFiles::Dim && git.as_ref().is_some_and(|r| !crate::gitstatus::inside_ignored(r, &t.path));
     let out = sa.show_viewport(&mut body_ui, |ui, vp| {
         // Vertical wheel scrolls the horizontal List view.
         if horizontal && ui.rect_contains_pointer(body) {
@@ -1227,7 +1230,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                 t.cursor_screen_pos = Some(r.center_bottom());
             }
             let drop = drop_target(ui, r, &e, env);
-            let faded = env.cut.contains(&e.path) || unmounted(t, &e);
+            let faded = env.cut.contains(&e.path) || unmounted(t, &e) || dim_ignored && crate::gitstatus::ignored(git.as_deref(), &e.path, &t.path);
             let dimc = |c: Color32| if faded { c.gamma_multiply(0.45) } else { c };
             let cat = theme::categorize(&e.ext(), e.is_dir, e.is_executable());
             match mode {

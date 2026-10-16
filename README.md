@@ -78,7 +78,7 @@ sidebar's Network section. Right-click files for Tags to give them colour labels
 named tags (kept on the files, where KDE's file managers see them too). In a git
 repository, the branch name in the status bar opens its commit history: a commit
 shows its files with their diffs, and right-clicking a file shows the commits that
-changed it.
+changed it. Files git ignores are drawn faded, or hidden (Options, Git).
 
 Ctrl+K finds files and folders anywhere in your home folder by name, as you type.
 With search by meaning turned on, it also finds documents, PDFs and pictures by what

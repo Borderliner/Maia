@@ -3152,8 +3152,9 @@ fn every_option_has_one_section() {
         Opt::CharKey => 40, Opt::MiddleClick => 41, Opt::InspectorLayout => 42, Opt::Startup => 43, Opt::NewTab => 44,
         Opt::GitPictures => 45, Opt::DefaultFm => 46, Opt::SingleInstance => 47, Opt::Meaning => 48, Opt::MeaningFolders => 49,
         Opt::MeaningPictures => 50, Opt::ConfigFile => 51, Opt::ResetAll => 52, Opt::Install => 53, Opt::LineSpacing => 54, Opt::Updates => 55,
+        Opt::IgnoredFiles => 56,
     };
-    let mut seen = vec![0; 56];
+    let mut seen = vec![0; 57];
     for o in OPTS {
         seen[index(o.0)] += 1;
     }
@@ -3201,6 +3202,7 @@ fn option_search_spans_sections() {
         ("search by meaning", Opt::Meaning),
         ("reuse the open window", Opt::SingleInstance),
         ("show github pictures", Opt::GitPictures),
+        ("ignored", Opt::IgnoredFiles),
         ("hidden", Opt::ShowHidden),
         ("folders first", Opt::FoldersFirst),
         ("install", Opt::Install),
@@ -3372,3 +3374,56 @@ fn a_broken_link_is_not_executable() {
     assert!(good.is_link && !good.is_broken_link());
     let _ = std::fs::remove_dir_all(&d);
 }
+/// A repository for changing things in: its own identity, no signing, and hooks only
+/// from its own `.git/hooks` (the machine's git config must not leak into a test).
+pub(crate) fn work_repo(d: &Path) {
+    git(d, &["init", "-q"]);
+    for (k, v) in [("user.name", "Test"), ("user.email", "test@example.invalid"), ("commit.gpgsign", "false"), ("core.hooksPath", ".git/hooks")] {
+        git(d, &["config", k, v]);
+    }
+}
+
+#[test]
+fn git_ignored_files_are_known_and_left_out_when_hidden() {
+    use crate::gitstatus::{ignored, inside_ignored, query};
+    if !crate::media::have("git") {
+        return;
+    }
+    let d = tmpdir("gitignored");
+    work_repo(&d);
+    touch(&d.join(".gitignore"), "node_modules/\n*.log\n");
+    for i in 0..300 {
+        touch(&d.join(format!("node_modules/p{i}/index.js")), "");
+    }
+    touch(&d.join("src/app.js"), "");
+    touch(&d.join("src/debug.log"), "");
+    touch(&d.join("README.md"), "");
+    git(&d, &["add", "-A"]);
+    git(&d, &["commit", "-qm", "Start"]);
+    let r = query(&d).expect("a work tree");
+    let mut set: Vec<&Path> = r.ignored.iter().map(Path::new).collect();
+    set.sort();
+    assert_eq!(set, [d.join("node_modules").as_path(), d.join("src/debug.log").as_path()], "an ignored folder is one entry");
+    assert!(ignored(Some(&r), &d.join("node_modules"), &d));
+    assert!(ignored(Some(&r), &d.join("node_modules/p3/index.js"), &d), "inside an ignored folder, seen from above");
+    assert!(ignored(Some(&r), &d.join("src/debug.log"), &d.join("src")));
+    assert!(!ignored(Some(&r), &d.join("src/app.js"), &d.join("src")));
+    assert!(!ignored(Some(&r), &d.join("node_modules/p3"), &d.join("node_modules")), "inside it, nothing is singled out");
+    assert!(inside_ignored(&r, &d.join("node_modules/p3")) && !inside_ignored(&r, &d.join("src")) && !inside_ignored(&r, &d));
+    // Hidden: left out of the view, counted as hidden, and back when shown.
+    let stats = HashMap::new();
+    let mut t = Tab::new(1, d.clone(), ViewSettings::default(), egui::Context::default());
+    pump(&mut t, &stats);
+    let names = |t: &Tab| t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&t), ["node_modules", "src", "README.md"]);
+    t.git_hide = Some(r.ignored.clone());
+    t.dirty = true;
+    pump(&mut t, &stats);
+    assert_eq!(names(&t), ["src", "README.md"]);
+    assert_eq!(t.hidden_count, 3, ".git, .gitignore and node_modules");
+    t.git_hide = None;
+    pump(&mut t, &stats);
+    assert_eq!(names(&t).len(), 3);
+    let _ = std::fs::remove_dir_all(&d);
+}
+

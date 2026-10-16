@@ -8,7 +8,7 @@ use egui::{self, Align2, Color32, CornerRadius, Event, FontId, Id, Key, Modifier
 
 use crate::app::{Action, App};
 use crate::commands::{self, ALL, Binding, Cat, Chord, Cmd};
-use crate::config::{CharKeyAction, InspectorLayout, MiddleClick, SaveScope, SavedView, RecentsStore, Startup, ThumbMode, NewTabShows};
+use crate::config::{CharKeyAction, IgnoredFiles, InspectorLayout, MiddleClick, SaveScope, SavedView, RecentsStore, Startup, ThumbMode, NewTabShows};
 use crate::ctxmenu::CtxState;
 use crate::fsx;
 use crate::fuzzy;
@@ -1715,6 +1715,7 @@ pub(crate) enum Opt {
     Startup,
     NewTab,
     GitPictures,
+    IgnoredFiles,
     DefaultFm,
     SingleInstance,
     Meaning,
@@ -1851,6 +1852,7 @@ pub(crate) const OPTS: &[(Opt, Section, &str, &str, &str)] = &[
     (Opt::Meaning, Section::Search, "", "Search by meaning", "Find files by topic, with a local Ollama model."),
     (Opt::MeaningFolders, Section::Search, "", "Folders to search", "Separated by commas; ~ is your home folder."),
     (Opt::MeaningPictures, Section::Search, "", "Include pictures", "Find pictures by what they show."),
+    (Opt::IgnoredFiles, Section::Git, "", "Ignored files", "What git ignores, in the listing."),
     (Opt::GitPictures, Section::Git, "", "Show GitHub pictures", "Asks GitHub by username or email; kept on this computer."),
     (Opt::Startup, Section::System, "Startup", "On startup", "What Maia shows when it starts."),
     (Opt::NewTab, Section::System, "Startup", "New tab shows", "The folder a new tab opens."),
@@ -2107,6 +2109,7 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
         Opt::Startup => f!(startup),
         Opt::NewTab => f!(new_tab),
         Opt::GitPictures => f!(github_pictures),
+        Opt::IgnoredFiles => f!(git_ignored),
     }
 }
 
@@ -2183,6 +2186,7 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         Opt::Meaning => toggle(ui, &mut c.semantic_search, &pal),
         Opt::MeaningPictures => toggle(ui, &mut c.semantic_pictures, &pal),
         Opt::GitPictures => toggle(ui, &mut c.github_pictures, &pal),
+        Opt::IgnoredFiles => choice(ui, "ignored", &mut c.git_ignored, &[(IgnoredFiles::Dim, "Dim"), (IgnoredFiles::Hide, "Hide"), (IgnoredFiles::Show, "Show")]),
         Opt::MeaningFolders => ui.add(egui::TextEdit::singleline(&mut c.semantic_folders).hint_text("~/Documents").desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).lost_focus(),
         Opt::DefaultFm => false,
         Opt::Updates => {

@@ -420,6 +420,8 @@ pub struct Sim {
     pub popup_checks: std::cell::Cell<usize>,
     /// Text drawn in the last frame (visible rect, string), for clicking by label.
     pub texts: Vec<(Rect, String)>,
+    /// The colour each of `texts` was drawn in (its first section's).
+    pub text_colors: Vec<egui::Color32>,
     /// What the last frame drew, kept for `shot` when MAIA_SIM_SHOTS names a folder.
     shots: Option<Box<Shots>>,
 }
@@ -526,7 +528,7 @@ impl Sim {
         let ctx = egui::Context::default();
         let app = App::new(&ctx, vec![path.to_path_buf()]);
         let shots = std::env::var_os("MAIA_SIM_SHOTS").map(|d| Box::new(Shots { dir: PathBuf::from(d), textures: Default::default(), prims: vec![] }));
-        let mut s = Sim { ctx, app, size, ppp: 1.6, time: 0.0, pointer: pos2(-10.0, -10.0), frame_ms: vec![], log: VecDeque::new(), check_overlap: false, slow: vec![], popup_checks: Default::default(), texts: vec![], shots };
+        let mut s = Sim { ctx, app, size, ppp: 1.6, time: 0.0, pointer: pos2(-10.0, -10.0), frame_ms: vec![], log: VecDeque::new(), check_overlap: false, slow: vec![], popup_checks: Default::default(), texts: vec![], text_colors: vec![], shots };
         // MAIA_SIM_LOOK=FONT,SPACING runs a session at another font size and Spacing.
         if let Some((f, sp)) = std::env::var("MAIA_SIM_LOOK").ok().and_then(|v| v.split_once(',').and_then(|(f, sp)| Some((f.trim().parse().ok()?, sp.trim().parse().ok()?)))) {
             s.app.cfg.font_size = f;
@@ -597,7 +599,8 @@ impl Sim {
         }
         self.time += 1.0 / 60.0;
         self.texts.clear();
-        fn collect(sh: &epaint::Shape, clip: Rect, out: &mut Vec<(Rect, String)>) {
+        self.text_colors.clear();
+        fn collect(sh: &epaint::Shape, clip: Rect, out: &mut Vec<(Rect, String)>, colors: &mut Vec<egui::Color32>) {
             match sh {
                 epaint::Shape::Text(t) => {
                     let s = t.galley.text().trim();
@@ -605,15 +608,16 @@ impl Sim {
                         let r = sh.visual_bounding_rect().intersect(clip);
                         if r.is_positive() {
                             out.push((r, s.to_string()));
+                            colors.push(t.override_text_color.or_else(|| t.galley.job.sections.first().map(|x| x.format.color)).unwrap_or(t.fallback_color));
                         }
                     }
                 }
-                epaint::Shape::Vec(v) => v.iter().for_each(|s| collect(s, clip, out)),
+                epaint::Shape::Vec(v) => v.iter().for_each(|s| collect(s, clip, out, colors)),
                 _ => {}
             }
         }
         for cs in &out.shapes {
-            collect(&cs.shape, cs.clip_rect, &mut self.texts);
+            collect(&cs.shape, cs.clip_rect, &mut self.texts, &mut self.text_colors);
         }
         self.check_state();
         self.check_shapes(&out.shapes);
@@ -925,7 +929,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(110) {
+    match rng.below(113) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1156,6 +1160,16 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             if s.ctx.input(|i| i.pointer.any_down()) {
                 s.act(&format!("up -40 {y:.0}"));
             }
+        }
+        112 => {
+            // Ignored files: Dim, Hide or Show, from Options.
+            s.act("key ctrl+Comma");
+            s.act("text ignored");
+            s.idle(2);
+            for _ in 0..1 + rng.below(2) {
+                click_control_at(s, "choice");
+            }
+            s.act("key Escape");
         }
         _ => {
             s.note("idle".into());
@@ -4184,6 +4198,115 @@ mod journeys {
         s.act("key Escape");
         assert!(s.app.panels[&s.app.active].inspector.is_none(), "closed with its inspector");
         report("gitcommit", &s);
+    }
+
+    /// The colour `label` was last drawn in.
+    fn color_of(s: &Sim, label: &str) -> egui::Color32 {
+        let i = s.texts.iter().rposition(|(_, t)| t == label).unwrap_or_else(|| s.fail(&format!("no {label:?} on screen")));
+        s.text_colors[i]
+    }
+
+    /// What git ignores, in the listing: faded by default in every view (a folder that
+    /// is ignored as a whole, a matching file, both seen from above), nothing singled
+    /// out inside an ignored folder, left out with Hide and shown plainly with Show,
+    /// from Options. A node_modules of 20,000 files never stalls a frame, flattened
+    /// either.
+    #[test]
+    fn git_ignored_files() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        use crate::config::IgnoredFiles;
+        let home = fixture("gitignored");
+        let repo = home.join("Code/web");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::tests::work_repo(&repo);
+        std::fs::write(repo.join(".gitignore"), "node_modules/\n*.log\n").unwrap();
+        for p in 0..200 {
+            let d = repo.join(format!("node_modules/pkg{p}/lib"));
+            std::fs::create_dir_all(&d).unwrap();
+            for f in 0..100 {
+                std::fs::write(d.join(format!("f{f}.js")), "").unwrap();
+            }
+        }
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        for f in ["src/app.js", "src/debug.log", "README.md", "server.log"] {
+            std::fs::write(repo.join(f), "x\n").unwrap();
+        }
+        crate::tests::git(&repo, &["add", "-A"]);
+        crate::tests::git(&repo, &["commit", "-qm", "Start"]);
+        let mut s = Sim::new(&repo, vec2(1280.0, 800.0));
+        assert_eq!(s.app.cfg.git_ignored, IgnoredFiles::Dim, "dimmed by default");
+        wait_until(&mut s, "the ignored files", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some_and(|r| r.ignored.len() == 3));
+        s.idle(3);
+        let plain = color_of(&s, "README.md");
+        for (view, name) in [(ViewDetails, "details"), (ViewList, "list"), (ViewLarge, "icons")] {
+            s.cmd(view);
+            s.settle();
+            for f in ["node_modules", "server.log"] {
+                let c = color_of(&s, f);
+                assert!(c.a() < plain.a() && c != plain, "{f} faded in {name}: {c:?} against {plain:?}");
+            }
+            assert_eq!(color_of(&s, "src"), plain, "src is not ignored");
+            look(&mut s, &format!("ignored dimmed, {name}"));
+            s.shot(&format!("ignored-dim-{name}"));
+        }
+        s.cmd(ViewDetails);
+        // In the tree, a file further down is faded too.
+        s.cmd(ViewTree);
+        s.settle();
+        let id = s.app.active;
+        s.app.panels.get_mut(&id).unwrap().tab_mut().toggle_expand(&repo.join("src"));
+        s.settle();
+        assert!(color_of(&s, "debug.log").a() < color_of(&s, "app.js").a(), "a file further down");
+        look(&mut s, "ignored in the tree");
+        s.shot("ignored-tree");
+        s.cmd(ViewDetails);
+        // Inside an ignored folder nothing is singled out.
+        go(&mut s, &repo.join("node_modules"));
+        wait_until(&mut s, "its status", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
+        s.idle(2);
+        assert_eq!(color_of(&s, "pkg0"), plain, "inside node_modules, rows are not faded");
+        go(&mut s, &repo);
+        // Hide, from Options: left out (and counted as hidden), then Show.
+        s.act("key ctrl+Comma");
+        s.act("text ignored");
+        s.idle(30);
+        s.shot("ignored-option");
+        click_control(&mut s, "choice");
+        assert_eq!(s.app.cfg.git_ignored, IgnoredFiles::Hide);
+        s.act("key Escape");
+        s.settle();
+        let names = |s: &Sim| s.tab().view.iter().map(|&i| s.tab().entries[i as usize].name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&s), ["src", "README.md"], "hidden");
+        look(&mut s, "ignored hidden");
+        s.shot("ignored-hidden");
+        // Flattened, 20,000 ignored files stream in and stay out, the frames short.
+        s.cmd(ToggleFlatten);
+        s.settle();
+        assert!(!s.tab().view.iter().any(|&i| s.tab().entries[i as usize].path.starts_with(repo.join("node_modules"))), "nothing from node_modules");
+        assert!(names(&s).contains(&"app.js".to_string()) && !names(&s).contains(&"debug.log".to_string()));
+        s.cmd(ToggleFlatten);
+        s.settle();
+        s.act("key ctrl+Comma");
+        s.act("text ignored");
+        s.idle(3);
+        click_control(&mut s, "choice");
+        assert_eq!(s.app.cfg.git_ignored, IgnoredFiles::Show);
+        s.act("key Escape");
+        s.settle();
+        wait_until(&mut s, "read without ignored files", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some_and(|r| r.ignored.is_empty()));
+        s.idle(2);
+        assert_eq!(names(&s).len(), 4, "every entry");
+        assert_eq!(color_of(&s, "node_modules"), plain, "shown like the rest");
+        look(&mut s, "ignored shown");
+        // Back to Dim, and the frames stayed short throughout.
+        s.app.cfg.git_ignored = IgnoredFiles::Dim;
+        wait_until(&mut s, "read with ignored files", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some_and(|r| !r.ignored.is_empty()));
+        s.idle(3);
+        assert!(color_of(&s, "node_modules").a() < plain.a());
+        assert!(s.slow.is_empty(), "slow frames: {:?}", s.slow);
+        report("gitignored", &s);
     }
 
     /// Git history: the branch chip opens the commit graph in the inspector, scrolling

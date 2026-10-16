@@ -116,6 +116,8 @@ pub struct Tab {
     /// Counts for the footer: (visible folders, total folders, visible files, total files).
     pub counts: (usize, usize, usize, usize),
     pub hidden_count: usize,
+    /// What git ignores here, left out of the view (the Ignored files option is Hide).
+    pub git_hide: Option<std::sync::Arc<HashSet<std::ffi::OsString>>>,
     /// In a trash folder: original location and deletion time per item.
     pub trash_meta: HashMap<PathBuf, (PathBuf, Option<SystemTime>)>,
     /// Tree-view context rows: ancestors kept only to show where filter matches live (drawn dimmed).
@@ -209,6 +211,7 @@ impl Tab {
             rename: None,
             counts: (0, 0, 0, 0),
             hidden_count: 0,
+            git_hide: None,
             gone: false,
             archive: None,
             dimmed: HashSet::new(),
@@ -865,8 +868,12 @@ impl Tab {
         let (show_folders, show_files) = (self.settings.show_folders, self.settings.show_files);
         let flatten = self.flatten;
         let db = crate::mime::mime_db();
+        let (git_hide, here) = (self.git_hide.clone(), self.path.clone());
         let hidden_ok = |e: &Entry| -> bool {
             if !c.show_hidden && (e.hidden || e.rel_hidden()) {
+                return false;
+            }
+            if git_hide.as_ref().is_some_and(|set| crate::gitstatus::is_ignored(set, &e.path, &here)) {
                 return false;
             }
             c.show_system || !is_system(e)
