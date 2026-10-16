@@ -1238,6 +1238,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::CloseLeftTabs | Cmd::MoveTabLeft => p.active > 0,
         Cmd::TabNewOrRecent | Cmd::ToggleFlatten | Cmd::OpenTerminal => !tab::is_computer(&t.path),
         Cmd::OpenInEditor => !tab::is_computer(&t.path) && t.archive.is_none(),
+        Cmd::CopyPathRelative => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::OpenTabInWindow => p.tabs.len() > 0,
         Cmd::GroupDeleted | Cmd::GroupOriginal => crate::trashcan::is_trash_files(&t.path),
         Cmd::GroupFree | Cmd::GroupFs | Cmd::GroupFull => tab::is_computer(&t.path),

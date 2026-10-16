@@ -3427,3 +3427,27 @@ fn editor_command_lines() {
     assert!(resolve("", None, None, &none).is_none());
     assert!(resolve("  ", None, None, &none).is_none(), "spaces are empty");
 }
+
+/// Paths written from the project's top: its repository, else its manifest, else the
+/// folder itself; never the home folder or / for a folder inside them.
+#[test]
+fn path_variants_from_the_project_root() {
+    use crate::project::{git_root, relative, root, with_line};
+    let d = tmpdir("paths");
+    std::fs::create_dir_all(d.join("repo/.git")).unwrap();
+    touch(&d.join("repo/crates/a/Cargo.toml"), "");
+    touch(&d.join("repo/crates/a/src/lib.rs"), "");
+    touch(&d.join("loose/pkg/package.json"), "{}");
+    std::fs::create_dir_all(d.join("loose/pkg/src")).unwrap();
+    std::fs::create_dir_all(d.join("nothing/here")).unwrap();
+    assert_eq!(root(&d.join("repo/crates/a/src")), d.join("repo"), "the repository beats the nearer manifest");
+    assert_eq!(root(&d.join("loose/pkg/src")), d.join("loose/pkg"));
+    assert_eq!(root(&d.join("nothing/here")), d.join("nothing/here"));
+    assert_eq!(git_root(&d.join("nothing/here")), None);
+    let f = d.join("repo/crates/a/src/lib.rs");
+    assert_eq!(relative(&f, &root(&d.join("repo/crates/a/src"))), "crates/a/src/lib.rs");
+    assert_eq!(with_line(&relative(&f, &d.join("repo")), 12), "crates/a/src/lib.rs:12");
+    assert_eq!(relative(&f, &d.join("elsewhere")), f.to_string_lossy(), "outside the root: the whole path");
+    assert_eq!(relative(&d, &d), d.to_string_lossy());
+    let _ = std::fs::remove_dir_all(&d);
+}

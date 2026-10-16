@@ -984,7 +984,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(111) {
+    match rng.below(112) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1215,6 +1215,17 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                     s.act("text editor");
                     s.act("key Enter");
                 }
+            }
+        }
+        111 => {
+            // A path from the top of the project, from the palette or the file's menu.
+            if rng.below(2) == 0 {
+                s.cmd(Cmd::CopyPathRelative);
+            } else {
+                let (x, y) = p(rng);
+                s.act(&format!("click {x:.0} {y:.0} right"));
+                s.act("text relative");
+                s.act("key Enter");
             }
         }
         97 => {

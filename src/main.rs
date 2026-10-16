@@ -32,6 +32,7 @@ mod ollama;
 mod ops;
 mod panel;
 mod popups;
+mod project;
 mod query;
 mod rename;
 mod runner;

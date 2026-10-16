@@ -1836,6 +1836,19 @@ impl App {
                 self.clipboard = Some((paths, cut));
             }
             Cmd::Paste => self.paste(),
+            Cmd::CopyPathRelative => {
+                let mut paths = self.tab().selected_paths();
+                if paths.is_empty() {
+                    paths = self.tab().target_entries().iter().map(|e| e.path.clone()).collect();
+                }
+                if paths.is_empty() {
+                    paths = vec![self.panel().path()];
+                }
+                let root = crate::project::root(paths[0].parent().filter(|_| !paths[0].is_dir()).unwrap_or(&paths[0]));
+                let s = paths.iter().map(|p| crate::project::relative(p, &root)).collect::<Vec<_>>().join("\n");
+                ctx.copy_text(s.clone());
+                self.toast(format!("Copied {}", if paths.len() == 1 { s } else { format!("{} paths", paths.len()) }));
+            }
             Cmd::CopyPath | Cmd::CopyPathRaw | Cmd::CopyName => {
                 let mut paths = self.tab().selected_paths();
                 if paths.is_empty() {
