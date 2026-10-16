@@ -23,6 +23,13 @@
 !/tools/lucide_subset.py
 !/tools/notices.py
 
+# The release workflow, by name.
+!/.github/
+/.github/**
+!/.github/workflows/
+/.github/workflows/**
+!/.github/workflows/release.yml
+
 # The README screenshot, allowed by name once it exists.
 !/docs/
 /docs/**
