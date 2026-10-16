@@ -37,7 +37,8 @@ These are optional. Maia works without them and uses them when they are there:
 | `7z` | password-protected 7z archives (and quicker password checks for zip) |
 | `gio` (GVFS) | network places (smb, sftp, ftp, WebDAV) and phones over MTP |
 | `pkexec` (polkit) | retrying a refused copy, move, delete or rename as administrator |
-| `git` | change marks on files in git repositories, and their commit history |
+| `git` | change marks on files in git repositories, their commit history and blame |
+| `sqlite3` | the tables and first rows of SQLite databases, read-only, in the inspector |
 | `ollama` | search by meaning, if you turn it on (it fetches a ~860 MB model only when you ask); `ollama-vulkan` lets it use the graphics card |
 | `ffmpeg`, `ffprobe`, `ffplay` | video and audio previews and thumbnails |
 | `pdfinfo`, `pdftoppm` (poppler) | PDF pages in the inspector |
@@ -79,6 +80,12 @@ named tags (kept on the files, where KDE's file managers see them too). In a git
 repository, the branch name in the status bar opens its commit history: a commit
 shows its files with their diffs, and right-clicking a file shows the commits that
 changed it.
+
+The inspector renders Markdown, shows JSON, TOML and YAML as trees you fold with the
+arrow keys, and CSV and TSV as tables; its toolbar switches any of them to the text as
+written. Values in `.env` files stay hidden until clicked. A log can be followed as it
+grows and filtered to the lines you want, and Blame puts who last changed each line
+of a committed file beside it; clicking a line opens that commit.
 
 Ctrl+K finds files and folders anywhere in your home folder by name, as you type.
 With search by meaning turned on, it also finds documents, PDFs and pictures by what

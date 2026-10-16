@@ -41,6 +41,8 @@ pub enum Action {
     CommitRename(u64),
     CancelRename(u64),
     Toast(String),
+    /// A preview's Rendered / Source choice, remembered for its kind.
+    SourceView(crate::inspector::RichKind, bool),
     Open(Popup),
     StartJob(OpKind),
     ExternalDrop { paths: Vec<PathBuf>, dest: PathBuf },
@@ -1126,6 +1128,13 @@ impl App {
                         consumed.push(n);
                         continue;
                     }
+                    // A data tree or a database's tables, clicked: their keys until a
+                    // click elsewhere or Escape.
+                    if let Some(i) = p.inspector.as_mut().filter(|i| i.git.is_none() && i.takes(*key)) {
+                        i.key(*key);
+                        consumed.push(n);
+                        continue;
+                    }
                 }
             }
             let chord = match ev {
@@ -1792,6 +1801,23 @@ impl App {
                     }
                 }
             }
+            Cmd::InspectorSource => {
+                if let Some(k) = self.panel().inspector.as_ref().and_then(|i| i.rich_kind()) {
+                    let v = !self.cfg.source_views.get(k);
+                    self.cfg.source_views.set(k, v);
+                    self.cfg_dirty = true;
+                }
+            }
+            Cmd::InspectorBlame => {
+                if let Some(i) = self.panel().inspector.as_mut() {
+                    i.blame_on = !i.blame_on;
+                }
+            }
+            Cmd::InspectorFollow => {
+                if let Some(i) = self.panel().inspector.as_mut() {
+                    i.toggle_follow();
+                }
+            }
             Cmd::InspectorMinimap => {
                 if let Some(i) = self.panel().inspector.as_mut() {
                     i.minimap = !i.minimap;
@@ -2378,6 +2404,10 @@ impl App {
                 }
             }
             Action::Activate { panel, idx, mods } => self.activate(panel, idx, mods),
+            Action::SourceView(k, source) => {
+                self.cfg.source_views.set(k, source);
+                self.cfg_dirty = true;
+            }
             Action::OpenFile(p) => {
                 if let Err(e) = crate::mime::open_default(&p) {
                     self.toast(format!("Couldn't open: {e}"));

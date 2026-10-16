@@ -1076,9 +1076,9 @@ impl History {
         }
     }
 
-    /// A commit by its hash (a parent link): looked for in the pages still to come, and
-    /// in the whole history when one file's does not have it.
-    fn open_hash(&mut self, hash: String) {
+    /// A commit by its hash (a parent link, a blame line): looked for in the pages still
+    /// to come, and in the whole history when one file's does not have it.
+    pub fn open_hash(&mut self, hash: String) {
         if self.list.path.is_some() && !self.list.commits.iter().any(|c| c.hash == hash) {
             self.show_all();
         }

@@ -3372,3 +3372,506 @@ fn a_broken_link_is_not_executable() {
     assert!(good.is_link && !good.is_broken_link());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ---------------------------------------------------------------- developer previews
+
+/// A README as projects write them: every kind of block, emphasis inside links inside
+/// lists, references, pictures on disk and on the web, a table with alignments.
+pub(crate) const README_MD: &str = r#"# Maia
+A file manager that *stays out of the way*, with **bold claims** and ***both***.
+
+[![Build](https://img.example.invalid/ci.svg)](https://ci.example.invalid/maia)
+
+<p align="center"><img src="shot.png" alt="The window"></p>
+
+Install it with `cargo build --release`, or read [the guide](docs/guide.md) and
+the [notes][n]. See https://example.invalid/maia. for more, or <mail@example.invalid>.
+
+Setext title
+------------
+
+> A quote that goes on
+lazily, with a list:
+> - one
+> - two
+
+3. third
+4. fourth
+   - nested **strong** item
+   - [link in a list](#setext-title)
+
+- [x] done task
+- [ ] open task
+
+| Key | Does | Count |
+|:----|:----:|------:|
+| `Space` | opens the inspector | 1 |
+| Ctrl+P \| G | goes | 22 |
+
+```rust
+fn main() {
+    println!("hi"); // greet
+}
+```
+
+    indented code
+
+~~gone~~ and snake_case_words and 2 * 3 * 4 stay plain.
+
+***
+
+![logo](logo.png "The logo")
+
+[n]: notes.md "Notes"
+"#;
+
+/// A folder with one file of every developer kind, committed by two people, a database
+/// and a growing log beside them.
+pub(crate) fn dev_fixture(d: &Path) {
+    let _ = std::fs::remove_dir_all(d);
+    std::fs::create_dir_all(d.join("docs")).unwrap();
+    touch(&d.join("README.md"), README_MD);
+    std::fs::write(d.join("logo.png"), png_bytes(64, 40, 2)).unwrap();
+    std::fs::write(d.join("shot.png"), png_bytes(320, 180, 3)).unwrap();
+    touch(&d.join("docs/guide.md"), "# Guide\n");
+    touch(&d.join("notes.md"), "# Notes\n");
+    touch(&d.join("package.json"), "{\n  // settings files have comments\n  \"name\": \"maia-web\",\n  \"version\": \"0.2.0\",\n  \"private\": true,\n  \"id\": 12345678901234567890,\n  \"scripts\": { \"build\": \"vite build\", \"test\": \"vitest\" },\n  \"files\": [\"dist\", \"README.md\"],\n  \"nothing\": null,\n  \"nested\": { \"deeper\": { \"deepest\": [1, 2.5, -3e2] } },\n}\n");
+    touch(&d.join("events.jsonl"), "{\"t\": 1, \"msg\": \"start\"}\n{\"t\": 2, \"msg\": \"tick\", \"tags\": [\"a\", \"b\"]}\n\n{\"t\": 3, \"msg\": \"stop\"}\n");
+    touch(&d.join("config.toml"), "# Settings\ntitle = \"Maia \\\"dev\\\"\"\nwhen = 1979-05-27T07:32:00Z\nhex = 0xdead_beef\nsite.name = \"x\"\n\n[server]\nport = 8080\nhosts = [\n  \"alpha\", # first\n  \"beta\",\n]\npath = '''\nC:\\raw\\path\n'''\n\n[[plugin]]\nname = \"one\"\n[[plugin]]\nname = \"two\"\ninline = { a = 1, b.c = true }\n");
+    touch(&d.join("ci.yml"), "name: CI\non:\n  push:\n    branches: [main, 'release/*']\ndefaults: &defaults\n  runs-on: ubuntu-latest\n  timeout: 30\njobs:\n  build:\n    <<: *defaults\n    steps:\n      - uses: actions/checkout@v4\n      - name: Test\n        run: |\n          cargo test\n          cargo build\n      - when: 2026-10-16\n        ok: yes\n        none: ~\n");
+    touch(&d.join("people.csv"), "id,name,email,joined,score\n1,Ada Lovelace,ada@example.invalid,1843-01-01,99.5\n2,\"Grace \"\"Amazing\"\" Hopper\",grace@example.invalid,1952-05-01,98\n3,\"Line\nbreak\",x@example.invalid,2000-01-01,7\n4,Linus,linus@example.invalid,1991-08-25,\n");
+    touch(&d.join("prices.tsv"), "item\tprice\tqty\nkeyboard\t49.90\t2\nmouse\t19.00\t5\n");
+    let wide: String = (0..30).map(|c| format!("column {c}")).collect::<Vec<_>>().join(";") + "\n" + &(0..40).map(|r| (0..30).map(|c| format!("{}", r * c)).collect::<Vec<_>>().join(";")).collect::<Vec<_>>().join("\n") + "\n";
+    touch(&d.join("wide.csv"), &wide);
+    touch(&d.join(".env"), "# Local secrets\nexport API_KEY=sk-live-0123456789\nDATABASE_URL=\"postgres://u:pw@localhost/db\"\nMULTI=\"first line\nsecond line\"\nEMPTY=\nnot a pair here\n");
+    touch(&d.join("prod.env"), "TOKEN=abc\n");
+    touch(&d.join("app.log"), &(1..=40).map(|i| format!("2026-10-16 10:00:{:02} INFO request {i} served\n", i % 60)).collect::<String>());
+    touch(&d.join("broken.json"), "{\"a\": 1,, }\n");
+    std::fs::write(d.join("data.db"), b"SQLite format 3\0fake pages follow").unwrap();
+    std::fs::write(d.join("other.db"), b"not a database at all, just text\n").unwrap();
+    touch(&d.join("src/lib.rs"), "pub fn one() -> u32 {\n    1\n}\n");
+    if !crate::media::have("git") {
+        return;
+    }
+    let commit = |who: &str, mail: &str, date: &str, msg: &str| {
+        for args in [vec!["add", "-A"], vec!["commit", "-qm", msg]] {
+            let ok = std::process::Command::new("git")
+                .args(["-c", &format!("user.name={who}"), "-c", &format!("user.email={mail}"), "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+                .args(&args)
+                .env("GIT_AUTHOR_DATE", date)
+                .env("GIT_COMMITTER_DATE", date)
+                .current_dir(d)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            assert!(ok, "git {args:?}");
+        }
+    };
+    git(d, &["init", "-q"]);
+    commit("Ada Lovelace", "ada@example.invalid", "2024-03-01T10:00:00+00:00", "Start the library");
+    touch(&d.join("src/lib.rs"), "pub fn one() -> u32 {\n    1\n}\n\npub fn two() -> u32 {\n    2\n}\n");
+    commit("Grace Hopper", "grace@example.invalid", "2026-10-10T10:00:00+00:00", "Add two");
+    // A line changed and not committed.
+    touch(&d.join("src/lib.rs"), "pub fn one() -> u32 {\n    1\n}\n\npub fn two() -> u32 {\n    2 // two\n}\n");
+}
+
+/// What sqlite3 3.50 printed for the fixture's queries (the schema listing, the first
+/// rows with a blob, a NULL, a comma and a line break), and a fake that answers with it.
+pub(crate) const SQLITE_LIST: &str = "table,\"odd \"\"name\"\"\"\ntable,people\nview,adults\n";
+pub(crate) const SQLITE_ROWS: &str = "id,name,age,photo\n1,Ada,36,\"<12 bytes>\"\n2,\"Grace, R.\",45,NULL\n3,\"Line\nbreak\",28,NULL\n";
+
+pub(crate) fn fake_sqlite(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    let script = format!(
+        "#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/sqlite3.log\"\nfor a; do last=\"$a\"; done\ncase \"$1\" in -version) echo '3.50.6 2025-09-22 fake'; exit 0;; esac\ncase \"$last\" in\n*sqlite_master*) printf '%s' '{}';;\n*count*people*) echo 3;;\n*count*adults*) echo 2;;\n*count*) echo 0;;\n*pragma_table_info*) printf 'id\\nname\\nage\\nphoto\\n';;\n*people*|*adults*) printf '%s' '{}';;\n*) exit 1;;\nesac\n",
+        SQLITE_LIST.replace('\'', "'\\''"),
+        SQLITE_ROWS.replace('\'', "'\\''")
+    );
+    let p = dir.join("sqlite3");
+    std::fs::write(&p, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn md_lines(s: &str) -> Vec<String> {
+    crate::inspector::text_lines(s.as_bytes()).unwrap()
+}
+
+#[test]
+fn markdown_reads_every_block_and_inline_form() {
+    use crate::markdown::{Align, Block, CODE, EM, STRIKE, STRONG, plain};
+    let d = tmpdir("md");
+    dev_fixture(&d);
+    let doc = crate::markdown::parse(&md_lines(README_MD), Some(&d));
+    let b = &doc.blocks;
+    let kinds: Vec<&str> = b.iter().map(|b| match b {
+        Block::Heading(..) => "h",
+        Block::Para(_) => "p",
+        Block::Code { .. } => "code",
+        Block::Quote(_) => "quote",
+        Block::List { .. } => "list",
+        Block::Table { .. } => "table",
+        Block::Rule => "rule",
+        Block::Images(_) => "img",
+    }).collect();
+    assert_eq!(kinds, ["h", "p", "img", "img", "p", "h", "quote", "list", "list", "table", "code", "code", "p", "rule", "img"], "{b:#?}");
+    // Emphasis, strong and both; a heading's text.
+    let Block::Heading(1, h) = &b[0] else { panic!() };
+    assert_eq!(plain(h), "Maia");
+    let Block::Para(p) = &b[1] else { panic!() };
+    assert!(p.iter().any(|r| r.text == "stays out of the way" && r.st == EM));
+    assert!(p.iter().any(|r| r.text == "bold claims" && r.st == STRONG));
+    assert!(p.iter().any(|r| r.text == "both" && r.st == STRONG | EM));
+    // A linked badge from the web, a picture inside HTML.
+    let Block::Images(badge) = &b[2] else { panic!() };
+    assert_eq!(badge.len(), 1);
+    assert_eq!(doc.images[badge[0].0 as usize - 1].src, "https://img.example.invalid/ci.svg");
+    assert_eq!(doc.links[badge[0].1 as usize - 1].url, "https://ci.example.invalid/maia");
+    let Block::Images(shot) = &b[3] else { panic!() };
+    let im = &doc.images[shot[0].0 as usize - 1];
+    assert_eq!((im.src.as_str(), im.alt.as_str()), ("shot.png", "The window"));
+    assert!(im.path.is_some(), "a picture beside the file is found");
+    // Code, an inline link to a file, a reference, a bare address less its full stop, an
+    // address in brackets.
+    let Block::Para(p) = &b[4] else { panic!() };
+    assert!(p.iter().any(|r| r.text == "cargo build --release" && r.st == CODE));
+    let link = |text: &str| p.iter().find(|r| r.text == text).map(|r| &doc.links[r.link as usize - 1]).unwrap_or_else(|| panic!("{text}: {p:?}"));
+    assert_eq!(link("the guide").url, "docs/guide.md");
+    assert_eq!(link("the guide").path.as_deref(), Some(d.join("docs/guide.md").as_path()));
+    assert_eq!(link("notes").url, "notes.md");
+    assert_eq!(link("https://example.invalid/maia").url, "https://example.invalid/maia");
+    assert_eq!(link("mail@example.invalid").url, "mailto:mail@example.invalid");
+    // Setext heading; a quote with a lazy line and a list in it.
+    assert!(matches!(&b[5], Block::Heading(2, h) if plain(h) == "Setext title"));
+    let Block::Quote(q) = &b[6] else { panic!() };
+    assert!(matches!(&q[0], Block::Para(p) if plain(p) == "A quote that goes on lazily, with a list:"), "{q:?}");
+    assert!(matches!(&q[1], Block::List { start: None, items } if items.len() == 2));
+    // An ordered list from 3 with a nested list of strong text and an anchor link.
+    let Block::List { start: Some(3), items } = &b[7] else { panic!("{:?}", b[7]) };
+    assert_eq!(items.len(), 2);
+    let Block::List { items: nested, .. } = &items[1].1[1] else { panic!("{:?}", items[1].1) };
+    assert!(matches!(&nested[0].1[0], Block::Para(p) if p.iter().any(|r| r.text == "strong" && r.st == STRONG)));
+    assert!(matches!(&nested[1].1[0], Block::Para(p) if p.iter().any(|r| doc.links.get(r.link as usize - 1).is_some_and(|l| l.url == "#setext-title"))));
+    // Tasks.
+    let Block::List { items, .. } = &b[8] else { panic!() };
+    assert_eq!(items.iter().map(|i| i.0).collect::<Vec<_>>(), [Some(true), Some(false)]);
+    // A table: alignments, code in a cell, an escaped bar.
+    let Block::Table { aligns, head, rows } = &b[9] else { panic!() };
+    assert_eq!(aligns, &[Align::Left, Align::Center, Align::Right]);
+    assert_eq!(head.iter().map(|c| plain(c)).collect::<Vec<_>>(), ["Key", "Does", "Count"]);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0][0][0].st, CODE);
+    assert_eq!(plain(&rows[1][0]), "Ctrl+P | G");
+    // Fenced code with its language's colours; indented code.
+    let Block::Code { lang, lines, spans } = &b[10] else { panic!() };
+    assert_eq!((lang.as_str(), lines.len()), ("rust", 3));
+    assert!(spans.as_ref().is_some_and(|s| s.iter().flatten().count() >= 3));
+    assert!(matches!(&b[11], Block::Code { lines, .. } if lines == &["indented code"]));
+    // Strikethrough; underscores inside words and lone stars stay text.
+    let Block::Para(p) = &b[12] else { panic!() };
+    assert!(p.iter().any(|r| r.text == "gone" && r.st == STRIKE));
+    assert!(plain(p).contains("snake_case_words") && plain(p).contains("2 * 3 * 4"), "{p:?}");
+    // A picture on its own; the link definition is no text.
+    let Block::Images(logo) = &b[14] else { panic!() };
+    assert!(doc.images[logo[0].0 as usize - 1].path.is_some());
+    assert!(!doc.blocks.iter().any(|b| matches!(b, Block::Para(p) if plain(p).contains("[n]"))));
+    assert_eq!(crate::markdown::slug(&[crate::markdown::Run { text: "Setext title".into(), ..Default::default() }]), "setext-title");
+}
+
+#[test]
+fn markdown_survives_broken_and_hostile_input() {
+    // Unclosed everything, deep nesting, private-use characters that look like Maia's
+    // own picture marker: text comes out, nothing panics.
+    let nasty = format!("{}\n\n{}\n\n**open *em `code [link](x \"t\n\n\u{F8FF}0 \u{F8FF}99 ![a](\n\n|a|b|\n|-|\n|c|\n\n```\nnever closed", ">".repeat(200), "- ".repeat(100));
+    let doc = crate::markdown::parse(&md_lines(&nasty), None);
+    assert!(!doc.blocks.is_empty());
+    let big = "a line of a long document\n".repeat(40_000);
+    let doc = crate::markdown::parse(&md_lines(&big), None);
+    assert!(doc.cut, "past the cap: the rest is left to Source");
+}
+
+#[test]
+fn json_tree_keeps_order_exact_numbers_and_comments() {
+    use crate::datatree::{K, V, flatten, parse_json};
+    let d = tmpdir("json");
+    dev_fixture(&d);
+    let v = parse_json(&std::fs::read_to_string(d.join("package.json")).unwrap()).unwrap();
+    let V::Map(m) = &v else { panic!() };
+    assert_eq!(m.iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["name", "version", "private", "id", "scripts", "files", "nothing", "nested"], "file order, not sorted");
+    assert_eq!(m[3].1, V::Num("12345678901234567890".into()), "a big number stays exact");
+    let mut t = flatten(&v, None);
+    let deepest = t.nodes.iter().position(|n| n.key == "deepest").unwrap();
+    assert_eq!(t.path(deepest), ".nested.deeper.deepest");
+    assert_eq!(t.path(deepest + 2), ".nested.deeper.deepest[1]");
+    assert_eq!(t.nodes[deepest].count, 3);
+    assert_eq!(t.nodes[deepest + 3].text, "-3e2");
+    assert_eq!(t.nodes[0].kind, K::Str);
+    assert_eq!(t.nodes[0].text, "\"maia-web\"");
+    // Small: open whole. Folding hides a subtree; keys walk and fold it.
+    let all = t.rows().len();
+    assert_eq!(all, t.nodes.len());
+    let scripts = t.nodes.iter().position(|n| n.key == "scripts").unwrap();
+    t.sel = scripts;
+    t.focus = true;
+    t.key(egui::Key::ArrowLeft);
+    assert_eq!(t.rows().len(), all - 2, "folded");
+    t.key(egui::Key::ArrowRight);
+    t.key(egui::Key::ArrowRight);
+    assert_eq!(t.path(t.sel), ".scripts.build", "opened, then stepped in");
+    t.key(egui::Key::ArrowLeft);
+    assert_eq!(t.sel, scripts, "left steps out to the parent");
+    assert!(parse_json("{\"a\": 1,, }").unwrap_err().contains("line 1"));
+    // JSON Lines: one record per line, blank lines skipped.
+    let v = crate::datatree::parse_jsonl(&std::fs::read_to_string(d.join("events.jsonl")).unwrap()).unwrap();
+    assert!(matches!(&v, V::List(l) if l.len() == 3));
+    // A huge array stops at the cap with what fits.
+    let huge = format!("[{}]", (0..300_000).map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+    let v = parse_json(&huge).unwrap();
+    let t = flatten(&v, None);
+    assert!(t.nodes.len() < crate::datatree::MAX_NODES && t.nodes.len() > 150_000, "{}", t.nodes.len());
+    // Escapes and a surrogate pair.
+    assert_eq!(parse_json(r#""a\"\n\u00e9\ud83d\ude00""#).unwrap(), V::Str("a\"\né😀".into()));
+}
+
+#[test]
+fn toml_tree_reads_tables_arrays_of_tables_and_every_value() {
+    use crate::datatree::{V, parse_toml};
+    let d = tmpdir("toml");
+    dev_fixture(&d);
+    let v = parse_toml(&std::fs::read_to_string(d.join("config.toml")).unwrap()).unwrap();
+    let V::Map(m) = &v else { panic!() };
+    let get = |m: &Vec<(String, V)>, k: &str| m.iter().find(|x| x.0 == k).map(|x| x.1.clone()).unwrap_or_else(|| panic!("{k}"));
+    assert_eq!(m.iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["title", "when", "hex", "site", "server", "plugin"]);
+    assert_eq!(get(m, "title"), V::Str("Maia \"dev\"".into()));
+    assert_eq!(get(m, "when"), V::Date("1979-05-27T07:32:00Z".into()));
+    assert_eq!(get(m, "hex"), V::Num("0xdead_beef".into()));
+    let V::Map(server) = get(m, "server") else { panic!() };
+    assert_eq!(get(&server, "port"), V::Num("8080".into()));
+    assert_eq!(get(&server, "hosts"), V::List(vec![V::Str("alpha".into()), V::Str("beta".into())]));
+    assert_eq!(get(&server, "path"), V::Str("C:\\raw\\path\n".into()));
+    let V::List(plugins) = get(m, "plugin") else { panic!() };
+    assert_eq!(plugins.len(), 2);
+    let V::Map(two) = &plugins[1] else { panic!() };
+    let V::Map(inline) = get(two, "inline") else { panic!() };
+    assert_eq!(get(&inline, "a"), V::Num("1".into()));
+    assert!(matches!(get(&inline, "b"), V::Map(c) if c[0] == ("c".into(), V::Bool(true))));
+    // The project's own manifest and lock file.
+    let cargo = parse_toml(include_str!("../Cargo.toml")).unwrap();
+    let V::Map(c) = &cargo else { panic!() };
+    assert_eq!(c[0].0, "package", "tables in the order written");
+    let lock = parse_toml(include_str!("../Cargo.lock")).unwrap();
+    assert!(matches!(&lock, V::Map(l) if l.iter().any(|(k, v)| k == "package" && matches!(v, V::List(p) if p.len() > 50))));
+    // Mistakes are reported with their line.
+    assert!(parse_toml("a = 1\na = 2\n").unwrap_err().contains("line 2"));
+    assert!(parse_toml("[x]\nk = \n").is_err());
+    assert!(parse_toml("s = \"open\n").is_err());
+}
+
+#[test]
+fn yaml_tree_follows_anchors_block_scalars_and_documents() {
+    use crate::datatree::{V, parse_yaml};
+    let d = tmpdir("yaml");
+    dev_fixture(&d);
+    let v = parse_yaml(&std::fs::read_to_string(d.join("ci.yml")).unwrap()).unwrap();
+    let V::Map(m) = &v else { panic!() };
+    let get = |m: &Vec<(String, V)>, k: &str| m.iter().find(|x| x.0 == k).map(|x| x.1.clone()).unwrap_or_else(|| panic!("{k} in {m:?}"));
+    assert_eq!(m.iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["name", "on", "defaults", "jobs"]);
+    let V::Map(on) = get(m, "on") else { panic!() };
+    let V::Map(push) = get(&on, "push") else { panic!() };
+    assert_eq!(get(&push, "branches"), V::List(vec![V::Str("main".into()), V::Str("release/*".into())]));
+    let V::Map(jobs) = get(m, "jobs") else { panic!() };
+    let V::Map(build) = get(&jobs, "build") else { panic!() };
+    // The alias shows what the anchor names.
+    assert!(matches!(get(&build, "<<"), V::Map(x) if x.len() == 2 && x[1] == ("timeout".into(), V::Num("30".into()))));
+    let V::List(steps) = get(&build, "steps") else { panic!() };
+    let V::Map(test) = &steps[1] else { panic!() };
+    assert_eq!(get(test, "run"), V::Str("cargo test\ncargo build\n".into()));
+    let V::Map(last) = &steps[2] else { panic!() };
+    assert_eq!(get(last, "when"), V::Date("2026-10-16".into()));
+    assert_eq!(get(last, "ok"), V::Str("yes".into()), "YAML 1.2: yes is a word");
+    assert_eq!(get(last, "none"), V::Null);
+    // Several documents are a list of them; a bad file says where.
+    assert!(matches!(parse_yaml("a: 1\n---\nb: 2\n").unwrap(), V::List(l) if l.len() == 2));
+    assert!(parse_yaml("a: [1, 2\nb: 3\n").is_err());
+}
+
+#[test]
+fn csv_delimiters_quotes_headers_and_caps() {
+    use crate::table::{Table, detect, parse};
+    let d = tmpdir("csv");
+    dev_fixture(&d);
+    let text = std::fs::read_to_string(d.join("people.csv")).unwrap();
+    assert_eq!(detect(&text, "people.csv"), b',');
+    let t = Table::from_text(&text, "people.csv", false);
+    assert_eq!(t.header.as_deref(), Some(&["id", "name", "email", "joined", "score"].map(String::from)[..]));
+    assert_eq!(t.rows.len(), 4);
+    assert_eq!(t.rows[1][1], "Grace \"Amazing\" Hopper", "doubled quotes");
+    assert_eq!(t.rows[2][1], "Line\nbreak", "a line break inside quotes");
+    assert_eq!(t.numeric, [true, false, false, false, true], "numbers right-aligned; an empty cell does not count");
+    assert_eq!(t.note, None);
+    assert_eq!(detect(&std::fs::read_to_string(d.join("wide.csv")).unwrap(), "wide.csv"), b';');
+    assert_eq!(detect("a|b|c\n1|2|3\n", "x.txt"), b'|');
+    assert_eq!(detect("a,b\n1,2\n", "prices.tsv"), b'\t', "the extension decides for .tsv");
+    let tsv = Table::from_text(&std::fs::read_to_string(d.join("prices.tsv")).unwrap(), "prices.tsv", false);
+    assert_eq!(tsv.cols, 3);
+    // A comma inside a semicolon file is not a delimiter.
+    assert_eq!(detect("name;city\n\"Doe, J\";Paris\nRoe;Rome\n", "x.csv"), b';');
+    // No header when the first row is data; CRLF; a file cut off says so.
+    let t = Table::from_text("1,2\r\n3,4\r\n", "n.csv", true);
+    assert!(t.header.is_none() && t.rows.len() == 2 && t.rows[1] == ["3", "4"]);
+    assert!(t.note.is_some());
+    let (rows, more) = parse(&"x\n".repeat(50), b',', 10);
+    assert!(rows.len() == 10 && more);
+}
+
+#[test]
+fn sqlite_lists_tables_and_rows_read_only() {
+    use crate::sqlite::{parse_list, parse_version, quote_ident, rows_query, uri};
+    let items = parse_list(crate::tests::SQLITE_LIST);
+    assert_eq!(items.iter().map(|i| (i.name.as_str(), i.view)).collect::<Vec<_>>(), [("odd \"name\"", false), ("people", false), ("adults", true)]);
+    assert_eq!(quote_ident("odd \"name\""), "\"odd \"\"name\"\"\"");
+    assert!(rows_query("people", &["photo".into()]).contains("typeof(\"photo\") = 'blob'"));
+    assert_eq!(uri(Path::new("/a b/c?d#e.db")), "file:/a%20b/c%3Fd%23e.db?mode=ro&immutable=1");
+    assert_eq!(parse_version("3.50.6 2025-09-22 18:50:24 9cc55437 (64-bit)"), Some((3, 50)));
+    assert!(crate::sqlite::is_db_header(b"SQLite format 3\0..."));
+    // Through the fake: the arguments say read-only, immutable and safe.
+    let d = tmpdir("sqlite");
+    let fake = d.join("fake");
+    fake_sqlite(&fake);
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let tools = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    let db = d.join("x.db");
+    std::fs::write(&db, b"SQLite format 3\0").unwrap();
+    let (items, safe) = crate::sqlite::tables(&tools, &db).unwrap();
+    assert!(safe && items.len() == 3);
+    let t = crate::sqlite::read_rows(&tools, &db, "people").unwrap();
+    assert_eq!(t.header.as_ref().map(|h| h.len()), Some(4));
+    assert_eq!(t.rows.len(), 3);
+    assert_eq!(t.rows[0][3], "<12 bytes>");
+    assert_eq!(t.rows[2][1], "Line\nbreak");
+    let log = std::fs::read_to_string(fake.join("sqlite3.log")).unwrap();
+    for l in log.lines().filter(|l| !l.contains("-version")) {
+        assert!(l.contains("-readonly") && l.contains("-safe") && l.contains("immutable=1") && l.contains("-init /dev/null"), "{l}");
+    }
+    // The real program, when this machine has it: a database made here.
+    if crate::media::have("sqlite3") {
+        let real = d.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let bin = std::env::split_paths(&std::env::var_os("PATH").unwrap()).map(|p| p.join("sqlite3")).find(|p| p.is_file()).unwrap();
+        std::os::unix::fs::symlink(&bin, real.join("sqlite3")).unwrap();
+        let db = d.join("real.db");
+        let ok = std::process::Command::new(&bin).arg(&db).arg("CREATE TABLE people(id INTEGER PRIMARY KEY, name TEXT, photo BLOB); INSERT INTO people VALUES(1,'Ada',x'00ff00ff'),(2,'Grace, R.',NULL); CREATE VIEW named AS SELECT name FROM people;").status().is_ok_and(|s| s.success());
+        assert!(ok);
+        let before = std::fs::read(&db).unwrap();
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(real.clone()));
+        let tools = crate::drives::Tools::current().unwrap();
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        let (items, _) = crate::sqlite::tables(&tools, &db).unwrap();
+        assert_eq!(items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["people", "named"]);
+        let t = crate::sqlite::read_rows(&tools, &db, "people").unwrap();
+        assert_eq!(t.rows, [["1", "Ada", "<4 bytes>"], ["2", "Grace, R.", "NULL"]]);
+        assert_eq!(std::fs::read(&db).unwrap(), before, "the file is unchanged");
+        let names: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("real.db")).collect();
+        assert_eq!(names, ["real.db"], "no journal or lock files beside it");
+    } else {
+        eprintln!("sqlite3 not installed: the real database was not tried");
+    }
+}
+
+#[test]
+fn env_values_are_masked_keys_are_not() {
+    use crate::envfile::{Line, MASK, classify, is_env_name, shown};
+    for (n, yes) in [(".env", true), (".env.local", true), ("prod.env", true), ("env", false), (".envrc", false), ("my.environment", false)] {
+        assert_eq!(is_env_name(n), yes, "{n}");
+    }
+    let d = tmpdir("env");
+    dev_fixture(&d);
+    let lines = md_lines(&std::fs::read_to_string(d.join(".env")).unwrap());
+    let k = classify(&lines);
+    assert_eq!(k[0], Line::Comment);
+    let masked: Vec<String> = lines.iter().zip(&k).map(|(l, &k)| shown(l, k, false)).collect();
+    assert_eq!(masked[1], format!("export API_KEY={MASK}"));
+    assert_eq!(masked[2], format!("DATABASE_URL={MASK}"));
+    assert_eq!(masked[3], format!("MULTI={MASK}"));
+    assert_eq!(masked[4], MASK, "the rest of a quoted value over lines");
+    assert_eq!(masked[5], "EMPTY=", "nothing to hide");
+    assert_eq!(masked[6], MASK, "a line that is no pair is hidden whole");
+    let all = masked.join("\n");
+    for secret in ["sk-live", "pw@localhost", "second line", "not a pair"] {
+        assert!(!all.contains(secret), "{secret} leaked");
+    }
+    assert_eq!(shown(&lines[1], k[1], true), lines[1]);
+}
+
+#[test]
+fn followed_file_appends_rotates_and_stops() {
+    use std::io::Write;
+    let d = tmpdir("follow");
+    let p = d.join("app.log");
+    std::fs::write(&p, "one\ntwo\n").unwrap();
+    let ctx = egui::Context::default();
+    let tail = crate::tail::Tail::start(p.clone(), Some(8), ctx).unwrap();
+    let wait = |what: &str| -> (bool, Vec<u8>) {
+        let t0 = Instant::now();
+        loop {
+            if let Some(got) = tail.take() {
+                return got;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(5), "{what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(b"three\nfou").unwrap();
+    let (reset, data) = wait("appended lines");
+    assert!(!reset);
+    assert_eq!(data, b"three\nfou");
+    std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(b"r\n").unwrap();
+    assert_eq!(wait("the rest of the line").1, b"r\n");
+    // Truncated: read again from the start.
+    std::fs::write(&p, "fresh\n").unwrap();
+    let (reset, data) = wait("truncation");
+    assert!(reset);
+    assert_eq!(data, b"fresh\n");
+    // Rotated: a new file under the name.
+    std::fs::rename(&p, d.join("app.log.1")).unwrap();
+    std::fs::write(&p, "rotated and longer than before\n").unwrap();
+    let (reset, data) = wait("rotation");
+    assert!(reset && data.ends_with(b"rotated and longer than before\n"));
+    // Dropped: the worker ends (its thread finishes; nothing more is read).
+    let threads = || std::fs::read_dir("/proc/self/task").map(|r| r.count()).unwrap_or(0);
+    let before = threads();
+    drop(tail);
+    let t0 = Instant::now();
+    while threads() >= before && t0.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(threads() < before, "the follow worker ended");
+}
+
+#[test]
+fn blame_reads_authors_ages_and_uncommitted_lines() {
+    if !crate::media::have("git") {
+        eprintln!("git not installed: skipped");
+        return;
+    }
+    let d = tmpdir("blame");
+    dev_fixture(&d);
+    let b = crate::blame::run(&d, &d.join("src/lib.rs")).unwrap();
+    assert_eq!(b.lines.len(), 7);
+    let who: Vec<&str> = b.lines.iter().map(|&k| b.commits[k as usize].author.as_str()).collect();
+    assert_eq!(&who[..3], ["Ada Lovelace"; 3]);
+    assert_eq!(who[4], "Grace Hopper");
+    let six = &b.commits[b.lines[5] as usize];
+    assert!(!six.committed(), "the edited line is not committed");
+    let first = &b.commits[b.lines[0] as usize];
+    assert_eq!(first.summary, "Start the library");
+    assert_eq!(first.time, 1709287200);
+    assert_eq!(crate::blame::short_ago(first.time, first.time + 3 * 86_400), "3d");
+    assert_eq!(crate::blame::short_ago(first.time, first.time + 400 * 86_400), "1y");
+    assert_eq!(crate::blame::short_author("Grace Hopper"), "Grace");
+    // Outside the repository, or not tracked: no blame.
+    touch(&d.join("new.txt"), "x\n");
+    assert!(crate::blame::run(&d, &d.join("new.txt")).is_err());
+}

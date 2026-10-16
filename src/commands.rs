@@ -220,6 +220,9 @@ commands! {
     ToggleInspector, "toggle_inspector", Inspector, "Toggle Inspector", "Preview the item under the cursor beside the list.", ["Space", "Ctrl+I"];
     InspectorLineNumbers, "inspector_line_numbers", Inspector, "Toggle Inspector Line Numbers", "Show or hide line numbers in text previews.", [];
     InspectorWrap, "inspector_word_wrap", Inspector, "Toggle Inspector Word Wrap", "Wrap long lines in text previews (remembered apart for code and for prose).", [];
+    InspectorSource, "inspector_source", Inspector, "Toggle Inspector Source", "Show Markdown, data files and tables as written, or rendered (remembered for each).", [];
+    InspectorBlame, "inspector_blame", Inspector, "Toggle Inspector Blame", "Who last changed each line of a file in a git repository, and when.", [];
+    InspectorFollow, "inspector_follow", Inspector, "Toggle Inspector Follow", "Keep the preview of a growing file, such as a log, at its end as lines arrive.", [];
     InspectorMinimap, "inspector_minimap", Inspector, "Toggle Inspector Image Minimap", "Show or hide the overview while zoomed into an image.", [];
     GitHistory, "show_git_history", Inspector, "Show Git History", "The commits of this folder's repository as a graph, in the inspector.", [];
     Properties, "properties", Inspector, "Properties", "Details, sizes and permissions of the selection.", ["Alt+Enter"];
