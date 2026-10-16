@@ -3450,7 +3450,6 @@ struct ThemesState {
 /// the chosen one restored.
 fn themes(app: &mut App, ctx: &egui::Context) -> bool {
     let pal = app.pal;
-    let fs = app.cfg.font_size;
     let sid = Id::new("themes state");
     let mut st: ThemesState = ctx.data_mut(|d| d.get_temp(sid)).unwrap_or_default();
     let pass = ctx.cumulative_pass_nr();
@@ -3634,9 +3633,9 @@ fn themes(app: &mut App, ctx: &egui::Context) -> bool {
             // (and the chosen one's check beside it).
             let min_w = (longest + 2.0 * pad + 8.0 + 24.0).max(150.0);
             let most = (((avail + gap) / (min_w + gap)).floor() as usize).clamp(2, 5);
-            // Of the column counts that fit, the one that leaves the fewest gaps in the
-            // groups' last rows (the larger on a tie).
-            let cols = (2..=most).rev().min_by_key(|&c| groups.iter().map(|g| (c - g.1.len() % c) % c).sum::<usize>()).unwrap_or(2);
+            // As many columns as fit: a gap or two in a group's last row beats cards
+            // made needlessly big.
+            let cols = most;
             let cw = ((avail - gap * (cols as f32 - 1.0)) / cols as f32).floor();
             // Shorter in a short window, so more than one row shows.
             let preview_h = (cw * 0.52).clamp(64.0, 118.0).min(((body.height() - 90.0) * 0.6).max(64.0)).round();

@@ -3490,7 +3490,8 @@ mod journeys {
         let tokyo = ThemeName::ALL.iter().filter(|t| t.label().contains("Tokyo")).count();
         assert_eq!(shown(&s), tokyo, "the Tokyo themes only");
         assert!(ctl(&s, "Tokyo Night").is_some());
-        assert!(s.texts.iter().any(|(_, t)| t == "Dark · 1"), "the group says how many it shows");
+        let tokyo_dark = ThemeName::ALL.iter().filter(|t| t.label().contains("Tokyo") && !t.is_light()).count();
+        assert!(s.texts.iter().any(|(_, t)| *t == format!("Dark · {tokyo_dark}")), "the group says how many it shows");
         s.act("key ctrl+a");
         s.act("text warm and retro");
         s.idle(3);
