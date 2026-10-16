@@ -987,14 +987,15 @@ impl App {
         let mut widths: Vec<f32> = segs.iter().map(|(l, _)| ui.painter().layout_no_wrap(l.clone(), font.clone(), pal.text).size().x + 12.0).collect();
         // Narrow panels: shrink every segment (eliding with "…") before dropping any.
         let avail = rect.width() - 8.0 - sep_w * widths.len() as f32;
-        let sum: f32 = widths.iter().sum();
-        if sum > avail && avail > 0.0 {
-            let min_w = 44.0;
-            let shrinkable: f32 = widths.iter().map(|w| (w - min_w).max(0.0)).sum();
-            let over = sum - avail;
+        let over = widths.iter().sum::<f32>() - avail;
+        if over > 0.0 && avail > 0.0 {
+            // The folders above give way; the current one keeps its whole name, and only
+            // shrinks below when it alone is wider than the bar.
+            let (min_w, n) = (44.0, widths.len());
+            let shrinkable: f32 = widths[..n - 1].iter().map(|w| (w - min_w).max(0.0)).sum();
             if shrinkable > 0.0 {
                 let k = (over / shrinkable).min(1.0);
-                for w in widths.iter_mut() {
+                for w in widths[..n - 1].iter_mut() {
                     *w -= (*w - min_w).max(0.0) * k;
                 }
             }

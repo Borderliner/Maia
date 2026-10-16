@@ -2691,6 +2691,42 @@ mod journeys {
         report("encrypted", &s);
     }
 
+    /// A deep folder in a narrow window: the path bar squeezes the folders above it
+    /// first, so the current one keeps its whole name.
+    #[test]
+    fn path_bar_keeps_the_current_folder() {
+        if !sandboxed() {
+            return;
+        }
+        // Outside home, so the whole path is spelled out (no "~").
+        let deep = root().join("srv/Projects archive 2026/client reports/quarterly summaries/final versions");
+        std::fs::create_dir_all(&deep).unwrap();
+        let mut s = Sim::new(&deep, vec2(1280.0, 800.0));
+        let mut full = 0.0;
+        for w in [1280.0, 900.0, 640.0, 520.0] {
+            s.resize(w, 600.0);
+            s.settle();
+            // Drawn texts keep their whole label, so an elided one shows only in its width:
+            // the name in the path bar (its lowest occurrence) against its width with room.
+            let bar = s.app.panels[&s.app.active].list_rect.top();
+            let r = s.texts.iter().filter(|(r, t)| t == "final versions" && r.top() < bar).map(|(r, _)| *r).max_by(|a, b| a.top().total_cmp(&b.top())).unwrap_or_else(|| s.fail("not in the path bar"));
+            if w == 1280.0 {
+                full = r.width();
+            }
+            // Shortened only when nothing else of the path is left beside it.
+            if r.width() < 0.95 * full {
+                // Path segments: text in the panel, on the bar's row, left of the name; not the
+                // "…" for the dropped ones, not the toolbar's icon glyphs.
+                let left = s.app.panels[&s.app.active].list_rect.left();
+                let icon = |t: &str| t.chars().next().is_some_and(|c| ('\u{e000}'..='\u{f8ff}').contains(&c));
+                let others: Vec<&str> = s.texts.iter().filter(|(o, t)| (o.center().y - r.center().y).abs() < 3.0 && o.left() >= left && o.right() <= r.left() && t != "…" && !icon(t)).map(|(_, t)| t.as_str()).collect();
+                assert!(others.is_empty(), "current folder cut short at {w} px wide ({:.0} of {full:.0} px) while {others:?} still show", r.width());
+            }
+            look(&mut s, &format!("path bar at {w}"));
+        }
+        report("pathbar", &s);
+    }
+
     /// A view picked in one folder (every kind) stays as the user opens other folders by
     /// double-click and Enter and goes back up.
     #[test]
