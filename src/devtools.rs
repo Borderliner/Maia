@@ -387,7 +387,7 @@ pub fn code_search_popup(app: &mut App, ctx: &egui::Context, st: &mut CodeState)
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
             let w = (ui.available_width() * 0.42).clamp(140.0, 340.0);
-            let r = ui.add(egui::TextEdit::singleline(&mut st.q.files).id(Id::new("code files")).hint_text("Files: rust, *.toml, src/**, !tests/").desired_width(w).font(FontId::proportional(12.5)).margin(egui::Margin::symmetric(6, 3)));
+            let r = ui.add(egui::TextEdit::singleline(&mut st.q.files).id(Id::new("code files")).hint_text(egui::RichText::new("Files: rust, *.toml, src/**, !tests/").color(pal.text_dim)).desired_width(w).font(FontId::proportional(12.5)).margin(egui::Margin::symmetric(6, 3)));
             crate::ui::note_control(ui, r.rect, "code files");
             if st.focus_files {
                 r.request_focus();
