@@ -2563,8 +2563,10 @@ mod journeys {
             s.idle(3);
             if let Some(w) = on_wanted {
                 assert_eq!(s.app.default_fm(), Some(!w), "switch starts the other way");
+                // A message of its own, not one still showing from before.
+                let before = s.app.toast.as_ref().map(|t| t.0.clone());
                 click_control(s, "switch");
-                wait_until(s, "default changed", 5, |s| s.app.toast.is_some());
+                wait_until(s, "default changed", 5, |s| s.app.toast.as_ref().is_some_and(|t| Some(&t.0) != before.as_ref()));
             }
         };
         switch(&mut s, Some(true));
