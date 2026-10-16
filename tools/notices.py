@@ -8,6 +8,7 @@ Run after a dependency changes:  tools/notices.py
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -46,6 +47,11 @@ def texts(package):
         path = os.path.join(folder, name)
         if os.path.isfile(path) and name.lower().startswith(NAMES) and path not in found:
             found.append(path)
+    # 0BSD asks for no notice; a crate that offers it beside another licence is
+    # taken under the other, whose text is here.
+    rest = [p for p in found if "0bsd" not in os.path.basename(p).lower()]
+    if rest:
+        found = rest
     out = []
     for path in found:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -75,7 +81,8 @@ def main():
     for p in missing:
         if apache is None or "Apache-2.0" not in (p.get("license") or ""):
             sys.exit(f"{p['name']}: no licence file and no Apache-2.0 option; add its notice by hand")
-        authors = ", ".join(p.get("authors") or []) or "its authors"
+        # Names only: the addresses in a manifest are for crates.io, not for this file.
+        authors = ", ".join(re.sub(r"\s*<[^>]*>", "", a) for a in p.get("authors") or []) or "its authors"
         groups[apache][1].append(f"{p['name']} {p['version']} (by {authors}; its package ships no licence file)")
     with open(OUT, "w", encoding="utf-8") as f:
         f.write("Maia is free software under the GNU General Public License, version 3 (LICENSE).\n")

@@ -13,6 +13,8 @@ SMITHAY-CLIPBOARD-LICENSE.txt beside this file.
     https://github.com/tkaitchuck/ahash
   arboard 3.6.1                            MIT OR Apache-2.0
     https://github.com/1Password/arboard
+  arraydeque 0.5.1                         MIT/Apache-2.0
+    https://github.com/andylokandy/arraydeque
   as-raw-xcb-connection 1.0.1              MIT OR Apache-2.0
     https://github.com/psychon/as-raw-xcb-connection
   bitflags 1.3.2                           MIT/Apache-2.0
@@ -137,10 +139,14 @@ SMITHAY-CLIPBOARD-LICENSE.txt beside this file.
     https://github.com/dtolnay/quote
   raw-window-handle 0.6.2                  MIT OR Apache-2.0 OR Zlib
     https://github.com/rust-windowing/raw-window-handle
+  regex-lite 0.1.9                         MIT OR Apache-2.0
+    https://github.com/rust-lang/regex
   rustix 0.38.44                           Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
     https://github.com/bytecodealliance/rustix
   rustix 1.1.5                             Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
     https://github.com/bytecodealliance/rustix
+  saphyr-parser 0.2.2                      MIT OR Apache-2.0
+    https://github.com/saphyr-rs/saphyr
   scoped-tls 1.0.1                         MIT/Apache-2.0
     https://github.com/alexcrichton/scoped-tls
   scopeguard 1.2.0                         MIT OR Apache-2.0
@@ -169,7 +175,11 @@ SMITHAY-CLIPBOARD-LICENSE.txt beside this file.
     https://github.com/dtolnay/syn
   thiserror 1.0.69                         MIT OR Apache-2.0
     https://github.com/dtolnay/thiserror
+  thiserror 2.0.21                         MIT OR Apache-2.0
+    https://github.com/dtolnay/thiserror
   thiserror-impl 1.0.69                    MIT OR Apache-2.0
+    https://github.com/dtolnay/thiserror
+  thiserror-impl 2.0.21                    MIT OR Apache-2.0
     https://github.com/dtolnay/thiserror
   tracing 0.1.44                           MIT
     https://github.com/tokio-rs/tracing
@@ -227,7 +237,7 @@ SMITHAY-CLIPBOARD-LICENSE.txt beside this file.
     https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg
 
 ==============================================================================
-Used by: ab_glyph 0.2.32, ab_glyph_rasterizer 0.1.10, arboard 3.6.1, fdeflate 0.3.7, image-webp 0.2.4, miniz_oxide 0.8.9, owned_ttf_parser 0.25.1, pin-project-lite 0.2.17, raw-window-handle 0.6.2, ecolor 0.33.3 (by Emil Ernerfeldt <emil.ernerfeldt@gmail.com>, Andreas Reich <reichandreas@gmx.de>; its package ships no licence file), egui 0.33.3 (by Emil Ernerfeldt <emil.ernerfeldt@gmail.com>; its package ships no licence file), egui-winit 0.33.3 (by Emil Ernerfeldt <emil.ernerfeldt@gmail.com>; its package ships no licence file), egui_glow 0.33.3 (by Emil Ernerfeldt <emil.ernerfeldt@gmail.com>; its package ships no licence file), emath 0.33.3 (by Emil Ernerfeldt <emil.ernerfeldt@gmail.com>; its package ships no licence file), epaint 0.33.3 (by Emil Ernerfeldt <emil.ernerfeldt@gmail.com>; its package ships no licence file), profiling 1.0.18 (by Philip Degarmo <aclysma@gmail.com>; its package ships no licence file), zune-core 0.4.12 (by its authors; its package ships no licence file), zune-jpeg 0.4.21 (by caleb <etemesicaleb@gmail.com>; its package ships no licence file)
+Used by: ab_glyph 0.2.32, ab_glyph_rasterizer 0.1.10, arboard 3.6.1, fdeflate 0.3.7, image-webp 0.2.4, miniz_oxide 0.8.9, owned_ttf_parser 0.25.1, pin-project-lite 0.2.17, raw-window-handle 0.6.2, ecolor 0.33.3 (by Emil Ernerfeldt, Andreas Reich; its package ships no licence file), egui 0.33.3 (by Emil Ernerfeldt; its package ships no licence file), egui-winit 0.33.3 (by Emil Ernerfeldt; its package ships no licence file), egui_glow 0.33.3 (by Emil Ernerfeldt; its package ships no licence file), emath 0.33.3 (by Emil Ernerfeldt; its package ships no licence file), epaint 0.33.3 (by Emil Ernerfeldt; its package ships no licence file), profiling 1.0.18 (by Philip Degarmo; its package ships no licence file), zune-core 0.4.12 (by its authors; its package ships no licence file), zune-jpeg 0.4.21 (by caleb; its package ships no licence file)
 
 Apache License
                            Version 2.0, January 2004
@@ -405,22 +415,6 @@ Apache License
       of your accepting any such warranty or additional liability.
 
    END OF TERMS AND CONDITIONS
-
-==============================================================================
-Used by: adler2 2.0.1
-
-Copyright (C) Jonas Schievink <jonasschievink@gmail.com>
-
-Permission to use, copy, modify, and/or distribute this software for
-any purpose with or without fee is hereby granted.
-
-THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
-ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
-AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
-OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ==============================================================================
 Used by: adler2 2.0.1
@@ -628,7 +622,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 ==============================================================================
-Used by: adler2 2.0.1, glow 0.16.0, itoa 1.0.18, linux-raw-sys 0.12.1, linux-raw-sys 0.4.15, once_cell 1.21.4, pin-project-lite 0.2.17, polling 3.11.0, proc-macro2 1.0.107, quote 1.0.47, rustix 0.38.44, rustix 1.1.5, serde 1.0.229, serde_core 1.0.229, serde_derive 1.0.229, serde_json 1.0.154, smol_str 0.2.2, syn 2.0.119, syn 3.0.9, thiserror 1.0.69, thiserror-impl 1.0.69, unicode-ident 1.0.27, x11-dl 2.21.0, zmij 1.0.23
+Used by: adler2 2.0.1, glow 0.16.0, itoa 1.0.18, linux-raw-sys 0.12.1, linux-raw-sys 0.4.15, once_cell 1.21.4, pin-project-lite 0.2.17, polling 3.11.0, proc-macro2 1.0.107, quote 1.0.47, rustix 0.38.44, rustix 1.1.5, serde 1.0.229, serde_core 1.0.229, serde_derive 1.0.229, serde_json 1.0.154, smol_str 0.2.2, syn 2.0.119, syn 3.0.9, thiserror 1.0.69, thiserror 2.0.21, thiserror-impl 1.0.69, thiserror-impl 2.0.21, unicode-ident 1.0.27, x11-dl 2.21.0, zmij 1.0.23
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -655,7 +649,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-Used by: ahash 0.8.12, bitflags 1.3.2, bitflags 2.13.2, cfg-if 1.0.5, errno 0.3.14, flate2 1.1.2, gethostname 1.1.0, gif 0.13.3, glow 0.16.0, linux-raw-sys 0.12.1, linux-raw-sys 0.4.15, lock_api 0.4.14, log 0.4.34, once_cell 1.21.4, parking_lot 0.12.5, parking_lot_core 0.9.12, percent-encoding 2.3.2, png 0.17.16, polling 3.11.0, rustix 0.38.44, rustix 1.1.5, scoped-tls 1.0.1, scopeguard 1.2.0, smallvec 1.16.3, smol_str 0.2.2, ttf-parser 0.25.1, unicode-segmentation 1.13.3, weezl 0.1.12
+Used by: ahash 0.8.12, bitflags 1.3.2, bitflags 2.13.2, cfg-if 1.0.5, errno 0.3.14, flate2 1.1.2, gethostname 1.1.0, gif 0.13.3, glow 0.16.0, linux-raw-sys 0.12.1, linux-raw-sys 0.4.15, lock_api 0.4.14, log 0.4.34, once_cell 1.21.4, parking_lot 0.12.5, parking_lot_core 0.9.12, percent-encoding 2.3.2, png 0.17.16, polling 3.11.0, regex-lite 0.1.9, rustix 0.38.44, rustix 1.1.5, scoped-tls 1.0.1, scopeguard 1.2.0, smallvec 1.16.3, smol_str 0.2.2, ttf-parser 0.25.1, unicode-segmentation 1.13.3, weezl 0.1.12
 
 Apache License
                         Version 2.0, January 2004
@@ -914,6 +908,31 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
+Used by: arraydeque 0.5.1
+
+The MIT License (MIT)
+
+Copyright (c) 2018 Andy Lok <andylokandy@hotmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+==============================================================================
 Used by: as-raw-xcb-connection 1.0.1, nohash-hasher 0.2.0, x11rb 0.13.2, x11rb-protocol 0.13.2
 
 Apache License
@@ -1148,7 +1167,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-Used by: bitflags 1.3.2, bitflags 2.13.2, log 0.4.34
+Used by: bitflags 1.3.2, bitflags 2.13.2, log 0.4.34, regex-lite 0.1.9
 
 Copyright (c) 2014 The Rust Project Developers
 
@@ -3003,7 +3022,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-Used by: itoa 1.0.18, libc 0.2.190, proc-macro2 1.0.107, quote 1.0.47, serde 1.0.229, serde_core 1.0.229, serde_derive 1.0.229, serde_json 1.0.154, syn 2.0.119, syn 3.0.9, thiserror 1.0.69, thiserror-impl 1.0.69, unicode-ident 1.0.27
+Used by: itoa 1.0.18, libc 0.2.190, proc-macro2 1.0.107, quote 1.0.47, serde 1.0.229, serde_core 1.0.229, serde_derive 1.0.229, serde_json 1.0.154, syn 2.0.119, syn 3.0.9, thiserror 1.0.69, thiserror 2.0.21, thiserror-impl 1.0.69, thiserror-impl 2.0.21, unicode-ident 1.0.27
 
 Apache License
                         Version 2.0, January 2004
@@ -4430,6 +4449,19 @@ is licensed under:
    <http://opensource.org/licenses/MIT>,
 
 at your option.
+
+==============================================================================
+Used by: saphyr-parser 0.2.2
+
+Code up to and including commit `da52a68615f2ecdd6b7e4567019f280c433c1521` is licensed by Chen Yuheng under either of:
+  - [Apache License, Version 2.0](.licenses/ChenYuheng-Apache) (http://www.apache.org/licenses/LICENSE-2.0)
+  - [MIT License](./licenses/ChenYuheng-MIT) (http://opensource.org/licenses/MIT)
+
+Code modifications starting with commit `1d71a23b151dcc12b289d0f06d8207dd9c764216` (included) are licenced by Ethiraric under either of:
+  - [Apache License, Version 2.0](.licenses/Ethiraric-Apache) (http://www.apache.org/licenses/LICENSE-2.0)
+  - [MIT License](./licenses/Ethiraric-MIT) (http://opensource.org/licenses/MIT)
+
+Redistributions of this Work must include licenses of both Chen Yuheng and Ethiraric.
 
 ==============================================================================
 Used by: scopeguard 1.2.0
