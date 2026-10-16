@@ -424,6 +424,8 @@ pub struct Sim {
     pub text_colors: Vec<egui::Color32>,
     /// What the last frame drew, kept for `shot` when MAIA_SIM_SHOTS names a folder.
     shots: Option<Box<Shots>>,
+    /// When the last frame asked to be drawn again (MAX: not until something happens).
+    pub repaint: std::time::Duration,
 }
 
 /// The textures egui has handed out and the last frame's triangles: enough to paint the
@@ -528,7 +530,7 @@ impl Sim {
         let ctx = egui::Context::default();
         let app = App::new(&ctx, vec![path.to_path_buf()]);
         let shots = std::env::var_os("MAIA_SIM_SHOTS").map(|d| Box::new(Shots { dir: PathBuf::from(d), textures: Default::default(), prims: vec![] }));
-        let mut s = Sim { ctx, app, size, ppp: 1.6, time: 0.0, pointer: pos2(-10.0, -10.0), frame_ms: vec![], log: VecDeque::new(), check_overlap: false, slow: vec![], popup_checks: Default::default(), texts: vec![], text_colors: vec![], shots };
+        let mut s = Sim { ctx, app, size, ppp: 1.6, time: 0.0, pointer: pos2(-10.0, -10.0), frame_ms: vec![], log: VecDeque::new(), check_overlap: false, slow: vec![], popup_checks: Default::default(), texts: vec![], text_colors: vec![], shots, repaint: std::time::Duration::MAX };
         // MAIA_SIM_LOOK=FONT,SPACING runs a session at another font size and Spacing.
         if let Some((f, sp)) = std::env::var("MAIA_SIM_LOOK").ok().and_then(|v| v.split_once(',').and_then(|(f, sp)| Some((f.trim().parse().ok()?, sp.trim().parse().ok()?)))) {
             s.app.cfg.font_size = f;
@@ -574,6 +576,7 @@ impl Sim {
         let app = &mut self.app;
         let out = self.ctx.run(raw, |ctx| app.frame(ctx));
         let prims = self.ctx.tessellate(out.shapes.clone(), out.pixels_per_point);
+        self.repaint = out.viewport_output.get(&egui::ViewportId::ROOT).map_or(std::time::Duration::MAX, |v| v.repaint_delay);
         let ms = t0.elapsed().as_secs_f32() * 1000.0;
         if let Some(sh) = &mut self.shots {
             sh.take(&out.textures_delta);
@@ -950,7 +953,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(113) {
+    match rng.below(116) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1183,6 +1186,77 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             }
         }
         110 => {
+            // A developer file previewed (Markdown, a tree, a table, a database, a .env, a
+            // log, code to blame), then its controls and keys.
+            let dev = root().join("home").read_dir().ok().and_then(|r| r.flatten().map(|d| d.path().join("Dev")).find(|p| p.is_dir()));
+            if let Some(dev) = dev {
+                if rng.below(3) == 0 || !s.tab().path.starts_with(&dev) {
+                    s.act("key ctrl+p");
+                    s.act(&format!("text {}/{}", dev.display(), if rng.below(4) == 0 { "src/" } else { "" }));
+                    s.act("key Enter");
+                    s.settle();
+                }
+                if s.app.panels.get(&s.app.active).is_some_and(|p| p.inspector.is_none()) {
+                    s.cmd(Cmd::ToggleInspector);
+                }
+                let n = s.tab().entries.len();
+                if n > 0 {
+                    let i = rng.below(n) as u32;
+                    let id = s.app.active;
+                    if let Some(p) = s.app.panels.get_mut(&id) {
+                        p.tab_mut().select_only(i);
+                    }
+                    s.idle(3);
+                }
+            }
+            for _ in 0..rng.below(4) {
+                if rng.below(2) == 0 {
+                    click_control_at(s, rng.pick(&["Rendered", "Source", "Tree", "Table", "Blame", "Follow", "Show values", "Hide values", "copy path", "line filter", "database table", "blame gutter", "Wrap lines", "Line numbers", "Larger text", "Smaller text"]));
+                } else {
+                    s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Enter", "Escape", "End", "Home"])));
+                }
+            }
+        }
+        111 => {
+            // A log being written to, followed or not.
+            let log = root().join("home").read_dir().ok().and_then(|r| r.flatten().map(|d| d.path().join("Dev/app.log")).find(|p| p.is_file()));
+            if let Some(log) = log {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log) {
+                    for _ in 0..1 + rng.below(50) {
+                        let _ = writeln!(f, "2026-10-16 12:00:00 INFO event {}", rng.next() % 1000);
+                    }
+                }
+                // Now and then rotated or cut short.
+                match rng.below(8) {
+                    0 => {
+                        let _ = std::fs::write(&log, "fresh start\n");
+                    }
+                    1 => {
+                        let _ = std::fs::rename(&log, log.with_extension("log.1"));
+                        let _ = std::fs::write(&log, "rotated\n");
+                    }
+                    _ => {}
+                }
+                s.idle(1 + rng.below(10));
+            }
+        }
+        112 => {
+            // Somewhere in the preview: a link, a tree row, a cell, a hidden value, a
+            // blame line, a database table; or the wheel over it.
+            if let Some(r) = s.app.panels.get(&s.app.active).and_then(|p| p.inspector_rect) {
+                let (x, y) = (rng.f(r.left() + 2.0, r.right() - 2.0), rng.f(r.top() + 32.0, r.bottom() - 2.0));
+                match rng.below(4) {
+                    0 => s.act(&format!("scroll {x:.0} {y:.0} {:.1}{}", rng.f(-8.0, 8.0), if rng.below(3) == 0 { " shift" } else { "" })),
+                    1 => s.act(&format!("dclick {x:.0} {y:.0}")),
+                    _ => {
+                        s.idle(30);
+                        s.act(&format!("click {x:.0} {y:.0}"));
+                    }
+                }
+            }
+        }
+        113 => {
             into_repo(s, rng);
             // The branch menu (the chip, or the palette's command), then a key or an item,
             // and whatever that opens: a name for a new branch, a stash's menu, a refusal.
@@ -1209,7 +1283,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.idle(3);
             }
         }
-        111 => {
+        114 => {
             into_repo(s, rng);
             // The Changes page: rows hovered and their buttons, a hunk, everything at
             // once, a summary typed and committed (by button or Ctrl+Enter), the keys.
@@ -1242,7 +1316,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 }
             }
         }
-        112 => {
+        115 => {
             // Ignored files: Dim, Hide or Show, from Options.
             s.act("key ctrl+Comma");
             s.act("text ignored");
@@ -2420,11 +2494,12 @@ mod journeys {
         // Word wrap: off for code until asked, on for prose; each kind keeps its own.
         assert_eq!(inspector(&s).wrapped_rows(), None, "code starts unwrapped");
         let para = "Wrapped prose keeps every word on screen, however narrow the preview is made. ".repeat(12);
-        std::fs::write(d.join("notes.md"), format!("# Notes\n\n{para}\n\n- short item\n{para}\n")).unwrap();
+        // Plain prose (Markdown would be rendered, wrapping as a page does).
+        std::fs::write(d.join("notes.txt"), format!("# Notes\n\n{para}\n\n- short item\n{para}\n")).unwrap();
         s.cmd(Refresh);
         // The folder is read again on a thread: the new file shows once that is done.
-        wait_until(&mut s, "notes listed", 10, |s| s.tab().entries.iter().any(|e| e.name == "notes.md"));
-        select_path(&mut s, &d.join("notes.md"));
+        wait_until(&mut s, "notes listed", 10, |s| s.tab().entries.iter().any(|e| e.name == "notes.txt"));
+        select_path(&mut s, &d.join("notes.txt"));
         wait_until(&mut s, "prose wrapped", 10, |s| inspector(s).wrapped_rows().is_some_and(|n| n > 10));
         let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
         let rows: Vec<Rect> = s.texts.iter().filter(|(_, t)| t.starts_with("Wrapped prose") || t.starts_with("prose keeps")).map(|(r, _)| *r).collect();
@@ -5489,7 +5564,9 @@ mod journeys {
         if git {
             crate::tests::commit_view_fixture(&home.join("Code/project"));
         }
+        crate::tests::dev_fixture(&home.join("Dev"));
         let drv = fake_drives("audit");
+        crate::tests::fake_sqlite(&drv);
         let net = fake_network("audit");
         for f in ["gio", "phones"] {
             let _ = std::fs::copy(net.join(f), drv.join(f));
@@ -5693,6 +5770,38 @@ mod journeys {
             pause(&mut s);
             shot(&mut s, &format!("inspect-{n}"));
         }
+        // Developer previews: rendered, as trees and tables, a database, a .env, a log
+        // and blame.
+        let dev = home.join("Dev");
+        if dev.exists() {
+            go(&mut s, &dev);
+            let hidden = s.app.cfg.show_hidden;
+            if !hidden {
+                s.cmd(ToggleHidden);
+                s.settle();
+            }
+            for (f, n) in [("README.md", "markdown"), ("package.json", "json"), ("ci.yml", "yaml"), ("people.csv", "csv"), ("data.db", "sqlite"), (".env", "env"), ("app.log", "log")] {
+                select_path(&mut s, &dev.join(f));
+                if n == "sqlite" {
+                    wait_until(&mut s, "tables", 10, |s| inspector(s).sqlite_state().is_some_and(|st| st.1 == 3));
+                }
+                pause(&mut s);
+                shot(&mut s, &format!("inspect-dev-{n}"));
+            }
+            if git {
+                go(&mut s, &dev.join("src"));
+                wait_until(&mut s, "work tree", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
+                select_path(&mut s, &dev.join("src/lib.rs"));
+                s.cmd(InspectorBlame);
+                wait_until(&mut s, "blame", 15, |s| inspector(s).blame_state().is_some());
+                pause(&mut s);
+                shot(&mut s, "inspect-dev-blame");
+                s.cmd(InspectorBlame);
+            }
+            if !hidden {
+                s.cmd(ToggleHidden);
+            }
+        }
         s.cmd(ToggleInspector);
         // The history and a commit.
         if git {
@@ -5809,6 +5918,349 @@ mod journeys {
         report(&format!("audit {tag}"), &s);
     }
 
+    fn inspector_mut(s: &mut Sim) -> &mut crate::inspector::Inspector {
+        let id = s.app.active;
+        s.app.panels.get_mut(&id).and_then(|p| p.inspector.as_mut()).expect("inspector open")
+    }
+
+    fn rich(s: &mut Sim) -> Option<(&'static str, usize)> {
+        inspector_mut(s).rich_state()
+    }
+
+    fn has_control(_s: &Sim, what: &str) -> bool {
+        crate::ui::CONTROLS.with(|c| c.borrow().iter().any(|(_, _, w)| *w == what))
+    }
+
+    fn inspector_texts(s: &Sim) -> Vec<String> {
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("inspector shown"));
+        s.texts.iter().filter(|(r, _)| ir.contains(r.center())).map(|(_, t)| t.clone()).collect()
+    }
+
+    /// Developer previews as someone reading a project would use them: a README rendered
+    /// with its pictures and links, then as source; JSON, TOML and YAML as trees folded by
+    /// keys and clicks, with a path copied; tables with quoted fields and sideways
+    /// scrolling; a database's tables and rows through sqlite3 and without it; a .env
+    /// with its values hidden; a log followed as it grows and filtered; blame, wrapped and
+    /// spaced, opening a commit. Then a narrow inspector, the bottom dock and a light
+    /// theme over all of it.
+    #[test]
+    fn inspector_developer_previews() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("devprev");
+        let d = home.join("Dev");
+        crate::tests::dev_fixture(&d);
+        let git = crate::media::have("git");
+        let fake = root().join("devprev-tools");
+        crate::tests::fake_sqlite(&fake);
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.cmd(ToggleHidden);
+        s.cmd(ToggleInspector);
+        s.settle();
+        let shot = |s: &mut Sim, name: &str| {
+            look(s, name);
+            s.idle(3);
+            s.shot(&format!("dev-{name}"));
+        };
+        // Markdown, rendered: blocks laid out, both local pictures decoded.
+        select_path(&mut s, &d.join("README.md"));
+        wait_until(&mut s, "markdown rendered", 10, |s| s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.markdown()).and_then(|m| m.counts()).is_some_and(|c| c.0 > 20 && c.1 == 2 && c.2 == 2));
+        assert!(rich(&mut s).is_some_and(|r| r.0 == "markdown"));
+        toolbar_centred(&mut s, "markdown", &[]);
+        shot(&mut s, "markdown");
+        assert!(inspector_texts(&s).iter().any(|t| t == "Maia"), "the title is drawn");
+        assert!(!inspector_texts(&s).iter().any(|t| t.contains("**") || t.starts_with("# ")), "no markup is left over");
+        // A link to a file beside it opens it.
+        let at = inspector(&s).markdown().and_then(|m| m.link_pos("docs/guide.md")).unwrap_or_else(|| s.fail("the guide's link drawn"));
+        let before = crate::mime::LAUNCHED.lock().unwrap().len();
+        s.idle(40);
+        s.act(&format!("click {:.0} {:.0}", at.x, at.y));
+        s.idle(2);
+        let launched = crate::mime::LAUNCHED.lock().unwrap();
+        assert!(launched.len() > before && launched.last().is_some_and(|l| l.contains("guide.md")), "the guide opened: {:?}", launched.last());
+        drop(launched);
+        // Source: the text, highlighted; remembered when the inspector opens again.
+        click_control(&mut s, "Source");
+        wait_until(&mut s, "markdown source", 5, |s| s.app.cfg.source_views.markdown && inspector(s).text_spans().is_some());
+        assert!(s.app.cfg_dirty, "the choice is saved");
+        shot(&mut s, "markdown-source");
+        s.cmd(ToggleInspector);
+        s.cmd(ToggleInspector);
+        s.settle();
+        assert!(s.app.cfg.source_views.markdown);
+        assert!(has_control(&s, "Rendered"), "Rendered offered beside Source");
+        click_control(&mut s, "Rendered");
+        s.idle(2);
+        assert!(!s.app.cfg.source_views.markdown);
+        // JSON: a tree in file order, folded by keys while it has the keyboard.
+        select_path(&mut s, &d.join("package.json"));
+        wait_until(&mut s, "json tree", 10, |s| inspector(s).rich_name() == Some("tree"));
+        let rows = rich(&mut s).unwrap().1;
+        assert!(rows >= 14, "{rows} rows");
+        shot(&mut s, "json-tree");
+        let cursor = cursor_pos(&s);
+        click_in_inspector(&mut s, "scripts", "click");
+        assert!(inspector_mut(&mut s).tree().is_some_and(|t| t.focus), "a click gives the tree the keyboard");
+        s.act("key ArrowLeft");
+        assert_eq!(rich(&mut s).unwrap().1, rows - 2, "folded by the left arrow");
+        assert!(inspector_texts(&s).iter().any(|t| t.contains("2 keys")), "a folded node counts what it holds");
+        s.act("key ArrowRight");
+        s.act("key ArrowRight");
+        assert_eq!(cursor_pos(&s), cursor, "arrows went to the tree, not the listing");
+        let path = inspector_mut(&mut s).tree().map(|t| t.path(t.sel)).unwrap();
+        assert_eq!(path, ".scripts.build");
+        assert!(inspector_texts(&s).iter().any(|t| t == ".scripts.build"), "the path bar shows where");
+        click_control(&mut s, "copy path");
+        assert!(toast_is(&s, "Copied .scripts.build"));
+        s.act("key Escape");
+        assert!(!inspector_mut(&mut s).tree().unwrap().focus, "Escape gives the keyboard back");
+        // Tree / Source, remembered apart from Markdown's.
+        click_control(&mut s, "Source");
+        wait_until(&mut s, "json source", 5, |s| s.app.cfg.source_views.data);
+        assert!(!s.app.cfg.source_views.markdown);
+        click_control(&mut s, "Tree");
+        s.idle(2);
+        // A broken file says why above its text; JSON Lines; TOML; YAML.
+        select_path(&mut s, &d.join("broken.json"));
+        wait_until(&mut s, "broken json", 10, |s| inspector(s).rich_name() == Some("broken"));
+        s.idle(2);
+        assert!(inspector_texts(&s).iter().any(|t| t.starts_with("Can't read this as JSON")), "{:?}", inspector_texts(&s));
+        shot(&mut s, "json-broken");
+        for (f, min) in [("events.jsonl", 9), ("config.toml", 14), ("ci.yml", 16)] {
+            select_path(&mut s, &d.join(f));
+            wait_until(&mut s, f, 10, |s| inspector(s).rich_name() == Some("tree"));
+            assert!(rich(&mut s).unwrap().1 >= min, "{f}: {:?}", rich(&mut s));
+            shot(&mut s, &format!("tree-{f}"));
+        }
+        // Tables: quoted fields, numbers to the right, a wide one scrolled sideways.
+        select_path(&mut s, &d.join("people.csv"));
+        wait_until(&mut s, "csv table", 10, |s| inspector(s).table().is_some());
+        assert_eq!(inspector(&s).table().unwrap().rows.len(), 4);
+        s.idle(2);
+        assert!(inspector_texts(&s).iter().any(|t| t == "Grace \"Amazing\" Hopper"));
+        shot(&mut s, "csv");
+        select_path(&mut s, &d.join("wide.csv"));
+        wait_until(&mut s, "wide table", 10, |s| inspector(s).table().is_some_and(|t| t.cols == 30));
+        s.idle(2);
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
+        assert!(inspector_texts(&s).iter().any(|t| t == "column 0"));
+        for _ in 0..12 {
+            s.act(&format!("scroll {:.0} {:.0} -6 shift", ir.center().x, ir.center().y));
+        }
+        s.idle(3);
+        assert!(!inspector_texts(&s).iter().any(|t| t == "column 0") && inspector_texts(&s).iter().any(|t| t == "column 29"), "scrolled to the last column: {:?}", inspector_texts(&s));
+        assert!(s.texts.iter().any(|(r, t)| t == "1" && ir.contains(r.center()) && r.right() < ir.left() + 60.0), "row numbers stay put");
+        shot(&mut s, "csv-wide");
+        click_control(&mut s, "Source");
+        wait_until(&mut s, "table source", 5, |s| s.app.cfg.source_views.table);
+        click_control(&mut s, "Table");
+        // A database: tables with counts, the first's rows (it cannot be read: said so),
+        // then a click on another.
+        select_path(&mut s, &d.join("data.db"));
+        wait_until(&mut s, "tables listed and counted", 15, |s| inspector(s).sqlite_state().is_some_and(|st| st.0 == Some(3) && st.1 == 3));
+        s.idle(5);
+        assert!(inspector_texts(&s).iter().any(|t| t == "3 rows"));
+        assert!(inspector_texts(&s).iter().any(|t| t == "Can't read this table"), "{:?}", inspector_texts(&s));
+        click_in_inspector(&mut s, "people", "click");
+        wait_until(&mut s, "people's rows", 10, |s| inspector(s).sqlite_state().is_some_and(|st| st.2 == Some((1, 3))));
+        s.idle(2);
+        assert!(inspector_texts(&s).iter().any(|t| t == "<12 bytes>"));
+        let cursor = cursor_pos(&s);
+        s.act("key ArrowDown");
+        wait_until(&mut s, "the view's rows by key", 10, |s| inspector(s).sqlite_state().is_some_and(|st| st.2 == Some((2, 3))));
+        assert_eq!(cursor_pos(&s), cursor, "the key went to the list");
+        shot(&mut s, "sqlite");
+        let log = std::fs::read_to_string(fake.join("sqlite3.log")).unwrap();
+        assert!(log.lines().filter(|l| !l.contains("-version")).all(|l| l.contains("-readonly") && l.contains("-safe") && l.contains("immutable=1")), "{log}");
+        // Not a database inside: its text. No sqlite3: a note.
+        select_path(&mut s, &d.join("other.db"));
+        wait_until(&mut s, "other.db as text", 10, |s| inspector(s).text_lines().is_some());
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(root().join("devprev-none")));
+        select_path(&mut s, &d.join("data.db"));
+        wait_until(&mut s, "no sqlite3 note", 10, |s| inspector(s).note().is_some_and(|n| n.contains("sqlite3")));
+        shot(&mut s, "sqlite-missing");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+        // .env: keys shown, values hidden until clicked or all shown.
+        select_path(&mut s, &d.join(".env"));
+        wait_until(&mut s, "env view", 10, |s| inspector(s).rich_name() == Some("env"));
+        s.idle(2);
+        let secret = |s: &Sim| s.texts.iter().any(|(_, t)| t.contains("sk-live") || t.contains("pw@localhost") || t.contains("second line"));
+        assert!(!secret(&s), "values hidden");
+        assert!(inspector_texts(&s).iter().any(|t| t.starts_with("export API_KEY=••••")));
+        shot(&mut s, "env");
+        click_in_inspector(&mut s, &format!("export API_KEY={}", crate::envfile::MASK), "click");
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t.contains("sk-live-0123456789")), "a click shows that value");
+        assert!(!s.texts.iter().any(|(_, t)| t.contains("pw@localhost")), "and only that one");
+        click_control(&mut s, "Show values");
+        s.idle(2);
+        assert!(secret(&s), "all shown");
+        click_control(&mut s, "Hide values");
+        s.idle(2);
+        click_in_inspector(&mut s, "export API_KEY=sk-live-0123456789", "click");
+        s.idle(2);
+        assert!(!secret(&s), "hidden again");
+        // A log: followed as it grows, the view at its end; filtered; let go.
+        select_path(&mut s, &d.join("app.log"));
+        wait_until(&mut s, "log", 10, |s| inspector(s).text_lines().is_some_and(|l| l.0.len() == 40));
+        s.idle(2);
+        assert!(has_control(&s, "line filter"), "a log has its filter");
+        click_control(&mut s, "Follow");
+        wait_until(&mut s, "following", 5, |s| inspector(s).text_lines().is_some_and(|l| l.1));
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(d.join("app.log")).unwrap();
+            for i in 41..=300 {
+                writeln!(f, "2026-10-16 10:01:{:02} WARN request {i} slow", i % 60).unwrap();
+            }
+        }
+        wait_until(&mut s, "appended lines", 10, |s| inspector(s).text_lines().is_some_and(|l| l.0.len() == 300));
+        s.idle(4);
+        assert!(inspector_texts(&s).iter().any(|t| t.contains("request 300 slow")), "the view stayed at the end: {:?}", inspector_texts(&s));
+        shot(&mut s, "log-follow");
+        // Nothing arriving: the worker waits without waking the window. What the last
+        // arrival set going settles first, on the wall clock (the folder's listing read
+        // again, then the memory trim two seconds after it).
+        s.app.toast = None;
+        s.act("move -50 -50");
+        s.settle();
+        for _ in 0..2 {
+            std::thread::sleep(std::time::Duration::from_millis(1400));
+            s.idle(3);
+        }
+        let wakes = (0..10).filter(|_| {
+            s.frame(vec![]);
+            s.repaint < std::time::Duration::from_secs(5)
+        }).count();
+        assert_eq!(wakes, 0, "repaints asked for while the followed log was quiet: {:?}", s.ctx.repaint_causes());
+        click_control(&mut s, "line filter");
+        s.act("text request 29");
+        s.idle(2);
+        assert_eq!(inspector(&s).filtered_lines(), Some(11), "request 29 and 290…299");
+        shot(&mut s, "log-filter");
+        s.act("key ctrl+a");
+        s.act("key Backspace");
+        s.act("key Escape");
+        click_control(&mut s, "Follow");
+        s.idle(2);
+        assert!(inspector(&s).text_lines().is_some_and(|l| !l.1), "not following: no worker");
+        // A file that grows while shown is offered Follow too.
+        select_path(&mut s, &d.join("notes.md"));
+        click_control(&mut s, "Source");
+        wait_until(&mut s, "notes", 10, |s| inspector(s).text_lines().is_some());
+        assert!(!has_control(&s, "Follow"));
+        std::fs::write(d.join("notes.md"), "# Notes\nmore\nand more\n").unwrap();
+        wait_until(&mut s, "Follow offered", 10, |s| has_control(s, "Follow"));
+        click_control(&mut s, "Rendered");
+        // Blame: who and when beside each line; the summary on hover; a click opens it.
+        if git {
+            go(&mut s, &d.join("src"));
+            wait_until(&mut s, "work tree read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
+            select_path(&mut s, &d.join("src/lib.rs"));
+            wait_until(&mut s, "code", 10, |s| inspector(s).text_lines().is_some());
+            s.idle(2);
+            click_control(&mut s, "Blame");
+            wait_until(&mut s, "blame read", 15, |s| inspector(s).blame_state() == Some((7, 3)));
+            s.idle(2);
+            let t = inspector_texts(&s);
+            assert!(t.iter().any(|x| x == "Ada") && t.iter().any(|x| x == "Grace") && t.iter().any(|x| x == "Not committed"), "{t:?}");
+            assert_eq!(t.iter().filter(|x| *x == "Ada").count(), 1, "a run of lines is named once");
+            toolbar_centred(&mut s, "blame", &[]);
+            shot(&mut s, "blame");
+            click_control(&mut s, "Wrap lines");
+            s.app.cfg.preview_line_spacing = 1.6;
+            s.idle(2);
+            shot(&mut s, "blame-wrapped");
+            s.app.cfg.preview_line_spacing = 1.25;
+            s.idle(2);
+            let g = s.text_rect("Grace");
+            s.act(&format!("move {:.0} {:.0}", g.center().x, g.center().y));
+            s.idle(50);
+            assert!(s.texts.iter().any(|(_, t)| t.starts_with("Add two")), "the commit's summary on hover");
+            s.act(&format!("click {:.0} {:.0}", g.center().x, g.center().y));
+            wait_until(&mut s, "the commit opened", 15, |s| s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_ref()).is_some_and(|h| h.probe().subject.as_deref() == Some("Add two")));
+            wait_until(&mut s, "its files", 10, |s| history(s).is_some_and(|h| h.3 == Some(1)));
+            s.idle(3);
+            shot(&mut s, "blame-commit");
+            s.act("key Escape");
+            s.act("key Escape");
+            s.idle(3);
+            assert!(inspector(&s).git.is_none(), "back from the history");
+            wait_until(&mut s, "blame again", 10, |s| inspector(s).blame_state().is_some());
+            click_control(&mut s, "Wrap lines");
+            go(&mut s, &d);
+        }
+        // Big files: everything heavy happens on workers or a few milliseconds a frame.
+        // A long README, 5 MB of JSON, a table past its row cap, a 3 MB log.
+        let big = d.join("Big");
+        std::fs::create_dir_all(&big).unwrap();
+        let para = "Some **bold** text, `code` and a [link](https://example.invalid) in a paragraph that wraps over a few lines of the preview. ";
+        std::fs::write(big.join("long.md"), (0..2500).map(|i| format!("## Part {i}\n\n{}\n\n- one\n- two\n\n", para.repeat(1 + i % 3))).collect::<String>()).unwrap();
+        std::fs::write(big.join("big.json"), format!("[{}]", (0..60_000).map(|i| format!("{{\"id\": {i}, \"name\": \"item {i}\", \"tags\": [\"a\", \"b\"], \"ok\": true}}")).collect::<Vec<_>>().join(",\n"))).unwrap();
+        std::fs::write(big.join("big.csv"), (0..120_000).map(|i| format!("{i},name {i},{}.5\n", i * 3)).collect::<String>()).unwrap();
+        std::fs::write(big.join("big.log"), (0..60_000).map(|i| format!("2026-10-16 10:00:00 INFO line {i} of a long log\n")).collect::<String>()).unwrap();
+        go(&mut s, &big);
+        let slow_before = s.slow.len();
+        for (f, what) in [("long.md", "markdown"), ("big.json", "tree"), ("big.csv", "table")] {
+            select_path(&mut s, &big.join(f));
+            wait_until(&mut s, f, 30, |s| inspector(s).rich_name() == Some(what));
+            s.idle(10);
+        }
+        assert!(inspector(&s).table().is_some_and(|t| t.rows.len() == crate::table::MAX_ROWS && t.note.is_some()), "a table past the cap says so");
+        select_path(&mut s, &big.join("long.md"));
+        wait_until(&mut s, "long markdown laid out", 30, |s| inspector(s).markdown().and_then(|m| m.counts()).is_some_and(|c| c.0 > 5000));
+        s.resize(900.0, 700.0);
+        s.idle(20);
+        s.resize(1280.0, 800.0);
+        s.idle(20);
+        select_path(&mut s, &big.join("big.log"));
+        wait_until(&mut s, "log end", 10, |s| inspector(s).text_lines().is_some_and(|l| l.0.last().is_some_and(|x| x.contains("line 59999"))));
+        s.idle(4);
+        assert!(inspector_texts(&s).iter().any(|t| t.contains("line 59999 of")), "a long log opens at its end");
+        let slow: Vec<_> = s.slow[slow_before..].to_vec();
+        assert!(slow.is_empty(), "big previews stalled: {slow:?}");
+        go(&mut s, &d);
+        // A narrow inspector, the bottom dock and a light theme: every preview again.
+        let files = ["README.md", "package.json", "config.toml", "ci.yml", "people.csv", "wide.csv", "data.db", ".env", "app.log", "broken.json"];
+        for (pass, (ratio, layout, theme)) in [(0.18, crate::config::InspectorLayout::Right, crate::theme::ThemeName::Midnight), (0.5, crate::config::InspectorLayout::Bottom, crate::theme::ThemeName::Midnight), (0.4, crate::config::InspectorLayout::Right, crate::theme::ThemeName::Paper)].into_iter().enumerate() {
+            let id = s.app.active;
+            s.app.cfg.theme = theme;
+            if let Some(p) = s.app.panels.get_mut(&id) {
+                p.inspector_ratio = ratio;
+                if let Some(i) = p.inspector.as_mut() {
+                    i.layout = Some(layout);
+                }
+            }
+            s.idle(3);
+            for f in files {
+                select_path(&mut s, &d.join(f));
+                s.idle(4);
+                s.settle();
+                if f == "data.db" {
+                    wait_until(&mut s, "tables again", 10, |s| inspector(s).sqlite_state().is_some_and(|st| st.1 == 3) && s.texts.iter().any(|(_, t)| t == "Can't read this table"));
+                }
+                look(&mut s, &format!("{f} in pass {pass}"));
+                s.idle(2);
+                if f == "README.md" || f == "data.db" || f == "people.csv" {
+                    s.shot(&format!("dev-pass{pass}-{f}"));
+                }
+            }
+        }
+        for (ms, step) in &s.slow {
+            eprintln!("  slow frame {ms:.0} ms after: {step}");
+        }
+        report("devprev", &s);
+    }
+
     #[test]
     fn monkey_sessions() {
         if !sandboxed() {
@@ -5832,7 +6284,10 @@ mod journeys {
                 }
             }
             // Fake drives, network places and pkexec to use at random (never the real tools).
+            // Every developer preview, in a work tree of its own, with a fake sqlite3.
+            crate::tests::dev_fixture(&home.join("Dev"));
             let drv = fake_drives(&format!("monkey{seed}"));
+            crate::tests::fake_sqlite(&drv);
             let net = fake_network(&format!("monkey{seed}"));
             let adm = fake_pkexec(&format!("monkey{seed}"));
             for (dir, f) in [(&net, "gio"), (&net, "phones"), (&adm, "pkexec")] {

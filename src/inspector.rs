@@ -24,8 +24,13 @@ enum Content {
     /// Folder listing or text being read in the background.
     Loading,
     /// `spans`: syntax highlighting per line (code and markup only). `prose`: plain text
-    /// or Markdown, which wrap by default where code does not.
-    Text { lines: Vec<String>, truncated: bool, spans: Option<Vec<Vec<(usize, usize, crate::syntax::Kind)>>>, prose: bool },
+    /// or Markdown, which wrap by default where code does not. `rich`: what Markdown,
+    /// data, tables and `.env` files show instead of their text. `end`: the byte after
+    /// what was read; `from_end`: the file's last megabyte was read (a long log).
+    Text { lines: Vec<String>, truncated: bool, spans: Option<Vec<Vec<(usize, usize, crate::syntax::Kind)>>>, prose: bool, rich: Option<Box<Rich>>, end: u64, from_end: bool },
+    Sqlite(Box<crate::sqlite::View>),
+    /// Why there is nothing to show, under the file's icon and name.
+    Note(String),
     Binary(Vec<u8>),
     Image,
     Folder(Vec<Entry>),
@@ -34,6 +39,45 @@ enum Content {
     Media(Box<MediaView>),
     Other,
 }
+
+/// What a rendered preview shows instead of its text (the text stays, for Source).
+pub enum Rich {
+    Markdown(Box<crate::markdown::View>),
+    Data(Box<crate::datatree::Tree>),
+    Table(Box<crate::table::TableView>),
+    /// A data file that would not parse: why, above its source.
+    Broken(String),
+    Env(Box<crate::envfile::View>),
+}
+
+/// The previews with a Rendered / Source choice, remembered apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RichKind {
+    Markdown,
+    Data,
+    Table,
+}
+
+impl Rich {
+    fn kind(&self) -> Option<RichKind> {
+        match self {
+            Rich::Markdown(_) => Some(RichKind::Markdown),
+            Rich::Data(_) | Rich::Broken(_) => Some(RichKind::Data),
+            Rich::Table(_) => Some(RichKind::Table),
+            Rich::Env(_) => None,
+        }
+    }
+}
+
+/// A blame of the file shown, read on a worker, for the file as it was when asked.
+struct BlameJob {
+    key: (PathBuf, Option<std::time::SystemTime>),
+    rx: Option<std::sync::mpsc::Receiver<Result<crate::blame::Blame, String>>>,
+    got: Option<Result<crate::blame::Blame, String>>,
+}
+
+/// Lines a followed file keeps; past it the oldest go.
+pub const FOLLOW_LINES: usize = 100_000;
 
 pub struct PdfView {
     path: PathBuf,
@@ -88,6 +132,30 @@ pub struct Inspector {
     locked: bool,
     /// The commit history, shown instead of the preview while open.
     pub git: Option<Box<crate::gitlog::History>>,
+    /// Who last changed each line (the toolbar's Blame), for files in a work tree.
+    pub blame_on: bool,
+    blame: Option<BlameJob>,
+    /// Keep a growing file's preview at its end (the toolbar's Follow).
+    pub follow: bool,
+    tail: Option<crate::tail::Tail>,
+    /// Bytes after the last line break that arrived, waiting for the rest of their line.
+    carry: Vec<u8>,
+    /// The file grew while it was shown: Follow is offered for it.
+    grew: bool,
+    /// Size of the file when its preview was read.
+    shown_size: u64,
+    /// The number of the first line kept (0: unknown, after reading a file's end).
+    first_line: usize,
+    /// Scroll to the end on the next frame.
+    to_end: bool,
+    /// A log preview's filter, and the lines it lets through: (query, lines looked at,
+    /// lines dropped from the front when made, matches).
+    pub filter: String,
+    filtered: Option<(String, u64, usize, Vec<String>)>,
+    /// Counts every new text and every cut to the front of one (the filter starts over).
+    era: u64,
+    /// A `.env` preview shows every value.
+    pub env_all: bool,
 }
 
 /// Test-only views of the preview state (simulations check behaviour, not pixels).
@@ -117,6 +185,82 @@ impl Inspector {
     pub fn wrapped_rows(&self) -> Option<usize> {
         self.wrapped.as_ref().filter(|_| self.wraps()).map(|w| w.rows.len())
     }
+    /// What a rich preview holds: (kind, rows or pieces drawn). Markdown: laid-out text
+    /// pieces; data: visible tree rows; table: rows; env: lines.
+    pub fn rich_state(&mut self) -> Option<(&'static str, usize)> {
+        let Content::Text { rich: Some(r), .. } = &mut self.content else { return None };
+        Some(match &mut **r {
+            Rich::Markdown(v) => ("markdown", v.counts().map_or(0, |c| c.0)),
+            Rich::Data(t) => ("tree", t.rows().len()),
+            Rich::Table(t) => ("table", t.t.rows.len()),
+            Rich::Broken(_) => ("broken", 0),
+            Rich::Env(v) => ("env", v.kinds.len()),
+        })
+    }
+    pub fn rich_name(&self) -> Option<&'static str> {
+        let Content::Text { rich: Some(r), .. } = &self.content else { return None };
+        Some(match &**r {
+            Rich::Markdown(_) => "markdown",
+            Rich::Data(_) => "tree",
+            Rich::Table(_) => "table",
+            Rich::Broken(_) => "broken",
+            Rich::Env(_) => "env",
+        })
+    }
+    pub fn markdown(&self) -> Option<&crate::markdown::View> {
+        match &self.content {
+            Content::Text { rich: Some(r), .. } => match &**r {
+                Rich::Markdown(v) => Some(v),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    pub fn tree(&mut self) -> Option<&mut crate::datatree::Tree> {
+        match &mut self.content {
+            Content::Text { rich: Some(r), .. } => match &mut **r {
+                Rich::Data(t) => Some(t),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    pub fn table(&self) -> Option<&crate::table::Table> {
+        match &self.content {
+            Content::Text { rich: Some(r), .. } => match &**r {
+                Rich::Table(t) => Some(&t.t),
+                _ => None,
+            },
+            Content::Sqlite(v) => v.rows.as_ref().and_then(|r| r.1.as_ref().ok()).map(|t| &t.t),
+            _ => None,
+        }
+    }
+    pub fn sqlite_state(&self) -> Option<(Option<usize>, usize, Option<(usize, usize)>)> {
+        match &self.content {
+            Content::Sqlite(v) => Some(v.state()),
+            _ => None,
+        }
+    }
+    pub fn note(&self) -> Option<&str> {
+        match &self.content {
+            Content::Note(n) => Some(n),
+            _ => None,
+        }
+    }
+    /// Lines of a text preview, and whether a worker is following the file.
+    pub fn text_lines(&self) -> Option<(&[String], bool)> {
+        match &self.content {
+            Content::Text { lines, .. } => Some((lines, self.tail.is_some())),
+            _ => None,
+        }
+    }
+    /// The blame read for the file shown: (lines, commits).
+    pub fn blame_state(&self) -> Option<(usize, usize)> {
+        self.blame.as_ref().and_then(|b| b.got.as_ref()).and_then(|g| g.as_ref().ok()).map(|b| (b.lines.len(), b.commits.len()))
+    }
+    pub fn filtered_lines(&self) -> Option<usize> {
+        self.filtered.as_ref().filter(|f| !f.0.is_empty()).map(|f| f.3.len())
+    }
     /// Highlighted spans in a text preview (None: plain text or not text).
     pub fn text_spans(&self) -> Option<usize> {
         match &self.content {
@@ -130,6 +274,44 @@ impl Inspector {
     /// Page Up / Page Down turn pages while the pointer is over this preview.
     pub fn wants_page_keys(&self) -> bool {
         matches!(self.content, Content::Pdf(_))
+    }
+
+    /// The Rendered / Source choice that applies to what is shown.
+    pub fn rich_kind(&self) -> Option<RichKind> {
+        match &self.content {
+            Content::Text { rich: Some(r), .. } => r.kind(),
+            _ => None,
+        }
+    }
+
+    /// Keys a clicked data tree or database list takes while it has the keyboard.
+    pub fn takes(&self, k: egui::Key) -> bool {
+        match &self.content {
+            Content::Text { rich: Some(r), .. } => matches!(&**r, Rich::Data(t) if t.takes(k)),
+            Content::Sqlite(v) => v.takes(k),
+            _ => false,
+        }
+    }
+
+    pub fn key(&mut self, k: egui::Key) {
+        match &mut self.content {
+            Content::Text { rich: Some(r), .. } => {
+                if let Rich::Data(t) = &mut **r {
+                    t.key(k);
+                }
+            }
+            Content::Sqlite(v) => v.key(k),
+            _ => {}
+        }
+    }
+
+    pub fn toggle_follow(&mut self) {
+        self.follow = !self.follow;
+        if !self.follow {
+            self.tail = None;
+        } else {
+            self.to_end = true;
+        }
     }
 }
 
@@ -156,11 +338,35 @@ impl Default for Inspector {
             extracting: None,
             locked: false,
             git: None,
+            blame_on: false,
+            blame: None,
+            follow: false,
+            tail: None,
+            carry: vec![],
+            grew: false,
+            shown_size: 0,
+            first_line: 1,
+            to_end: false,
+            filter: String::new(),
+            filtered: None,
+            era: 0,
+            env_all: false,
         }
     }
 }
 
 impl Inspector {
+    /// Show `c`. A big text, tree or table goes away on a thread of its own: freeing a
+    /// few hundred thousand strings is a stall a frame should not wait for.
+    fn set(&mut self, c: Content) {
+        let old = std::mem::replace(&mut self.content, c);
+        if let Content::Text { lines, rich, spans, .. } = old {
+            if lines.len() > 2000 || rich.is_some() {
+                std::thread::spawn(move || drop((lines, rich, spans)));
+            }
+        }
+    }
+
     /// Whether the text shown now wraps.
     pub fn wraps(&self) -> bool {
         match &self.content {
@@ -183,7 +389,7 @@ impl Inspector {
 
     /// Show the history; the preview (a playing video included) stops until it closes.
     pub fn show_history(&mut self, h: crate::gitlog::History) {
-        self.content = Content::None;
+        self.set(Content::None);
         self.current = None;
         self.pending = None;
         self.git = Some(Box::new(h));
@@ -199,7 +405,7 @@ impl Inspector {
         self.fit = Fit::Fit;
         self.pending = None;
         if computer {
-            self.content = Content::Volume;
+            self.set(Content::Volume);
             return;
         }
         self.extracting = None;
@@ -207,7 +413,7 @@ impl Inspector {
         // Inside an archive: a file is extracted to the cache and previewed from there.
         if !e.path.exists() {
             if let Some((archive, inner)) = crate::archive::split(&e.path) {
-                self.content = Content::Other;
+                self.set(Content::Other);
                 if !e.is_dir && e.size <= 64 << 20 {
                     let (tx, rx) = std::sync::mpsc::channel();
                     let ctx = ctx.clone();
@@ -222,7 +428,7 @@ impl Inspector {
         }
         if e.special {
             // Sockets, FIFOs and device nodes: opening or reading them can block forever.
-            self.content = Content::Other;
+            self.set(Content::Other);
             return;
         }
         if !e.is_dir {
@@ -234,7 +440,7 @@ impl Inspector {
                     let _ = tx.send(crate::media::pdf_pages(&path));
                     ctx.request_repaint();
                 });
-                self.content = Content::Pdf(Box::new(PdfView { path: e.path.clone(), pages: None, pages_rx: Some(rx), page: 1, tex: None, shown: None, job: None, failed: false }));
+                self.set(Content::Pdf(Box::new(PdfView { path: e.path.clone(), pages: None, pages_rx: Some(rx), page: 1, tex: None, shown: None, job: None, failed: false })));
                 return;
             }
             if (mime.starts_with("video/") || mime.starts_with("audio/")) && crate::media::have("ffprobe") {
@@ -244,12 +450,33 @@ impl Inspector {
                     let _ = tx.send(crate::media::probe(&path));
                     ctx.request_repaint();
                 });
-                self.content = Content::Media(Box::new(MediaView { path: e.path.clone(), probe: None, probe_rx: Some(rx), player: None, tex: None, seq: 0, failed: false }));
+                self.set(Content::Media(Box::new(MediaView { path: e.path.clone(), probe: None, probe_rx: Some(rx), player: None, tex: None, seq: 0, failed: false })));
                 return;
             }
         }
         if !e.is_dir && thumbs::can_thumb(e) {
-            self.content = Content::Image;
+            self.set(Content::Image);
+            return;
+        }
+        // A database: its tables through sqlite3, once its first bytes say it is one.
+        if !e.is_dir && crate::sqlite::is_db_name(&e.name) {
+            let tools = crate::drives::Tools::current().filter(|t| t.has("sqlite3"));
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (path, ctx) = (e.path.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut head = [0u8; 16];
+                let db = std::fs::metadata(&path).is_ok_and(|m| m.is_file()) && std::fs::File::open(&path).and_then(|mut f| f.read_exact(&mut head)).is_ok() && crate::sqlite::is_db_header(&head);
+                let c = match (db, tools) {
+                    (true, Some(t)) => Content::Sqlite(Box::new(crate::sqlite::View::start(path, t, &ctx))),
+                    (true, None) => Content::Note("Install sqlite3 to see the tables in this database".into()),
+                    _ => read_text(&path),
+                };
+                let _ = tx.send(c);
+                ctx.request_repaint();
+            });
+            self.pending = Some(rx);
+            self.set(Content::Loading);
             return;
         }
         if e.is_dir {
@@ -278,18 +505,25 @@ impl Inspector {
             ctx.request_repaint();
         });
         self.pending = Some(rx);
-        self.content = Content::Loading;
+        self.set(Content::Loading);
     }
 
     fn poll(&mut self) {
         if let Some(rx) = &self.pending {
             match rx.try_recv() {
                 Ok(c) => {
-                    self.content = c;
+                    if let Content::Text { from_end, .. } = &c {
+                        self.first_line = if *from_end { 0 } else { 1 };
+                        // A log opens at its end, where the newest lines are.
+                        self.to_end = self.current.as_ref().is_some_and(|(p, _)| p.file_name().is_some_and(|n| is_log(&n.to_string_lossy())));
+                    }
+                    self.era += 1;
+                    self.tail = None;
+                    self.set(c);
                     self.pending = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.content = Content::Other;
+                    self.set(Content::Other);
                     self.pending = None;
                 }
                 Err(_) => {}
@@ -298,32 +532,110 @@ impl Inspector {
     }
 }
 
+/// What a text file's preview becomes, by its name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    Plain,
+    Markdown,
+    Json,
+    JsonLines,
+    Toml,
+    Yaml,
+    Table,
+    Env,
+    Log,
+}
+
+fn kind_for(name: &str) -> Kind {
+    let l = name.to_ascii_lowercase();
+    let ext = l.rsplit_once('.').map_or("", |x| x.1);
+    if crate::envfile::is_env_name(&l) {
+        return Kind::Env;
+    }
+    match ext {
+        "md" | "markdown" | "mdown" | "mkd" | "mkdn" => Kind::Markdown,
+        "json" | "jsonc" | "geojson" | "webmanifest" => Kind::Json,
+        "jsonl" | "ndjson" => Kind::JsonLines,
+        "toml" => Kind::Toml,
+        "yaml" | "yml" => Kind::Yaml,
+        "csv" | "tsv" | "tab" | "psv" => Kind::Table,
+        "log" => Kind::Log,
+        _ if l == "cargo.lock" || l == "pipfile" || l == "poetry.lock" => Kind::Toml,
+        _ => Kind::Plain,
+    }
+}
+
+/// Text read for its preview: the first megabyte as lines (a log: its last), and up to
+/// 8 MB for a data file or table, which is parsed whole, on this worker.
 fn read_text(p: &Path) -> Content {
-    use std::io::Read;
+    use std::io::{Read, Seek};
     // Only regular files (a symlink may point at a FIFO or device).
-    if !std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) {
+    let Ok(meta) = std::fs::metadata(p) else { return Content::Other };
+    if !meta.is_file() {
         return Content::Other;
     }
     let Ok(mut f) = std::fs::File::open(p) else { return Content::Other };
-    let mut buf = Vec::with_capacity(64 << 10);
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let kind = kind_for(&name);
     let limit = 1 << 20;
-    if f.by_ref().take(limit as u64 + 1).read_to_end(&mut buf).is_err() {
+    let parse_limit: usize = if matches!(kind, Kind::Json | Kind::JsonLines | Kind::Toml | Kind::Yaml | Kind::Table) { 8 << 20 } else { limit };
+    // A long log is read from its end: the newest lines are what it is opened for.
+    let from_end = kind == Kind::Log && meta.len() > limit as u64;
+    if from_end && f.seek(std::io::SeekFrom::Start(meta.len() - limit as u64)).is_err() {
         return Content::Other;
     }
-    if buf.is_empty() {
-        return Content::Text { lines: vec![], truncated: false, spans: None, prose: true };
+    let mut buf = Vec::with_capacity(64 << 10);
+    if f.by_ref().take(parse_limit as u64 + 1).read_to_end(&mut buf).is_err() {
+        return Content::Other;
     }
-    let truncated = buf.len() > limit;
-    buf.truncate(limit);
-    let Some(lines) = text_lines(&buf) else {
+    if from_end {
+        let cut = buf.iter().position(|&b| b == b'\n').map_or(0, |i| i + 1);
+        buf.drain(..cut);
+    }
+    let end = if from_end { meta.len() } else { buf.len().min(limit) as u64 };
+    if buf.is_empty() {
+        return Content::Text { lines: vec![], truncated: false, spans: None, prose: true, rich: None, end, from_end };
+    }
+    let cut = buf.len() > parse_limit;
+    buf.truncate(parse_limit);
+    let truncated = !from_end && buf.len() > limit;
+    let Some(lines) = text_lines(&buf[..buf.len().min(limit)]) else {
         buf.truncate(4096);
         return Content::Binary(buf);
     };
-    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let lang = crate::syntax::lang_for(&name);
     let prose = lang.is_none_or(crate::syntax::is_markdown);
     let spans = lang.map(|lang| crate::syntax::highlight(lang, &lines, 20_000));
-    Content::Text { lines, truncated, spans, prose }
+    let whole = || String::from_utf8_lossy(&buf);
+    let tree = |r: Result<crate::datatree::V, String>, what: &str| -> Rich {
+        match r {
+            // Cut off mid-way, a file is not what it says: the tree would be wrong.
+            Ok(_) if cut && kind != Kind::JsonLines => Rich::Broken(format!("Over 8 MB: shown as {what} text")),
+            Ok(v) => {
+                let mut t = crate::datatree::flatten(&v, None);
+                t.note = (t.nodes.len() >= crate::datatree::MAX_NODES - 1).then(|| format!("First {} values", crate::table::fmt_count(t.nodes.len())));
+                Rich::Data(Box::new(t))
+            }
+            Err(e) => Rich::Broken(format!("Can't read this as {what}: {e}")),
+        }
+    };
+    let rich = match kind {
+        Kind::Markdown => Some(Rich::Markdown(Box::new(crate::markdown::View::new(crate::markdown::parse(&lines, p.parent()))))),
+        Kind::Json if cut => Some(Rich::Broken("Over 8 MB: shown as JSON text".into())),
+        Kind::Json => Some(tree(crate::datatree::parse_json(&whole()), "JSON")),
+        Kind::JsonLines => Some(tree(crate::datatree::parse_jsonl(&whole()), "JSON Lines")),
+        Kind::Toml => Some(tree(crate::datatree::parse_toml(&whole()), "TOML")),
+        Kind::Yaml => Some(tree(crate::datatree::parse_yaml(&whole()), "YAML")),
+        Kind::Table => Some(Rich::Table(Box::new(crate::table::TableView::new(crate::table::Table::from_text(&whole(), &name, cut))))),
+        Kind::Env => Some(Rich::Env(Box::new(crate::envfile::View::new(&lines)))),
+        Kind::Plain | Kind::Log => None,
+    };
+    Content::Text { lines, truncated, spans, prose, rich: rich.map(Box::new), end, from_end }
+}
+
+/// A log, by its name: offered Follow and a filter from the start.
+pub fn is_log(name: &str) -> bool {
+    kind_for(name) == Kind::Log
 }
 
 /// Text as preview lines (tabs as spaces, very long lines cut), or None when it looks
@@ -358,6 +670,10 @@ pub(crate) fn seg_button(ui: &mut Ui, on: bool, tip: &'static str, pal: &theme::
 
 /// A quiet rounded segment behind a group of toolbar buttons, as Options draws its groups.
 pub(crate) fn seg_frame(ui: &mut Ui, pal: &theme::Palette, add: impl FnOnce(&mut Ui)) {
+    // No room for even one button: no empty outline either.
+    if crate::ui::no_room(ui, 30.0) {
+        return;
+    }
     // The buttons go straight into the toolbar row, so they centre on it like the close
     // button does; the segment is a fixed 24 px around that centre (buttons are 20 high),
     // painted under them once their width is known.
@@ -431,16 +747,33 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
     ui.painter().rect_filled(rect, CornerRadius::ZERO, pal.bg);
     let key = target.as_ref().map(|e| (e.path.clone(), e.modified));
     if key != ins.current {
-        ins.current = key;
-        match &target {
-            Some(e) => ins.load(e, computer, ui.ctx()),
-            None => {
-                ins.content = Content::None;
-                ins.folder_path = None;
+        let same = ins.current.as_ref().map(|c| &c.0) == key.as_ref().map(|k| &k.0) && key.is_some();
+        if same && ins.tail.is_some() {
+            // Followed: the worker reads what was added, nothing is read again.
+            ins.current = key;
+        } else {
+            ins.current = key;
+            if !same {
+                ins.tail = None;
+                ins.grew = false;
+                ins.filtered = None;
+            }
+            match &target {
+                Some(e) => {
+                    // The same file again, bigger: it is being written to.
+                    ins.grew |= same && e.size > ins.shown_size && matches!(ins.content, Content::Text { .. });
+                    ins.shown_size = e.size;
+                    ins.load(e, computer, ui.ctx());
+                }
+                None => {
+                    ins.set(Content::None);
+                    ins.folder_path = None;
+                }
             }
         }
     }
     ins.poll();
+    ins.pump_tail(target.as_ref(), ui.ctx());
     if let Some((rx, e)) = &ins.extracting {
         if let Ok(got) = rx.try_recv() {
             let mut e = e.clone();
@@ -456,6 +789,14 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             }
         }
     }
+    // The file is committed in a work tree (blame has something to say), or a log.
+    let blame_repo = target.as_ref().filter(|e| !e.is_dir).and_then(|e| {
+        let r = e.path.parent().and_then(crate::gitstatus::repo_for).or_else(|| crate::gitstatus::repo_for(&here))?;
+        let untracked = e.path.ancestors().take_while(|a| a.starts_with(&r.root) && *a != r.root).any(|a| r.marks.get(a) == Some(&crate::gitstatus::Mark::Untracked));
+        (e.path.starts_with(&r.root) && !untracked).then_some(r)
+    });
+    let blame_ok = blame_repo.is_some();
+    let log = target.as_ref().is_some_and(|e| is_log(&e.name));
     // ---------------------------------------------------------- header
     let hdr = Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + 30.0));
     ui.painter().line_segment([hdr.left_bottom(), hdr.right_bottom()], Stroke::new(1.0, pal.border));
@@ -537,18 +878,62 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                 v.page = p;
             }
         }
-        Content::Text { .. } => {
+        Content::Text { ref rich, .. } => {
+            let kind = rich.as_ref().and_then(|r| r.kind());
+            let source = kind.is_some_and(|k| env.cfg.source_views.get(k));
+            let env_file = matches!(rich.as_deref(), Some(Rich::Env(_)));
+            if let Some(k) = kind {
+                // Rendered or as written: remembered for each kind of file.
+                let (tip, glyph) = match k {
+                    RichKind::Markdown => ("Rendered", Glyph::Eye),
+                    RichKind::Data => ("Tree", Glyph::ListTree),
+                    RichKind::Table => ("Table", Glyph::Table),
+                };
+                seg_frame(&mut hui, &pal, |ui| {
+                    if seg_button(ui, !source, tip, &pal, |p, r, c| paint_glyph(p, r, glyph, c)) && source {
+                        env.actions.push(crate::app::Action::SourceView(k, false));
+                    }
+                    if seg_button(ui, source, "Source", &pal, |p, r, c| paint_glyph(p, r, Glyph::Code, c)) && !source {
+                        env.actions.push(crate::app::Action::SourceView(k, true));
+                    }
+                });
+            }
+            // A data file that would not parse shows its text either way.
+            let as_text = kind.is_none() || source || matches!(rich.as_deref(), Some(Rich::Broken(_)));
             seg_frame(&mut hui, &pal, |ui| {
-                if seg_button(ui, ins.line_numbers, "Line numbers", &pal, |p, r, c| {
+                if as_text && seg_button(ui, ins.line_numbers, "Line numbers", &pal, |p, r, c| {
                     theme::paint_lucide(p, r, "list-ordered", c);
                 }) {
                     ins.line_numbers = !ins.line_numbers;
                 }
-                if seg_button(ui, ins.wraps(), "Wrap lines", &pal, |p, r, c| {
+                if as_text && !env_file && seg_button(ui, ins.wraps(), "Wrap lines", &pal, |p, r, c| {
                     paint_glyph(p, r, Glyph::Wrap, c);
                 }) {
                     ins.toggle_wrap();
                 }
+                if seg_button(ui, false, "Smaller text", &pal, |p, r, c| {
+                    theme::paint_lucide(p, r, "a-arrow-down", c);
+                }) {
+                    ins.text_size = (ins.text_size - 1.0).max(-6.0);
+                }
+                if seg_button(ui, false, "Larger text", &pal, |p, r, c| {
+                    theme::paint_lucide(p, r, "a-arrow-up", c);
+                }) {
+                    ins.text_size = (ins.text_size + 1.0).min(16.0);
+                }
+            });
+            if env_file && seg_button(&mut hui, ins.env_all, if ins.env_all { "Hide values" } else { "Show values" }, &pal, |p, r, c| paint_glyph(p, r, if ins.env_all { Glyph::LockOpen } else { Glyph::Lock }, c)) {
+                ins.env_all = !ins.env_all;
+            }
+            if as_text && !env_file && blame_ok && seg_button(&mut hui, ins.blame_on, "Blame", &pal, |p, r, c| paint_glyph(p, r, Glyph::Blame, c)) {
+                ins.blame_on = !ins.blame_on;
+            }
+            if as_text && !env_file && (log || ins.grew || ins.follow) && seg_button(&mut hui, ins.follow, "Follow", &pal, |p, r, c| paint_glyph(p, r, Glyph::Follow, c)) {
+                ins.toggle_follow();
+            }
+        }
+        Content::Sqlite(_) => {
+            seg_frame(&mut hui, &pal, |ui| {
                 if seg_button(ui, false, "Smaller text", &pal, |p, r, c| {
                     theme::paint_lucide(p, r, "a-arrow-down", c);
                 }) {
@@ -609,14 +994,21 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         }
         _ => {}
     }
-    match &ins.content {
-        Content::Pdf(_) | Content::Media(_) => {}
-        Content::Image => image_view(&mut bui, body, &e, ins, env),
-        Content::Text { lines, truncated, spans, prose } => {
-            let wrap = if *prose { ins.wrap_prose } else { ins.wrap_code };
-            let wrapped = if wrap { Some(&mut ins.wrapped) } else { None };
-            text_view(&mut bui, body, lines, *truncated, spans.as_deref(), ins.line_numbers, wrapped, env.cfg.inspector_font_size + ins.text_size, &pal, false, env.cfg.preview_line_spacing);
+    if matches!(ins.content, Content::Text { .. } | Content::Sqlite(_)) {
+        ins.pump_blame(&e, blame_repo.as_deref(), &env.cfg.source_views, ui.ctx());
+        if let Some(hash) = text_body(&mut bui, body, ins, &e, env) {
+            // A blame line's commit, opened in the history; closing it comes back here.
+            if let Some(r) = &blame_repo {
+                let mut h = crate::gitlog::History::new(r.root.clone(), r.branch.clone(), false);
+                h.open_hash(hash);
+                ins.show_history(h);
+                return;
+            }
         }
+    }
+    match &ins.content {
+        Content::Pdf(_) | Content::Media(_) | Content::Text { .. } | Content::Sqlite(_) => {}
+        Content::Image => image_view(&mut bui, body, &e, ins, env),
         Content::Binary(bytes) => {
             let mut lines = vec!["Binary file: first 4 KB shown as hex".to_string(), String::new()];
             for (i, chunk) in bytes.chunks(16).enumerate() {
@@ -629,13 +1021,17 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         Content::Folder(entries) => folder_view(&mut bui, body, entries, env),
         Content::Volume => volume_view(&mut bui, body, &e, vol.as_ref(), &pal),
         Content::Loading => {}
-        Content::Other | Content::None => {
+        Content::Other | Content::None | Content::Note(_) => {
             let ic = Rect::from_center_size(body.center() - vec2(0.0, 30.0), Vec2::splat(96.0));
             if !crate::icons::entry(bui.painter(), ic, &e) {
                 theme::paint_icon(bui.painter(), ic, theme::categorize(&e.ext(), e.is_dir, e.is_executable()), &e.ext(), e.is_link);
             }
             bui.painter().text(pos2(body.center().x, ic.bottom() + 14.0), Align2::CENTER_TOP, &e.name, FontId::proportional(env.cfg.font_size), pal.text);
-            let sub = if ins.locked { "Password-protected".to_string() } else { fsx::fmt_size(e.size) };
+            let sub = match &ins.content {
+                Content::Note(n) => n.clone(),
+                _ if ins.locked => "Password-protected".to_string(),
+                _ => fsx::fmt_size(e.size),
+            };
             bui.painter().text(pos2(body.center().x, ic.bottom() + 34.0), Align2::CENTER_TOP, sub, FontId::proportional(env.cfg.font_size - 1.5), pal.text_dim);
         }
     }
@@ -719,6 +1115,188 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             ins.extra_meta = !ins.extra_meta;
         }
     }
+}
+
+impl Inspector {
+    /// Follow mode: start the worker for the file shown, and take in what it read.
+    fn pump_tail(&mut self, e: Option<&Entry>, ctx: &egui::Context) {
+        if !self.follow {
+            self.tail = None;
+            return;
+        }
+        let Some(e) = e else { return };
+        let Content::Text { lines, end, truncated, spans, .. } = &mut self.content else { return };
+        if self.tail.is_none() {
+            // From where the read stopped; a file read only in part is read from its end.
+            let from = (!*truncated).then_some(*end);
+            self.tail = crate::tail::Tail::start(e.path.clone(), from, ctx.clone());
+            self.carry.clear();
+            self.to_end = true;
+        }
+        let Some((reset, data)) = self.tail.as_ref().and_then(|t| t.take()) else { return };
+        if reset {
+            lines.clear();
+            self.carry.clear();
+            self.first_line = 0;
+            self.era += 1;
+        }
+        *truncated = false;
+        self.carry.extend_from_slice(&data);
+        if let Some(cut) = self.carry.iter().rposition(|&b| b == b'\n') {
+            let rest = self.carry.split_off(cut + 1);
+            let done = std::mem::replace(&mut self.carry, rest);
+            if let Some(new) = text_lines(&done) {
+                lines.extend(new);
+                self.to_end = true;
+                // Appended lines are not highlighted; a log has no colours to lose.
+                *spans = None;
+            }
+        }
+        if lines.len() > FOLLOW_LINES {
+            let n = lines.len() - FOLLOW_LINES * 3 / 4;
+            lines.drain(..n);
+            if self.first_line > 0 {
+                self.first_line += n;
+            }
+            self.era += 1;
+        }
+    }
+
+    /// Blame the file shown when asked to, once per version of it.
+    fn pump_blame(&mut self, e: &Entry, repo: Option<&crate::gitstatus::Repo>, source: &crate::config::SourceViews, ctx: &egui::Context) {
+        let shows_text = match &self.content {
+            Content::Text { rich: None, .. } => true,
+            Content::Text { rich: Some(r), .. } => r.kind().is_some_and(|k| source.get(k)),
+            _ => false,
+        };
+        let Some(repo) = repo.filter(|_| self.blame_on && shows_text) else { return };
+        let key = (e.path.clone(), e.modified);
+        if self.blame.as_ref().map(|b| &b.key) != Some(&key) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (root, path, ctx) = (repo.root.clone(), e.path.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::blame::run(&root, &path));
+                ctx.request_repaint();
+            });
+            self.blame = Some(BlameJob { key, rx: Some(rx), got: None });
+        }
+        if let Some(b) = &mut self.blame {
+            if let Some(Ok(r)) = b.rx.as_ref().map(|rx| rx.try_recv()) {
+                b.got = Some(r);
+                b.rx = None;
+            }
+        }
+    }
+}
+
+/// Lines holding `q`, ignoring case (ASCII letters; others as they are).
+fn has_ci(hay: &str, q: &str) -> bool {
+    let (h, n) = (hay.as_bytes(), q.as_bytes());
+    n.is_empty() || h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
+/// Text, code, and the rich previews; returns a blame line's commit that was clicked.
+fn text_body(ui: &mut Ui, body: Rect, ins: &mut Inspector, e: &Entry, env: &mut Env) -> Option<String> {
+    let pal = *env.pal;
+    let size = env.cfg.inspector_font_size + ins.text_size;
+    let spacing = env.cfg.preview_line_spacing;
+    let id = env.panel_id;
+    if let Content::Sqlite(v) = &mut ins.content {
+        crate::sqlite::view(ui, body, v, size, &pal, spacing, id);
+        return None;
+    }
+    let Content::Text { lines, truncated, spans, prose, rich, .. } = &mut ins.content else { return None };
+    let kind = rich.as_ref().and_then(|r| r.kind());
+    let source = kind.is_some_and(|k| env.cfg.source_views.get(k));
+    if !source {
+        match rich.as_deref_mut() {
+            Some(Rich::Markdown(v)) => {
+                match crate::markdown::view(ui, body, v, size, &pal, spacing, env.thumbs, id) {
+                    Some(crate::markdown::Follow::Open(p)) => env.actions.push(crate::app::Action::OpenFile(p)),
+                    Some(crate::markdown::Follow::Folder(p)) => env.actions.push(crate::app::Action::Navigate { panel: id, path: p }),
+                    Some(crate::markdown::Follow::Url(u)) if crate::markdown::is_web(&u) => {
+                        if let Err(err) = crate::mime::open_uri(&u) {
+                            env.actions.push(crate::app::Action::Toast(format!("Couldn't open: {err}")));
+                        }
+                    }
+                    _ => {}
+                }
+                return None;
+            }
+            Some(Rich::Data(t)) => {
+                if let Some(path) = crate::datatree::view(ui, body, t, size, &pal, spacing, id) {
+                    env.actions.push(crate::app::Action::Toast(format!("Copied {path}")));
+                }
+                return None;
+            }
+            Some(Rich::Table(t)) => {
+                crate::table::view(ui, body, t, size, &pal, spacing, id);
+                return None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(Rich::Env(v)) = rich.as_deref_mut() {
+        crate::envfile::view(ui, body, lines, v, ins.env_all, ins.line_numbers, size, &pal, spacing);
+        return None;
+    }
+    let mut body = body;
+    // A data file that would not parse says why, above its text.
+    if let (false, Some(Rich::Broken(msg))) = (source, rich.as_deref()) {
+        let bar = Rect::from_min_max(body.min, pos2(body.right(), body.top() + 28.0));
+        let g = crate::listing::elided(ui, msg, FontId::proportional(12.0), bar.width() - 30.0, pal.text_dim);
+        ui.painter().circle_filled(pos2(bar.left() + 12.0, bar.center().y), 3.0, pal.danger);
+        ui.painter().galley(pos2(bar.left() + 22.0, bar.center().y - g.size().y / 2.0), g, pal.text_dim);
+        ui.painter().line_segment([bar.left_bottom(), bar.right_bottom()], Stroke::new(1.0, pal.border));
+        body.min.y = bar.bottom() + 1.0;
+    }
+    // A log, or a file that grew while shown: a filter along the bottom.
+    let mut shown: &[String] = lines;
+    let filtering = is_log(&e.name) || ins.follow || ins.grew;
+    if filtering && body.height() > 90.0 {
+        let bar = Rect::from_min_max(pos2(body.left(), body.bottom() - 30.0), body.max);
+        body.max.y = bar.top() - 1.0;
+        ui.painter().line_segment([pos2(bar.left(), bar.top() - 0.5), pos2(bar.right(), bar.top() - 0.5)], Stroke::new(1.0, pal.border));
+        let q = ins.filter.trim().to_string();
+        // Matches, kept up as lines arrive; made again for a new query or text.
+        let stale = ins.filtered.as_ref().is_none_or(|f| f.0 != q || f.1 != ins.era || f.2 > lines.len());
+        if stale {
+            ins.filtered = Some((q.clone(), ins.era, 0, vec![]));
+        }
+        if let Some(f) = &mut ins.filtered {
+            if !q.is_empty() {
+                f.3.extend(lines[f.2..].iter().filter(|l| has_ci(l, &q)).cloned());
+            }
+            f.2 = lines.len();
+        }
+        let count = if q.is_empty() { String::new() } else { format!("{} of {}", crate::table::fmt_count(ins.filtered.as_ref().map_or(0, |f| f.3.len())), crate::table::fmt_count(lines.len())) };
+        let cg = ui.painter().layout_no_wrap(count, FontId::proportional(11.5), pal.text_dim);
+        let field = Rect::from_min_max(pos2(bar.left() + 28.0, bar.top() + 4.0), pos2(bar.right() - cg.size().x - 16.0, bar.bottom() - 4.0));
+        paint_glyph(ui.painter(), Rect::from_center_size(pos2(bar.left() + 14.0, bar.center().y), Vec2::splat(13.0)), Glyph::Search, pal.text_dim);
+        ui.painter().galley(pos2(bar.right() - 8.0 - cg.size().x, bar.center().y - cg.size().y / 2.0), cg, pal.text_dim);
+        if field.width() > 30.0 {
+            let mut fui = ui.new_child(UiBuilder::new().max_rect(field).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            let te = egui::TextEdit::singleline(&mut ins.filter).id_salt(("log-filter", id)).hint_text("Filter lines").frame(false).desired_width(field.width()).font(FontId::proportional(12.5));
+            let r = fui.add(te);
+            crate::ui::note_control(ui, r.rect, "line filter");
+        }
+        if let Some(f) = ins.filtered.as_ref().filter(|f| !f.0.is_empty()) {
+            shown = &f.3;
+        }
+    }
+    let filtered = !std::ptr::eq(shown, lines.as_slice());
+    // The blame of this file (one left from another file says nothing here).
+    let job = ins.blame.as_ref().filter(|b| ins.blame_on && !filtered && b.key.0 == e.path);
+    let blame = job.map(|b| match &b.got {
+        Some(Ok(b)) => Gutter::Lines(b),
+        Some(Err(m)) => Gutter::Note(m),
+        None => Gutter::Waiting,
+    });
+    let wrap = if *prose { ins.wrap_prose } else { ins.wrap_code };
+    let wrapped = if wrap { Some(&mut ins.wrapped) } else { None };
+    let opts = TextOpts { blame, first: if filtered { 0 } else { ins.first_line }, stick: ins.follow, to_end: std::mem::take(&mut ins.to_end) };
+    let spans = if filtered { None } else { spans.as_deref() };
+    text_view_ex(ui, body, shown, *truncated && !filtered, spans, ins.line_numbers, wrapped, size, &pal, false, spacing, opts)
 }
 
 /// Close the history, and the inspector with it when it was opened for the history.
@@ -1101,12 +1679,48 @@ pub(crate) fn row_height(ui: &Ui, size: f32, spacing: f32) -> f32 {
 }
 
 pub(crate) fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bool, spans: Option<&[Vec<(usize, usize, crate::syntax::Kind)>]>, numbers: bool, wrapped: Option<&mut Option<Wrapped>>, size: f32, pal: &theme::Palette, diff: bool, spacing: f32) {
+    text_view_ex(ui, body, lines, truncated, spans, numbers, wrapped, size, pal, diff, spacing, TextOpts::default());
+}
+
+/// What a blame gutter shows: the lines' commits, why there are none, or nothing yet.
+pub(crate) enum Gutter<'a> {
+    Lines(&'a crate::blame::Blame),
+    Note(&'a str),
+    Waiting,
+}
+
+/// A text preview's extras: a blame gutter, line numbers that start past 1 (a followed
+/// file whose start was dropped; 0: not known), staying at the end as lines arrive.
+pub(crate) struct TextOpts<'a> {
+    pub blame: Option<Gutter<'a>>,
+    pub first: usize,
+    pub stick: bool,
+    pub to_end: bool,
+}
+
+impl Default for TextOpts<'_> {
+    fn default() -> Self {
+        TextOpts { blame: None, first: 1, stick: false, to_end: false }
+    }
+}
+
+/// The text preview; returns the commit of a blame line that was clicked.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated: bool, spans: Option<&[Vec<(usize, usize, crate::syntax::Kind)>]>, numbers: bool, wrapped: Option<&mut Option<Wrapped>>, size: f32, pal: &theme::Palette, diff: bool, spacing: f32, opts: TextOpts) -> Option<String> {
     let font = FontId::monospace(size);
     let (line_h, cw) = ui.fonts_mut(|f| (f.row_height(&font), f.glyph_width(&font, 'M')));
     let row_h = row_height(ui, size, spacing);
     // Text sits in the middle of its (taller) row.
     let lift = ((row_h - line_h) / 2.0).floor().max(0.0);
-    let gutter = if numbers { (lines.len().max(1).to_string().len() as f32) * size * 0.62 + 16.0 } else { 6.0 };
+    let numbers = numbers && opts.first > 0;
+    let base = opts.first.max(1);
+    let gutter = if numbers { ((lines.len() + base).max(1).to_string().len() as f32) * size * 0.62 + 16.0 } else { 6.0 };
+    // The blame column: author and age where a commit's lines begin; only the age when
+    // the preview is narrow.
+    let narrow = body.width() < 360.0;
+    let blame_w = if opts.blame.is_some() { ((if narrow { 5.0 } else { 16.0 }) * cw + 14.0).round() } else { 0.0 };
+    let gutter = gutter + blame_w;
+    let mut clicked = None;
     let mut inner = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(4.0, 4.0))));
     // Wrapping: rows are (line, start byte), made again only when the width or the text
     // changes. The scroll bar's room is left free so a row never runs under it.
@@ -1131,15 +1745,33 @@ pub(crate) fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bo
     let total = rows.map_or(lines.len(), |r| r.len());
     let n = total + if truncated { 1 } else { 0 };
     let area = if rows.is_some() { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
-    area.auto_shrink([false, false]).id_salt("insp_text").show_viewport(&mut inner, |ui, vp| {
+    let now = crate::blame::now();
+    area.auto_shrink([false, false]).stick_to_bottom(opts.stick).id_salt("insp_text").show_viewport(&mut inner, |ui, vp| {
         let w = if rows.is_some() { vp.width() } else { (2000.0 * size * 0.62).min(lines.iter().map(|l| l.len()).max().unwrap_or(0) as f32 * size * 0.62 + gutter + 20.0).max(vp.width()) };
         let (r, _) = ui.allocate_exact_size(vec2(w, n as f32 * row_h + 8.0), Sense::hover());
+        if opts.to_end && n > 0 {
+            // At once: a followed log jumps to its newest line, as a terminal does.
+            ui.scroll_to_rect_animation(Rect::from_min_size(pos2(r.left(), r.bottom() - row_h), vec2(1.0, row_h)), Some(egui::Align::BOTTOM), egui::style::ScrollAnimation::none());
+        }
         let first = (vp.min.y / row_h).floor().max(0.0) as usize;
         let last = ((vp.max.y / row_h).ceil() as usize + 1).min(n);
-        let p = ui.painter();
+        let p = ui.painter().clone();
+        let p = &p;
+        // The blame column scrolls sideways with the line numbers and the text.
+        let bx = r.left();
+        let col = Rect::from_min_max(pos2(bx, r.top() + vp.min.y), pos2(bx + blame_w - 6.0, r.top() + vp.max.y));
+        let blame_hit = (blame_w > 0.0).then(|| ui.interact(col, ui.id().with("blame"), Sense::click()));
+        if let Some(h) = &blame_hit {
+            crate::ui::note_control(ui, col, "blame gutter");
+            let _ = h;
+        }
+        let mut hovered_line = None;
         for i in first..last {
             let top = r.top() + i as f32 * row_h;
             let y = top + lift;
+            if let (Some(Gutter::Note(t)), 0) = (&opts.blame, i) {
+                p.text(pos2(bx + 4.0, y), Align2::LEFT_TOP, *t, FontId::proportional((size - 1.5).max(8.0)), pal.text_dim);
+            }
             if i == total {
                 p.text(pos2(r.left() + gutter, y), Align2::LEFT_TOP, "… (preview truncated at 1 MB)", font.clone(), pal.text_dim);
                 continue;
@@ -1155,7 +1787,30 @@ pub(crate) fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bo
             };
             let line = &lines[li];
             if numbers && a == 0 {
-                p.text(pos2(r.left() + gutter - 10.0, y), Align2::RIGHT_TOP, (li + 1).to_string(), font.clone(), pal.text_dim.gamma_multiply(0.7));
+                p.text(pos2(r.left() + gutter - 10.0, y), Align2::RIGHT_TOP, (li + base).to_string(), font.clone(), pal.text_dim.gamma_multiply(0.7));
+            }
+            if let Some(Gutter::Lines(b)) = &opts.blame {
+                if let Some(c) = b.lines.get(li).and_then(|&k| b.commits.get(k as usize)) {
+                    let ac = if c.committed() { crate::blame::age_color(c.time, now, pal) } else { pal.text_dim.gamma_multiply(0.6) };
+                    // A strip down every row of a commit's lines; its name where they begin.
+                    p.rect_filled(Rect::from_min_size(pos2(bx + 1.0, top), vec2(2.0, row_h)), CornerRadius::ZERO, ac.gamma_multiply(0.8));
+                    let starts = a == 0 && (li == 0 || b.lines.get(li - 1) != b.lines.get(li));
+                    if starts {
+                        let small = FontId::proportional((size - 1.5).max(8.0));
+                        let age = if c.committed() { crate::blame::short_ago(c.time, now) } else { "new".into() };
+                        let ag = ui.painter().layout_no_wrap(age, small.clone(), ac);
+                        let ax = bx + blame_w - 10.0 - ag.size().x;
+                        p.galley(pos2(ax, top + (row_h - ag.size().y) / 2.0), ag, ac);
+                        if !narrow {
+                            let who = if c.committed() { crate::blame::short_author(&c.author).to_string() } else { "Not committed".into() };
+                            let g = crate::listing::elided(ui, &who, small, (ax - bx - 14.0).max(8.0), pal.text_dim);
+                            p.galley(pos2(bx + 8.0, top + (row_h - g.size().y) / 2.0), g, pal.text_dim);
+                        }
+                    }
+                    if blame_hit.as_ref().and_then(|h| h.hover_pos()).is_some_and(|hp| hp.y >= top && hp.y < top + row_h) {
+                        hovered_line = Some(li);
+                    }
+                }
             }
             // A diff: added and removed lines tinted (every row of them when wrapped),
             // hunk headers dimmed.
@@ -1206,7 +1861,23 @@ pub(crate) fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bo
                 }
             }
         }
+        // A blame line: its commit's summary on hover; a click opens it in the history.
+        if let (Some(Gutter::Lines(b)), Some(li), Some(h)) = (&opts.blame, hovered_line, blame_hit) {
+            if let Some(c) = b.lines.get(li).and_then(|&k| b.commits.get(k as usize)) {
+                if c.committed() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    let tip = format!("{}\n{} · {} · {}", c.summary, c.author, crate::gitlog::ago(c.time, now), &c.hash[..c.hash.len().min(10)]);
+                    if h.clicked() {
+                        clicked = Some(c.hash.clone());
+                    }
+                    h.on_hover_text(tip);
+                } else {
+                    h.on_hover_text("Changed here and not committed yet");
+                }
+            }
+        }
     });
+    clicked
 }
 
 fn folder_view(ui: &mut Ui, body: Rect, entries: &[Entry], env: &mut Env) {

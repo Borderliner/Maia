@@ -37,7 +37,8 @@ These are optional. Maia works without them and uses them when they are there:
 | `7z` | password-protected 7z archives (and quicker password checks for zip) |
 | `gio` (GVFS) | network places (smb, sftp, ftp, WebDAV) and phones over MTP |
 | `pkexec` (polkit) | retrying a refused copy, move, delete or rename as administrator |
-| `git` | change marks on files in git repositories, their history, staging and committing, branches and the stash |
+| `git` | change marks on files in git repositories, their history and blame, staging and committing, branches and the stash |
+| `sqlite3` | the tables and first rows of SQLite databases, read-only, in the inspector |
 | `ollama` | search by meaning, if you turn it on (it fetches a ~860 MB model only when you ask); `ollama-vulkan` lets it use the graphics card |
 | `ffmpeg`, `ffprobe`, `ffplay` | video and audio previews and thumbnails |
 | `pdfinfo`, `pdftoppm` (poppler) | PDF pages in the inspector |
@@ -83,6 +84,12 @@ that changed it. Changes, above the commits, stages files or single hunks, disca
 (into the stash, or the trash for a new file) and commits; Ctrl+Enter commits. Files
 git ignores are drawn faded, or hidden (Options, Git). Maia never pushes.
 
+The inspector renders Markdown, shows JSON, TOML and YAML as trees you fold with the
+arrow keys, and CSV and TSV as tables; its toolbar switches any of them to the text as
+written. Values in `.env` files stay hidden until clicked. A log can be followed as it
+grows and filtered to the lines you want, and Blame puts who last changed each line
+of a committed file beside it; clicking a line opens that commit.
+
 Ctrl+K finds files and folders anywhere in your home folder by name, as you type.
 With search by meaning turned on, it also finds documents, PDFs and pictures by what
 they are about or show ("a dog on the beach", "the lease clause about pets"), and words
@@ -122,4 +129,6 @@ tools/window.sh      # a real window driven through a pipe, for checking by eye
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE). The bundled fonts and icons keep their own
-licenses, in `assets/`.
+licenses, in `assets/`, and so do the Rust crates Maia is built from:
+[assets/THIRD-PARTY-NOTICES.txt](assets/THIRD-PARTY-NOTICES.txt) lists each with its
+license text (`tools/notices.py` writes it).

@@ -70,6 +70,34 @@ pub enum InspectorLayout {
     Bottom,
 }
 
+/// Markdown, data files and tables each remember Rendered or Source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SourceViews {
+    pub markdown: bool,
+    pub data: bool,
+    pub table: bool,
+}
+
+impl SourceViews {
+    pub fn get(&self, k: crate::inspector::RichKind) -> bool {
+        use crate::inspector::RichKind as K;
+        match k {
+            K::Markdown => self.markdown,
+            K::Data => self.data,
+            K::Table => self.table,
+        }
+    }
+    pub fn set(&mut self, k: crate::inspector::RichKind, v: bool) {
+        use crate::inspector::RichKind as K;
+        match k {
+            K::Markdown => self.markdown = v,
+            K::Data => self.data = v,
+            K::Table => self.table = v,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Startup {
     #[default]
@@ -186,6 +214,8 @@ pub struct Config {
     pub middle_click: MiddleClick,
     // Inspector & startup
     pub inspector_layout: InspectorLayout,
+    /// Previews shown as written rather than rendered (the inspector's Source toggle).
+    pub source_views: SourceViews,
     pub startup: Startup,
     pub new_tab: NewTabShows,
     /// Authors' GitHub pictures in the history. Off: GitHub is never contacted.
@@ -251,6 +281,7 @@ impl Default for Config {
             char_key_action: CharKeyAction::TriggerHotkey,
             middle_click: MiddleClick::OpenInSplit,
             inspector_layout: InspectorLayout::Auto,
+            source_views: SourceViews::default(),
             startup: Startup::LastSession,
             new_tab: NewTabShows::Current,
             github_pictures: false,

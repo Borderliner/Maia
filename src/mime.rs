@@ -466,6 +466,13 @@ pub fn open_default(path: &Path) -> Result<(), String> {
     spawn_detached(c)
 }
 
+/// A web or mail address, with the desktop's handler for it.
+pub fn open_uri(uri: &str) -> Result<(), String> {
+    let mut c = Command::new("xdg-open");
+    c.arg(uri);
+    spawn_detached(c)
+}
+
 fn terminal_argv() -> Vec<String> {
     if let Ok(t) = std::env::var("TERMINAL") {
         if !t.is_empty() {

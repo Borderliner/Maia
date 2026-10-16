@@ -1467,6 +1467,11 @@ pub enum Glyph {
     List,
     ListTree,
     Maximize,
+    Code,
+    Table,
+    Blame,
+    Follow,
+    Copy,
 }
 
 /// Draw a Lucide icon by name, centered in `rect` (the icon's stroke box roughly fills it).
@@ -1518,7 +1523,8 @@ fn glyph_name(g: Glyph) -> &'static str {
         Glyph::Globe => "globe",
         Glyph::Phone => "smartphone",
         Glyph::Maximize => "maximize-2",
-        Glyph::Eject | Glyph::Wrap | Glyph::Tag | Glyph::Cloud | Glyph::ChevronUp | Glyph::List | Glyph::ListTree => "", // drawn below
+        Glyph::Table => "grid-3x3",
+        Glyph::Eject | Glyph::Wrap | Glyph::Tag | Glyph::Cloud | Glyph::ChevronUp | Glyph::List | Glyph::ListTree | Glyph::Code | Glyph::Blame | Glyph::Follow | Glyph::Copy => "", // drawn below
     }
 }
 
@@ -1644,7 +1650,7 @@ pub fn paint_glyph(painter: &Painter, rect: Rect, g: Glyph, col: Color32) {
             line(p(0.34, 0.0), p(-0.16, 0.0));
             painter.add(Shape::line(vec![p(0.0, -0.16), p(-0.16, 0.0), p(0.0, 0.16)], st));
         }
-        Glyph::ChevronRight | Glyph::ChevronDown | Glyph::Lock | Glyph::LockOpen | Glyph::Usb | Glyph::Globe | Glyph::Phone | Glyph::Maximize => {}
+        Glyph::ChevronRight | Glyph::ChevronDown | Glyph::Lock | Glyph::LockOpen | Glyph::Usb | Glyph::Globe | Glyph::Phone | Glyph::Maximize | Glyph::Table => {}
         // On Lucide's 24-unit grid, so they sit with the font's icons.
         Glyph::Wrap => {
             let m = |x: f32, y: f32| p((x - 12.0) * 0.036, (y - 12.0) * 0.036);
@@ -1696,6 +1702,36 @@ pub fn paint_glyph(painter: &Painter, rect: Rect, g: Glyph, col: Color32) {
             let m = |x: f32, y: f32| p((x - 12.0) / 20.0, (y - 12.0) / 20.0);
             let st = Stroke::new(s / 10.0, col);
             painter.add(Shape::line(vec![m(6.0, 15.0), m(12.0, 9.0), m(18.0, 15.0)], st));
+        }
+        Glyph::Code | Glyph::Blame | Glyph::Follow | Glyph::Copy => {
+            // On Lucide's 24-unit grid: angle brackets with a slash; a column of short
+            // marks beside lines; an arrow down onto a line; two overlapping sheets.
+            let m = |x: f32, y: f32| p((x - 12.0) / 20.0, (y - 12.0) / 20.0);
+            let st = Stroke::new(s / 10.0, col);
+            match g {
+                Glyph::Code => {
+                    painter.add(Shape::line(vec![m(18.0, 16.0), m(22.0, 12.0), m(18.0, 8.0)], st));
+                    painter.add(Shape::line(vec![m(6.0, 8.0), m(2.0, 12.0), m(6.0, 16.0)], st));
+                    painter.line_segment([m(14.5, 4.0), m(9.5, 20.0)], st);
+                }
+                Glyph::Blame => {
+                    // The gutter's strip, a name where a run begins, its lines beside it.
+                    painter.line_segment([m(3.0, 3.0), m(3.0, 21.0)], st);
+                    painter.circle_stroke(m(8.5, 7.0), s * 0.11, st);
+                    painter.line_segment([m(14.0, 7.0), m(21.0, 7.0)], st);
+                    painter.line_segment([m(14.0, 13.0), m(21.0, 13.0)], st);
+                    painter.line_segment([m(8.0, 19.0), m(21.0, 19.0)], st);
+                }
+                Glyph::Follow => {
+                    painter.line_segment([m(12.0, 3.0), m(12.0, 17.0)], st);
+                    painter.add(Shape::line(vec![m(6.0, 11.0), m(12.0, 17.0), m(18.0, 11.0)], st));
+                    painter.line_segment([m(5.0, 21.0), m(19.0, 21.0)], st);
+                }
+                _ => {
+                    painter.rect_stroke(Rect::from_min_max(m(8.0, 8.0), m(22.0, 22.0)), CornerRadius::same((s / 10.0).round() as u8), st, StrokeKind::Middle);
+                    painter.add(Shape::line(vec![m(4.0, 16.0), m(2.0, 14.0), m(2.0, 4.0), m(4.0, 2.0), m(14.0, 2.0), m(16.0, 4.0)], st));
+                }
+            }
         }
         Glyph::List | Glyph::ListTree => {
             // Lucide's list (dots before three lines) and list-tree (lines branching off a stem).
