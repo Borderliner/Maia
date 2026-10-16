@@ -165,6 +165,8 @@ pub struct Config {
     pub semantic_search: bool,
     /// The folders it reads, comma-separated ("~" is home).
     pub semantic_folders: String,
+    /// Pictures are read too, by how they look.
+    pub semantic_pictures: bool,
     pub dblclick_bg_parent: bool,
     pub reverse_scroll: bool,
     pub char_key_action: CharKeyAction,
@@ -224,6 +226,7 @@ impl Default for Config {
             single_instance: true,
             semantic_search: false,
             semantic_folders: "~/Documents".into(),
+            semantic_pictures: true,
             dblclick_bg_parent: false,
             reverse_scroll: false,
             char_key_action: CharKeyAction::TriggerHotkey,

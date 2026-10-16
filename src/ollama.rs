@@ -6,10 +6,15 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-/// Google's EmbeddingGemma: small, multilingual, made for search on one's own files.
-pub const MODEL: &str = "embeddinggemma";
-/// Fingerprint length kept: the model's first 256 numbers carry most of the meaning.
-pub const DIMS: usize = 256;
+/// Google's EmbeddingGemma 2 (Google's own build, from Hugging Face): one meaning space
+/// for text and pictures, multilingual, made for search on one's own files.
+pub const MODEL: &str = "hf.co/ggml-org/embeddinggemma-2-GGUF:Q8_0";
+/// Fingerprint length: what Ollama returns for this build (Matryoshka: the first numbers
+/// carry the most, so a longer answer is cut to this).
+pub const DIMS: usize = 512;
+
+/// CPU threads Ollama may use for this (it otherwise takes every core).
+const THREADS: usize = 4;
 
 #[cfg(test)]
 pub static TEST_HOST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -128,7 +133,7 @@ pub enum Status {
 pub fn status() -> Status {
     let Ok(r) = request("GET", "/api/tags", None, Duration::from_secs(5)) else { return Status::NotRunning };
     let Ok(v) = json(r) else { return Status::NotRunning };
-    let has = v["models"].as_array().is_some_and(|m| m.iter().any(|m| m["name"].as_str().is_some_and(|n| n.split(':').next() == Some(MODEL))));
+    let has = v["models"].as_array().is_some_and(|m| m.iter().any(|m| m["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(MODEL))));
     if has { Status::Ready } else { Status::NoModel }
 }
 
@@ -160,10 +165,34 @@ pub fn pull(mut progress: impl FnMut(u64, u64), stop: &std::sync::atomic::Atomic
 
 /// Meaning fingerprints for `texts`: DIMS numbers each, of length 1.
 pub fn embed(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-    let body = serde_json::json!({ "model": MODEL, "input": texts, "truncate": true, "keep_alive": "2m" }).to_string();
+    embed_inputs(texts.iter().map(|t| serde_json::Value::from(t.as_str())).collect())
+}
+
+/// Fingerprints for pictures (PNG or JPEG bytes), in the same space as text.
+pub fn embed_images(images: &[Vec<u8>]) -> Result<Vec<Vec<f32>>, String> {
+    embed_inputs(images.iter().map(|b| serde_json::json!({ "image": base64(b) })).collect())
+}
+
+fn base64(b: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::with_capacity(b.len().div_ceil(3) * 4);
+    for c in b.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for k in 0..4 {
+            s.push(if k <= c.len() { T[(n >> (18 - 6 * k) & 63) as usize] as char } else { '=' });
+        }
+    }
+    s
+}
+
+fn embed_inputs(inputs: Vec<serde_json::Value>) -> Result<Vec<Vec<f32>>, String> {
+    let n = inputs.len();
+    // A few threads, not all of them: indexing is background work, and the rest of the
+    // machine stays free (pictures take a little longer, about 3 s each on a laptop).
+    let body = serde_json::json!({ "model": MODEL, "input": inputs, "truncate": true, "keep_alive": "2m", "options": { "num_thread": THREADS } }).to_string();
     let v = json(request("POST", "/api/embed", Some(&body), Duration::from_secs(180))?)?;
     let out: Vec<Vec<f32>> = v["embeddings"].as_array().ok_or("No embeddings in the answer")?.iter().map(|e| e.as_array().map(|a| a.iter().take(DIMS).map(|x| x.as_f64().unwrap_or(0.0) as f32).collect()).unwrap_or_default()).collect();
-    if out.len() != texts.len() || out.iter().any(|e| e.len() < DIMS) {
+    if out.len() != n || out.iter().any(|e| e.len() < DIMS) {
         return Err("Ollama gave fingerprints of the wrong shape".into());
     }
     // Cut to DIMS (Matryoshka) and scaled back to length 1.

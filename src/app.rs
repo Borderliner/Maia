@@ -806,9 +806,10 @@ impl App {
         }
         self.pump_passwords();
         // Search by meaning runs only while switched on, for the folders now chosen.
-        let want = self.cfg.semantic_search.then(|| self.cfg.semantic_folders.clone());
+        let want = self.cfg.semantic_search.then(|| format!("{}\u{1f}{}", self.cfg.semantic_folders, self.cfg.semantic_pictures));
         if want != self.semantic_for {
-            self.semantic = want.as_deref().map(|f| crate::semantic::Engine::start(crate::semantic::folders(f), ctx));
+            let (folders, pictures) = (crate::semantic::folders(&self.cfg.semantic_folders), self.cfg.semantic_pictures);
+            self.semantic = want.as_ref().map(|_| crate::semantic::Engine::start(folders, pictures, ctx));
             self.semantic_for = want;
         }
         let thumbs_landed = self.thumbs.pump(ctx);

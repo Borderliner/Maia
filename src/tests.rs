@@ -2302,6 +2302,54 @@ fn ahead_behind_and_branch_labels_from_real_remotes() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+fn unbase64(s: &str) -> Vec<u8> {
+    let val = |c: u8| match c {
+        b'A'..=b'Z' => c - b'A',
+        b'a'..=b'z' => c - b'a' + 26,
+        b'0'..=b'9' => c - b'0' + 52,
+        b'+' => 62,
+        _ => 63,
+    };
+    let b: Vec<u8> = s.bytes().filter(|&c| c != b'=').collect();
+    b.chunks(4).flat_map(|c| {
+        let n = c.iter().enumerate().fold(0u32, |n, (k, &x)| n | (val(x) as u32) << (18 - 6 * k));
+        (0..c.len() - 1).map(move |k| (n >> (16 - 8 * k)) as u8)
+    }).collect()
+}
+
+/// What test pictures can show; a picture's red tells which (it survives the shrinking
+/// a picture gets on its way to the model).
+const CAPTIONS: &[&str] = &["a puppy playing in the sand", "a spreadsheet of numbers", "icon"];
+
+/// The largest side of a picture the fake Ollama was sent.
+static PICTURE_SIDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// What the fake Ollama "sees" in a picture.
+fn caption(png: &[u8]) -> String {
+    let Some(img) = crate::imgdec::decode_bytes(png) else { return String::new() };
+    PICTURE_SIDE.fetch_max(img.w.max(img.h), std::sync::atomic::Ordering::Relaxed);
+    let red = img.px.first().copied().unwrap_or(0) as usize;
+    CAPTIONS.get(red / 40).map_or(String::new(), |c| c.to_string())
+}
+
+/// A picture for the tests, 640 by 480 (a photo's shape) showing `caption`, one of CAPTIONS.
+pub(crate) fn captioned_png(path: &Path, caption: &str) {
+    sized_png(path, caption, 640, 480)
+}
+
+pub(crate) fn sized_png(path: &Path, caption: &str, w: u32, h: u32) {
+    let red = CAPTIONS.iter().position(|c| *c == caption).expect("a known caption") as u8 * 40 + 20;
+    let mut seed = 0x2545f491u32;
+    let px = (0..w * h).flat_map(|_| {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        [red, (seed >> 8) as u8, (seed >> 16) as u8, 255]
+    }).collect();
+    let img = crate::imgdec::Rgba { w, h, px };
+    std::fs::write(path, crate::thumbcache::encode_png(&img, &[]).unwrap()).unwrap();
+}
+
 /// A stand-in for Ollama on a local port, speaking its HTTP API: /api/tags, a chunked
 /// /api/pull with progress, and /api/embed. Its "model" puts words about one topic in
 /// the same direction (money, holidays, cooking, pets, meetings), so a question finds a
@@ -2363,7 +2411,7 @@ pub(crate) fn fake_ollama(has_model: bool) -> (String, std::sync::Arc<std::sync:
             };
             match (method.as_str(), path.as_str()) {
                 ("GET", "/api/tags") => {
-                    let models = if m.load(Relaxed) { r#"[{"name":"embeddinggemma:latest","size":621875424}]"# } else { "[]" };
+                    let models = if m.load(Relaxed) { r#"[{"name":"hf.co/ggml-org/embeddinggemma-2-GGUF:Q8_0","size":864000000}]"# } else { "[]" };
                     reply(&mut s, "200 OK", format!(r#"{{"models":{models}}}"#));
                 }
                 ("POST", "/api/pull") => {
@@ -2383,12 +2431,17 @@ pub(crate) fn fake_ollama(has_model: bool) -> (String, std::sync::Arc<std::sync:
                 }
                 ("POST", "/api/embed") if m.load(Relaxed) => {
                     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-                    let inputs: Vec<String> = v["input"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+                    // Text as it is; a picture by the caption its PNG carries (the test's
+                    // stand-in for what the real model sees in it).
+                    let inputs: Vec<String> = v["input"].as_array().map(|a| a.iter().map(|x| match x.as_str() {
+                        Some(t) => t.to_string(),
+                        None => caption(&unbase64(x["image"].as_str().unwrap_or(""))),
+                    }).collect()).unwrap_or_default();
                     n.fetch_add(inputs.len(), Relaxed);
                     let embs: Vec<Vec<f32>> = inputs.iter().map(|t| vector(t)).collect();
                     reply(&mut s, "200 OK", serde_json::json!({ "model": "embeddinggemma", "embeddings": embs }).to_string());
                 }
-                ("POST", "/api/embed") => reply(&mut s, "404 Not Found", r#"{"error":"model \"embeddinggemma\" not found, try pulling it first"}"#.into()),
+                ("POST", "/api/embed") => reply(&mut s, "404 Not Found", r#"{"error":"model not found, try pulling it first"}"#.into()),
                 _ => reply(&mut s, "404 Not Found", r#"{"error":"not found"}"#.into()),
             }
         }
@@ -2444,45 +2497,99 @@ fn search_by_meaning_through_ollama() {
     touch(&d.join("Notes/dinner.txt"), "Pasta with tomato sauce: boil, stir, eat. A kitchen classic.");
     touch(&d.join("node_modules/skip.txt"), "invoice invoice invoice");
     touch(&d.join(".hidden/skip.txt"), "invoice invoice invoice");
-    touch(&d.join("photo.png"), "not text");
+    captioned_png(&d.join("IMG_0412.png"), "a puppy playing in the sand");
+    // Pictures that aren't someone's: an icon, an app's artwork, frames cut from a video.
+    sized_png(&d.join("app.png"), "icon", 64, 64);
+    std::fs::create_dir_all(d.join("theme/icons")).unwrap();
+    sized_png(&d.join("theme/icons/folder.png"), "icon", 256, 256);
+    std::fs::create_dir_all(d.join("clip/frames")).unwrap();
+    for k in 0..45 {
+        sized_png(&d.join(format!("clip/frames/frame_{k:04}.png")), "a spreadsheet of numbers", 220, 220);
+    }
+    touch(&d.join("clip/frames/notes.txt"), "Frames cut from the holiday video at 30 per second.");
+    // The same photo copied elsewhere: read once.
+    std::fs::create_dir_all(d.join("Backup")).unwrap();
+    std::fs::copy(d.join("IMG_0412.png"), d.join("Backup/IMG_0412.png")).unwrap();
     let _ = std::fs::remove_file(std::env::temp_dir().join("maia/meaning.idx"));
     let ctx = egui::Context::default();
-    let engine = Engine::start(vec![d.clone()], &ctx);
+    let start = embedded.load(Relaxed);
+    let engine = Engine::start(vec![d.clone()], true, &ctx);
     let t0 = Instant::now();
     while engine.phase() != Phase::Ready {
         assert!(t0.elapsed() < Duration::from_secs(20), "stuck at {:?}", engine.phase());
         std::thread::sleep(Duration::from_millis(10));
     }
     let idx = engine.index();
-    assert_eq!(idx.files(), 3, "text files only; hidden and build folders skipped");
+    assert_eq!(idx.files(), 6, "text and pictures; hidden and build folders, icons and video frames skipped");
+    assert_eq!(embedded.load(Relaxed) - start, 5, "four texts and one picture: the copy shares its fingerprint");
+    assert_eq!(PICTURE_SIDE.load(Relaxed), 512, "pictures shrunk before they go to the model");
     let best = |e: &Engine, q: &str| semantic::search(&e.index(), q, 3).unwrap().first().map(|h| h.path.file_name().unwrap().to_string_lossy().into_owned());
     assert_eq!(best(&engine, "money back from the government").as_deref(), Some("letter from the bank.txt"), "no word in common, same topic");
     assert_eq!(best(&engine, "travel in summer").as_deref(), Some("summer.md"));
-    assert_eq!(best(&engine, "what to cook tonight").as_deref(), Some("dinner.txt"));
+    assert_eq!(best(&engine, "cooking tonight").as_deref(), Some("dinner.txt"));
+    assert_eq!(best(&engine, "photo of my dog").as_deref(), Some("IMG_0412.png"), "a picture by what it shows");
+    let dogs = semantic::search(&engine.index(), "photo of my dog", 10).unwrap().iter().filter(|h| h.path.ends_with("IMG_0412.png")).count();
+    assert_eq!(dogs, 1, "the copy in Backup isn't shown twice");
     let hit = &semantic::search(&engine.index(), "food", 1).unwrap()[0];
     assert!(hit.passage.starts_with("Pasta with tomato sauce"), "the passage shown: {:?}", hit.passage);
     // Saved, and on the next start only changed files are read again.
     let before = embedded.load(Relaxed);
     drop(engine);
     std::thread::sleep(Duration::from_millis(50));
-    assert_eq!(semantic::load(&std::env::temp_dir().join("maia/meaning.idx")).files(), 3, "saved to the cache");
+    assert_eq!(semantic::load(&std::env::temp_dir().join("maia/meaning.idx")).files(), 6, "saved to the cache");
     std::thread::sleep(Duration::from_secs(1));
     touch(&d.join("summer.md"), "# Plans\n\nWe changed our mind: a puppy instead of a trip. The dog needs a vet.");
     std::fs::remove_file(d.join("Notes/dinner.txt")).unwrap();
-    let engine = Engine::start(vec![d.clone()], &ctx);
+    let engine = Engine::start(vec![d.clone()], true, &ctx);
     let t0 = Instant::now();
     while engine.phase() != Phase::Ready {
         assert!(t0.elapsed() < Duration::from_secs(20));
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(embedded.load(Relaxed) - before, 1, "only the changed file was read again");
-    assert_eq!(engine.index().files(), 2, "the deleted file is gone from the index");
-    assert_eq!(best(&engine, "my pet").as_deref(), Some("summer.md"));
+    assert_eq!(engine.index().files(), 5, "the deleted file is gone from the index");
+    assert_eq!(best(&engine, "summer plans changed for a pet").as_deref(), Some("summer.md"));
+    drop(engine);
+    // Pictures left out when "Include pictures" is off.
+    let engine = Engine::start(vec![d.clone()], false, &ctx);
+    let t0 = Instant::now();
+    while engine.phase() != Phase::Ready {
+        assert!(t0.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(engine.index().files(), 3, "text only");
+    drop(engine);
+    // Code by its opening; minified bundles and lock files not at all. On battery a new
+    // picture waits for the charger while text is still read.
+    let body = (0..400).map(|k| format!("    // Step {k}: fetch the lyrics for the playing song and keep them in memory\n")).collect::<String>();
+    touch(&d.join("lyrics.py"), &body);
+    touch(&d.join("bundle.js"), &format!("var a=function(){{return 'lyrics for the playing song and more words here'}};{}", "x=1;".repeat(400)));
+    touch(&d.join("package-lock.json"), "{ \"name\": \"lyrics for the playing song and more words\" }");
+    captioned_png(&d.join("IMG_0413.png"), "a puppy playing in the sand");
+    semantic::TEST_BATTERY.store(true, Relaxed);
+    let before = embedded.load(Relaxed);
+    let engine = Engine::start(vec![d.clone()], true, &ctx);
+    let t0 = Instant::now();
+    while engine.phase() != Phase::Ready {
+        assert!(t0.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(embedded.load(Relaxed) - before, 1, "one passage of the code file, nothing else");
+    assert_eq!(engine.waiting(), 4, "pictures wait (the run with pictures off left them all out)");
+    assert_eq!(engine.index().files(), 4, "the text is read meanwhile");
+    semantic::TEST_BATTERY.store(false, Relaxed);
+    engine.poke();
+    let t0 = Instant::now();
+    while engine.waiting() > 0 || engine.phase() != Phase::Ready {
+        assert!(t0.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(engine.index().files(), 7, "plugged in: the picture is read");
     drop(engine);
     // Without the model the engine waits for the user's say-so, then fetches it.
     let (addr2, model2, _) = fake_ollama(false);
     set_host(&addr2);
-    let engine = Engine::start(vec![d.clone()], &ctx);
+    let engine = Engine::start(vec![d.clone()], true, &ctx);
     let t0 = Instant::now();
     while engine.phase() != Phase::NoModel {
         assert!(t0.elapsed() < Duration::from_secs(10));

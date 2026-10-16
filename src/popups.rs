@@ -1554,6 +1554,7 @@ enum Opt {
     SingleInstance,
     Meaning,
     MeaningFolders,
+    MeaningPictures,
 }
 
 const OPTS: &[(Opt, &str, &str, &str)] = &[
@@ -1605,6 +1606,7 @@ const OPTS: &[(Opt, &str, &str, &str)] = &[
     (Opt::SingleInstance, "System", "Reuse the open window", "Folders from other apps and new launches open as tabs here."),
     (Opt::Meaning, "Search", "Search by meaning", "Find files by what they are about, with a local model through Ollama."),
     (Opt::MeaningFolders, "Search", "Folders to search by meaning", "Separated by commas; ~ is your home folder."),
+    (Opt::MeaningPictures, "Search", "Include pictures", "Find pictures by what they show, too."),
 ];
 
 /// Choice control: a box showing the value and a chevron; click steps
@@ -1688,6 +1690,7 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
         Opt::SingleInstance => f!(single_instance),
         Opt::Meaning => f!(semantic_search),
         Opt::MeaningFolders => f!(semantic_folders),
+        Opt::MeaningPictures => f!(semantic_pictures),
         Opt::Font => f!(font_family),
         Opt::InspectorFontSize => f!(inspector_font_size),
         Opt::RectButtons => f!(rect_buttons),
@@ -1817,6 +1820,7 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         Opt::SystemIcons => toggle(ui, &mut c.system_icons, &pal),
         Opt::SingleInstance => toggle(ui, &mut c.single_instance, &pal),
         Opt::Meaning => toggle(ui, &mut c.semantic_search, &pal),
+        Opt::MeaningPictures => toggle(ui, &mut c.semantic_pictures, &pal),
         Opt::MeaningFolders => ui.add(egui::TextEdit::singleline(&mut c.semantic_folders).hint_text("~/Documents").desired_width(150.0)).lost_focus(),
         Opt::DefaultFm => false,
         Opt::InspectorFont => {
@@ -2503,6 +2507,53 @@ fn archive_password(app: &mut App, ctx: &egui::Context, st: &mut PasswordState) 
     !cancel
 }
 
+/// `text` with each of `words` in it (any case) in `hit`'s format.
+fn append_marked(job: &mut egui::text::LayoutJob, text: &str, words: &[String], plain: egui::TextFormat, hit: egui::TextFormat) {
+    let low = text.to_lowercase();
+    // Lowercasing that changes byte lengths (rare scripts) leaves the text unmarked.
+    if words.is_empty() || low.len() != text.len() {
+        job.append(text, 0.0, plain);
+        return;
+    }
+    let mut marks = vec![false; text.len()];
+    for w in words {
+        let mut from = 0;
+        while let Some(i) = low[from..].find(w.as_str()) {
+            let s = from + i;
+            marks[s..s + w.len()].iter_mut().for_each(|m| *m = true);
+            from = s + w.len();
+        }
+    }
+    let mut at = 0;
+    while at < text.len() {
+        let on = marks[at];
+        let mut end = at;
+        while end < text.len() && marks[end] == on {
+            end += 1;
+        }
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        job.append(&text[at..end], 0.0, if on { hit.clone() } else { plain.clone() });
+        at = end;
+    }
+}
+
+/// A passage starting a little before the first of `words` in it, so the match is in
+/// view; as it is when none is found.
+fn around(passage: &str, words: &[String]) -> String {
+    let low = passage.to_lowercase();
+    let first = (low.len() == passage.len()).then(|| words.iter().filter_map(|w| low.find(w.as_str())).min()).flatten();
+    match first {
+        Some(i) if i > 80 => {
+            let from = passage.floor_char_boundary(i - 60);
+            let from = passage[from..].find(' ').map_or(from, |s| from + s + 1);
+            format!("…{}", &passage[from..])
+        }
+        _ => passage.to_string(),
+    }
+}
+
 /// Search by meaning: the setup step the engine is at, or the question and its matches.
 fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
     use crate::semantic::Phase;
@@ -2553,7 +2604,13 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
     let mut turn_on = false;
     let (mut download, mut retry) = (false, false);
     let fs = app.cfg.font_size;
-    centered(ctx, "meaning", 640.0, &pal, |ui| {
+    let words = crate::semantic::terms(&st.query);
+    // The list may use most of the window's height; it claims what its rows need, since
+    // the window keeps its first (empty) size otherwise and would show them in a sliver.
+    let list_max = (ctx.content_rect().height() - 260.0).max(160.0);
+    let thumbs = &mut app.thumbs;
+    let ppp = ctx.pixels_per_point();
+    centered(ctx, "meaning", 760.0, &pal, |ui| {
         if phase.is_none() {
             ui.label(egui::RichText::new("Search by meaning").strong());
             ui.add_space(4.0);
@@ -2583,8 +2640,8 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
                 retry = ui.button("Try again").clicked();
             }
             Phase::NoModel => {
-                dim(ui, "The model (EmbeddingGemma) isn't downloaded yet.");
-                download = ui.add(egui::Button::new(egui::RichText::new("Download, about 300 MB").color(Color32::WHITE)).fill(pal.accent)).clicked();
+                dim(ui, "The model (EmbeddingGemma 2, for text and pictures) isn't downloaded yet.");
+                download = ui.add(egui::Button::new(egui::RichText::new("Download, about 860 MB").color(Color32::WHITE)).fill(pal.accent)).clicked();
             }
             Phase::Downloading(done, all) => {
                 let f = if all > 0 { done as f32 / all as f32 } else { 0.0 };
@@ -2592,7 +2649,13 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
                 dim(ui, &format!("Downloading the model… {} of {}", fsx::fmt_size(done), fsx::fmt_size(all)));
             }
             Phase::Indexing(n, all) => dim(ui, &format!("Reading your files… {n} of {all}")),
-            Phase::Ready => dim(ui, &format!("{} files read", index.as_ref().map_or(0, |i| i.files()))),
+            Phase::Ready => {
+                let read = index.as_ref().map_or(0, |i| i.files());
+                match app.semantic.as_ref().map_or(0, |e| e.waiting()) {
+                    0 => dim(ui, &format!("{read} files read")),
+                    w => dim(ui, &format!("{read} files read · {w} pictures wait until the laptop is plugged in")),
+                }
+            }
             Phase::Failed(e) => {
                 ui.label(egui::RichText::new(e).color(pal.danger));
                 retry = ui.button("Try again").clicked();
@@ -2604,7 +2667,9 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
         if !st.hits.is_empty() {
             ui.add_space(4.0);
         }
-        egui::ScrollArea::vertical().max_height(420.0).auto_shrink([false, true]).show(ui, |ui| {
+        let (small, row_h) = (fs - 1.5, (fs * 1.35 + 2.0 * (fs - 1.5) * 1.35 + 16.0).round());
+        let rows_h = st.hits.len() as f32 * (row_h + 2.0);
+        egui::ScrollArea::vertical().max_height(list_max).min_scrolled_height(rows_h.min(list_max)).auto_shrink([false, true]).show(ui, |ui| {
             for (i, h) in st.hits.iter().enumerate() {
                 let name = h.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let home = crate::fsx::home();
@@ -2612,21 +2677,42 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
                     Ok(rest) => format!("~/{}", rest.display()),
                     Err(_) => p.display().to_string(),
                 }).unwrap_or_default();
-                let row_h = fs * 2.9 + 10.0;
                 let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                ui.add_space(2.0);
                 if i == st.sel {
                     ui.painter().rect_filled(r, CornerRadius::same(6), pal.selected);
                 } else if resp.hovered() {
                     ui.painter().rect_filled(r, CornerRadius::same(6), pal.hover);
                 }
+                let fmt = |size: f32, color: Color32| egui::TextFormat { font_id: FontId::proportional(size), color, ..Default::default() };
+                // A picture shows itself, small, at the left.
+                let picture = crate::semantic::is_picture(&h.path);
+                let mut x = r.left() + 12.0;
+                if picture {
+                    let box_r = Rect::from_min_size(pos2(x, r.top() + 6.0), Vec2::splat(r.height() - 12.0));
+                    ui.painter().rect_filled(box_r, CornerRadius::same(4), pal.raised);
+                    if let Some(l) = thumbs.get(&h.path, None, box_r.width() * ppp) {
+                        let [tw, th] = l.tex.size();
+                        let k = (box_r.width() / tw as f32).min(box_r.height() / th as f32);
+                        let sz = vec2(tw as f32 * k, th as f32 * k);
+                        ui.painter().image(l.tex.id(), Rect::from_center_size(box_r.center(), sz), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                    x = box_r.right() + 10.0;
+                }
+                let w = r.right() - 12.0 - x;
                 let mut job = egui::text::LayoutJob::default();
-                job.append(&name, 0.0, egui::TextFormat { font_id: FontId::proportional(fs), color: pal.text, ..Default::default() });
-                job.append(&format!("  {folder}"), 0.0, egui::TextFormat { font_id: FontId::proportional(fs - 1.5), color: pal.text_dim, ..Default::default() });
-                job.wrap = egui::text::TextWrapping { max_width: r.width() - 20.0, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+                append_marked(&mut job, &name, &words, fmt(fs, pal.text), fmt(fs, pal.accent));
+                job.append(&format!("   {folder}"), 0.0, fmt(small, pal.text_dim));
+                job.wrap = egui::text::TextWrapping { max_width: w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
                 let g = ui.fonts_mut(|f| f.layout_job(job));
-                ui.painter().galley(pos2(r.left() + 10.0, r.top() + 5.0), g, pal.text);
-                let p = crate::listing::elided(ui, &h.passage, FontId::proportional(fs - 1.5), r.width() - 20.0, pal.text_dim);
-                ui.painter().galley(pos2(r.left() + 10.0, r.bottom() - 5.0 - p.size().y), p, pal.text_dim);
+                ui.painter().galley(pos2(x, r.top() + 7.0), g, pal.text);
+                // The passage around the question's words, which show in the accent.
+                let text = if picture { "Picture".to_string() } else { around(&h.passage, &words) };
+                let mut job = egui::text::LayoutJob::default();
+                append_marked(&mut job, &text, &words, fmt(small, pal.text_dim), fmt(small, pal.accent));
+                job.wrap = egui::text::TextWrapping { max_width: w, max_rows: 2, break_anywhere: false, overflow_character: Some('…') };
+                let g = ui.fonts_mut(|f| f.layout_job(job));
+                ui.painter().galley(pos2(x, r.top() + 7.0 + fs * 1.35 + 2.0), g, pal.text_dim);
                 if i == st.sel && (k.up || k.down) {
                     ui.scroll_to_rect(r, None);
                 }
@@ -3683,6 +3769,7 @@ fn opt_flip(c: &mut crate::config::Config, o: Opt) -> bool {
         Opt::ReverseScroll => &mut c.reverse_scroll,
         Opt::SingleInstance => &mut c.single_instance,
         Opt::Meaning => &mut c.semantic_search,
+        Opt::MeaningPictures => &mut c.semantic_pictures,
         _ => return false,
     };
     *b = !*b;

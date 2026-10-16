@@ -2974,6 +2974,7 @@ mod journeys {
         std::fs::write(docs.join("letter from the bank.txt"), "Dear customer, your tax refund has been paid into your account.").unwrap();
         std::fs::write(docs.join("summer plans.md"), "Two weeks at the beach, a flight on Friday and a hotel by the sea.").unwrap();
         std::fs::write(docs.join("Taxes/pasta.txt"), "Pasta with tomato sauce: boil, stir and eat.").unwrap();
+        crate::tests::captioned_png(&docs.join("IMG_0412.png"), "a puppy playing in the sand");
         let (addr, model, _) = crate::tests::fake_ollama(false);
         *crate::ollama::TEST_HOST.lock().unwrap() = Some(addr);
         struct Reset;
@@ -2991,11 +2992,11 @@ mod journeys {
         assert!(s.texts.iter().any(|(_, t)| t == "Search by meaning"));
         look(&mut s, "meaning off");
         s.click_text("Turn on");
-        wait_until(&mut s, "asks for the model", 10, |s| s.texts.iter().any(|(_, t)| t == "Download, about 300 MB"));
+        wait_until(&mut s, "asks for the model", 10, |s| s.texts.iter().any(|(_, t)| t == "Download, about 860 MB"));
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert!(!model.load(std::sync::atomic::Ordering::Relaxed), "nothing fetched before the click");
         look(&mut s, "meaning needs the model");
-        s.click_text("Download, about 300 MB");
+        s.click_text("Download, about 860 MB");
         wait_until(&mut s, "files read", 20, |s| matches!(s.app.semantic.as_ref().map(|e| e.phase()), Some(crate::semantic::Phase::Ready)));
         s.idle(2);
         let n = s.app.semantic.as_ref().map_or(0, |e| e.index().files());
@@ -3011,7 +3012,27 @@ mod journeys {
             _ => s.fail("window closed"),
         }
         assert!(s.texts.iter().any(|(_, t)| t.starts_with("Dear customer, your tax refund")), "the passage under the name");
+        // Several results show at once, each row whole (not squeezed into the window's
+        // first, empty size).
+        let shown = match &s.app.popup {
+            Popup::Meaning(st) => st.hits.iter().filter(|h| {
+                let name = h.path.file_name().unwrap().to_string_lossy().into_owned();
+                s.texts.iter().any(|(r, t)| t.starts_with(&name) && r.height() > 8.0 && r.top() > 0.0 && r.bottom() < s.size.y)
+            }).count(),
+            _ => 0,
+        };
+        assert!(shown >= 4, "only {shown} results on screen");
         look(&mut s, "meaning results");
+        // A picture, by what it shows.
+        s.act("key ctrl+a");
+        s.act("text photo of my dog");
+        wait_until(&mut s, "picture found", 10, |s| matches!(&s.app.popup, Popup::Meaning(st) if st.hits.first().is_some_and(|h| h.path.ends_with("IMG_0412.png"))));
+        s.idle(3);
+        assert!(s.texts.iter().any(|(_, t)| t == "Picture"), "a picture is said to be one");
+        look(&mut s, "a picture found");
+        s.act("key ctrl+a");
+        s.act("text money back from the government");
+        wait_until(&mut s, "answer again", 10, |s| matches!(&s.app.popup, Popup::Meaning(st) if st.hits.first().is_some_and(|h| h.path.ends_with("letter from the bank.txt"))));
         s.act("key Enter");
         s.settle();
         assert!(!s.popup_open());

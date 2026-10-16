@@ -38,7 +38,7 @@ These are optional. Maia works without them and uses them when they are there:
 | `gio` (GVFS) | network places (smb, sftp, ftp, WebDAV) and phones over MTP |
 | `pkexec` (polkit) | retrying a refused copy, move, delete or rename as administrator |
 | `git` | change marks on files in git repositories, and their commit history |
-| `ollama` | search by meaning, if you turn it on (it fetches a ~300 MB model only when you ask) |
+| `ollama` | search by meaning, if you turn it on (it fetches a ~860 MB model only when you ask); `ollama-vulkan` lets it use the graphics card |
 | `ffmpeg`, `ffprobe`, `ffplay` | video and audio previews and thumbnails |
 | `pdfinfo`, `pdftoppm` (poppler) | PDF pages in the inspector |
 | `udisksctl` (udisks2), `lsblk` | mounting, unmounting and ejecting drives |
@@ -79,8 +79,11 @@ named tags (kept on the files, where KDE's file managers see them too). In a git
 repository, the branch name in the status bar opens its commit history.
 
 Search by meaning (Ctrl+K) finds files by what they are about rather than their exact
-words. It is off until you turn it on in Options, and then reads only the folders you
-list there, using a small model running on your computer through Ollama.
+words, and pictures by what they show. It is off until you turn it on in Options, and
+then reads only the folders you list there, using a small model running on your
+computer through Ollama. The first read of a large folder takes a while; after that only
+new and changed files are read. With a graphics card and `ollama-vulkan` installed it is
+some thirty times faster. Pictures wait while a laptop runs on its battery.
 
 Settings live in `~/.config/maia/config.json`, bookmarks and layouts in
 `~/.local/share/maia/userdata.json`.
