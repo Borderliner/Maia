@@ -320,6 +320,8 @@ pub fn listing(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
     if t.view.is_empty() && !t.is_loading() {
         let msg = if let Some(e) = &t.error {
             format!("Can't open this folder: {}", fsx::plain_error(e))
+        } else if !t.filter.trim().is_empty() && !t.content.on {
+            format!("Nothing matches “{}”", t.filter.trim())
         } else if !t.filter.is_empty() || !t.settings.only_types.is_empty() || !t.settings.show_files || !t.settings.show_folders {
             "No matches".into()
         } else if t.hidden_count > 0 {
@@ -327,7 +329,9 @@ pub fn listing(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         } else {
             "This folder is empty".into()
         };
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, msg, FontId::proportional(env.cfg.font_size), env.pal.text_dim);
+        // Cut to the panel: a long error or filter ran past a narrow one.
+        let g = elided(&ui, &msg, FontId::proportional(env.cfg.font_size), (rect.width() - 24.0).max(40.0), env.pal.text_dim);
+        ui.painter().galley(rect.center() - g.size() / 2.0, g, env.pal.text_dim);
     } else if t.view.is_empty() && (t.flatten || t.content.busy()) {
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, if t.content.busy() { "Searching…" } else { "Indexing…" }, FontId::proportional(env.cfg.font_size), env.pal.text_dim);
     }
