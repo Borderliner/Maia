@@ -397,6 +397,9 @@ fn entry_size_text(e: &Entry, t: &Tab, env: &Env) -> String {
     if e.is_dir {
         match env.stats.map.get(&e.path) {
             Some(s) => fsx::fmt_size(s.size),
+            // A linked folder is not measured (its contents are counted where they
+            // are): "--" as for a file's folder count, not a blank that looks pending.
+            None if e.is_link => "--".into(),
             None => String::new(),
         }
     } else {
@@ -975,8 +978,8 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                     Column::Accessed => fmt_date(e.accessed, env.cfg),
                                     Column::Deleted => fmt_date(t.trash_meta.get(&e.path).and_then(|m| m.1), env.cfg),
                                     Column::Original => t.trash_meta.get(&e.path).and_then(|m| m.0.parent()).map(|p| p.display().to_string()).unwrap_or_default(),
-                                    Column::Folders => if e.is_dir { env.stats.map.get(&e.path).map(|s| abbrev(s.folders)).unwrap_or_default() } else { "--".into() },
-                                    Column::Files => if e.is_dir { env.stats.map.get(&e.path).map(|s| abbrev(s.files)).unwrap_or_default() } else { "--".into() },
+                                    Column::Folders => if e.is_dir { env.stats.map.get(&e.path).map(|s| abbrev(s.folders)).unwrap_or_else(|| if e.is_link { "--".into() } else { String::new() }) } else { "--".into() },
+                                    Column::Files => if e.is_dir { env.stats.map.get(&e.path).map(|s| abbrev(s.files)).unwrap_or_else(|| if e.is_link { "--".into() } else { String::new() }) } else { "--".into() },
                                     Column::Permissions => fsx::fmt_mode(e.mode, e.is_dir),
                                     Column::Extension => e.ext().to_string(),
                                     _ => String::new(),
