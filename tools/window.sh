@@ -45,7 +45,7 @@ start)
     --unshare-all \
     --setenv HOME "$W/home" --setenv XDG_CONFIG_HOME "$W/home/.config" --setenv XDG_DATA_HOME "$W/home/.local/share" \
     --setenv XDG_CACHE_HOME "$W/home/.cache" --setenv XDG_STATE_HOME "$W/home/.local/state" --setenv XDG_RUNTIME_DIR "$XDG_RUNTIME_DIR" --setenv WAYLAND_DISPLAY "$WL" \
-    --setenv COMET_TEST_FIFO "$FIFO" ${MAIA_PATH:+--setenv PATH "$MAIA_PATH:/usr/bin"} \
+    --setenv MAIA_TEST_FIFO "$FIFO" ${MAIA_PATH:+--setenv PATH "$MAIA_PATH:/usr/bin"} \
     "$BIN" "${2:-$W/files}" > "$W/maia.log" 2>&1 & echo $! > "$W/pid")
   [ -n "$MAIA_WS" ] || exit 0
   # Move only the new window, never one that was already open.

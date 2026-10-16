@@ -534,12 +534,12 @@ fn trash_metadata_columns_and_groups() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Renders the SVGs listed in $COMET_SVG_SAMPLES (one path per line) into $COMET_SVG_OUT
+/// Renders the SVGs listed in $MAIA_SVG_SAMPLES (one path per line) into $MAIA_SVG_OUT
 /// as PNGs, for eyeballing the renderer. Run with --ignored.
 #[test]
 #[ignore]
 fn svg_render_samples() {
-    let (Ok(list), Ok(out)) = (std::env::var("COMET_SVG_SAMPLES"), std::env::var("COMET_SVG_OUT")) else { return };
+    let (Ok(list), Ok(out)) = (std::env::var("MAIA_SVG_SAMPLES"), std::env::var("MAIA_SVG_OUT")) else { return };
     std::fs::create_dir_all(&out).unwrap();
     for (i, p) in std::fs::read_to_string(list).unwrap().lines().enumerate() {
         let data = std::fs::read(p).unwrap();
@@ -1216,7 +1216,7 @@ fn drag_picture_is_a_clean_premultiplied_card() {
         let text = (70..w).flat_map(|x| (0..h).map(move |y| (x, y))).filter(|&(x, y)| at(x, y)[1] > 150).count();
         assert!(text > 60, "{name}: the label is drawn ({text} bright pixels)");
         assert!(w <= ((10.0 + 16.0 + 8.0 + 241.0 + 12.0) * 2.0) as usize + 2, "{name}: long names are cut ({w})");
-        if let Some(d) = std::env::var_os("COMET_ICON_DUMP") {
+        if let Some(d) = std::env::var_os("MAIA_ICON_DUMP") {
             let mut rgba = px.clone();
             for p in rgba.chunks_mut(4) {
                 p.swap(0, 2);
@@ -1241,7 +1241,7 @@ fn window_icon_is_the_launcher_icon() {
     assert!(c[0] > 240 && c[1] > 240 && c[2] > 240, "star {c:?}");
     let g = at(41, 31);
     assert!(g[2] > g[0], "blue glow under the star {g:?}");
-    if let Some(d) = std::env::var_os("COMET_ICON_DUMP") {
+    if let Some(d) = std::env::var_os("MAIA_ICON_DUMP") {
         let f = std::fs::File::create(std::path::Path::new(&d).join("window-icon.png")).unwrap();
         let mut e = png::Encoder::new(f, w, h);
         e.set_color(png::ColorType::Rgba);
@@ -1690,7 +1690,7 @@ fn hand_written_png_is_valid_and_compact() {
     }
     assert!(ours.len() < theirs.len() * 2, "ours {} vs png {}", ours.len(), theirs.len());
     eprintln!("png sizes: ours {} png crate {}", ours.len(), theirs.len());
-    if let Some(d) = std::env::var_os("COMET_ICON_DUMP") {
+    if let Some(d) = std::env::var_os("MAIA_ICON_DUMP") {
         std::fs::write(std::path::Path::new(&d).join("hand.png"), &ours).unwrap();
     }
 }

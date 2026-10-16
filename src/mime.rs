@@ -530,7 +530,7 @@ pub fn set_default(app_id: &str, mime: &str) -> Result<(), String> {
     {
         LAUNCHED.lock().unwrap_or_else(|e| e.into_inner()).push(format!("xdg-mime default {app_id} {mime}"));
         // Inside the simulation sandbox, do what xdg-mime does, to the sandbox's own file.
-        if std::env::var("COMET_SIM_SANDBOX").as_deref() == Ok("1") {
+        if std::env::var("MAIA_SIM_SANDBOX").as_deref() == Ok("1") {
             if let Some(dir) = dirs::config_dir() {
                 let p = dir.join("mimeapps.list");
                 let old = std::fs::read_to_string(&p).unwrap_or_default();

@@ -1,5 +1,5 @@
 //! Test-only input driver (cargo feature `testkit`): reads commands from the FIFO named
-//! by $COMET_TEST_FIFO and injects them as egui input. Not compiled into release builds.
+//! by $MAIA_TEST_FIFO and injects them as egui input. Not compiled into release builds.
 //!
 //! Commands (coordinates in logical points, relative to the window):
 //!   move X Y            click X Y [left|right|middle] [ctrl|shift|alt...]
@@ -26,7 +26,7 @@ pub struct Driver {
 
 impl Driver {
     pub fn start(wake: impl Fn() + Send + 'static) -> Option<Driver> {
-        let path = std::env::var("COMET_TEST_FIFO").ok()?;
+        let path = std::env::var("MAIA_TEST_FIFO").ok()?;
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             loop {

@@ -5,7 +5,7 @@
 //!
 //! These tests click, type, rename, move and delete like a person would, so they only run
 //! inside the sandbox set up by `tools/sim.sh` (read-only filesystem, empty home,
-//! no network, only the fixture writable), which sets `COMET_SIM_SANDBOX=1`. Started any
+//! no network, only the fixture writable), which sets `MAIA_SIM_SANDBOX=1`. Started any
 //! other way they skip. External programs are never launched from test builds
 //! (`mime::spawn_detached` records the request instead).
 
@@ -35,7 +35,7 @@ pub fn prof(name: &'static str, t: Instant) {
 
 /// True inside the sandbox; tests return early (and say so) otherwise.
 pub fn sandboxed() -> bool {
-    let ok = std::env::var("COMET_SIM_SANDBOX").as_deref() == Ok("1");
+    let ok = std::env::var("MAIA_SIM_SANDBOX").as_deref() == Ok("1");
     if !ok {
         eprintln!("sim: skipped (run tools/sim.sh to simulate users in the sandbox)");
     }
@@ -46,7 +46,7 @@ pub fn sandboxed() -> bool {
 pub fn root() -> PathBuf {
     static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
-        let r = PathBuf::from(std::env::var("COMET_SIM_ROOT").expect("COMET_SIM_ROOT"));
+        let r = PathBuf::from(std::env::var("MAIA_SIM_ROOT").expect("MAIA_SIM_ROOT"));
         for d in ["home", "xdg/config", "xdg/data", "xdg/cache", "xdg/state"] {
             std::fs::create_dir_all(r.join(d)).unwrap();
         }
@@ -88,7 +88,7 @@ fn free_mb(p: &Path) -> u64 {
 
 pub fn wipe_root() {
     let r = root();
-    if std::env::var("COMET_SIM_DEBUG").is_ok() {
+    if std::env::var("MAIA_SIM_DEBUG").is_ok() {
         let out = std::process::Command::new("du").args(["-xhd", "3"]).arg(&r).output();
         let txt = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
         let mut lines: Vec<&str> = txt.lines().collect();
@@ -104,7 +104,7 @@ pub fn wipe_root() {
     for d in ["home", "xdg/config", "xdg/data", "xdg/cache", "xdg/state"] {
         let _ = std::fs::create_dir_all(r.join(d));
     }
-    if std::env::var("COMET_SIM_DEBUG").is_ok() {
+    if std::env::var("MAIA_SIM_DEBUG").is_ok() {
         eprintln!("wipe: free {} MB after", free_mb(&r));
         if let Ok(rd) = std::fs::read_dir("/proc/self/fd") {
             for d in rd.flatten() {
@@ -117,7 +117,7 @@ pub fn wipe_root() {
                 }
             }
         }
-        for cmd in [vec!["df", "-h", "/tmp", "/run", "/home"], vec!["sh", "-c", "find / -xdev -newer /proc/self/stat -size +1M 2>/dev/null | head; find \"$COMET_SIM_ROOT\" | head -20; df -h \"$COMET_SIM_ROOT\""]] {
+        for cmd in [vec!["df", "-h", "/tmp", "/run", "/home"], vec!["sh", "-c", "find / -xdev -newer /proc/self/stat -size +1M 2>/dev/null | head; find \"$MAIA_SIM_ROOT\" | head -20; df -h \"$MAIA_SIM_ROOT\""]] {
             if let Ok(o) = std::process::Command::new(cmd[0]).args(&cmd[1..]).output() {
                 eprintln!("  $ {}\n{}", cmd.join(" "), String::from_utf8_lossy(&o.stdout));
             }
@@ -420,7 +420,7 @@ pub struct Sim {
     pub popup_checks: std::cell::Cell<usize>,
     /// Text drawn in the last frame (visible rect, string), for clicking by label.
     pub texts: Vec<(Rect, String)>,
-    /// What the last frame drew, kept for `shot` when COMET_SIM_SHOTS names a folder.
+    /// What the last frame drew, kept for `shot` when MAIA_SIM_SHOTS names a folder.
     shots: Option<Box<Shots>>,
 }
 
@@ -525,10 +525,10 @@ impl Sim {
         root();
         let ctx = egui::Context::default();
         let app = App::new(&ctx, vec![path.to_path_buf()]);
-        let shots = std::env::var_os("COMET_SIM_SHOTS").map(|d| Box::new(Shots { dir: PathBuf::from(d), textures: Default::default(), prims: vec![] }));
+        let shots = std::env::var_os("MAIA_SIM_SHOTS").map(|d| Box::new(Shots { dir: PathBuf::from(d), textures: Default::default(), prims: vec![] }));
         let mut s = Sim { ctx, app, size, ppp: 1.6, time: 0.0, pointer: pos2(-10.0, -10.0), frame_ms: vec![], log: VecDeque::new(), check_overlap: false, slow: vec![], popup_checks: Default::default(), texts: vec![], shots };
-        // COMET_SIM_LOOK=FONT,SPACING runs a session at another font size and Spacing.
-        if let Some((f, sp)) = std::env::var("COMET_SIM_LOOK").ok().and_then(|v| v.split_once(',').and_then(|(f, sp)| Some((f.trim().parse().ok()?, sp.trim().parse().ok()?)))) {
+        // MAIA_SIM_LOOK=FONT,SPACING runs a session at another font size and Spacing.
+        if let Some((f, sp)) = std::env::var("MAIA_SIM_LOOK").ok().and_then(|v| v.split_once(',').and_then(|(f, sp)| Some((f.trim().parse().ok()?, sp.trim().parse().ok()?)))) {
             s.app.cfg.font_size = f;
             s.app.cfg.spacing = sp;
         }
@@ -583,7 +583,7 @@ impl Sim {
         self.frame_ms.push(ms);
         if ms > SLOW_MS && self.frame_ms.len() > 3 {
             let traced = self.slow.iter().any(|x| x.0 > 1000.0);
-            if !traced && (ms > 1000.0 || (self.slow.is_empty() && std::env::var("COMET_SIM_SEED").is_ok())) {
+            if !traced && (ms > 1000.0 || (self.slow.is_empty() && std::env::var("MAIA_SIM_SEED").is_ok())) {
                 eprintln!("first slow frame ({ms:.0} ms); steps before it:\n  {}", self.log.iter().cloned().collect::<Vec<_>>().join("\n  "));
                 PROF.with(|p| eprintln!("  sections: {:?}", p.borrow()));
                 eprintln!("  jobs {} [{}], popup open {}, drag {}, toast {:?}", self.app.jobs.len(), self.app.jobs.iter().map(|j| j.label.clone()).collect::<Vec<_>>().join("; "), self.popup_open(), self.app.drag.is_some(), self.app.toast.as_ref().map(|t| t.0.clone()));
@@ -680,13 +680,13 @@ impl Sim {
         self.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
     }
 
-    /// Save what the last frame drew as `<COMET_SIM_SHOTS>/<name>.png` (nothing when the
+    /// Save what the last frame drew as `<MAIA_SIM_SHOTS>/<name>.png` (nothing when the
     /// variable is not set). The look in use goes into the name.
     pub fn shot(&self, name: &str) {
         let Some(sh) = &self.shots else { return };
         let (w, h) = ((self.size.x * self.ppp).round() as usize, (self.size.y * self.ppp).round() as usize);
         let rgb = sh.paint(w, h, self.ppp);
-        let look = std::env::var("COMET_SIM_LOOK").unwrap_or_default().replace(',', "-");
+        let look = std::env::var("MAIA_SIM_LOOK").unwrap_or_default().replace(',', "-");
         let name: String = format!("{name}{}{look}", if look.is_empty() { "" } else { "@" }).chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '@') { c } else { '_' }).collect();
         let Ok(f) = std::fs::File::create(sh.dir.join(format!("{name}.png"))) else { return };
         let mut e = png::Encoder::new(std::io::BufWriter::new(f), w as u32, h as u32);
@@ -4782,11 +4782,11 @@ mod journeys {
         report("admin", &s);
     }
 
-    /// Every surface photographed for a person to look at (COMET_SIM_SHOTS): the window,
+    /// Every surface photographed for a person to look at (MAIA_SIM_SHOTS): the window,
     /// each view, the inspector's previews, the history, popups and menus, in a dark and
     /// a light theme and two of the newer ones, at a normal and a small window. Without
     /// shots it walks the first theme and size only, as one more check of every frame.
-    /// COMET_SIM_AUDIT=midnight-1280 keeps the passes whose name contains it.
+    /// MAIA_SIM_AUDIT=midnight-1280 keeps the passes whose name contains it.
     #[test]
     fn ui_audit() {
         if !sandboxed() {
@@ -4834,8 +4834,8 @@ mod journeys {
         let _reset = Reset;
         let (addr, _, _) = crate::tests::fake_ollama(true);
         *crate::ollama::TEST_HOST.lock().unwrap() = Some(addr);
-        let shots = std::env::var_os("COMET_SIM_SHOTS").is_some();
-        let only = std::env::var("COMET_SIM_AUDIT").unwrap_or_default().to_lowercase();
+        let shots = std::env::var_os("MAIA_SIM_SHOTS").is_some();
+        let only = std::env::var("MAIA_SIM_AUDIT").unwrap_or_default().to_lowercase();
         for theme in [ThemeName::Midnight, ThemeName::Paper, ThemeName::Latte, ThemeName::Gruvbox] {
             for (w, h) in [(1280.0, 800.0), (720.0, 480.0)] {
                 let tag = format!("{}-{w}", theme.label().to_lowercase().replace(' ', ""));
@@ -5140,10 +5140,10 @@ mod journeys {
         if !sandboxed() {
             return;
         }
-        let seeds: u64 = std::env::var("COMET_SIM_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
-        let steps: usize = std::env::var("COMET_SIM_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+        let seeds: u64 = std::env::var("MAIA_SIM_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+        let steps: usize = std::env::var("MAIA_SIM_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
         let mut all = vec![];
-        let only: Option<u64> = std::env::var("COMET_SIM_SEED").ok().and_then(|v| v.parse().ok());
+        let only: Option<u64> = std::env::var("MAIA_SIM_SEED").ok().and_then(|v| v.parse().ok());
         for seed in only.map(|o| o..=o).unwrap_or(1..=seeds) {
             let home = fixture(&format!("monkey{seed}"));
             // A git work tree with every kind of change, for the status marks.

@@ -12,17 +12,19 @@ use crate::fuzzy;
 use crate::rename::Rename;
 use crate::stats::DirStats;
 
-pub const COMPUTER: &str = "comet:computer";
+pub const COMPUTER: &str = "maia:computer";
 
 pub fn is_computer(p: &Path) -> bool {
-    p.as_os_str() == COMPUTER
+    // (Or its form under an earlier name, as an older saved session may have it.)
+    p.as_os_str() == COMPUTER || p.to_str().is_some_and(|s| s.ends_with(":computer") && !s.contains('/') && s.len() < 24)
 }
 
-/// Computer view rows for drives that aren't mounted: "comet:drive:/dev/sdb1".
-pub const DRIVE: &str = "comet:drive:";
+/// Computer view rows for drives that aren't mounted: "maia:drive:/dev/sdb1".
+pub const DRIVE: &str = "maia:drive:";
 
 pub fn drive_dev(p: &Path) -> Option<&str> {
-    p.to_str()?.strip_prefix(DRIVE)
+    let s = p.to_str()?;
+    s.strip_prefix(DRIVE).or_else(|| s.split_once(":drive:").filter(|(name, _)| !name.contains('/')).map(|(_, dev)| dev))
 }
 
 #[derive(Clone, Debug, Default)]
