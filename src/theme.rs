@@ -222,6 +222,16 @@ impl Palette {
         if lum < 0.3 { Color32::WHITE } else { self.text }
     }
 
+    /// A quiet card inside a popup (a group of rows): a step from the popup towards the
+    /// window, as Options draws its groups.
+    pub fn card(&self) -> Color32 {
+        self.raised.lerp_to_gamma(self.bg, 0.45)
+    }
+
+    pub fn card_line(&self) -> Color32 {
+        self.border.gamma_multiply(0.8)
+    }
+
     /// Secondary text on a selected row: `on_sel` a little blended into the selection. The
     /// dim grey used elsewhere sinks into a saturated selection.
     pub fn on_sel_dim(&self) -> Color32 {

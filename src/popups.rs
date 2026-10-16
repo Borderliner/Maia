@@ -467,19 +467,116 @@ fn popup_frame(pal: &Palette) -> egui::Frame {
         .shadow(egui::epaint::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(90) })
 }
 
+/// A path with the home folder written as ~.
+fn home_short(p: &Path) -> String {
+    match p.strip_prefix(fsx::home()) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => p.display().to_string(),
+    }
+}
+
+/// A dialog's title, with an optional dim line under it.
+fn dialog_title(ui: &mut Ui, title: &str, sub: Option<&str>, pal: &Palette) {
+    let fs = ui.style().text_styles.get(&egui::TextStyle::Body).map_or(13.0, |f| f.size);
+    ui.add(egui::Label::new(egui::RichText::new(title).strong().size(fs + 1.5).color(pal.text)).wrap());
+    if let Some(sub) = sub {
+        ui.add(egui::Label::new(egui::RichText::new(sub).color(pal.text_dim)).wrap());
+    }
+}
+
+/// A group's name over its card, as Options labels its groups.
+fn group_label(ui: &mut Ui, text: &str, pal: &Palette) {
+    ui.add_space(8.0);
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+    ui.painter().text(pos2(r.left() + 4.0, r.center().y - 1.0), Align2::LEFT_CENTER, text, FontId::proportional(11.5), pal.text_dim);
+}
+
+/// A quiet card holding a group of rows inside a dialog.
+fn card<R>(ui: &mut Ui, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> R {
+    egui::Frame::NONE
+        .fill(pal.card())
+        .stroke(Stroke::new(1.0, pal.card_line()))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+/// A label and its value on one row of a card: the label in a column of its own, both
+/// on the first line when the value wraps.
+fn field_row(ui: &mut Ui, key_w: f32, key: &str, pal: &Palette, value: impl FnOnce(&mut Ui)) {
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        let g = ui.painter().layout_no_wrap(key.to_string(), egui::TextStyle::Body.resolve(ui.style()), pal.text_dim);
+        let (r, _) = ui.allocate_exact_size(vec2(key_w, g.size().y), Sense::hover());
+        ui.painter().galley(r.min, g, pal.text_dim);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            value(ui)
+        });
+    });
+}
+
+/// A dialog's buttons, on the right; the first given is the rightmost (the main one).
+fn dialog_buttons(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    ui.add_space(12.0);
+    // In a row of its own first: laid out right to left straight in the dialog, the
+    // buttons would centre on all the height left below them.
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            add(ui)
+        });
+    });
+}
+
+/// The main button of a dialog, in the accent.
+fn primary_button(ui: &mut Ui, label: &str, enabled: bool, pal: &Palette) -> egui::Response {
+    ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(label).color(Color32::WHITE)).fill(pal.accent).min_size(vec2(72.0, 0.0)))
+}
+
+/// A dialog's other buttons: a quiet fill and outline, so they read as buttons and not
+/// as text beside the accent one.
+fn plain_button(ui: &mut Ui, label: &str, pal: &Palette) -> egui::Response {
+    ui.add(egui::Button::new(label).fill(pal.card()).stroke(Stroke::new(1.0, pal.card_line())).min_size(vec2(72.0, 0.0)))
+}
+
 /// Top-centered popup. Returns (inner, rect).
+/// How far below the window's top a centred popup opens: less in a short window.
+fn popup_top(screen: Rect) -> f32 {
+    (screen.height() * 0.09).clamp(12.0, 70.0).round()
+}
+
+/// A popup's list, as tall as `max` but leaving `chrome` (its search field, hints and
+/// margins) room in the window: in a short one the list shrank off the bottom.
+fn fit_list(ctx: &egui::Context, max: f32, chrome: f32) -> f32 {
+    let s = ctx.content_rect();
+    max.min(s.height() - popup_top(s) - 12.0 - chrome).max(96.0)
+}
+
 fn centered<R>(ctx: &egui::Context, id: &str, width: f32, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
     let screen = ctx.content_rect();
     let w = width.min(screen.width() - 24.0);
+    let top = popup_top(screen);
+    // A dialog taller than the window scrolls instead of losing its buttons off the
+    // bottom; the scroll area claims its height (see `anchored`).
+    let room = (screen.height() - top - 12.0 - 16.0).max(60.0);
     note_layer(Id::new(id));
     let r = egui::Area::new(Id::new(id))
         .order(egui::Order::Foreground)
-        .fixed_pos(pos2(screen.center().x - w / 2.0, screen.top() + 70.0))
+        .fixed_pos(pos2((screen.center().x - w / 2.0).round(), screen.top() + top))
         .show(ctx, |ui| {
             popup_frame(pal)
                 .show(ui, |ui| {
                     ui.set_width(w - 16.0);
-                    add(ui)
+                    egui::ScrollArea::vertical().id_salt("dialog").max_height(room).min_scrolled_height(room).auto_shrink([false, true]).show(ui, |ui| {
+                        ui.set_width(w - 16.0);
+                        add(ui)
+                    }).inner
                 })
                 .inner
         });
@@ -490,12 +587,16 @@ fn centered<R>(ctx: &egui::Context, id: &str, width: f32, pal: &Palette, add: im
 fn anchored<R>(ctx: &egui::Context, id: &str, pos: Pos2, width: f32, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
     let screen = ctx.content_rect();
     let x = pos.x.min(screen.right() - width - 8.0).max(screen.left() + 4.0);
-    let r = egui::Area::new(Id::new(id)).order(egui::Order::Foreground).fixed_pos(pos2(x, pos.y)).constrain(true).show(ctx, |ui| {
+    // Kept off the window's edges, and scrolled when taller than the window (a Quick menu
+    // with a long list ran off the bottom). The scroll area claims its height: the area
+    // remembers its last size and would cut a longer menu short (see ctxmenu.rs).
+    let room = (screen.height() - 16.0 - 10.0).max(60.0);
+    let r = egui::Area::new(Id::new(id)).order(egui::Order::Foreground).fixed_pos(pos2(x, pos.y)).constrain_to(screen.shrink(6.0)).show(ctx, |ui| {
         popup_frame(pal)
             .inner_margin(egui::Margin::same(5))
             .show(ui, |ui| {
                 ui.set_width(width - 10.0);
-                add(ui)
+                egui::ScrollArea::vertical().max_height(room).min_scrolled_height(room).auto_shrink([false, true]).show(ui, add).inner
             })
             .inner
     });
@@ -1010,7 +1111,7 @@ fn goto(app: &mut App, ctx: &egui::Context, st: &mut GoToState) -> bool {
             fuzzy::Query::new(&st.input)
         };
         let row_h = 30.0;
-        egui::ScrollArea::vertical().max_height(420.0).auto_shrink([false, true]).show_rows(ui, row_h, st.items.len(), |ui, range| {
+        egui::ScrollArea::vertical().max_height(fit_list(ctx, 420.0, 110.0)).auto_shrink([false, true]).show_rows(ui, row_h, st.items.len(), |ui, range| {
             for i in range {
                 let it = &st.items[i];
                 if it.header {
@@ -1340,7 +1441,7 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
                 close = true;
             }
         });
-        egui::ScrollArea::vertical().max_height(460.0).auto_shrink([false, true]).show(ui, |ui| {
+        egui::ScrollArea::vertical().max_height(fit_list(ctx, 460.0, 110.0)).auto_shrink([false, true]).show(ui, |ui| {
             for (i, r) in rows.iter().enumerate() {
                 match r {
                     PRow::Header(cat, collapsed) => {
@@ -2851,14 +2952,15 @@ fn prompt(app: &mut App, ctx: &egui::Context, title: &str, text: &mut String, on
     }
     let mut cancel = false;
     centered(ctx, "prompt", 420.0, &pal, |ui| {
-        ui.label(egui::RichText::new(title).strong());
+        dialog_title(ui, title, None, &pal);
+        ui.add_space(8.0);
         let r = ui.add(egui::TextEdit::singleline(text).desired_width(f32::INFINITY));
         r.request_focus();
-        ui.horizontal(|ui| {
-            if ui.button("OK").clicked() {
+        dialog_buttons(ui, |ui| {
+            if primary_button(ui, "OK", true, &pal).clicked() {
                 ok = true;
             }
-            if ui.button("Cancel").clicked() {
+            if plain_button(ui, "Cancel", &pal).clicked() {
                 cancel = true;
             }
         });
@@ -2889,8 +2991,8 @@ fn connect(app: &mut App, ctx: &egui::Context, st: &mut ConnectState) -> bool {
     let mut cancel = false;
     let mut pick: Option<String> = None;
     centered(ctx, "connect", 440.0, &pal, |ui| {
-        ui.label(egui::RichText::new("Connect to server").strong());
-        ui.add_space(6.0);
+        dialog_title(ui, "Connect to server", None, &pal);
+        ui.add_space(8.0);
         let field = |ui: &mut Ui, label: &str, id: &'static str, text: &mut String, hint: &str, secret: bool, focus: bool| {
             ui.label(egui::RichText::new(label).small().color(pal.text_dim));
             let r = ui.add_enabled(!busy, egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_dim)).password(secret).desired_width(f32::INFINITY));
@@ -2928,21 +3030,18 @@ fn connect(app: &mut App, ctx: &egui::Context, st: &mut ConnectState) -> bool {
                 }
             }
         }
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(valid && !busy, egui::Button::new(egui::RichText::new("Connect").color(Color32::WHITE)).fill(pal.accent)).clicked() {
-                    go = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
-                }
-                if busy {
-                    let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
-                    crate::ui::spinner(ui.painter(), r.center(), 6.0, pal.accent, ui.input(|i| i.time));
-                    ui.ctx().request_repaint();
-                }
-            });
+        dialog_buttons(ui, |ui| {
+            if primary_button(ui, "Connect", valid && !busy, &pal).clicked() {
+                go = true;
+            }
+            if plain_button(ui, "Cancel", &pal).clicked() {
+                cancel = true;
+            }
+            if busy {
+                let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+                crate::ui::spinner(ui.painter(), r.center(), 6.0, pal.accent, ui.input(|i| i.time));
+                ui.ctx().request_repaint();
+            }
         });
     });
     if let Some(s) = pick {
@@ -2967,10 +3066,8 @@ fn archive_password(app: &mut App, ctx: &egui::Context, st: &mut PasswordState) 
     let mut cancel = false;
     let name = st.archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     centered(ctx, "archive password", 400.0, &pal, |ui| {
-        let g = crate::listing::elided(ui, &format!("“{name}” is password-protected"), FontId::proportional(app.cfg.font_size), ui.available_width(), pal.text);
-        let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
-        ui.painter().galley(r.min, g, pal.text);
-        ui.add_space(6.0);
+        dialog_title(ui, &format!("“{name}” is password-protected"), None, &pal);
+        ui.add_space(8.0);
         ui.label(egui::RichText::new("Password").small().color(pal.text_dim));
         let r = ui.add(egui::TextEdit::singleline(&mut st.text).password(true).desired_width(f32::INFINITY));
         crate::ui::note_control(ui, r.rect, "archive password field");
@@ -2982,16 +3079,13 @@ fn archive_password(app: &mut App, ctx: &egui::Context, st: &mut PasswordState) 
             ui.add_space(4.0);
             ui.label(egui::RichText::new("Wrong password").color(pal.danger));
         }
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(!st.text.is_empty(), egui::Button::new(egui::RichText::new("Unlock").color(Color32::WHITE)).fill(pal.accent)).clicked() {
-                    go = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
-                }
-            });
+        dialog_buttons(ui, |ui| {
+            if primary_button(ui, "Unlock", !st.text.is_empty(), &pal).clicked() {
+                go = true;
+            }
+            if plain_button(ui, "Cancel", &pal).clicked() {
+                cancel = true;
+            }
         });
     });
     if go {
@@ -3484,17 +3578,14 @@ fn confirm(app: &mut App, ctx: &egui::Context, msg: &str, ok_label: &str, on_ok:
     ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, Id::new("dim"))).rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(90));
     centered(ctx, "confirm", 440.0, &pal, |ui| {
         ui.add_space(4.0);
-        ui.label(egui::RichText::new(msg).size(14.0));
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Button::new(egui::RichText::new(ok_label).color(Color32::WHITE)).fill(pal.danger)).clicked() {
-                    ok = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
-                }
-            });
+        dialog_title(ui, msg, None, &pal);
+        dialog_buttons(ui, |ui| {
+            if ui.add(egui::Button::new(egui::RichText::new(ok_label).color(Color32::WHITE)).fill(pal.danger).min_size(vec2(72.0, 0.0))).clicked() {
+                ok = true;
+            }
+            if plain_button(ui, "Cancel", &pal).clicked() {
+                cancel = true;
+            }
         });
     });
     if ok {
@@ -3525,38 +3616,45 @@ fn conflict(app: &mut App, ctx: &egui::Context, st: &mut ConflictState) -> bool 
     let mut cancel = false;
     let remaining = st.items.len() - st.idx;
     centered(ctx, "conflict", 520.0, &pal, |ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
         let name = item.dst.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        ui.label(egui::RichText::new(format!("“{name}” already exists")).strong().size(15.0));
-        ui.label(egui::RichText::new(format!("in {}", st.dest.display())).color(pal.text_dim));
-        ui.add_space(8.0);
-        egui::Grid::new("cf").num_columns(2).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
-            ui.label(egui::RichText::new(if st.mv { "Moving" } else { "Copying" }).color(pal.text_dim));
-            ui.label(info(&item.src));
-            ui.end_row();
-            ui.label(egui::RichText::new("Existing").color(pal.text_dim));
-            ui.label(info(&item.dst));
-            ui.end_row();
+        dialog_title(ui, &format!("“{name}” already exists"), Some(&format!("in {}", home_short(&st.dest))), &pal);
+        ui.add_space(6.0);
+        let verb = if st.mv { "Moving" } else { "Copying" };
+        let body = egui::TextStyle::Body.resolve(ui.style());
+        let key_w = [verb, "Existing"].iter().map(|k| ui.painter().layout_no_wrap(k.to_string(), body.clone(), pal.text_dim).size().x).fold(0.0, f32::max).ceil();
+        card(ui, &pal, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            field_row(ui, key_w, verb, &pal, |ui| {
+                ui.label(info(&item.src));
+            });
+            field_row(ui, key_w, "Existing", &pal, |ui| {
+                ui.label(info(&item.dst));
+            });
         });
-        ui.add_space(8.0);
         if remaining > 1 {
+            ui.add_space(4.0);
             ui.checkbox(&mut st.apply_all, format!("Apply to all {remaining} conflicts"));
         }
-        ui.add_space(4.0);
+        ui.add_space(12.0);
         ui.horizontal(|ui| {
-            if ui.button("Replace").clicked() {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if plain_button(ui, "Replace", &pal).clicked() {
                 decision = Some(Conflict::Overwrite);
             }
-            if both_dirs && ui.button("Merge").on_hover_text("Copy into the existing folder, replacing files").clicked() {
+            if both_dirs && plain_button(ui, "Merge", &pal).on_hover_text("Copy into the existing folder, replacing files").clicked() {
                 decision = Some(Conflict::Merge);
             }
-            if ui.button("Keep both").clicked() {
-                decision = Some(Conflict::KeepBoth);
-            }
-            if ui.button("Skip").clicked() {
+            if plain_button(ui, "Skip", &pal).clicked() {
                 decision = Some(Conflict::Skip);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Cancel").clicked() {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                // Keeping both loses nothing: the main button.
+                if primary_button(ui, "Keep both", true, &pal).clicked() {
+                    decision = Some(Conflict::KeepBoth);
+                }
+                if plain_button(ui, "Cancel", &pal).clicked() {
                     cancel = true;
                 }
             });
@@ -3604,104 +3702,131 @@ fn properties(app: &mut App, ctx: &egui::Context, st: &mut PropState) -> bool {
     let mut close = false;
     st.refresh();
     let snap = st.snap.take();
-    let (_, rect) = centered(ctx, "props", 480.0, &pal, |ui| {
+    let (_, rect) = centered(ctx, "props", 500.0, &pal, |ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
         let Some(snap) = &snap else { return };
         if st.paths.len() == 1 {
             let p = st.paths[0].clone();
             let Some((m, e)) = snap.single.clone() else {
-                ui.label("Item no longer exists");
+                dialog_title(ui, "Item no longer exists", Some(&p.display().to_string()), &pal);
+                dialog_buttons(ui, |ui| close = plain_button(ui, "Close", &pal).clicked());
                 return;
             };
+            // The item: its icon, name and kind.
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
                 let (r, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
                 if !crate::icons::entry(ui.painter(), r, &e) {
                     theme::paint_icon(ui.painter(), r, theme::categorize(&e.ext(), e.is_dir, e.is_executable()), &e.ext(), e.is_link);
                 }
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new(&e.name).strong().size(15.0));
+                    ui.spacing_mut().item_spacing.y = 2.0;
                     let db = crate::mime::mime_db();
                     let mime = db.for_name(&e.name, e.is_dir, e.is_executable());
-                    ui.label(egui::RichText::new(format!("{} · {mime}", db.comment(&mime))).color(pal.text_dim));
+                    dialog_title(ui, &e.name, Some(&format!("{} · {mime}", db.comment(&mime))), &pal);
                 });
             });
-            ui.separator();
-            egui::Grid::new("props").num_columns(2).spacing(vec2(14.0, 5.0)).show(ui, |ui| {
-                let mut kv = |k: &str, v: String| {
-                    ui.label(egui::RichText::new(k).color(pal.text_dim));
+            ui.add_space(6.0);
+            // Every label's column as wide as the widest one shown.
+            let body = egui::TextStyle::Body.resolve(ui.style());
+            let key_w = ["Location", "Size", "Accessed", "Owner", "Link target", "Checksum"].iter().map(|k| ui.painter().layout_no_wrap(k.to_string(), body.clone(), pal.text_dim).size().x).fold(0.0, f32::max).ceil();
+            card(ui, &pal, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                let kv = |ui: &mut Ui, k: &str, v: String| field_row(ui, key_w, k, &pal, |ui| {
                     ui.add(egui::Label::new(v).wrap());
-                    ui.end_row();
-                };
-                kv("Location", p.parent().map(|x| x.display().to_string()).unwrap_or_default());
+                });
+                kv(ui, "Location", p.parent().map(|x| x.display().to_string()).unwrap_or_default());
                 if e.is_dir {
                     match app.stats.map.get(&p) {
-                        Some(s) => kv("Size", format!("{} ({} bytes)\n{} files, {} folders", fsx::fmt_size(s.size), s.size, s.files, s.folders)),
+                        Some(s) => kv(ui, "Size", format!("{} ({} bytes)\n{} files, {} folders", fsx::fmt_size(s.size), s.size, s.files, s.folders)),
                         None => {
                             app.stats.request(&p);
-                            kv("Size", "Calculating…".into())
+                            kv(ui, "Size", "Calculating…".into())
                         }
                     }
                 } else {
-                    kv("Size", format!("{} ({} bytes)", fsx::fmt_size(e.size), e.size));
-                }
-                kv("Created", fsx::fmt_time(e.created));
-                kv("Modified", fsx::fmt_time(e.modified));
-                kv("Accessed", fsx::fmt_time(m.accessed().ok()));
-                kv("Owner", format!("{} : {}", user_name(m.uid(), "/etc/passwd"), user_name(m.gid(), "/etc/group")));
-                if let Some(t) = crate::tags::get(&p, |t| t.join(", ")).filter(|t| !t.is_empty()) {
-                    kv("Tags", t);
-                }
-                if let Some(t) = &snap.link {
-                    kv("Link target", t.clone());
+                    kv(ui, "Size", format!("{} ({} bytes)", fsx::fmt_size(e.size), e.size));
                 }
                 if let Some((total, free)) = snap.vol {
-                    kv("Volume", format!("{} free of {}", fsx::fmt_size(free), fsx::fmt_size(total)));
+                    kv(ui, "Volume", format!("{} free of {}", fsx::fmt_size(free), fsx::fmt_size(total)));
                 }
-                if m.is_file() {
-                    ui.label(egui::RichText::new("Checksum").color(pal.text_dim));
-                    ui.vertical(|ui| checksum_row(ui, ctx, &p, st, &pal));
-                    ui.end_row();
+                if let Some(t) = &snap.link {
+                    kv(ui, "Link target", t.clone());
+                }
+                if let Some(t) = crate::tags::get(&p, |t| t.join(", ")).filter(|t| !t.is_empty()) {
+                    kv(ui, "Tags", t);
                 }
             });
-            ui.separator();
-            // Permissions
+            card(ui, &pal, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                let kv = |ui: &mut Ui, k: &str, v: String| field_row(ui, key_w, k, &pal, |ui| {
+                    ui.add(egui::Label::new(v).wrap());
+                });
+                kv(ui, "Created", fsx::fmt_time(e.created));
+                kv(ui, "Modified", fsx::fmt_time(e.modified));
+                kv(ui, "Accessed", fsx::fmt_time(m.accessed().ok()));
+                kv(ui, "Owner", format!("{} : {}", user_name(m.uid(), "/etc/passwd"), user_name(m.gid(), "/etc/group")));
+            });
+            if m.is_file() {
+                group_label(ui, "Checksum", &pal);
+                card(ui, &pal, |ui| checksum_row(ui, ctx, &p, st, &pal));
+            }
+            // Permissions: who may read, write and run it, in columns under their names.
+            group_label(ui, "Permissions", &pal);
             let mode = st.mode.get_or_insert(m.mode() & 0o7777);
-            ui.label(egui::RichText::new("Permissions").color(pal.text_dim));
-            egui::Grid::new("perm").num_columns(4).show(ui, |ui| {
-                ui.label("");
-                for h in ["Read", "Write", "Execute"] {
-                    ui.label(egui::RichText::new(h).small());
+            card(ui, &pal, |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                let col_w = 72.0;
+                let row_h = 22.0;
+                let (head, _) = ui.allocate_exact_size(vec2(key_w + 12.0 + 3.0 * col_w, 18.0), Sense::hover());
+                for (k, h) in ["Read", "Write", "Execute"].iter().enumerate() {
+                    let cx = head.left() + key_w + 12.0 + col_w * (k as f32 + 0.5);
+                    ui.painter().text(pos2(cx, head.center().y), Align2::CENTER_CENTER, *h, FontId::proportional(11.5), pal.text_dim);
                 }
-                ui.end_row();
                 for (who, shift) in [("Owner", 6), ("Group", 3), ("Others", 0)] {
-                    ui.label(who);
-                    for bit in [4u32, 2, 1] {
+                    let (r, _) = ui.allocate_exact_size(vec2(key_w + 12.0 + 3.0 * col_w, row_h), Sense::hover());
+                    ui.painter().text(pos2(r.left(), r.center().y), Align2::LEFT_CENTER, who, body.clone(), pal.text);
+                    for (k, bit) in [4u32, 2, 1].into_iter().enumerate() {
                         let mask = bit << shift;
-                        let mut on = *mode & mask != 0;
-                        if ui.checkbox(&mut on, "").changed() {
-                            if on {
-                                *mode |= mask;
-                            } else {
-                                *mode &= !mask;
-                            }
+                        let on = *mode & mask != 0;
+                        let cx = r.left() + key_w + 12.0 + col_w * (k as f32 + 0.5);
+                        let br = Rect::from_center_size(pos2(cx, r.center().y), Vec2::splat(16.0));
+                        let resp = ui.interact(br.expand(3.0), Id::new(("perm", shift, bit)), Sense::click());
+                        checkbox_glyph(ui.painter(), br, on, &pal);
+                        if resp.hovered() && !on {
+                            ui.painter().rect_stroke(br, CornerRadius::same(3), Stroke::new(1.2, pal.text_dim), StrokeKind::Inside);
+                        }
+                        if resp.has_focus() {
+                            ui.painter().rect_stroke(br.expand(2.5), CornerRadius::same(5), Stroke::new(1.5, pal.accent), StrokeKind::Inside);
+                        }
+                        if resp.clicked() {
+                            *mode ^= mask;
                         }
                     }
-                    ui.end_row();
                 }
+                ui.add_space(2.0);
+                let shown = *mode;
+                ui.label(egui::RichText::new(format!("{:04o}  {}", shown, fsx::fmt_mode(shown, e.is_dir))).monospace().color(pal.text_dim));
             });
             let orig = m.mode() & 0o7777;
             let mode = *mode;
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(format!("{:04o}  {}", mode, fsx::fmt_mode(mode, e.is_dir))).monospace());
-                if mode != orig && ui.button("Apply").clicked() {
-                    use std::os::unix::fs::PermissionsExt;
-                    match std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)) {
-                        Ok(()) => app.toast("Permissions updated"),
-                        Err(err) => app.toast(format!("Couldn't change permissions: {err}")),
+            dialog_buttons(ui, |ui| {
+                if mode != orig {
+                    if primary_button(ui, "Apply", true, &pal).clicked() {
+                        use std::os::unix::fs::PermissionsExt;
+                        match std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)) {
+                            Ok(()) => app.toast("Permissions updated"),
+                            Err(err) => app.toast(format!("Couldn't change permissions: {err}")),
+                        }
                     }
+                    if plain_button(ui, "Close", &pal).clicked() {
+                        close = true;
+                    }
+                } else if primary_button(ui, "Close", true, &pal).clicked() {
+                    close = true;
                 }
             });
         } else {
-            ui.label(egui::RichText::new(format!("{} items", st.paths.len())).strong().size(15.0));
             let mut total = 0u64;
             let mut pending = false;
             let (mut files, mut dirs) = (0, 0);
@@ -3720,15 +3845,23 @@ fn properties(app: &mut App, ctx: &egui::Context, st: &mut PropState) -> bool {
                     total += len;
                 }
             }
-            ui.label(format!("{files} files, {dirs} folders"));
-            ui.label(format!("Total size: {}{}", fsx::fmt_size(total), if pending { " (calculating…)" } else { "" }));
-            if let Some(parent) = st.paths[0].parent() {
-                ui.label(egui::RichText::new(format!("in {}", parent.display())).color(pal.text_dim));
-            }
-        }
-        ui.add_space(6.0);
-        if ui.button("Close").clicked() {
-            close = true;
+            let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+            dialog_title(ui, &format!("{} items", st.paths.len()), Some(&format!("{}, {}", count(files, "file", "files"), count(dirs, "folder", "folders"))), &pal);
+            ui.add_space(6.0);
+            let body = egui::TextStyle::Body.resolve(ui.style());
+            let key_w = ["Location", "Size"].iter().map(|k| ui.painter().layout_no_wrap(k.to_string(), body.clone(), pal.text_dim).size().x).fold(0.0, f32::max).ceil();
+            card(ui, &pal, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                field_row(ui, key_w, "Size", &pal, |ui| {
+                    ui.label(format!("{}{}", fsx::fmt_size(total), if pending { " (calculating…)" } else { "" }));
+                });
+                if let Some(parent) = st.paths[0].parent() {
+                    field_row(ui, key_w, "Location", &pal, |ui| {
+                        ui.add(egui::Label::new(parent.display().to_string()).wrap());
+                    });
+                }
+            });
+            dialog_buttons(ui, |ui| close = primary_button(ui, "Close", true, &pal).clicked());
         }
     });
     ctx.request_repaint_after(std::time::Duration::from_millis(300));
@@ -3747,7 +3880,8 @@ fn checksum_row(ui: &mut Ui, ctx: &egui::Context, p: &Path, st: &mut PropState, 
     let mut start = None;
     ui.horizontal(|ui| {
         let busy = st.sum_job.is_some();
-        let bw = if busy { 0.0 } else { 74.0 };
+        // Room for the SHA-256 button only while it is there.
+        let bw = if !busy && st.sum.is_none() { 74.0 } else { 0.0 };
         let r = ui.add(egui::TextEdit::singleline(&mut st.expected).hint_text(egui::RichText::new("Paste one to compare").color(pal.text_dim)).desired_width(ui.available_width() - bw));
         crate::ui::note_control(ui, r.rect, "checksum field");
         // Pasting a checksum works out the same kind for this file.
