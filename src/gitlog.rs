@@ -1291,7 +1291,7 @@ fn avatar(p: &egui::Painter, c: Pos2, d: f32, name: &str, col: Color32) {
 
 /// The commit header's author circle and the graph rows' smaller one, across.
 fn face_sizes(fs: f32) -> (f32, f32) {
-    ((fs * 2.3).round(), (fs - 1.5 + 1.5).round())
+    ((fs * 2.3).round(), fs.round())
 }
 
 /// Both sizes in pixels, which the pictures are cut to.
