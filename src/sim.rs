@@ -944,6 +944,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             // history; then a walk through it with keys and clicks.
             let chip = s.texts.iter().filter(|(_, t)| t == "main").max_by(|a, b| a.0.center().y.total_cmp(&b.0.center().y)).map(|(r, _)| r.center());
             if let Some(c) = chip {
+                s.note("the branch chip".into());
                 s.act(&format!("click {:.0} {:.0}", c.x, c.y));
                 s.idle(3);
             }
