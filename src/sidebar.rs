@@ -464,7 +464,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 }
                 let ic = Rect::from_center_size(pos2(r.left() + 36.0, r.top() + row_h / 2.0 + 1.0), Vec2::splat(15.0));
                 let g = if drive.is_some_and(|d| d.removable) { Glyph::Usb } else { Glyph::Drive };
-                let icol = if sel { pal.accent } else if mounted { pal.text_dim } else { pal.text_dim.gamma_multiply(0.6) };
+                let icol = if sel { pal.on_sel() } else if mounted { pal.text_dim } else { pal.text_dim.gamma_multiply(0.6) };
                 paint_glyph(ui.painter(), ic, g, icol);
                 // Room on the right for the eject button (or the spinner while busy).
                 let btn = Rect::from_center_size(pos2(r.right() - 20.0, ic.center().y), Vec2::splat(20.0));

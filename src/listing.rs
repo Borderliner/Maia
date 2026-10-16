@@ -220,6 +220,13 @@ fn paint_dots(p: &egui::Painter, x: f32, y: f32, dots: &[Color32], r: f32, ring:
     if dots.is_empty() { 0.0 } else { step * dots.len() as f32 - 2.5 }
 }
 
+/// Secondary text, match highlight and the ring around colour dots on an item: on a
+/// selected one the dim grey and the accent sink into the selection colour, and a blue
+/// dot would vanish without a ring.
+fn sel_colors(pal: &theme::Palette, selected: bool) -> (Color32, Color32, Color32) {
+    if selected { (pal.on_sel_dim(), pal.on_sel(), pal.on_sel()) } else { (pal.text_dim, pal.accent, Color32::TRANSPARENT) }
+}
+
 /// After a row's name: its colour dots, then its other tags in small dim text. Returns
 /// the width they need, measured before the name is laid out so it leaves the room.
 fn tags_width(ui: &Ui, tags: &(Vec<Color32>, String), font: &FontId) -> f32 {
@@ -229,15 +236,15 @@ fn tags_width(ui: &Ui, tags: &(Vec<Color32>, String), font: &FontId) -> f32 {
     dots + words
 }
 
-fn paint_tags(ui: &Ui, x: f32, y: f32, tags: &(Vec<Color32>, String), font: &FontId, pal: &theme::Palette, ring: Color32) {
+fn paint_tags(ui: &Ui, x: f32, y: f32, tags: &(Vec<Color32>, String), font: &FontId, dim: Color32, ring: Color32) {
     let r = (font.size * 0.28).clamp(3.0, 5.0);
     let mut x = x;
     if !tags.0.is_empty() {
         x += 8.0 + paint_dots(ui.painter(), x + 8.0, y, &tags.0, r, ring);
     }
     if !tags.1.is_empty() {
-        let g = ui.painter().layout_no_wrap(tags.1.clone(), FontId::proportional(font.size - 1.5), pal.text_dim);
-        ui.painter().galley(pos2(x + 8.0, y - g.size().y / 2.0), g, pal.text_dim);
+        let g = ui.painter().layout_no_wrap(tags.1.clone(), FontId::proportional(font.size - 1.5), dim);
+        ui.painter().galley(pos2(x + 8.0, y - g.size().y / 2.0), g, dim);
     }
 }
 
@@ -859,6 +866,7 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                     // Cut items, and tree context rows that only lead to filter matches, are faded.
                     let faded = env.cut.contains(&e.path) || t.dimmed.contains(&idx) || unmounted(t, &e);
                     let dimc = |c: Color32| if faded { c.gamma_multiply(0.45) } else { c };
+                    let (sub, acc, ring) = sel_colors(&pal, selected && !editing);
                     let mut x = origin.x + pad;
                     for (c, w) in &cols {
                         let w = col_w(*c, *w);
@@ -1233,12 +1241,13 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                     if !rename_field(ui, name_r, idx, t, env, &font) {
                         let tags = row_tags(&e.path);
                         let room = tags.as_ref().map_or(0.0, |tg| tags_width(ui, tg, &font));
-                        let job = name_job(&display_name(&e, env.cfg), None, q, &font, dimc(pal.text), pal.text_dim, pal.accent, (name_r.width() - room).max(24.0), 1);
+                        let (sub, acc, ring) = sel_colors(&pal, selected && !editing);
+                        let job = name_job(&display_name(&e, env.cfg), None, q, &font, dimc(pal.text), sub, acc, (name_r.width() - room).max(24.0), 1);
                         let g = ui.fonts_mut(|f| f.layout_job(job));
                         let gw = g.size().x;
                         ui.painter().galley(pos2(name_r.left(), r.center().y - g.size().y / 2.0), g, pal.text);
                         if let Some(tg) = &tags {
-                            paint_tags(ui, name_r.left() + gw, r.center().y, tg, &font, &pal, Color32::TRANSPARENT);
+                            paint_tags(ui, name_r.left() + gw, r.center().y, tg, &font, sub, ring);
                         }
                     }
                 }
@@ -1295,16 +1304,17 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                     let name_line = Rect::from_min_size(text_r.min, vec2(text_r.width(), font.size + 6.0));
                     if !rename_field(ui, name_line, idx, t, env, &font) {
                         let rows = if s < 72.0 { 1 } else { 2 };
-                        let mut job = name_job(&display_name(&e, env.cfg), None, q, &font, dimc(pal.text), pal.text_dim, pal.accent, text_r.width(), rows);
+                        let (sub, acc, _) = sel_colors(&pal, selected && !editing);
+                        let mut job = name_job(&display_name(&e, env.cfg), None, q, &font, dimc(pal.text), sub, acc, text_r.width(), rows);
                         job.halign = egui::Align::Center;
                         let g = ui.fonts_mut(|f| f.layout_job(job));
                         let gh = g.size().y;
                         ui.painter().galley(pos2(text_r.center().x, text_r.top()), g, pal.text);
                         {
-                            let sub = entry_size_text(&e, t, env);
-                            let sub = if sub.is_empty() { "--".to_string() } else { sub };
+                            let size = entry_size_text(&e, t, env);
+                            let size = if size.is_empty() { "--".to_string() } else { size };
                             if gh < text_r.height() - 8.0 {
-                                ui.painter().text(pos2(text_r.center().x, text_r.top() + gh + 1.0), Align2::CENTER_TOP, sub, small.clone(), pal.text_dim);
+                                ui.painter().text(pos2(text_r.center().x, text_r.top() + gh + 1.0), Align2::CENTER_TOP, size, small.clone(), sub);
                             }
                         }
                     }

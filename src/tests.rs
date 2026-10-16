@@ -3288,3 +3288,28 @@ fn updates_check_compare_and_install() {
     assert!(matches!(u.state(), State::CantWrite(_)));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Contrast ratio of two colours (WCAG relative luminance).
+fn contrast(a: egui::Color32, b: egui::Color32) -> f32 {
+    let lum = |c: egui::Color32| {
+        let f = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+    };
+    let (x, y) = (lum(a), lum(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+#[test]
+fn selected_rows_read_in_every_theme() {
+    for t in crate::theme::ThemeName::ALL {
+        let p = crate::theme::palette(t);
+        let (on, dim) = (p.on_sel(), p.on_sel_dim());
+        assert!(contrast(on, p.selected) >= 4.5, "{}: text on the selection {:.2}", t.label(), contrast(on, p.selected));
+        assert!(contrast(dim, p.selected) >= 3.0, "{}: secondary text on the selection {:.2}", t.label(), contrast(dim, p.selected));
+        // The selected text stays apart from its secondary text.
+        assert!(contrast(on, p.selected) > contrast(dim, p.selected));
+    }
+}

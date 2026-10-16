@@ -209,6 +209,26 @@ pub struct Palette {
     pub syntax: Syntax,
 }
 
+impl Palette {
+    /// Text on a selected row: white on a deep selection colour, the theme's own text on
+    /// a pale one (white there all but disappears).
+    pub fn on_sel(&self) -> Color32 {
+        let lin = |c: u8| {
+            let c = c as f32 / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        let s = self.selected;
+        let lum = 0.2126 * lin(s.r()) + 0.7152 * lin(s.g()) + 0.0722 * lin(s.b());
+        if lum < 0.3 { Color32::WHITE } else { self.text }
+    }
+
+    /// Secondary text on a selected row: `on_sel` a little blended into the selection. The
+    /// dim grey used elsewhere sinks into a saturated selection.
+    pub fn on_sel_dim(&self) -> Color32 {
+        self.on_sel().lerp_to_gamma(self.selected, 0.3)
+    }
+}
+
 pub fn palette(t: ThemeName) -> Palette {
     let mut p = base_palette(t);
     let mix = |a: Color32, b: Color32, t: f32| Color32::from_rgb((a.r() as f32 + (b.r() as f32 - a.r() as f32) * t) as u8, (a.g() as f32 + (b.g() as f32 - a.g() as f32) * t) as u8, (a.b() as f32 + (b.b() as f32 - a.b() as f32) * t) as u8);

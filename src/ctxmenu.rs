@@ -545,7 +545,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                         if sel {
                             ui.painter().rect_filled(r, CornerRadius::same(4), pal.selected);
                         }
-                        let on = if sel { egui::Color32::WHITE } else { pal.text };
+                        let on = if sel { pal.on_sel() } else { pal.text };
                         // Fixed icon column; nested entries indent one step per level.
                         let ic = Rect::from_center_size(pos2(r.left() + 14.0, r.center().y), Vec2::splat(16.0));
                         if let Act::OpenWith(id) = &it.act {
@@ -561,7 +561,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                                 Some(c) => {
                                     ui.painter().circle_filled(ic.center(), 5.0, c);
                                 }
-                                None => paint_glyph(ui.painter(), ic.shrink(1.5), Glyph::Tag, if sel { egui::Color32::WHITE } else { pal.text_dim }),
+                                None => paint_glyph(ui.painter(), ic.shrink(1.5), Glyph::Tag, if sel { pal.on_sel() } else { pal.text_dim }),
                             }
                         }
                         let x0 = r.left() + 32.0 + *depth as f32 * 22.0;
@@ -581,7 +581,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                         };
                         let g = ui.fonts_mut(|f| f.layout_job(job));
                         ui.painter().galley(pos2(x0, r.center().y - g.size().y / 2.0), g, pal.text);
-                        let dimc = if sel { egui::Color32::from_white_alpha(190) } else { pal.text_dim };
+                        let dimc = if sel { pal.on_sel_dim() } else { pal.text_dim };
                         let mut rx = r.right() - 10.0;
                         if !it.children.is_empty() {
                             let c = pos2(rx - 4.0, r.center().y);
@@ -591,7 +591,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                             if let Act::Tag(_, true) = &it.act {
                                 // Every selected item has this tag: a check, and a click removes it.
                                 let c = pos2(rx - 6.0, r.center().y);
-                                let col = if sel { egui::Color32::WHITE } else { pal.accent };
+                                let col = if sel { pal.on_sel() } else { pal.accent };
                                 ui.painter().add(egui::Shape::line(vec![c + vec2(-4.5, 0.0), c + vec2(-1.5, 3.0), c + vec2(4.5, -3.5)], Stroke::new(1.6, col)));
                                 rx -= 22.0;
                             }
@@ -600,7 +600,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                                 if let Some(on_now) = radio_of(*c) {
                                     let cc = pos2(rx - 6.0, r.center().y);
                                     if on_now {
-                                        ui.painter().circle_filled(cc, 6.5, if sel { egui::Color32::WHITE } else { pal.accent });
+                                        ui.painter().circle_filled(cc, 6.5, if sel { pal.on_sel() } else { pal.accent });
                                         ui.painter().circle_filled(cc, 2.5, if sel { pal.selected } else { egui::Color32::WHITE });
                                     } else {
                                         ui.painter().circle_stroke(cc, 6.0, Stroke::new(1.2, dimc.gamma_multiply(0.7)));
@@ -620,7 +620,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                                 let sr = Rect::from_center_size(pos2(rx - 10.0, r.center().y), Vec2::splat(18.0));
                                 let pinned_now = pinned.contains(&it.id);
                                 let sresp = ui.interact(sr, Id::new(("pin", &it.id, i)), Sense::click()).on_hover_text(if pinned_now { "Unpin" } else { "Pin to top" });
-                                crate::ui::star(ui.painter(), sr.center(), 5.5, if pinned_now { if sel { egui::Color32::WHITE } else { pal.accent } } else { dimc }, pinned_now);
+                                crate::ui::star(ui.painter(), sr.center(), 5.5, if pinned_now { if sel { pal.on_sel() } else { pal.accent } } else { dimc }, pinned_now);
                                 if sresp.clicked() {
                                     pin = Some(it.id.clone());
                                     continue;

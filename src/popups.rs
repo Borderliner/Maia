@@ -1034,14 +1034,14 @@ fn goto(app: &mut App, ctx: &egui::Context, st: &mut GoToState) -> bool {
                     let x0 = r.left() + if in_root { 30.0 } else { 6.0 };
                     let ic = Rect::from_center_size(pos2(x0 + 10.0, r.center().y), Vec2::splat(16.0));
                     if tab::is_computer(&it.path) || it.usage.is_some() {
-                        paint_glyph(ui.painter(), ic, Glyph::Drive, if sel { Color32::WHITE } else { pal.text_dim });
+                        paint_glyph(ui.painter(), ic, Glyph::Drive, if sel { pal.on_sel() } else { pal.text_dim });
                     } else if !(it.is_dir && crate::icons::dir(ui.painter(), ic, &it.path)) {
                         let ext = it.path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
                         theme::paint_icon(ui.painter(), ic, theme::categorize(&ext, it.is_dir, false), "", false);
                     }
-                    let tc = if sel { Color32::WHITE } else { pal.text };
+                    let tc = if sel { pal.on_sel() } else { pal.text };
                     let tx = x0 + 26.0;
-                    let mut job = highlight_job(&it.label, &q, FontId::proportional(13.0), tc, if sel { Color32::WHITE } else { pal.accent });
+                    let mut job = highlight_job(&it.label, &q, FontId::proportional(13.0), tc, if sel { tc } else { pal.accent });
                     // One line ending in "…" inside the row; with a location hint, keep room for it.
                     let room = r.right() - tx - if it.sub.is_empty() { 8.0 } else { 90.0 };
                     job.wrap = egui::text::TextWrapping { max_width: room.max(40.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
@@ -1052,11 +1052,11 @@ fn goto(app: &mut App, ctx: &egui::Context, st: &mut GoToState) -> bool {
                     if let Some(u) = it.usage {
                         let bar = Rect::from_min_size(pos2(tx, r.center().y + 6.0), vec2(90.0, 4.0));
                         ui.painter().rect_filled(bar, CornerRadius::same(1), pal.border);
-                        ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * u.clamp(0.0, 1.0), bar.height())), CornerRadius::same(1), if sel { Color32::WHITE } else { pal.accent });
+                        ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * u.clamp(0.0, 1.0), bar.height())), CornerRadius::same(1), if sel { pal.on_sel() } else { pal.accent });
                     }
                     if !it.sub.is_empty() {
                         let chev = Rect::from_center_size(pos2(tx + gw + 10.0, r.center().y), Vec2::splat(9.0));
-                        let sc = if sel { Color32::from_white_alpha(170) } else { pal.text_dim.gamma_multiply(0.75) };
+                        let sc = if sel { pal.on_sel_dim() } else { pal.text_dim.gamma_multiply(0.75) };
                         paint_glyph(ui.painter(), chev, Glyph::ChevronRight, sc);
                         let sub = crate::listing::elided(ui, &it.sub, FontId::proportional(11.5), (r.right() - chev.right() - 10.0).max(20.0), sc);
                         ui.painter().galley(pos2(chev.right() + 4.0, r.center().y - sub.size().y / 2.0), sub, sc);
@@ -1330,7 +1330,7 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
                     PRow::Header(cat, collapsed) => {
                         // Category row: icon and name on the left, fold chevron on the right.
                         let resp = row(ui, if app.cfg.compact_lists { 28.0 } else { 32.0 }, i == st.sel, &pal, |ui, r| {
-                            let col = if i == st.sel { Color32::WHITE } else { pal.text };
+                            let col = if i == st.sel { pal.on_sel() } else { pal.text };
                             paint_cat_glyph(ui.painter(), Rect::from_center_size(pos2(r.left() + 13.0, r.center().y), Vec2::splat(13.0)), *cat, if i == st.sel { col } else { pal.text_dim });
                             ui.painter().text(pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, cat.name(), FontId::proportional(13.0), col);
                             let c = pos2(r.right() - 16.0, r.center().y);
@@ -1362,20 +1362,22 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
                         if sel && (k.up || k.down || k.page_down || k.page_up) {
                             resp.scroll_to_me(None);
                         }
-                        let tcol = if enabled { pal.text } else { pal.text_dim.gamma_multiply(0.7) };
+                        // The dim grey and the accent sink into a saturated selection.
+                        let (dim, acc) = if sel { (pal.on_sel_dim(), pal.on_sel()) } else { (pal.text_dim, pal.accent) };
+                        let tcol = if !enabled { dim.gamma_multiply(0.7) } else if sel { pal.on_sel() } else { pal.text };
                         // Search results carry a category column (icon, name, ›) before the title.
                         let mut tx = r.left() + 10.0;
                         if let Some(cat) = cat_prefix {
                             let cy = r.center().y;
-                            paint_cat_glyph(ui.painter(), Rect::from_center_size(pos2(r.left() + 13.0, cy), Vec2::splat(12.0)), *cat, pal.text_dim);
-                            let cg = crate::listing::elided(ui, cat.name(), FontId::proportional(12.0), 70.0, pal.text_dim);
-                            ui.painter().galley(pos2(r.left() + 28.0, cy - cg.size().y / 2.0), cg, pal.text_dim);
-                            paint_glyph(ui.painter(), Rect::from_center_size(pos2(r.left() + 108.0, cy), Vec2::splat(8.0)), Glyph::ChevronRight, pal.text_dim);
+                            paint_cat_glyph(ui.painter(), Rect::from_center_size(pos2(r.left() + 13.0, cy), Vec2::splat(12.0)), *cat, dim);
+                            let cg = crate::listing::elided(ui, cat.name(), FontId::proportional(12.0), 70.0, dim);
+                            ui.painter().galley(pos2(r.left() + 28.0, cy - cg.size().y / 2.0), cg, dim);
+                            paint_glyph(ui.painter(), Rect::from_center_size(pos2(r.left() + 108.0, cy), Vec2::splat(8.0)), Glyph::ChevronRight, dim);
                             tx = r.left() + 122.0;
                         }
-                        let mut job = highlight_job(info.title, &q, FontId::proportional(13.5), tcol, pal.accent);
+                        let mut job = highlight_job(info.title, &q, FontId::proportional(13.5), tcol, acc);
                         if let Some(a) = app.ud.aliases.get(info.id) {
-                            job.append(&format!("“{a}”"), 8.0, egui::TextFormat { font_id: FontId::proportional(12.0), color: pal.text_dim, ..Default::default() });
+                            job.append(&format!("“{a}”"), 8.0, egui::TextFormat { font_id: FontId::proportional(12.0), color: dim, ..Default::default() });
                         }
                         let g = ui.fonts_mut(|f| f.layout_job(job));
                         if compact {
@@ -1383,10 +1385,10 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
                         } else {
                             ui.painter().galley(pos2(tx, r.top() + 4.0), g, tcol);
                             // Matches are highlighted in the description too.
-                            let mut dj = highlight_job(info.desc, &q, FontId::proportional(11.5), pal.text_dim, pal.accent.gamma_multiply(0.85));
+                            let mut dj = highlight_job(info.desc, &q, FontId::proportional(11.5), dim, acc.gamma_multiply(0.85));
                             dj.wrap = egui::text::TextWrapping { max_width: (r.right() - tx) * 0.7, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
                             let dg = ui.fonts_mut(|f| f.layout_job(dj));
-                            ui.painter().galley(pos2(tx, r.top() + 22.0), dg, pal.text_dim);
+                            ui.painter().galley(pos2(tx, r.top() + 22.0), dg, dim);
                         }
                         // Right side: chips, then (on hover/selection) + and ☆.
                         let mut x = r.right() - 8.0;
@@ -1404,7 +1406,7 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
                             if overridden {
                                 let rr = Rect::from_center_size(pos2(x - 10.0, r.center().y), Vec2::splat(20.0));
                                 let rresp = ui.interact(rr, Id::new(("reset", i)), Sense::click()).on_hover_text("Reset hotkeys to default");
-                                paint_glyph(ui.painter(), rr.shrink(3.0), Glyph::Refresh, if rresp.hovered() { pal.text } else { pal.text_dim });
+                                paint_glyph(ui.painter(), rr.shrink(3.0), Glyph::Refresh, if rresp.hovered() { tcol } else { dim });
                                 if rresp.clicked() {
                                     reset = Some(*c);
                                 }
@@ -1415,26 +1417,26 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
                             if presp.hovered() {
                                 ui.painter().rect_filled(pr, CornerRadius::same(4), pal.raised);
                             }
-                            paint_glyph(ui.painter(), pr.shrink(4.0), Glyph::Plus, pal.text_dim);
+                            paint_glyph(ui.painter(), pr.shrink(4.0), Glyph::Plus, dim);
                             if presp.clicked() {
                                 add_key = Some(*c);
                             }
                             x -= 24.0;
-                            let ag = ui.painter().layout_no_wrap("alias".into(), FontId::proportional(11.0), pal.text_dim);
+                            let ag = ui.painter().layout_no_wrap("alias".into(), FontId::proportional(11.0), dim);
                             let ar = Rect::from_min_max(pos2(x - ag.size().x - 8.0, r.center().y - 10.0), pos2(x, r.center().y + 10.0));
                             crate::ui::note_control(ui, ar, "alias button");
                             let aresp = ui.interact(ar, Id::new(("alias", i)), Sense::click()).on_hover_text("Set the alias that finds this command (F2)");
                             if aresp.hovered() {
                                 ui.painter().rect_filled(ar, CornerRadius::same(4), pal.raised);
                             }
-                            ui.painter().galley(pos2(ar.left() + 4.0, r.center().y - ag.size().y / 2.0), ag, pal.text_dim);
+                            ui.painter().galley(pos2(ar.left() + 4.0, r.center().y - ag.size().y / 2.0), ag, dim);
                             if aresp.clicked() {
                                 alias = Some(*c);
                             }
                             x = ar.left() - 4.0;
                             let sr = Rect::from_center_size(pos2(x - 10.0, r.center().y), Vec2::splat(20.0));
                             let sresp = ui.interact(sr, Id::new(("star", i)), Sense::click()).on_hover_text(if starred { "Remove from Quick" } else { "Add to Quick" });
-                            crate::ui::star(ui.painter(), sr.center(), 6.5, if starred { pal.accent } else { pal.text_dim }, starred);
+                            crate::ui::star(ui.painter(), sr.center(), 6.5, if starred { acc } else { dim }, starred);
                             if sresp.clicked() {
                                 star = Some(*c);
                             }
@@ -2573,19 +2575,19 @@ fn types(app: &mut App, ctx: &egui::Context, panel: u64, query: &mut String) -> 
                     if !crate::icons::entry(ui.painter(), ic, sample) {
                         theme::paint_icon(ui.painter(), ic, theme::categorize(sample.ext(), sample.is_dir, sample.is_executable()), "", false);
                     }
-                    let tc = if on { Color32::WHITE } else { pal.text };
-                    let job = highlight_job(k, &q, FontId::proportional(12.5), tc, if on { Color32::WHITE } else { pal.accent });
+                    let tc = if on { pal.on_sel() } else { pal.text };
+                    let job = highlight_job(k, &q, FontId::proportional(12.5), tc, if on { tc } else { pal.accent });
                     let g = ui.fonts_mut(|f| f.layout_job(job));
                     ui.painter().galley(pos2(r.left() + 30.0, r.center().y - g.size().y / 2.0), g, tc);
                     let cb = Rect::from_center_size(pos2(r.right() - 14.0, r.center().y), Vec2::splat(14.0));
                     if on {
-                        ui.painter().rect_filled(cb, CornerRadius::same(3), Color32::WHITE.gamma_multiply(0.18));
-                        ui.painter().rect_stroke(cb, CornerRadius::same(3), Stroke::new(1.2, Color32::WHITE), StrokeKind::Inside);
-                        ui.painter().add(egui::Shape::line(vec![cb.left_center() + vec2(3.0, 0.0), cb.center_bottom() + vec2(-1.0, -3.5), cb.right_top() + vec2(-3.0, 3.5)], Stroke::new(1.6, Color32::WHITE)));
+                        ui.painter().rect_filled(cb, CornerRadius::same(3), tc.gamma_multiply(0.18));
+                        ui.painter().rect_stroke(cb, CornerRadius::same(3), Stroke::new(1.2, tc), StrokeKind::Inside);
+                        ui.painter().add(egui::Shape::line(vec![cb.left_center() + vec2(3.0, 0.0), cb.center_bottom() + vec2(-1.0, -3.5), cb.right_top() + vec2(-3.0, 3.5)], Stroke::new(1.6, tc)));
                     } else {
                         ui.painter().rect_stroke(cb, CornerRadius::same(3), Stroke::new(1.2, pal.text_dim.gamma_multiply(0.6)), StrokeKind::Inside);
                     }
-                    ui.painter().text(pos2(cb.left() - 10.0, r.center().y), Align2::RIGHT_CENTER, crate::ui::fmt_count(*n), FontId::proportional(11.0), if on { Color32::from_white_alpha(200) } else { pal.text_dim.gamma_multiply(0.8) });
+                    ui.painter().text(pos2(cb.left() - 10.0, r.center().y), Align2::RIGHT_CENTER, crate::ui::fmt_count(*n), FontId::proportional(11.0), if on { pal.on_sel_dim() } else { pal.text_dim.gamma_multiply(0.8) });
                 });
                 if resp.clicked() {
                     if on {
@@ -3249,9 +3251,12 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
                 let w = r.right() - 12.0 - x;
                 let mut job = egui::text::LayoutJob::default();
                 let marked: &[String] = if row.passage.is_some() { &words } else { &marks };
-                append_marked(&mut job, &name, marked, fmt(fs, pal.text), fmt(fs, pal.accent));
+                // On the selected row the dim grey and the accent sink into the selection.
+                let sel = i == st.sel;
+                let (text, dim, mark) = if sel { (pal.on_sel(), pal.on_sel_dim(), pal.on_sel()) } else { (pal.text, pal.text_dim, pal.accent) };
+                append_marked(&mut job, &name, marked, fmt(fs, text), fmt(fs, mark));
                 if row.passage.is_some() {
-                    job.append(&format!("   {folder}"), 0.0, fmt(small, pal.text_dim));
+                    job.append(&format!("   {folder}"), 0.0, fmt(small, dim));
                 }
                 job.wrap = egui::text::TextWrapping { max_width: w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
                 let g = ui.fonts_mut(|f| f.layout_job(job));
@@ -3260,9 +3265,9 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
                 // question's words (in the accent).
                 let mut job = egui::text::LayoutJob::default();
                 match row.passage {
-                    None => job.append(&folder, 0.0, fmt(small, pal.text_dim)),
-                    Some(_) if picture => job.append("Picture", 0.0, fmt(small, pal.text_dim)),
-                    Some(p) => append_marked(&mut job, &around(p, &words), &words, fmt(small, pal.text_dim), fmt(small, pal.accent)),
+                    None => job.append(&folder, 0.0, fmt(small, dim)),
+                    Some(_) if picture => job.append("Picture", 0.0, fmt(small, dim)),
+                    Some(p) => append_marked(&mut job, &around(p, &words), &words, fmt(small, dim), fmt(small, mark)),
                 }
                 let lines = if row.passage.is_some() { 2 } else { 1 };
                 job.wrap = egui::text::TextWrapping { max_width: w, max_rows: lines, break_anywhere: row.passage.is_none(), overflow_character: Some('…') };
@@ -4087,7 +4092,7 @@ fn path_dropdown(app: &mut App, ctx: &egui::Context, st: &mut PathDropState) -> 
                         }
                     }
                     // The folder the path continues into is marked like the current crumb.
-                    let col = if sel { Color32::WHITE } else if highlighted { pal.accent } else { pal.text };
+                    let col = if sel { pal.on_sel() } else if highlighted { pal.accent } else { pal.text };
                     // Long names end in "…" inside the row instead of running past the popup.
                     let g = crate::listing::elided(ui, &name, FontId::proportional(12.5), (r.width() - 38.0).max(20.0), col);
                     ui.painter().galley(pos2(r.left() + 30.0, r.center().y - g.size().y / 2.0), g, col);
