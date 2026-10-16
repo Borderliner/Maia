@@ -142,7 +142,7 @@ pub fn read_page(r: &mut impl BufRead, n: usize) -> Vec<Commit> {
 
 fn git(root: &Path) -> std::process::Command {
     let mut c = crate::media::tool("git");
-    c.arg("--no-optional-locks").arg("--literal-pathspecs").arg("-C").arg(root).args(["-c", "log.showSignature=false", "-c", "core.quotePath=false"]);
+    c.arg("--no-optional-locks").arg("--literal-pathspecs").args(crate::gitstatus::guard(root)).arg("-C").arg(root).args(["-c", "log.showSignature=false", "-c", "core.quotePath=false"]);
     c
 }
 

@@ -2224,3 +2224,31 @@ fn git_history_reads_on_demand_and_stops() {
     assert!(gone(), "git is stopped with its history");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn a_repositorys_own_config_runs_nothing_when_maia_reads_it() {
+    let d = tmpdir("evilrepo");
+    let g = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&d).stdout(std::process::Stdio::null()).status().is_ok_and(|s| s.success()), "git {args:?}");
+    g(&["init", "-q"]);
+    touch(&d.join("notes.txt"), "one");
+    g(&["add", "notes.txt"]);
+    g(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "first"]);
+    // As a downloaded repository could arrive: an fsmonitor hook and filters (one named
+    // with a space) that each leave a marker if run, and files whose stat no longer
+    // matches the index, so status re-reads them through the filters.
+    let mark = |n: &str| format!("touch '{}'", d.join(n).display());
+    g(&["config", "core.fsmonitor", &mark("ran-fsmonitor")]);
+    g(&["config", "filter.x.clean", &format!("sh -c \"{}; cat\"", mark("ran-clean"))]);
+    g(&["config", "filter.my x.process", &mark("ran-process")]);
+    touch(&d.join(".gitattributes"), "*.txt filter=x\n*.md filter=my\\ x\n");
+    touch(&d.join("notes.txt"), "two");
+    touch(&d.join("readme.md"), "new");
+    let repo = crate::gitstatus::query(&d).expect("read the status");
+    assert!(!repo.marks.is_empty(), "the status was still read");
+    let (_, changed) = crate::gitlog::changes(&d, "HEAD", &[]);
+    assert!(!changed.is_empty());
+    for m in ["ran-fsmonitor", "ran-clean", "ran-process"] {
+        assert!(!d.join(m).exists(), "{m}: the repository's config ran a command");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

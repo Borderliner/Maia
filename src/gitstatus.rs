@@ -135,6 +135,26 @@ pub fn repo_for(dir: &Path) -> Option<Rc<Repo>> {
     GIT.with(|g| g.borrow().dirs.get(dir)?.clone())
 }
 
+/// Options that stop a repository's own config from running programs when Maia reads
+/// it: an fsmonitor hook, and filters (status re-reads changed files through their
+/// clean commands). Repositories come from anywhere, archives and downloads included,
+/// so their config is not trusted; the user's own (global, system) is left alone.
+pub fn guard(at: &Path) -> Vec<String> {
+    let mut v = vec!["-c".to_string(), "core.fsmonitor=false".to_string()];
+    let mut c = crate::media::tool("git");
+    c.arg("-C").arg(at).args(["config", "--show-scope", "-z", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"]);
+    // Entries are "scope\0key\nvalue\0" (a key may hold spaces: filter."my x".clean).
+    let out = crate::media::output(c, std::time::Duration::from_secs(5)).unwrap_or_default();
+    let mut f = out.split(|&b| b == 0);
+    while let (Some(scope), Some(entry)) = (f.next(), f.next()) {
+        let key = entry.split(|&b| b == b'\n').next().unwrap_or_default();
+        if matches!(scope, b"local" | b"worktree") {
+            v.extend(["-c".to_string(), format!("{}=", String::from_utf8_lossy(key))]);
+        }
+    }
+    v
+}
+
 /// Read the status of the work tree around `dir`: None outside one, or without git.
 pub fn query(dir: &Path) -> Option<Repo> {
     dir.ancestors().find(|a| a.join(".git").exists())?;
@@ -144,7 +164,7 @@ pub fn query(dir: &Path) -> Option<Repo> {
     // Never take the index lock: a status run must not itself look like a change.
     let git = |at: &Path, args: &[&str]| {
         let mut c = crate::media::tool("git");
-        c.arg("--no-optional-locks").arg("-C").arg(at).args(args);
+        c.arg("--no-optional-locks").args(guard(at)).arg("-C").arg(at).args(args);
         crate::media::output(c, std::time::Duration::from_secs(20))
     };
     let top = git(dir, &["rev-parse", "--show-toplevel", "--show-prefix"])?;
