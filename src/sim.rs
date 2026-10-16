@@ -2483,6 +2483,48 @@ mod journeys {
         report("archives", &s);
     }
 
+    /// Properties of a file: work out its SHA-256 and copy it; paste a checksum that is
+    /// wrong, then the file's real MD5, and see each verdict.
+    #[test]
+    fn checksums_in_properties() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("checksums");
+        let f = home.join("Documents/notes.txt");
+        std::fs::write(&f, "abc").unwrap();
+        let mut s = Sim::new(&home.join("Documents"), vec2(1280.0, 800.0));
+        s.cmd(ViewDetails);
+        s.settle();
+        select_path(&mut s, &f);
+        s.act("key alt+Enter");
+        s.idle(3);
+        assert!(s.texts.iter().any(|(_, t)| t == "Checksum"), "checksum row shown");
+        click_control(&mut s, "checksum button");
+        let sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        wait_until(&mut s, "SHA-256 shown", 10, |s| s.texts.iter().any(|(_, t)| t == sha));
+        look(&mut s, "checksum worked out");
+        click_control(&mut s, "copy checksum");
+        // A wrong one: its length says MD5, so MD5 is worked out and compared.
+        click_control(&mut s, "checksum field");
+        s.act("text 00000000000000000000000000000000");
+        wait_until(&mut s, "mismatch", 10, |s| s.texts.iter().any(|(_, t)| t == "Doesn't match"));
+        look(&mut s, "checksum mismatch");
+        s.act("key ctrl+a");
+        s.act("text MD5 (notes.txt) = 900150983CD24FB0D6963F7D28E17F72");
+        wait_until(&mut s, "match", 10, |s| s.texts.iter().any(|(_, t)| t == "Matches"));
+        assert!(s.texts.iter().any(|(_, t)| t == "MD5"));
+        look(&mut s, "checksum match");
+        s.act("key ctrl+a");
+        s.act("text hello");
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with("Not an MD5")), "says what it accepts");
+        s.act("key Escape");
+        s.idle(2);
+        assert!(!s.popup_open());
+        report("checksums", &s);
+    }
+
     /// Git status marks: a work tree with every kind of change, the branch in the status
     /// bar, marks in every view, refreshed when a file changes and when git itself changes
     /// the index, and nothing outside a work tree.

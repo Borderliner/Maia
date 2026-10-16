@@ -1723,3 +1723,51 @@ fn word_wrap_keeps_every_character_and_breaks_at_spaces() {
     assert_eq!(wrapped("日本語のテキスト", 6), ["日本語", "のテキ", "スト"]);
     assert_eq!(wrapped("", 10), [""]);
 }
+
+#[test]
+fn checksums_match_known_values_and_pasted_formats() {
+    use crate::checksum::{Algo, Job, clean};
+    let d = tmpdir("checksums");
+    // A name with a newline makes the tools escape their output line.
+    let odd = d.join("we\nird name.txt");
+    touch(&odd, "abc");
+    let ctx = egui::Context::default();
+    let want = [
+        (Algo::Md5, "900150983cd24fb0d6963f7d28e17f72"),
+        (Algo::Sha1, "a9993e364706816aba3e25717850c26c9cd0d89d"),
+        (Algo::Sha256, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+        (Algo::Sha512, "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"),
+    ];
+    for (algo, hex) in want {
+        assert_eq!(Algo::for_hex(hex), Some(algo));
+        let job = Job::start(&odd, algo, &ctx);
+        let t0 = Instant::now();
+        let got = loop {
+            if let Some(r) = job.poll() {
+                break r;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(10), "{algo:?} never finished");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(got.as_deref(), Ok(hex), "{algo:?}");
+    }
+    // What download pages and tools print comes down to the digits.
+    let sha = want[2].1;
+    assert_eq!(clean(&format!("  {}  ", sha.to_uppercase())), sha);
+    assert_eq!(clean(&format!("{sha}  ubuntu.iso")), sha);
+    assert_eq!(clean(&format!("SHA256 (ubuntu.iso) = {sha}")), sha);
+    assert_eq!(clean("ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad"), sha);
+    assert_eq!(Algo::for_hex(&clean("not a checksum")), None);
+    assert_eq!(Algo::for_hex("xyz7816bf8f01cfea414140de5dae2223"), None);
+    // A file that is gone says so.
+    let job = Job::start(&d.join("gone"), Algo::Sha256, &ctx);
+    let t0 = Instant::now();
+    let r = loop {
+        if let Some(r) = job.poll() {
+            break r;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(r, Err("No such file or directory".into()));
+}

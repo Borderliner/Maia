@@ -2,6 +2,7 @@
 
 mod admin;
 mod app;
+mod checksum;
 mod archive;
 mod clipboard;
 mod commands;

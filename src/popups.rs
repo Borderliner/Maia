@@ -99,6 +99,10 @@ pub struct PropState {
     pub mode: Option<u32>,
     /// File details read at most once a second (not on every frame).
     snap: Option<PropSnap>,
+    /// A checksum to compare with, as pasted.
+    pub expected: String,
+    pub sum_job: Option<crate::checksum::Job>,
+    pub sum: Option<(crate::checksum::Algo, Result<String, String>)>,
 }
 
 struct PropSnap {
@@ -250,7 +254,7 @@ impl Popup {
         Popup::Conflict(ConflictState { srcs, dest, mv, items, idx: 0, decide: HashMap::new(), apply_all: false })
     }
     pub fn properties(paths: Vec<PathBuf>) -> Popup {
-        Popup::Properties(PropState { paths, mode: None, snap: None })
+        Popup::Properties(PropState { paths, mode: None, snap: None, expected: String::new(), sum_job: None, sum: None })
     }
     pub fn open_with(paths: Vec<PathBuf>) -> Popup {
         Popup::OpenWith { paths, query: String::new(), all: false }
@@ -2568,6 +2572,11 @@ fn properties(app: &mut App, ctx: &egui::Context, st: &mut PropState) -> bool {
                 if let Some((total, free)) = snap.vol {
                     kv("Volume", format!("{} free of {}", fsx::fmt_size(free), fsx::fmt_size(total)));
                 }
+                if m.is_file() {
+                    ui.label(egui::RichText::new("Checksum").color(pal.text_dim));
+                    ui.vertical(|ui| checksum_row(ui, ctx, &p, st, &pal));
+                    ui.end_row();
+                }
             });
             ui.separator();
             // Permissions
@@ -2641,6 +2650,73 @@ fn properties(app: &mut App, ctx: &egui::Context, st: &mut PropState) -> bool {
     ctx.request_repaint_after(std::time::Duration::from_millis(300));
     st.snap = snap;
     !(close || clicked_outside(ctx, rect))
+}
+
+/// Paste a checksum to compare (its length picks the algorithm), or work out SHA-256.
+fn checksum_row(ui: &mut Ui, ctx: &egui::Context, p: &Path, st: &mut PropState, pal: &Palette) {
+    use crate::checksum::{Algo, Job, clean};
+    if let Some(r) = st.sum_job.as_ref().and_then(|j| j.poll().map(|r| (j.algo, r))) {
+        st.sum = Some(r);
+        st.sum_job = None;
+    }
+    let want = clean(&st.expected);
+    let mut start = None;
+    ui.horizontal(|ui| {
+        let busy = st.sum_job.is_some();
+        let bw = if busy { 0.0 } else { 74.0 };
+        let r = ui.add(egui::TextEdit::singleline(&mut st.expected).hint_text(egui::RichText::new("Paste one to compare").color(pal.text_dim)).desired_width(ui.available_width() - bw));
+        crate::ui::note_control(ui, r.rect, "checksum field");
+        // Pasting a checksum works out the same kind for this file.
+        if let Some(a) = Algo::for_hex(&clean(&st.expected)).filter(|_| r.changed()) {
+            if st.sum.as_ref().map(|s| s.0) != Some(a) && st.sum_job.as_ref().map(|j| j.algo) != Some(a) {
+                start = Some(a);
+            }
+        }
+        if !busy && st.sum.is_none() {
+            let b = ui.button("SHA-256");
+            crate::ui::note_control(ui, b.rect, "checksum button");
+            if b.clicked() {
+                start = Some(Algo::Sha256);
+            }
+        }
+    });
+    if let Some(a) = start {
+        st.sum = None;
+        st.sum_job = Some(Job::start(p, a, ctx));
+    }
+    if let Some(j) = &st.sum_job {
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+            crate::ui::spinner(ui.painter(), r.center(), 5.0, pal.accent, ui.input(|i| i.time));
+            ui.label(egui::RichText::new(format!("Calculating {}…", j.algo.label())).color(pal.text_dim));
+        });
+        ctx.request_repaint();
+        return;
+    }
+    match &st.sum {
+        Some((a, Ok(hex))) => {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(a.label()).small().color(pal.text_dim));
+                let b = ui.small_button("Copy");
+                crate::ui::note_control(ui, b.rect, "copy checksum");
+                if b.clicked() {
+                    ctx.copy_text(hex.clone());
+                }
+            });
+            ui.add(egui::Label::new(egui::RichText::new(hex).monospace().size(11.5)).wrap());
+            if Algo::for_hex(&want) == Some(*a) {
+                let (ok, msg) = if want == *hex { (true, "Matches") } else { (false, "Doesn't match") };
+                ui.label(egui::RichText::new(msg).strong().color(if ok { crate::gitstatus::GREEN } else { pal.danger }));
+            }
+        }
+        Some((_, Err(e))) => {
+            ui.label(egui::RichText::new(e).color(pal.danger));
+        }
+        None => {}
+    }
+    if !want.is_empty() && Algo::for_hex(&want).is_none() {
+        ui.label(egui::RichText::new("Not an MD5, SHA-1, SHA-256 or SHA-512 checksum").small().color(pal.text_dim));
+    }
 }
 
 fn open_with(app: &mut App, ctx: &egui::Context, paths: &mut Vec<PathBuf>, query: &mut String, all: &mut bool) -> bool {
