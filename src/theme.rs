@@ -551,6 +551,7 @@ pub enum Glyph {
     Phone,
     Wrap,
     Tag,
+    Cloud,
 }
 
 /// Draw a Lucide icon by name, centered in `rect` (the icon's stroke box roughly fills it).
@@ -601,7 +602,7 @@ fn glyph_name(g: Glyph) -> &'static str {
         Glyph::Usb => "usb",
         Glyph::Globe => "globe",
         Glyph::Phone => "smartphone",
-        Glyph::Eject | Glyph::Wrap | Glyph::Tag => "", // drawn below
+        Glyph::Eject | Glyph::Wrap | Glyph::Tag | Glyph::Cloud => "", // drawn below
     }
 }
 
@@ -742,6 +743,20 @@ pub fn paint_glyph(painter: &Painter, rect: Rect, g: Glyph, col: Color32) {
             pts.push(m(14.0, 18.0));
             painter.add(Shape::line(pts, st));
             painter.add(Shape::line(vec![m(16.0, 16.0), m(14.0, 18.0), m(16.0, 20.0)], st));
+        }
+        Glyph::Cloud => {
+            // Lucide's cloud: a large arc round the left and top, a small one at the right.
+            let m = |x: f32, y: f32| p((x - 12.0) * 0.036, (y - 12.0) * 0.036);
+            let arc = |cx: f32, cy: f32, r: f32, a0: f32, a1: f32, pts: &mut Vec<Pos2>| {
+                for k in 0..=14 {
+                    let a = (a0 + (a1 - a0) * k as f32 / 14.0).to_radians();
+                    pts.push(m(cx + r * a.cos(), cy + r * a.sin()));
+                }
+            };
+            let mut pts = vec![m(17.5, 19.0)];
+            arc(9.0, 12.0, 7.0, 90.0, 343.4, &mut pts);
+            arc(17.5, 14.5, 4.5, 270.0, 450.0, &mut pts);
+            painter.add(Shape::Path(egui::epaint::PathShape { points: pts, closed: true, fill: Color32::TRANSPARENT, stroke: st.into() }));
         }
         Glyph::Tag => {
             let m = |x: f32, y: f32| p((x - 12.0) * 0.036, (y - 12.0) * 0.036);

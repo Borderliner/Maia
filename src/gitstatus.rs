@@ -31,6 +31,9 @@ pub enum Mark {
 pub struct Repo {
     pub root: PathBuf,
     pub branch: String,
+    /// Commits to push and to pull, against the branch's upstream (0 with none).
+    pub ahead: u32,
+    pub behind: u32,
     pub marks: HashMap<PathBuf, Mark>,
 }
 
@@ -180,12 +183,23 @@ pub fn query(dir: &Path) -> Option<Repo> {
 pub fn parse(root: PathBuf, out: &[u8]) -> Repo {
     let mut marks = HashMap::new();
     let mut branch = String::new();
+    let (mut ahead, mut behind) = (0, 0);
     let mut it = out.split(|&b| b == 0);
     while let Some(rec) = it.next() {
         if let Some(b) = rec.strip_prefix(b"## ") {
+            // "main...origin/main [ahead 3, behind 1]"
             let s = String::from_utf8_lossy(b);
             let s = s.strip_prefix("No commits yet on ").unwrap_or(&s);
             branch = s.split("...").next().and_then(|s| s.split(' ').next()).unwrap_or("").to_string();
+            if let Some(counts) = s.rsplit_once(" [").and_then(|(_, c)| c.strip_suffix(']')) {
+                for part in counts.split(", ") {
+                    match part.split_once(' ') {
+                        Some(("ahead", n)) => ahead = n.parse().unwrap_or(0),
+                        Some(("behind", n)) => behind = n.parse().unwrap_or(0),
+                        _ => {}
+                    }
+                }
+            }
             continue;
         }
         if rec.len() < 4 {
@@ -215,7 +229,7 @@ pub fn parse(root: PathBuf, out: &[u8]) -> Repo {
         }
         marks.insert(p, m);
     }
-    Repo { root, branch, marks }
+    Repo { root, branch, ahead, behind, marks }
 }
 
 /// A dot on the icon's lower right corner; a ring for folders with changes inside.

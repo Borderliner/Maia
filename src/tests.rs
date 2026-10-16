@@ -2252,3 +2252,52 @@ fn a_repositorys_own_config_runs_nothing_when_maia_reads_it() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn ahead_behind_and_branch_labels_from_real_remotes() {
+    use crate::gitlog::{RefKind, labels};
+    let d = tmpdir("remotes");
+    let run = |at: &Path, args: &[&str]| {
+        let out = std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"]).args(args).current_dir(at).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    // A "server" and two clones of it: ours, and someone else's that pushes once.
+    std::fs::create_dir_all(d.join("server.git")).unwrap();
+    run(&d.join("server.git"), &["init", "-q", "--bare"]);
+    run(&d, &["clone", "-q", "server.git", "ours"]);
+    let ours = d.join("ours");
+    touch(&ours.join("a.txt"), "a");
+    run(&ours, &["add", "."]);
+    run(&ours, &["commit", "-qm", "first"]);
+    run(&ours, &["push", "-q", "-u", "origin", "main"]);
+    run(&ours, &["branch", "docs"]);
+    run(&ours, &["push", "-q", "origin", "docs"]);
+    run(&d, &["clone", "-q", "server.git", "theirs"]);
+    touch(&d.join("theirs/b.txt"), "b");
+    run(&d.join("theirs"), &["add", "."]);
+    run(&d.join("theirs"), &["commit", "-qm", "theirs"]);
+    run(&d.join("theirs"), &["push", "-q"]);
+    for n in ["c", "e"] {
+        touch(&ours.join(n), n);
+        run(&ours, &["add", "."]);
+        run(&ours, &["commit", "-qm", n]);
+    }
+    run(&ours, &["fetch", "-q"]);
+    let repo = crate::gitstatus::query(&ours).expect("status");
+    assert_eq!((repo.branch.as_str(), repo.ahead, repo.behind), ("main", 2, 1), "two to push, one to pull");
+    // Status lines git writes, parsed.
+    let line = |s: &str| crate::gitstatus::parse(ours.clone(), format!("## {s}\0").as_bytes());
+    assert_eq!((line("main...origin/main [behind 7]").ahead, line("main...origin/main [behind 7]").behind), (0, 7));
+    assert_eq!((line("main...origin/main [gone]").ahead, line("main...origin/main [gone]").behind), (0, 0));
+    assert_eq!((line("topic").branch.as_str(), line("topic").ahead), ("topic", 0), "no upstream");
+    // The refs on each commit, from git's own decorations: docs sits with origin/docs (one
+    // pill), main is ahead of origin/main (two pills, the remote one marked as such).
+    let log = run(&ours, &["log", "-z", "--decorate=full", crate::gitlog::FORMAT, "--branches", "--remotes", "--tags", "HEAD", "--"]);
+    let commits: Vec<crate::gitlog::Commit> = log.split('\0').filter_map(|r| crate::gitlog::parse(r.as_bytes())).collect();
+    let on = |subject: &str| commits.iter().find(|c| c.subject == subject).map(|c| labels(&c.refs).into_iter().map(|(k, n, r)| (k, n.to_string(), r.map(String::from))).collect::<Vec<_>>()).unwrap();
+    assert_eq!(on("e"), vec![(RefKind::Head, "main".into(), None)]);
+    assert_eq!(on("first"), vec![(RefKind::Branch, "docs".into(), Some("origin".into()))]);
+    assert_eq!(on("theirs"), vec![(RefKind::Remote, "origin/main".into(), None)]);
+    let _ = std::fs::remove_dir_all(&d);
+}

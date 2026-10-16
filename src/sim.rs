@@ -2960,6 +2960,62 @@ mod journeys {
         s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_ref()).map(|h| h.state())
     }
 
+    /// A clone two commits ahead of its remote and one behind: the status bar's branch
+    /// chip says so, and the history shows the remote branch with a cloud and a branch in
+    /// step with its remote as one pill.
+    #[test]
+    fn git_branch_labels_and_counts() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let home = fixture("gitremote");
+        let d = home.join("Code");
+        let run = |at: &Path, args: &[&str]| assert!(std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"]).args(args).current_dir(at).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|st| st.success()), "git {args:?}");
+        std::fs::create_dir_all(d.join("server.git")).unwrap();
+        run(&d.join("server.git"), &["init", "-q", "--bare"]);
+        run(&d, &["clone", "-q", "server.git", "ours"]);
+        let ours = d.join("ours");
+        std::fs::write(ours.join("a.txt"), "a").unwrap();
+        run(&ours, &["add", "."]);
+        run(&ours, &["commit", "-qm", "Start"]);
+        run(&ours, &["push", "-q", "-u", "origin", "main"]);
+        run(&ours, &["branch", "docs"]);
+        run(&ours, &["push", "-q", "origin", "docs"]);
+        run(&d, &["clone", "-q", "server.git", "theirs"]);
+        std::fs::write(d.join("theirs/b.txt"), "b").unwrap();
+        run(&d.join("theirs"), &["add", "."]);
+        run(&d.join("theirs"), &["commit", "-qm", "Their change"]);
+        run(&d.join("theirs"), &["push", "-q"]);
+        for n in ["Mine one", "Mine two"] {
+            std::fs::write(ours.join(n), n).unwrap();
+            run(&ours, &["add", "."]);
+            run(&ours, &["commit", "-qm", n]);
+        }
+        run(&ours, &["fetch", "-q"]);
+        let mut s = Sim::new(&ours, vec2(1280.0, 800.0));
+        wait_until(&mut s, "counts read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some_and(|r| (r.ahead, r.behind) == (2, 1)));
+        s.idle(2);
+        // The chip: branch, then 2 (up) and 1 (down), all on its row.
+        let chip = s.texts.iter().filter(|(_, t)| t == "main").max_by(|a, b| a.0.center().y.total_cmp(&b.0.center().y)).map(|(r, _)| *r).unwrap();
+        for n in ["2", "1"] {
+            assert!(s.texts.iter().any(|(r, t)| t == n && (r.center().y - chip.center().y).abs() < 2.0 && r.left() > chip.right()), "{n} beside the branch");
+        }
+        look(&mut s, "ahead and behind");
+        s.act(&format!("move {:.0} {:.0}", chip.center().x, chip.center().y));
+        s.idle(40);
+        assert!(s.texts.iter().any(|(_, t)| t == "2 to push, 1 to pull · click for history"), "the tooltip says what the numbers are");
+        // The history: our branch alone, origin/main on their commit, docs with its remote.
+        s.act(&format!("click {:.0} {:.0}", chip.center().x, chip.center().y));
+        wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 4));
+        s.idle(3);
+        for t in ["origin/main", "docs · origin"] {
+            assert!(s.texts.iter().any(|(_, x)| x == t), "{t:?} in the graph");
+        }
+        assert!(!s.texts.iter().any(|(_, x)| x == "origin/docs"), "a remote in step with its branch has no pill of its own");
+        look(&mut s, "branch labels");
+        report("gitremote", &s);
+    }
+
     /// A commit's diff with a long line: the history's Wrap lines button wraps it (every
     /// row inside the preview), and the setting is the code previews' own.
     #[test]

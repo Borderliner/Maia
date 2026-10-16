@@ -1100,7 +1100,7 @@ impl App {
             None
         };
         let loading = t.is_loading();
-        let branch = crate::gitstatus::repo_for(&t.path).map(|r| r.branch.clone()).filter(|b| !b.is_empty());
+        let branch = crate::gitstatus::repo_for(&t.path).map(|r| (r.branch.clone(), r.ahead, r.behind)).filter(|b| !b.0.is_empty());
         let mut toggle_history = false;
         let nsel = t.selected.len();
         let sel_size: u64 = if nsel > 1 && nsel < 200_000 {
@@ -1197,12 +1197,46 @@ impl App {
                 let clock = move |p: &egui::Painter, r: Rect| paint_glyph(p, r, Glyph::Clock, pal.text_dim);
                 chip(ui, Some(&clock), label, pal.text_dim, false, "Time taken to list every subfolder");
             }
-            if let Some(b) = &branch {
-                let icon = move |p: &egui::Painter, r: Rect| {
-                    crate::theme::paint_lucide(p, r.expand(1.0), "git-branch", pal.text_dim);
-                };
-                if chip(ui, Some(&icon), b, pal.text_dim, history, "Git branch · click for its history").clicked() {
-                    toggle_history = true;
+            if let Some((b, ahead, behind)) = &branch {
+                // The branch, then what is not yet pushed (up) and not yet pulled (down).
+                let counts: Vec<(bool, String)> = [(true, *ahead), (false, *behind)].into_iter().filter(|c| c.1 > 0).map(|(up, n)| (up, n.to_string())).collect();
+                let name = ui.painter().layout_no_wrap(b.clone(), font_small.clone(), pal.text_dim);
+                let nums: Vec<(bool, std::sync::Arc<egui::Galley>)> = counts.iter().map(|(up, n)| (*up, ui.painter().layout_no_wrap(n.clone(), font_small.clone(), pal.text_dim))).collect();
+                let arrow = (font_small.size * 0.7).round();
+                let w = 16.0 + name.size().x + nums.iter().map(|(_, g)| arrow + 2.0 + g.size().x + 6.0).sum::<f32>() + 12.0;
+                if w <= ui.available_width() {
+                    let (r, resp) = ui.allocate_exact_size(vec2(w, 20.0), Sense::click());
+                    note_control(ui, r, "status chip");
+                    if resp.hovered() || history {
+                        ui.painter().rect_filled(r, CornerRadius::same(5), if history { pal.accent.gamma_multiply(0.2) } else { pal.hover });
+                    }
+                    let p = ui.painter();
+                    crate::theme::paint_lucide(p, Rect::from_center_size(pos2(r.left() + 12.0, r.center().y), Vec2::splat(13.0)), "git-branch", pal.text_dim);
+                    let mut x = r.left() + 22.0;
+                    p.galley(pos2(x, r.center().y - name.size().y / 2.0), name.clone(), pal.text_dim);
+                    x += name.size().x + 6.0;
+                    for (up, g) in &nums {
+                        // A small drawn arrow: the bundled fonts have no arrow glyphs.
+                        let (cx, cy, h) = (x + arrow / 2.0, r.center().y, arrow / 2.0);
+                        let st = Stroke::new(1.3, pal.text_dim);
+                        let (tip, tail) = if *up { (cy - h, cy + h) } else { (cy + h, cy - h) };
+                        p.line_segment([pos2(cx, tail), pos2(cx, tip)], st);
+                        let back = if *up { tip + h * 0.7 } else { tip - h * 0.7 };
+                        p.line_segment([pos2(cx - h * 0.7, back), pos2(cx, tip)], st);
+                        p.line_segment([pos2(cx + h * 0.7, back), pos2(cx, tip)], st);
+                        x += arrow + 2.0;
+                        p.galley(pos2(x, r.center().y - g.size().y / 2.0), g.clone(), pal.text_dim);
+                        x += g.size().x + 6.0;
+                    }
+                    let tip = match (*ahead, *behind) {
+                        (0, 0) => "Git branch · click for its history".to_string(),
+                        (a, 0) => format!("{a} commit{} to push · click for history", if a == 1 { "" } else { "s" }),
+                        (0, d) => format!("{d} commit{} to pull · click for history", if d == 1 { "" } else { "s" }),
+                        (a, d) => format!("{a} to push, {d} to pull · click for history"),
+                    };
+                    if resp.on_hover_text(tip).clicked() {
+                        toggle_history = true;
+                    }
                 }
             }
             if nsel > 1 {

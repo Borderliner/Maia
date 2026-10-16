@@ -542,9 +542,35 @@ fn status_color(s: u8, pal: &Palette) -> Color32 {
 
 /// A small rounded label, at most `max` wide; returns its width.
 #[allow(clippy::too_many_arguments)]
-fn pill(ui: &Ui, p: &egui::Painter, at: Pos2, text: &str, font: &FontId, kind: RefKind, col: Color32, pal: &Palette, max: f32) -> f32 {
-    let g = crate::listing::elided(ui, text, font.clone(), max - 12.0, if kind == RefKind::Remote { pal.text_dim } else { pal.text });
-    let r = Rect::from_min_size(pos2(at.x, at.y - g.size().y / 2.0 - 1.0), g.size() + vec2(12.0, 2.0));
+/// A commit's refs as pills: a local branch whose remote copy sits on the same commit
+/// becomes one ("main · origin"), the remote's own pill dropped.
+pub fn labels(refs: &[(RefKind, String)]) -> Vec<(RefKind, &str, Option<&str>)> {
+    let local = |n: &str| refs.iter().any(|(k, b)| matches!(k, RefKind::Branch | RefKind::Head) && b == n);
+    refs.iter()
+        .filter_map(|(k, n)| match k {
+            RefKind::Remote if n.split_once('/').is_some_and(|(_, b)| local(b)) => None,
+            RefKind::Branch | RefKind::Head => {
+                let remote = refs.iter().find_map(|(rk, rn)| (*rk == RefKind::Remote).then(|| rn.split_once('/')).flatten().filter(|(_, b)| b == n).map(|(r, _)| r));
+                Some((*k, n.as_str(), remote))
+            }
+            _ => Some((*k, n.as_str(), None)),
+        })
+        .collect()
+}
+
+/// One ref as a small pill; a remote branch carries a cloud, a branch in step with its
+/// remote names that remote after it. Returns its width.
+#[allow(clippy::too_many_arguments)]
+fn pill(ui: &Ui, p: &egui::Painter, at: Pos2, text: &str, remote: Option<&str>, font: &FontId, kind: RefKind, col: Color32, pal: &Palette, max: f32) -> f32 {
+    let cloud = if kind == RefKind::Remote { font.size + 2.0 } else { 0.0 };
+    let mut job = LayoutJob::default();
+    job.append(text, 0.0, TextFormat { font_id: font.clone(), color: if kind == RefKind::Remote { pal.text_dim } else { pal.text }, ..Default::default() });
+    if let Some(r) = remote {
+        job.append(&format!(" · {r}"), 0.0, TextFormat { font_id: font.clone(), color: pal.text_dim, ..Default::default() });
+    }
+    job.wrap = TextWrapping { max_width: (max - 12.0 - cloud).max(8.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let g = ui.fonts_mut(|f| f.layout_job(job));
+    let r = Rect::from_min_size(pos2(at.x, at.y - g.size().y / 2.0 - 1.0), g.size() + vec2(12.0 + cloud, 2.0));
     let rad = CornerRadius::same((r.height() / 2.0) as u8);
     match kind {
         RefKind::Tag => {
@@ -558,10 +584,11 @@ fn pill(ui: &Ui, p: &egui::Painter, at: Pos2, text: &str, font: &FontId, kind: R
         }
         RefKind::Remote => {
             p.rect_filled(r, rad, pal.text_dim.gamma_multiply(0.14));
+            crate::theme::paint_glyph(p, Rect::from_center_size(pos2(r.left() + 5.0 + cloud / 2.0, r.center().y), Vec2::splat(font.size + 1.0)), Glyph::Cloud, pal.text_dim);
         }
     }
     let c = g.size();
-    p.galley(pos2(r.left() + 6.0, r.center().y - c.y / 2.0), g, pal.text);
+    p.galley(pos2(r.left() + 6.0 + cloud, r.center().y - c.y / 2.0), g, pal.text);
     r.width()
 }
 
@@ -736,16 +763,17 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
             let m = small.size * 1.35;
             let y0 = cy - (g.size().y + m) / 2.0;
             let mut px = tx;
-            for (k, (kind, name)) in c.refs.iter().enumerate() {
+            let labels = labels(&c.refs);
+            for (k, (kind, name, remote)) in labels.iter().enumerate() {
                 let room = tx + w * 0.5 - px;
                 if k > 0 && name.len() as f32 * tag.size * 0.6 + 16.0 > room || room < 40.0 {
-                    let more = format!("+{}", c.refs.len() - k);
+                    let more = format!("+{}", labels.len() - k);
                     let mg = p.layout_no_wrap(more, tag.clone(), pal.text_dim);
                     p.galley(pos2(px, y0 + g.size().y / 2.0 - mg.size().y / 2.0), mg.clone(), pal.text_dim);
                     px += mg.size().x + 6.0;
                     break;
                 }
-                px += pill(ui, &p, pos2(px, y0 + g.size().y / 2.0), name, &tag, *kind, dc, &pal, room) + 4.0;
+                px += pill(ui, &p, pos2(px, y0 + g.size().y / 2.0), name, *remote, &tag, *kind, dc, &pal, room) + 4.0;
             }
             let g = if px > tx { crate::listing::elided(ui, &c.subject, font.clone(), tx + w - px - 2.0, pal.text) } else { g };
             p.galley(pos2(px + if px > tx { 2.0 } else { 0.0 }, y0), g.clone(), pal.text);
@@ -782,11 +810,11 @@ fn commit(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
                 let tag = FontId::proportional((fs - 2.5).max(8.5));
                 let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), tag.size + 8.0), Sense::hover());
                 let mut px = r.left();
-                for (kind, name) in &c.refs {
+                for (kind, name, remote) in labels(&c.refs) {
                     if r.right() - px < 40.0 {
                         break;
                     }
-                    px += pill(ui, ui.painter(), pos2(px, r.center().y), name, &tag, *kind, lane_color(&pal, h.rows[o.at].col as usize), &pal, r.right() - px) + 4.0;
+                    px += pill(ui, ui.painter(), pos2(px, r.center().y), name, remote, &tag, kind, lane_color(&pal, h.rows[o.at].col as usize), &pal, r.right() - px) + 4.0;
                 }
             }
             let meta = format!("{}  ·  {}  ·  {}", c.author, ago(c.time, now), crate::fsx::fmt_time(Some(when)));
