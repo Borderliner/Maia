@@ -1253,6 +1253,9 @@ impl Writer<'_, '_> {
                 let lh = self.ui.fonts_mut(|f| f.row_height(&font)) * self.st.spacing.clamp(1.0, 2.0);
                 let mut job = LayoutJob::default();
                 job.wrap.max_width = (w - pad * 2.0).max(16.0);
+                // At the edge: the last space that fits is often the end of a line's
+                // indent, which would leave a blank row and the code at the left.
+                job.wrap.break_anywhere = true;
                 let fmt = |c: Color32| TextFormat { font_id: font.clone(), color: c, line_height: Some(lh), ..Default::default() };
                 for (li, line) in lines.iter().enumerate() {
                     let mut at = 0;
