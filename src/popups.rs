@@ -3602,14 +3602,14 @@ fn themes(app: &mut App, ctx: &egui::Context) -> bool {
                 });
             });
             // Footer: the code colours' switch on the left, Done on the right.
-            let foot = Rect::from_min_max(pos2(inner.left(), inner.bottom() - (fs * 1.4 + 10.0).max(28.0).round()), inner.max);
+            let foot = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 28.0), inner.max);
             ui.painter().line_segment([pos2(inner.left(), foot.top() - 6.5), pos2(inner.right(), foot.top() - 6.5)], Stroke::new(1.0, pal.border));
             let mut fui = ui.new_child(egui::UiBuilder::new().max_rect(foot).layout(egui::Layout::left_to_right(egui::Align::Center)));
             fui.spacing_mut().item_spacing.x = 10.0;
             fui.add_space(4.0);
             let sw = toggle(&mut fui, &mut syntax, &pal);
             let _ = sw;
-            let lr = fui.label(egui::RichText::new("Code colors follow the theme").size(fs - 0.5).color(pal.text));
+            let lr = fui.label(egui::RichText::new("Code colors follow the theme").size(12.5).color(pal.text));
             if lr.interact(Sense::click()).clicked() {
                 syntax = !syntax;
             }
@@ -3625,8 +3625,9 @@ fn themes(app: &mut App, ctx: &egui::Context) -> bool {
             let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(top_down));
             let gap = 12.0;
             let pad = 6.0;
-            let name_font = FontId::proportional(fs);
-            let blurb_font = FontId::proportional(fs - 2.0);
+            // Options' type: its rows' titles and lines are of fixed sizes.
+            let name_font = FontId::proportional(12.5);
+            let blurb_font = FontId::proportional(11.0);
             // Wide enough for the longest name: names are never cut.
             let longest = ThemeName::ALL.iter().map(|t| bui.painter().layout_no_wrap(t.label().to_string(), name_font.clone(), pal.text).size().x).fold(0.0, f32::max);
             let avail = body.width() - 10.0;
@@ -3639,8 +3640,8 @@ fn themes(app: &mut App, ctx: &egui::Context) -> bool {
             let cw = ((avail - gap * (cols as f32 - 1.0)) / cols as f32).floor();
             // Shorter in a short window, so more than one row shows.
             let preview_h = (cw * 0.52).clamp(64.0, 118.0).min(((body.height() - 90.0) * 0.6).max(64.0)).round();
-            let name_h = (fs * 1.35).round();
-            let blurb_h = ((fs - 2.0) * 1.35).round();
+            let name_h = (12.5f32 * 1.35).round();
+            let blurb_h = (11.0f32 * 1.35).round();
             let card_h = pad + preview_h + 8.0 + 4.0 + 8.0 + name_h + blurb_h + pad + 4.0;
             egui::ScrollArea::vertical().id_salt("theme cards").max_height(body.height()).auto_shrink([false, false]).show(&mut bui, |ui| {
                 ui.spacing_mut().item_spacing = vec2(gap, gap);
@@ -3666,7 +3667,7 @@ fn themes(app: &mut App, ctx: &egui::Context) -> bool {
                                 let p = theme::palette(t);
                                 ui.painter().rect(r, CornerRadius::same(12), if hov { pal.hover } else { pal.card() }, Stroke::new(1.0, if hov { pal.text_dim.gamma_multiply(0.5) } else { pal.card_line() }), StrokeKind::Inside);
                                 let preview = Rect::from_min_size(r.min + vec2(pad, pad), vec2(cw - 2.0 * pad, preview_h));
-                                theme_card(ui.painter(), preview, p, fs, 6);
+                                theme_card(ui.painter(), preview, p, 6);
                                 // Its colours: the accent, then the five code colours.
                                 let s = p.syntax;
                                 let sw = [p.accent, s.keyword, s.kind, s.string, s.number, s.comment];
@@ -3737,7 +3738,7 @@ fn themes(app: &mut App, ctx: &egui::Context) -> bool {
 
 /// A theme as a small window: its sidebar, title strip, three rows (one selected), an
 /// accent button, and two lines of code in its code colours. `rad` rounds its corners.
-fn theme_card(painter: &egui::Painter, r: Rect, p: Palette, fs: f32, rad: u8) {
+fn theme_card(painter: &egui::Painter, r: Rect, p: Palette, rad: u8) {
     let round = CornerRadius::same(rad);
     painter.rect_filled(r, round, p.panel);
     let side = Rect::from_min_max(r.min, pos2(r.left() + (r.width() * 0.28).round(), r.bottom()));
@@ -3749,7 +3750,8 @@ fn theme_card(painter: &egui::Painter, r: Rect, p: Palette, fs: f32, rad: u8) {
     let main = Rect::from_min_max(pos2(side.right(), r.top()), r.max);
     painter.rect_filled(Rect::from_min_size(main.min, vec2(main.width(), 9.0)), CornerRadius { nw: 0, ne: rad, sw: 0, se: 0 }, p.chrome);
     // As many rows as fit above the code, the second one selected.
-    let size = (fs - 4.5).clamp(8.0, 11.0);
+    // Of a fixed size, as the picker's type is: at larger fonts the comment fell off.
+    let size = 8.5;
     let code_top = main.bottom() - 8.0 - 2.0 * size * 1.35;
     let mut k = 0;
     while main.top() + 14.0 + k as f32 * 11.0 + 8.0 <= code_top - 4.0 {
