@@ -77,5 +77,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # checkout leaves the tag lightweight, which would give the commit's message.
+          git fetch --force origin "+refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           cp assets/THIRD-PARTY-NOTICES.txt out/
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "Maia ${GITHUB_REF_NAME#v}" --notes-from-tag out/*
