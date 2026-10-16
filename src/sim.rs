@@ -2483,6 +2483,43 @@ mod journeys {
         report("archives", &s);
     }
 
+    /// A view picked in one folder (every kind) stays as the user opens other folders by
+    /// double-click and Enter and goes back up.
+    #[test]
+    fn chosen_view_stays_while_browsing() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("viewstays");
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.settle();
+        for v in [ViewMedium, ViewTree, ViewList, ViewLarge, ViewXL, ViewDetails] {
+            go(&mut s, &home);
+            s.cmd(v);
+            s.settle();
+            let zoom = s.tab().settings.zoom;
+            // Into Documents with a double-click on its name.
+            let r = s.text_rect("Documents");
+            s.act(&format!("dclick {:.0} {:.0}", r.center().x, r.center().y));
+            wait_until(&mut s, "in Documents", 10, |s| s.tab().path == home.join("Documents"));
+            s.settle();
+            assert_eq!(s.tab().settings.zoom, zoom, "{v:?} kept after a double-click");
+            // Further down with Enter, then back up.
+            select_path(&mut s, &home.join("Documents/Taxes"));
+            s.act("key Enter");
+            wait_until(&mut s, "in Taxes", 10, |s| s.tab().path == home.join("Documents/Taxes"));
+            assert_eq!(s.tab().settings.zoom, zoom, "{v:?} kept after Enter");
+            s.act("key Backspace");
+            wait_until(&mut s, "back", 10, |s| s.tab().path == home.join("Documents"));
+            s.cmd(Up);
+            s.settle();
+            assert_eq!(s.tab().settings.zoom, zoom, "{v:?} kept going back and up");
+            look(&mut s, &format!("{v:?} after browsing"));
+            s.idle(30);
+        }
+        report("viewstays", &s);
+    }
+
     /// Size and date conditions typed into the filter, alone and with a name, in every
     /// view, flattened, in contents mode, and words that only look like conditions.
     #[test]

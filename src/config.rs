@@ -515,19 +515,24 @@ impl UserData {
 
     /// Resolve the view settings for a folder (own → nearest "and subfolders" ancestor → default).
     pub fn view_for(&self, path: &Path) -> (ViewSettings, Option<SaveScope>) {
+        self.saved_view_for(path).unwrap_or_else(|| (self.default_view.clone().unwrap_or_default(), None))
+    }
+
+    /// The view saved for a folder: its own, or a parent's saved for its subfolders.
+    pub fn saved_view_for(&self, path: &Path) -> Option<(ViewSettings, Option<SaveScope>)> {
         if let Some(v) = self.views.get(path) {
-            return (v.view.clone(), Some(v.scope));
+            return Some((v.view.clone(), Some(v.scope)));
         }
         let mut cur = path.parent();
         while let Some(p) = cur {
             if let Some(v) = self.views.get(p) {
                 if v.scope == SaveScope::Subfolders {
-                    return (v.view.clone(), None);
+                    return Some((v.view.clone(), None));
                 }
             }
             cur = p.parent();
         }
-        (self.default_view.clone().unwrap_or_default(), None)
+        None
     }
 }
 

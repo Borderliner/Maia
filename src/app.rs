@@ -259,12 +259,20 @@ impl App {
         self.ud.view_for(path)
     }
 
+    /// The view to switch to on going to `path`: None keeps the tab's own.
+    pub fn nav_view(ud: &UserData, path: &Path) -> Option<(ViewSettings, Option<SaveScope>)> {
+        if tab::is_computer(path) { Some(ud.view_for(path)) } else { ud.saved_view_for(path) }
+    }
+
     pub fn make_tab(&mut self, path: PathBuf) -> Tab {
         let id = self.alloc_id();
         let path = if tab::is_computer(&path) || path.exists() { path } else { fsx::home() };
         let (v, scope) = self.view_for(&path);
         let mut t = Tab::new(id, path.clone(), v, self.ctx.clone());
         t.saved_scope = scope;
+        if self.ud.saved_view_for(&path).is_some() {
+            t.free_view = Some(self.ud.default_view.clone().unwrap_or_default());
+        }
         if path.is_file() {
             t.navigate(path, None);
         }
@@ -1303,7 +1311,7 @@ impl App {
             }
             Cmd::Back => {
                 let ud = &self.ud;
-                let f = |p: &Path| ud.view_for(p);
+                let f = |p: &Path| App::nav_view(ud, p);
                 let id = self.active;
                 let old = self.panels[&id].path();
                 self.panels.get_mut(&id).unwrap().tab_mut().back(f);
@@ -1311,7 +1319,7 @@ impl App {
             }
             Cmd::Forward => {
                 let ud = &self.ud;
-                let f = |p: &Path| ud.view_for(p);
+                let f = |p: &Path| App::nav_view(ud, p);
                 let id = self.active;
                 let old = self.panels[&id].path();
                 self.panels.get_mut(&id).unwrap().tab_mut().forward(f);
@@ -1319,7 +1327,7 @@ impl App {
             }
             Cmd::Up => {
                 let ud = &self.ud;
-                let f = |p: &Path| ud.view_for(p);
+                let f = |p: &Path| App::nav_view(ud, p);
                 let id = self.active;
                 let old = self.panels[&id].path();
                 self.panels.get_mut(&id).unwrap().tab_mut().up(f);
@@ -2028,10 +2036,10 @@ impl App {
             self.drive_op(crate::drives::Op::Mount, &dev, Some((panel, false)));
             return;
         }
-        let s = self.view_for(&path);
+        let s = App::nav_view(&self.ud, &path);
         let Some(p) = self.panels.get_mut(&panel) else { return };
         let old = p.path();
-        p.tab_mut().navigate(path, Some(s));
+        p.tab_mut().navigate(path, s);
         if let Some(i) = p.inspector.as_mut() {
             i.invalidate();
         }

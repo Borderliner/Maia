@@ -2174,7 +2174,15 @@ fn saved_view(app: &mut App, ctx: &egui::Context, panel: u64) -> bool {
             }
         }
         if let Some(p) = app.panels.get_mut(&panel) {
-            p.tab_mut().saved_scope = v;
+            let t = p.tab_mut();
+            t.saved_scope = v;
+            // Saved: folders without a view of their own go back to the free one on leaving
+            // (this view, if there was none). Forgotten: this view becomes the free one.
+            if v.is_some() {
+                t.free_view.get_or_insert_with(|| t.settings.clone());
+            } else {
+                t.free_view = None;
+            }
         }
         app.ud_dirty = true;
     }

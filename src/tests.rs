@@ -344,7 +344,7 @@ fn tab_listing_sort_filter_flatten() {
     t.navigate(d.join("zdir"), None);
     pump(&mut t, &stats);
     assert!(t.can_back());
-    t.up(|_| (ViewSettings::default(), None));
+    t.up(|_| None);
     pump(&mut t, &stats);
     assert_eq!(t.cursor_path(), Some(d.join("zdir")));
     let _ = std::fs::remove_dir_all(&d);
@@ -1827,5 +1827,47 @@ fn filter_conditions_by_size_and_date() {
     let f = crate::query::parse("big size>10M  modified<7d x", now);
     assert_eq!(f.spans, vec![(4, 12), (14, 25)]);
     assert_eq!(f.name, "big x");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn chosen_view_stays_while_browsing_and_saved_views_still_apply() {
+    use crate::config::{SaveScope, SavedView, UserData};
+    let d = tmpdir("viewstays");
+    for f in ["a/inner", "b", "pics/trip"] {
+        std::fs::create_dir_all(d.join(f)).unwrap();
+    }
+    let mut ud = UserData::default();
+    let mut pics = ViewSettings::default();
+    pics.zoom = 0.9;
+    ud.views.insert(d.join("pics"), SavedView { scope: SaveScope::Subfolders, view: pics });
+    let stats = HashMap::new();
+    let mut t = Tab::new(5, d.clone(), ud.view_for(&d).0, egui::Context::default());
+    pump(&mut t, &stats);
+    let go = |t: &mut Tab, p: PathBuf| t.navigate(p.clone(), crate::app::App::nav_view(&ud, &p));
+    // Medium icons, say: kept into a folder, its child, and back up.
+    t.settings.zoom = 0.4;
+    go(&mut t, d.join("a"));
+    assert_eq!(t.settings.zoom, 0.4, "the chosen view follows into another folder");
+    go(&mut t, d.join("a/inner"));
+    assert_eq!(t.settings.zoom, 0.4);
+    t.up(|p| crate::app::App::nav_view(&ud, p));
+    assert_eq!(t.settings.zoom, 0.4, "and back up");
+    // A folder with a saved view (and its subfolders) shows that one...
+    go(&mut t, d.join("pics"));
+    assert_eq!(t.settings.zoom, 0.9);
+    go(&mut t, d.join("pics/trip"));
+    assert_eq!(t.settings.zoom, 0.9, "inherited by subfolders");
+    // ...and leaving it puts back the view chosen before, with Back and Forward too.
+    go(&mut t, d.join("b"));
+    assert_eq!(t.settings.zoom, 0.4, "the free view returns");
+    t.back(|p| crate::app::App::nav_view(&ud, p));
+    assert_eq!((t.path.clone(), t.settings.zoom), (d.join("pics/trip"), 0.9));
+    t.forward(|p| crate::app::App::nav_view(&ud, p));
+    assert_eq!((t.path.clone(), t.settings.zoom), (d.join("b"), 0.4));
+    // Changing the view again carries on from here.
+    t.settings.zoom = 0.0;
+    go(&mut t, d.join("a"));
+    assert_eq!(t.settings.zoom, 0.0);
     let _ = std::fs::remove_dir_all(&d);
 }

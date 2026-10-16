@@ -77,6 +77,9 @@ pub struct Tab {
     pub group_labels: Vec<String>,
     pub settings: ViewSettings,
     pub saved_scope: Option<SaveScope>,
+    /// The view chosen outside folders with a saved view, put back on leaving them
+    /// (None while that view is the one shown).
+    pub free_view: Option<ViewSettings>,
     pub filter: String,
     last_filter: String,
     pub flatten: bool,
@@ -176,6 +179,7 @@ impl Tab {
             group_labels: vec![],
             settings,
             saved_scope: None,
+            free_view: None,
             filter: String::new(),
             last_filter: String::new(),
             flatten: false,
@@ -600,9 +604,19 @@ impl Tab {
         self.tree_listed.clear();
         self.tree_groups.clear();
         self.cursor_first = restore.as_ref().and_then(|r| r.cursor.as_ref()).is_none();
-        if let Some((s, scope)) = settings {
-            self.settings = s;
-            self.saved_scope = scope;
+        // A folder with a saved view shows it; any other keeps the view in use.
+        match settings {
+            Some((s, scope)) => {
+                let before = std::mem::replace(&mut self.settings, s);
+                self.free_view.get_or_insert(before);
+                self.saved_scope = scope;
+            }
+            None => {
+                if let Some(f) = self.free_view.take() {
+                    self.settings = f;
+                }
+                self.saved_scope = None;
+            }
         }
         self.restore_scroll = Some(restore.as_ref().map(|r| r.scroll).unwrap_or(0.0));
         self.pending_restore = Some(restore.unwrap_or_default());
@@ -623,7 +637,7 @@ impl Tab {
         self.hist_pos + 1 < self.history.len()
     }
 
-    pub fn back(&mut self, settings: impl Fn(&Path) -> (ViewSettings, Option<SaveScope>)) {
+    pub fn back(&mut self, settings: impl Fn(&Path) -> Option<(ViewSettings, Option<SaveScope>)>) {
         if self.flatten {
             self.set_flatten(false);
             return;
@@ -635,10 +649,10 @@ impl Tab {
         self.hist_pos -= 1;
         let h = self.history[self.hist_pos].clone();
         let s = settings(&h.path);
-        self.go(h.path.clone(), Some(h), Some(s));
+        self.go(h.path.clone(), Some(h), s);
     }
 
-    pub fn forward(&mut self, settings: impl Fn(&Path) -> (ViewSettings, Option<SaveScope>)) {
+    pub fn forward(&mut self, settings: impl Fn(&Path) -> Option<(ViewSettings, Option<SaveScope>)>) {
         if !self.can_forward() {
             return;
         }
@@ -646,11 +660,11 @@ impl Tab {
         self.hist_pos += 1;
         let h = self.history[self.hist_pos].clone();
         let s = settings(&h.path);
-        self.go(h.path.clone(), Some(h), Some(s));
+        self.go(h.path.clone(), Some(h), s);
     }
 
     /// Go to parent, placing the cursor on the folder we came from.
-    pub fn up(&mut self, settings: impl Fn(&Path) -> (ViewSettings, Option<SaveScope>)) {
+    pub fn up(&mut self, settings: impl Fn(&Path) -> Option<(ViewSettings, Option<SaveScope>)>) {
         if self.flatten {
             self.set_flatten(false);
             return;
@@ -660,12 +674,12 @@ impl Tab {
         }
         let Some(parent) = self.path.parent().map(|p| p.to_path_buf()) else {
             let s = settings(Path::new(COMPUTER));
-            self.navigate(PathBuf::from(COMPUTER), Some(s));
+            self.navigate(PathBuf::from(COMPUTER), s);
             return;
         };
         let child = self.path.clone();
         let s = settings(&parent);
-        self.navigate(parent, Some(s));
+        self.navigate(parent, s);
         self.pending_restore = Some(HistState { path: self.path.clone(), cursor: Some(child), selected: vec![], scroll: 0.0 });
         self.scroll_to_cursor = true;
     }
