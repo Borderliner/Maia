@@ -1075,6 +1075,7 @@ impl App {
         let font_small = FontId::proportional(self.cfg.font_size - 1.5);
         let p = self.panels.get_mut(&id).unwrap();
         let focus_req = std::mem::take(&mut p.focus_filter);
+        let history = p.inspector.as_ref().is_some_and(|i| i.git.is_some());
         let t = p.tab_mut();
         let (vf, tf, vfi, tfi) = t.counts;
         let types_on = !t.settings.only_types.is_empty();
@@ -1092,6 +1093,7 @@ impl App {
         };
         let loading = t.is_loading();
         let branch = crate::gitstatus::repo_for(&t.path).map(|r| r.branch.clone()).filter(|b| !b.is_empty());
+        let mut toggle_history = false;
         let nsel = t.selected.len();
         let sel_size: u64 = if nsel > 1 && nsel < 200_000 {
             let stats = &self.stats.map;
@@ -1191,7 +1193,9 @@ impl App {
                 let icon = move |p: &egui::Painter, r: Rect| {
                     crate::theme::paint_lucide(p, r.expand(1.0), "git-branch", pal.text_dim);
                 };
-                chip(ui, Some(&icon), b, pal.text_dim, false, "Git branch");
+                if chip(ui, Some(&icon), b, pal.text_dim, history, "Git branch · click for its history").clicked() {
+                    toggle_history = true;
+                }
             }
             if nsel > 1 {
                 let layers = move |p: &egui::Painter, r: Rect| {
@@ -1343,6 +1347,13 @@ impl App {
         }
         p.filter_has_focus = has_focus;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| right(ui));
+        if toggle_history {
+            self.actions.push(Action::FocusPanel(id));
+            match self.panels.get_mut(&id) {
+                Some(p) if history => crate::inspector::close_history(p),
+                _ => self.actions.push(Action::Cmd(Cmd::GitHistory)),
+            }
+        }
         if toggle_folders || toggle_files {
             let t = self.panels.get_mut(&id).unwrap().tab_mut();
             if toggle_folders {

@@ -14,6 +14,7 @@ use egui::{Color32, Painter, Rect, Stroke, vec2};
 
 pub const AMBER: Color32 = Color32::from_rgb(0xe8, 0xa3, 0x3d);
 pub const GREEN: Color32 = Color32::from_rgb(0x4c, 0xb8, 0x60);
+pub const BLUE: Color32 = Color32::from_rgb(0x4f, 0x8f, 0xe8);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mark {
@@ -205,7 +206,7 @@ pub fn paint(p: &Painter, icon: Rect, repo: Option<&Repo>, path: &Path, pal: &cr
         Mark::Staged => GREEN,
         Mark::Untracked => pal.text_dim,
         Mark::Deleted => pal.danger,
-        Mark::Renamed => Color32::from_rgb(0x4f, 0x8f, 0xe8),
+        Mark::Renamed => BLUE,
         Mark::Conflict => Color32::from_rgb(0xc0, 0x61, 0xcb),
     };
     let r = (icon.width() * 0.14).clamp(2.6, 6.0);

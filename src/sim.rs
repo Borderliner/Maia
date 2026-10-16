@@ -939,6 +939,23 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.act("key Enter");
             }
         }
+        102 => {
+            // The branch chip in the status bar (the lowest "main" on screen) opens the
+            // history; then a walk through it with keys and clicks.
+            let chip = s.texts.iter().filter(|(_, t)| t == "main").max_by(|a, b| a.0.center().y.total_cmp(&b.0.center().y)).map(|(r, _)| r.center());
+            if let Some(c) = chip {
+                s.act(&format!("click {:.0} {:.0}", c.x, c.y));
+                s.idle(3);
+            }
+            for _ in 0..rng.below(6) {
+                if let Some(r) = s.app.panels.get(&s.app.active).and_then(|p| p.inspector_rect).filter(|_| rng.below(3) == 0) {
+                    let (x, y) = (rng.f(r.left(), r.right()), rng.f(r.top(), r.bottom()));
+                    s.act(&format!("click {x:.0} {y:.0}"));
+                } else {
+                    s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "PageDown", "End", "Home", "Enter", "Escape"])));
+                }
+            }
+        }
         101 => {
             // Give the selected palette command an alias (F2), sometimes one already taken.
             s.act("key ctrl+shift+p");
@@ -2935,6 +2952,129 @@ mod journeys {
         assert!(!s.texts.iter().any(|(_, t)| t == "main"), "no branch outside a work tree");
         look(&mut s, "outside git");
         report("git", &s);
+    }
+
+    fn history(s: &Sim) -> Option<(usize, bool, Option<usize>, Option<usize>, Option<usize>)> {
+        s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_ref()).map(|h| h.state())
+    }
+
+    /// Git history: the branch chip opens the commit graph in the inspector, scrolling
+    /// reads further pages from the one running git, a commit lists its files, a file
+    /// shows its diff, and Escape walks back out, closing the inspector it opened. Then
+    /// the same by keyboard and palette, beside an open preview, in a split, docked at
+    /// the bottom, in a small window, on a light theme, without animations, and leaving
+    /// the work tree.
+    #[test]
+    fn git_history_graph() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let home = fixture("githistory");
+        let repo = home.join("Code/history");
+        crate::tests::git_history_fixture(&repo, 700);
+        let mut s = Sim::new(&repo, vec2(1280.0, 800.0));
+        wait_until(&mut s, "branch read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
+        s.idle(2);
+        assert!(s.app.panels[&s.app.active].inspector.is_none());
+        // The chip is drawn last, over everything: the topmost "main".
+        s.click_text("main");
+        wait_until(&mut s, "first page", 10, |s| history(s).is_some_and(|h| h.0 == crate::gitlog::PAGE));
+        look(&mut s, "history");
+        for t in ["Join ten branches at once", "Wide branch 10", "wide-10"] {
+            assert!(s.texts.iter().any(|(_, x)| x == t), "{t:?} on screen");
+        }
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("inspector shown"));
+        assert!(s.text_rect("Wide branch 10").left() > ir.left(), "the graph is in the inspector");
+        // Scrolling down reads the next pages; then Home returns to the top.
+        let t0 = Instant::now();
+        while history(&s).is_some_and(|h| !h.1) && t0.elapsed().as_secs() < 20 {
+            s.act(&format!("scroll {:.0} {:.0} -60", ir.center().x, ir.center().y));
+        }
+        assert!(history(&s).is_some_and(|h| h.1 && h.0 > 2 * crate::gitlog::PAGE), "every page read: {:?}", history(&s));
+        // Once the wheel's smooth scrolling has run out, End jumps to the first commit.
+        s.idle(120);
+        s.act("key End");
+        wait_until(&mut s, "the first commit at the bottom", 5, |s| s.texts.iter().any(|(_, t)| t == "Start the notes"));
+        look(&mut s, "history at the end");
+        s.act("key Home");
+        wait_until(&mut s, "back at the top", 5, |s| s.texts.iter().any(|(_, t)| t == "Join ten branches at once"));
+        s.idle(2);
+        // A merge: what it brought in, then that file's diff.
+        for _ in 0..30 {
+            if s.texts.iter().any(|(r, t)| t == "Merge topic 700" && r.bottom() < ir.bottom() - 10.0) {
+                break;
+            }
+            s.act(&format!("scroll {:.0} {:.0} -2", ir.center().x, ir.center().y));
+            s.idle(10);
+        }
+        s.click_text("Merge topic 700");
+        wait_until(&mut s, "files", 10, |s| history(s).is_some_and(|h| h.3.is_some()));
+        assert_eq!(history(&s).and_then(|h| h.3), Some(1));
+        s.idle(2);
+        look(&mut s, "commit files");
+        s.click_text("topic_700.rs");
+        wait_until(&mut s, "diff", 10, |s| history(s).is_some_and(|h| h.4.is_some()));
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t == "+fn part_3() {}"), "the diff is drawn");
+        look(&mut s, "diff");
+        for (k, want) in [(1, "files again"), (2, "graph again")] {
+            s.act("key Escape");
+            let h = history(&s).unwrap_or_else(|| s.fail("history closed early"));
+            assert_eq!((h.2.is_some(), h.4.is_some()), (k == 1, false), "{want}");
+        }
+        s.act("key Escape");
+        assert!(s.app.panels[&s.app.active].inspector.is_none(), "the inspector the history opened closes with it");
+        // Keyboard and palette: down twice, open, open the first file, all the way back.
+        palette_run(&mut s, "Show Git History");
+        wait_until(&mut s, "history again", 10, |s| history(s).is_some_and(|h| h.0 > 0));
+        for k in ["ArrowDown", "ArrowDown", "Enter"] {
+            s.act(&format!("key {k}"));
+        }
+        assert_eq!(history(&s).and_then(|h| h.2), Some(2));
+        wait_until(&mut s, "files by keyboard", 10, |s| history(s).is_some_and(|h| h.3.is_some()));
+        s.act("key Enter");
+        wait_until(&mut s, "diff by keyboard", 10, |s| history(s).is_some_and(|h| h.4.is_some()));
+        look(&mut s, "diff by keyboard");
+        for _ in 0..3 {
+            s.act("key Escape");
+        }
+        assert!(s.app.panels[&s.app.active].inspector.is_none());
+        // Beside a preview the user opened: closing the history brings the preview back.
+        s.cmd(ToggleInspector);
+        s.cmd(GitHistory);
+        wait_until(&mut s, "history over the preview", 10, |s| history(s).is_some_and(|h| h.0 > 0));
+        s.act("key Escape");
+        assert!(s.app.panels[&s.app.active].inspector.as_ref().is_some_and(|i| i.git.is_none()), "the preview stays");
+        // Around it: a split, the bottom dock, small windows, a light theme, no animations.
+        s.cmd(GitHistory);
+        s.cmd(SplitRight);
+        s.cmd(FocusPrevPanel);
+        look(&mut s, "history in a split");
+        s.cmd(ClosePanel);
+        s.cmd(FocusPrevPanel);
+        s.cmd(GitHistory);
+        s.app.cfg.inspector_layout = crate::config::InspectorLayout::Bottom;
+        look(&mut s, "history docked at the bottom");
+        s.app.cfg.inspector_layout = crate::config::InspectorLayout::Auto;
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        s.app.cfg.animations = false;
+        for (w, h) in [(520.0, 340.0), (640.0, 480.0), (1920.0, 1080.0)] {
+            s.resize(w, h);
+            look(&mut s, &format!("history {w}x{h}"));
+            if let Some(r) = s.app.panels[&s.app.active].inspector_rect {
+                s.act(&format!("click {:.0} {:.0}", r.center().x, r.top() + 60.0));
+                s.idle(3);
+                look(&mut s, &format!("commit {w}x{h}"));
+                s.act("key Escape");
+            }
+        }
+        // Leaving the work tree closes its history.
+        let plain = home.join("Documents");
+        go(&mut s, &plain);
+        s.idle(4);
+        assert!(history(&s).is_none(), "no history outside the work tree");
+        assert!(!crate::popups::applicable(&s.app, GitHistory), "the command is off outside a work tree");
+        report("git history", &s);
     }
 
     fn palette_run(s: &mut Sim, title: &str) {

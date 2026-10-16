@@ -1034,7 +1034,7 @@ fn goto(app: &mut App, ctx: &egui::Context, st: &mut GoToState) -> bool {
 
 // ------------------------------------------------------------------ palette
 
-fn applicable(app: &App, c: Cmd) -> bool {
+pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
     let Some(p) = app.panels.get(&app.active) else { return true };
     let t = p.tab();
     let panels = app.panels.len();
@@ -1043,6 +1043,7 @@ fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::Forward => t.can_forward(),
         Cmd::ClosePanel | Cmd::FocusNextPanel | Cmd::FocusPrevPanel | Cmd::CopyToOther | Cmd::MoveToOther => panels > 1,
         Cmd::InspectorLineNumbers | Cmd::InspectorWrap | Cmd::InspectorMinimap => p.inspector.is_some(),
+        Cmd::GitHistory => crate::gitstatus::repo_for(&t.path).is_some(),
         Cmd::ComparePanels | Cmd::SelectDifferences | Cmd::SyncPanels => panels > 1,
         Cmd::OpenLinkTarget => t.target_entries().first().map(|e| e.is_link).unwrap_or(false),
         Cmd::RestoreTrash => t.path.starts_with(crate::sidebar::trash_dir()),

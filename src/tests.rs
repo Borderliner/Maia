@@ -2003,3 +2003,185 @@ fn tags_live_on_the_files_and_filter_the_list() {
     assert!(tags::known().contains(&"taxes".to_string()));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A history for the graph, written in one `git fast-import`: `n` commits on main, a
+/// side branch merged back every 25 commits, a tag every 100, a rename, and at the top
+/// ten branches joined by one octopus merge (more lanes than the graph draws).
+pub(crate) fn git_history_fixture(d: &Path, n: usize) {
+    use std::io::Write;
+    std::fs::create_dir_all(d).unwrap();
+    git(d, &["init", "-q"]);
+    let mut s = String::new();
+    let mut mark = 0;
+    let mut commit = |s: &mut String, branch: &str, msg: &str, from: Option<usize>, merges: &[usize], files: &[(&str, String)]| -> usize {
+        mark += 1;
+        let t = 1_700_000_000 + mark as i64 * 600;
+        let who = ["Ada Lovelace", "Grace Hopper", "Linus"][mark % 3];
+        s.push_str(&format!("commit refs/heads/{branch}\nmark :{mark}\nauthor {who} <dev@example.invalid> {t} +0000\ncommitter {who} <dev@example.invalid> {t} +0000\ndata {}\n{msg}\n", msg.len()));
+        if let Some(f) = from {
+            s.push_str(&format!("from :{f}\n"));
+        }
+        for m in merges {
+            s.push_str(&format!("merge :{m}\n"));
+        }
+        for (path, body) in files {
+            if let Some(old) = path.strip_prefix("R ") {
+                s.push_str(&format!("R {old}\n"));
+            } else {
+                s.push_str(&format!("M 644 inline {path}\ndata {}\n{body}\n", body.len()));
+            }
+        }
+        mark
+    };
+    let mut main = commit(&mut s, "main", "Start the notes", None, &[], &[("notes.txt", "notes\n".into()), ("old name.txt", "x\n".into())]);
+    for k in 2..=n {
+        if k % 25 == 0 {
+            let topic = format!("topic-{k}");
+            let mut t = main;
+            for j in 1..=3 {
+                t = commit(&mut s, &topic, &format!("Work on topic {k}, part {j}"), Some(t), &[], &[(&format!("src/topic_{k}.rs"), format!("fn part_{j}() {{}}\n"))]);
+            }
+            main = commit(&mut s, "main", &format!("Note {k} while topic {k} is open"), Some(main), &[], &[("notes.txt", format!("note {k}\n"))]);
+            // fast-import takes a merge's tree from its first parent: bring the topic's file in.
+            main = commit(&mut s, "main", &format!("Merge topic {k}"), Some(main), &[t], &[(&format!("src/topic_{k}.rs"), "fn part_3() {}\n".into())]);
+        } else if k == 40 {
+            main = commit(&mut s, "main", "Rename the old file", Some(main), &[], &[("R \"old name.txt\" \"new name.txt\"", String::new())]);
+        } else {
+            main = commit(&mut s, "main", &format!("Note {k}"), Some(main), &[], &[("notes.txt", format!("notes\nnote {k}\n"))]);
+        }
+        if k % 100 == 0 {
+            s.push_str(&format!("reset refs/tags/v{}\nfrom :{main}\n", k / 100));
+        }
+    }
+    let wide: Vec<usize> = (1..=10).map(|w| commit(&mut s, &format!("wide-{w}"), &format!("Wide branch {w}"), Some(main), &[], &[(&format!("wide/{w}.txt"), format!("{w}\n"))])).collect();
+    let all: Vec<(String, String)> = (1..=10).map(|w| (format!("wide/{w}.txt"), format!("{w}\n"))).collect();
+    commit(&mut s, "main", "Join ten branches at once", Some(main), &wide, &all.iter().map(|(p, b)| (p.as_str(), b.clone())).collect::<Vec<_>>());
+    let mut c = std::process::Command::new("git").args(["fast-import", "--quiet"]).current_dir(d).stdin(std::process::Stdio::piped()).spawn().unwrap();
+    c.stdin.take().unwrap().write_all(s.as_bytes()).unwrap();
+    assert!(c.wait().unwrap().success(), "fast-import");
+    git(d, &["reset", "-q", "--hard"]);
+}
+
+/// The history's commits as the graph reads them, all at once.
+fn git_log_all(d: &Path) -> Vec<crate::gitlog::Commit> {
+    let out = std::process::Command::new("git").arg("-C").arg(d).args(crate::gitlog::log_args()).output().unwrap();
+    crate::gitlog::read_page(&mut &out.stdout[..], usize::MAX)
+}
+
+#[test]
+fn git_history_lanes_edges_and_changes() {
+    use crate::gitlog::{Lanes, RefKind, Row};
+    if !crate::media::have("git") {
+        eprintln!("git not installed: skipped");
+        return;
+    }
+    let d = tmpdir("gitlog");
+    touch(&d.join("a"), "a\n");
+    git(&d, &["init", "-q"]);
+    git(&d, &["add", "-A"]);
+    git(&d, &["commit", "-qm", "c1"]);
+    touch(&d.join("a"), "a\nb\n");
+    git(&d, &["commit", "-qam", "c2"]);
+    git(&d, &["tag", "v1"]);
+    git(&d, &["checkout", "-qb", "feat"]);
+    touch(&d.join("f"), "f\n");
+    git(&d, &["add", "f"]);
+    git(&d, &["commit", "-qm", "f1"]);
+    touch(&d.join("f"), "f\nf\n");
+    git(&d, &["commit", "-qam", "f2"]);
+    git(&d, &["checkout", "-q", "main"]);
+    touch(&d.join("a"), "a\nb\nc\n");
+    git(&d, &["commit", "-qam", "c3"]);
+    git(&d, &["merge", "-q", "--no-ff", "-m", "merge feat", "feat"]);
+    git(&d, &["mv", "a", "b"]);
+    git(&d, &["commit", "-qm", "ren"]);
+    let log = git_log_all(&d);
+    let subjects: Vec<&str> = log.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(subjects, ["ren", "merge feat", "f2", "f1", "c3", "c2", "c1"]);
+    assert_eq!(log[0].refs, [(RefKind::Head, "main".to_string())]);
+    assert_eq!(log[2].refs, [(RefKind::Branch, "feat".to_string())]);
+    assert_eq!(log[5].refs, [(RefKind::Tag, "v1".to_string())]);
+    assert_eq!((log[1].parents.len(), log[6].parents.len(), log[0].author.as_str()), (2, 0, "Test"));
+    let mut lanes = Lanes::default();
+    let rows: Vec<Row> = log.iter().map(|c| lanes.place(c)).collect();
+    let r = |col, up, ins: &[u16], outs: &[u16], pass: &[u16]| Row { col, up, ins: ins.to_vec(), outs: outs.to_vec(), pass: pass.to_vec() };
+    // The trunk stays in lane 0; the branch takes lane 1 from the merge down to where it
+    // began, and curves back into the trunk there.
+    assert_eq!(rows[0], r(0, false, &[], &[0], &[]));
+    assert_eq!(rows[1], r(0, true, &[], &[0, 1], &[]));
+    assert_eq!(rows[2], r(1, true, &[], &[1], &[0]));
+    assert_eq!(rows[3], r(1, true, &[], &[1], &[0]));
+    assert_eq!(rows[4], r(0, true, &[], &[0], &[1]));
+    assert_eq!(rows[5], r(0, true, &[1], &[0], &[]));
+    assert_eq!(rows[6], r(0, true, &[], &[], &[]));
+    // What each commit changed, and a file's diff.
+    let (body, ch) = crate::gitlog::changes(&d, &log[0].hash, &log[0].parents);
+    assert_eq!((body.as_str(), ch.len(), ch[0].status, ch[0].path.as_str(), ch[0].from.as_deref()), ("", 1, b'R', "b", Some("a")));
+    let (_, ch) = crate::gitlog::changes(&d, &log[1].hash, &log[1].parents);
+    assert_eq!(ch.iter().map(|c| (c.status, c.path.as_str())).collect::<Vec<_>>(), [(b'A', "f")], "a merge shows what it brought in");
+    let (_, ch) = crate::gitlog::changes(&d, &log[6].hash, &log[6].parents);
+    assert_eq!((ch.len(), ch[0].status), (1, b'A'), "the root commit adds its files");
+    let (_, ch) = crate::gitlog::changes(&d, &log[4].hash, &log[4].parents);
+    let (lines, _, cut) = crate::gitlog::diff(&d, &log[4].hash, &log[4].parents, &ch[0]);
+    assert_eq!(lines, ["@@ -1,2 +1,3 @@", " a", " b", "+c"]);
+    assert!(!cut);
+    assert_eq!(crate::gitlog::ago(1000, 1000 + 3 * 86_400 + 5), "3 days ago");
+    assert_eq!(crate::gitlog::ago(1000, 1000 + 3600), "1 hour ago");
+    assert_eq!(crate::gitlog::ago(1000, 1010), "just now");
+    // Not a repository, or one without commits: nothing to read.
+    let empty = tmpdir("gitlog-empty");
+    git(&empty, &["init", "-q"]);
+    assert!(git_log_all(&empty).is_empty());
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&empty);
+}
+
+#[test]
+fn git_history_pages_and_wide_merges() {
+    use crate::gitlog::{Lanes, PAGE, read_page};
+    if !crate::media::have("git") {
+        eprintln!("git not installed: skipped");
+        return;
+    }
+    let d = tmpdir("gitlog-big");
+    git_history_fixture(&d, 700);
+    let all = git_log_all(&d);
+    assert!(all.len() > 2 * PAGE + 50, "{} commits", all.len());
+    // Read page by page from one running git, lanes carried across: the same graph as
+    // all at once.
+    let mut child = std::process::Command::new("git").arg("-C").arg(&d).args(crate::gitlog::log_args()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut r = std::io::BufReader::new(child.stdout.take().unwrap());
+    let (mut paged, mut one) = (Lanes::default(), Lanes::default());
+    let mut n = 0;
+    loop {
+        let page = read_page(&mut r, PAGE);
+        for c in &page {
+            assert_eq!(paged.place(c), one.place(&all[n]), "row {n}");
+            assert_eq!(c.hash, all[n].hash);
+            n += 1;
+        }
+        if page.len() < PAGE {
+            break;
+        }
+    }
+    let _ = child.wait();
+    assert_eq!(n, all.len());
+    // The octopus at the top fans out into eleven lanes; the trunk keeps lane 0 and the
+    // lanes are free again further down.
+    let mut lanes = Lanes::default();
+    let rows: Vec<_> = all.iter().map(|c| lanes.place(c)).collect();
+    assert_eq!(all[0].subject, "Join ten branches at once");
+    assert_eq!(rows[0].outs.len(), 11);
+    assert!(rows[0].outs.iter().any(|&l| l as usize >= crate::gitlog::LANES), "more lanes than drawn");
+    let trunk: Vec<usize> = all.iter().enumerate().filter(|(_, c)| c.subject.starts_with("Note ")).map(|(i, _)| i).collect();
+    assert!(trunk.iter().all(|&i| rows[i].col == 0), "main stays in the first lane");
+    let topic = all.iter().position(|c| c.subject == "Work on topic 50, part 3").unwrap();
+    assert_eq!(rows[topic].col, 1);
+    assert!(rows.iter().skip(20).all(|r| r.pass.len() <= 2), "lanes are given back");
+    let tags: Vec<&str> = all.iter().flat_map(|c| c.refs.iter().filter(|r| r.0 == crate::gitlog::RefKind::Tag).map(|r| r.1.as_str())).collect();
+    assert_eq!(tags, ["v7", "v6", "v5", "v4", "v3", "v2", "v1"]);
+    let ren = all.iter().find(|c| c.subject == "Rename the old file").unwrap();
+    let (_, ch) = crate::gitlog::changes(&d, &ren.hash, &ren.parents);
+    assert_eq!((ch[0].status, ch[0].path.as_str(), ch[0].from.as_deref()), (b'R', "new name.txt", Some("old name.txt")));
+    let _ = std::fs::remove_dir_all(&d);
+}

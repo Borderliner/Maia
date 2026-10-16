@@ -86,6 +86,8 @@ pub struct Inspector {
     extracting: Option<(std::sync::mpsc::Receiver<Result<PathBuf, String>>, Entry)>,
     /// The archive it is in wants a password the preview won't ask for.
     locked: bool,
+    /// The commit history, shown instead of the preview while open.
+    pub git: Option<Box<crate::gitlog::History>>,
 }
 
 /// Test-only views of the preview state (simulations check behaviour, not pixels).
@@ -153,6 +155,7 @@ impl Default for Inspector {
             extra_meta: false,
             extracting: None,
             locked: false,
+            git: None,
         }
     }
 }
@@ -176,6 +179,14 @@ impl Inspector {
 
     pub fn invalidate(&mut self) {
         self.current = None;
+    }
+
+    /// Show the history; the preview (a playing video included) stops until it closes.
+    pub fn show_history(&mut self, h: crate::gitlog::History) {
+        self.content = Content::None;
+        self.current = None;
+        self.pending = None;
+        self.git = Some(Box::new(h));
     }
 
     /// Start showing `e`. Anything that touches the disk (folder listings, file contents)
@@ -389,10 +400,18 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         idx.and_then(|i| t.entries.get(i as usize).cloned())
     };
     let vol = target.as_ref().and_then(|e| panel.tab().vols.get(&e.path).cloned());
+    let here = panel.tab().path.clone();
     let Some(ins) = panel.inspector.as_mut() else { return };
     // Too short to hold even its toolbar (a squeezed panel): draw nothing rather than
     // spill over the status bar.
     if rect.height() < 34.0 || rect.width() < 40.0 {
+        return;
+    }
+    if let Some(h) = ins.git.as_mut() {
+        // Leaving the work tree closes its history.
+        if !here.starts_with(&h.root) || !crate::gitlog::view(ui, rect, h, env) {
+            close_history(panel);
+        }
         return;
     }
     ui.painter().rect_filled(rect, CornerRadius::ZERO, pal.bg);
@@ -582,7 +601,7 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         Content::Text { lines, truncated, spans, prose } => {
             let wrap = if *prose { ins.wrap_prose } else { ins.wrap_code };
             let wrapped = if wrap { Some(&mut ins.wrapped) } else { None };
-            text_view(&mut bui, body, lines, *truncated, spans.as_deref(), ins.line_numbers, wrapped, env.cfg.inspector_font_size + ins.text_size, &pal);
+            text_view(&mut bui, body, lines, *truncated, spans.as_deref(), ins.line_numbers, wrapped, env.cfg.inspector_font_size + ins.text_size, &pal, false);
         }
         Content::Binary(bytes) => {
             let mut lines = vec!["Binary file: first 4 KB shown as hex".to_string(), String::new()];
@@ -591,7 +610,7 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                 let ascii: String = chunk.iter().map(|&b| if (32..127).contains(&b) { b as char } else { '.' }).collect();
                 lines.push(format!("{:08x}  {:<47}  {}", i * 16, hex.join(" "), ascii));
             }
-            text_view(&mut bui, body, &lines, false, None, false, None, env.cfg.inspector_font_size + ins.text_size, &pal);
+            text_view(&mut bui, body, &lines, false, None, false, None, env.cfg.inspector_font_size + ins.text_size, &pal, false);
         }
         Content::Folder(entries) => folder_view(&mut bui, body, entries, env),
         Content::Volume => volume_view(&mut bui, body, &e, vol.as_ref(), &pal),
@@ -685,6 +704,15 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         if toggle_extra {
             ins.extra_meta = !ins.extra_meta;
         }
+    }
+}
+
+/// Close the history, and the inspector with it when it was opened for the history.
+pub fn close_history(panel: &mut Panel) {
+    if panel.inspector.as_ref().and_then(|i| i.git.as_ref()).is_some_and(|h| h.opened) {
+        panel.inspector = None;
+    } else if let Some(i) = panel.inspector.as_mut() {
+        i.git = None;
     }
 }
 
@@ -1011,7 +1039,7 @@ fn syntax_color(k: crate::syntax::Kind, pal: &theme::Palette) -> Color32 {
 }
 
 /// Rows of wrapped text: each is (line, byte where the row starts in that line).
-struct Wrapped {
+pub(crate) struct Wrapped {
     /// Columns, and which text (its line count and where its lines live) they are for.
     key: (usize, usize, usize),
     rows: Vec<(u32, u32)>,
@@ -1050,8 +1078,9 @@ pub fn wrap_line(line: &str, cols: usize, out: &mut Vec<u32>) {
     }
 }
 
+/// `diff`: lines of a unified diff, tinted green where added and red where removed.
 #[allow(clippy::too_many_arguments)]
-fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bool, spans: Option<&[Vec<(usize, usize, crate::syntax::Kind)>]>, numbers: bool, wrapped: Option<&mut Option<Wrapped>>, size: f32, pal: &theme::Palette) {
+pub(crate) fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bool, spans: Option<&[Vec<(usize, usize, crate::syntax::Kind)>]>, numbers: bool, wrapped: Option<&mut Option<Wrapped>>, size: f32, pal: &theme::Palette, diff: bool) {
     let font = FontId::monospace(size);
     let (row_h, cw) = ui.fonts_mut(|f| (f.row_height(&font) + 1.0, f.glyph_width(&font, 'M')));
     let gutter = if numbers { (lines.len().max(1).to_string().len() as f32) * size * 0.62 + 16.0 } else { 6.0 };
@@ -1104,12 +1133,33 @@ fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bool, spans: 
             if numbers && a == 0 {
                 p.text(pos2(r.left() + gutter - 10.0, y), Align2::RIGHT_TOP, (li + 1).to_string(), font.clone(), pal.text_dim.gamma_multiply(0.7));
             }
-            match spans.and_then(|s| s.get(li)).filter(|s| !s.is_empty()) {
+            // A diff: added and removed lines tinted (every row of them when wrapped),
+            // hunk headers dimmed.
+            let mark = if diff { line.as_bytes().first().copied() } else { None };
+            let tint = match mark {
+                Some(b'+') => crate::gitstatus::GREEN,
+                Some(b'-') => pal.danger,
+                _ => Color32::TRANSPARENT,
+            };
+            if tint != Color32::TRANSPARENT {
+                p.rect_filled(Rect::from_min_size(pos2(r.left(), y), vec2(r.width(), row_h)), CornerRadius::ZERO, tint.gamma_multiply(if pal.dark { 0.13 } else { 0.11 }));
+            }
+            if mark == Some(b'@') || mark == Some(b'\\') {
+                p.text(pos2(r.left() + gutter, y), Align2::LEFT_TOP, &line[a..b], font.clone(), pal.text_dim);
+                continue;
+            }
+            let line_spans: &[(usize, usize, crate::syntax::Kind)] = spans.and_then(|s| s.get(li)).map_or(&[][..], |s| &s[..]);
+            match Some(line_spans).filter(|s| !s.is_empty() || tint != Color32::TRANSPARENT) {
                 Some(sp) => {
-                    // Coloured sections between the spans; plain text in the gaps.
+                    // Coloured sections between the spans; plain text in the gaps. A diff's
+                    // +/- takes its line's colour.
                     let mut job = egui::text::LayoutJob::default();
                     let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
                     let mut at = a;
+                    if tint != Color32::TRANSPARENT && a == 0 && b > 0 {
+                        job.append(&line[..1], 0.0, fmt(tint));
+                        at = 1;
+                    }
                     for &(sa, sb, k) in sp {
                         let (sa, sb) = (sa.max(a), sb.min(b));
                         if sa < at || sb > line.len() || sa >= sb {

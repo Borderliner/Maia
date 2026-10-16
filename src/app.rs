@@ -1089,6 +1089,19 @@ impl App {
         let mut consumed: Vec<usize> = vec![];
         let mut plain_fired = false;
         for (n, ev) in events.iter().enumerate() {
+            // An open history takes the keys that move through it, open and go back.
+            if let Event::Key { key, pressed: true, modifiers, .. } = ev {
+                let nav = matches!(key, Key::ArrowUp | Key::ArrowDown | Key::PageUp | Key::PageDown | Key::Home | Key::End | Key::Enter | Key::Escape);
+                if let Some(p) = self.panels.get_mut(&self.active).filter(|_| nav && !text_focus && !modifiers.ctrl && !modifiers.alt) {
+                    if let Some(h) = p.inspector.as_mut().and_then(|i| i.git.as_mut()) {
+                        if !h.key(*key) {
+                            crate::inspector::close_history(p);
+                        }
+                        consumed.push(n);
+                        continue;
+                    }
+                }
+            }
             let chord = match ev {
                 Event::Key { key, pressed: true, modifiers, .. } => Chord::from_key(*key, *modifiers),
                 Event::Copy => Chord::from_key(Key::C, Modifiers { ctrl: true, shift: mods.shift, ..Default::default() }),
@@ -1714,6 +1727,18 @@ impl App {
             Cmd::ToggleInspector => {
                 let p = self.panel();
                 p.inspector = if p.inspector.is_some() { None } else { Some(Inspector::default()) };
+            }
+            Cmd::GitHistory => {
+                let p = self.panel();
+                let repo = crate::gitstatus::repo_for(&p.path());
+                match (p.inspector.as_mut().and_then(|i| i.git.as_mut()), repo) {
+                    (Some(h), _) => h.top(),
+                    (None, Some(r)) => {
+                        let opened = p.inspector.is_none();
+                        p.inspector.get_or_insert_with(Inspector::default).show_history(crate::gitlog::History::new(r.root.clone(), r.branch.clone(), opened));
+                    }
+                    _ => {}
+                }
             }
             Cmd::InspectorLineNumbers => {
                 if let Some(i) = self.panel().inspector.as_mut() {
