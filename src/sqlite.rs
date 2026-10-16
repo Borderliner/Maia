@@ -82,11 +82,13 @@ pub fn parse_list(out: &str) -> Vec<Item> {
 
 const LIST: &str = "SELECT type, name FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY type, name;";
 
-/// The query for the first rows: blobs as their size, everything else as it is.
+/// The query for the first rows: blobs as their size, NULL as the word, everything else
+/// as it is. NULL is spelt out here rather than with -nullvalue, which sqlite3 3.54 and
+/// later ignore in CSV mode (an empty field there).
 pub fn rows_query(name: &str, cols: &[String]) -> String {
     let sel: Vec<String> = cols.iter().map(|c| {
         let q = quote_ident(c);
-        format!("CASE WHEN typeof({q}) = 'blob' THEN '<' || length({q}) || ' bytes>' ELSE {q} END AS {q}")
+        format!("CASE WHEN {q} IS NULL THEN 'NULL' WHEN typeof({q}) = 'blob' THEN '<' || length({q}) || ' bytes>' ELSE {q} END AS {q}")
     }).collect();
     let what = if sel.is_empty() { "*".to_string() } else { sel.join(", ") };
     format!("SELECT {what} FROM {} LIMIT {ROWS};", quote_ident(name))
