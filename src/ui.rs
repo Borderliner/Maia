@@ -547,7 +547,13 @@ impl App {
         let gap = ui.spacing().item_spacing.x;
         // A point of slack per tab: placing them rounds to pixels, and a strip filled to
         // the exact width lost its + to the rounding (at other font sizes and Spacings).
-        let per = ((max_w - plus_w - (gap + 1.0) * n as f32) / n.max(1) as f32).clamp(56.0, 220.0);
+        let avail = max_w - plus_w - (gap + 1.0) * n as f32;
+        let per = (avail / n.max(1) as f32).clamp(56.0, 220.0);
+        // Squeezed tabs read "D…", "Q…": the active one keeps room for its name, as the
+        // one being looked at.
+        // The others never get narrower than their least for it (the strip would overflow).
+        let active_w = if n > 1 && per < 120.0 { (avail * 0.4).min(160.0).min(avail - 56.0 * (n - 1) as f32).max(per) } else { per };
+        let rest = if active_w > per { ((avail - active_w) / (n - 1) as f32).clamp(56.0, 220.0) } else { per };
         let strip_start = ui.cursor().min;
         let col_x = self.shown_rects.get(&panel_id).map(|r| r.x_range());
         let dragging_tab = matches!(self.drag, Some(Drag::Tab { .. }));
@@ -582,7 +588,7 @@ impl App {
             if grow < 1.0 {
                 ui.ctx().request_repaint();
             }
-            let w = per * (0.3 + 0.7 * grow);
+            let w = if i == p.active { active_w } else { rest } * (0.3 + 0.7 * grow);
             widths.push(w);
             let (r, resp) = ui.allocate_exact_size(vec2(w, TAB_H - 4.0), Sense::click_and_drag());
             let is_active = i == p.active;
