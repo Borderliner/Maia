@@ -119,4 +119,6 @@ tools/window.sh      # a real window driven through a pipe, for checking by eye
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE). The bundled fonts and icons keep their own
-licenses, in `assets/`.
+licenses, in `assets/`, and so do the Rust crates Maia is built from:
+[assets/THIRD-PARTY-NOTICES.txt](assets/THIRD-PARTY-NOTICES.txt) lists each with its
+license text (`tools/notices.py` writes it).

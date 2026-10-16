@@ -21,6 +21,7 @@
 !/tools/sim.sh
 !/tools/window.sh
 !/tools/lucide_subset.py
+!/tools/notices.py
 
 # The README screenshot, allowed by name once it exists.
 !/docs/
