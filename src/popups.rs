@@ -526,6 +526,11 @@ fn search_field(ui: &mut Ui, text: &mut String, hint: &str, focus: &mut bool, pa
 }
 
 fn hints(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette) {
+    // A rule between the list and the keys, as under the search field: a row scrolled
+    // half out of view ran straight into them.
+    ui.add_space(2.0);
+    let y = ui.cursor().top();
+    ui.painter().line_segment([pos2(ui.min_rect().left(), y), pos2(ui.min_rect().right(), y)], Stroke::new(1.0, pal.border));
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
