@@ -1290,6 +1290,8 @@ impl App {
             if cresp.clicked() {
                 t.content.on = !on;
                 t.dirty = true;
+                // Back to the text, ready to type, as when switched from the palette.
+                ui.memory_mut(|m| m.request_focus(resp.id));
             }
             bx -= 22.0;
         }
