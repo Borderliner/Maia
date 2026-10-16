@@ -778,9 +778,15 @@ fn commit(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
         ui.painter().line_segment([r.left_center(), r.right_center()], Stroke::new(1.0, pal.border));
         ui.add_space(4.0);
-        let Some((_, files)) = &o.info else {
-            ui.label(egui::RichText::new("Loading…").size(fs - 0.5).color(pal.text_dim));
-            return;
+        let files = match &o.info {
+            Some((_, f)) if !f.is_empty() => f,
+            i => {
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new(if i.is_some() { "No files changed" } else { "Loading…" }).size(fs - 0.5).color(pal.text_dim));
+                });
+                return;
+            }
         };
         let row_h = (fs + 8.0).round();
         let (font, small) = (FontId::proportional(fs - 0.5), FontId::proportional(fs - 2.0));
