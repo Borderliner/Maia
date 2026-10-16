@@ -83,7 +83,9 @@ pub struct Inspector {
     extra_meta: bool,
     /// A file inside an archive being extracted to preview (where it landed, and the
     /// entry it stands for).
-    extracting: Option<(std::sync::mpsc::Receiver<Option<PathBuf>>, Entry)>,
+    extracting: Option<(std::sync::mpsc::Receiver<Result<PathBuf, String>>, Entry)>,
+    /// The archive it is in wants a password the preview won't ask for.
+    locked: bool,
 }
 
 /// Test-only views of the preview state (simulations check behaviour, not pixels).
@@ -150,6 +152,7 @@ impl Default for Inspector {
             pending: None,
             extra_meta: false,
             extracting: None,
+            locked: false,
         }
     }
 }
@@ -189,6 +192,7 @@ impl Inspector {
             return;
         }
         self.extracting = None;
+        self.locked = false;
         // Inside an archive: a file is extracted to the cache and previewed from there.
         if !e.path.exists() {
             if let Some((archive, inner)) = crate::archive::split(&e.path) {
@@ -197,7 +201,7 @@ impl Inspector {
                     let (tx, rx) = std::sync::mpsc::channel();
                     let ctx = ctx.clone();
                     std::thread::spawn(move || {
-                        let _ = tx.send(crate::archive::extract_for_open(&archive, &inner).ok());
+                        let _ = tx.send(crate::archive::extract_for_open(&archive, &inner));
                         ctx.request_repaint();
                     });
                     self.extracting = Some((rx, e.clone()));
@@ -408,11 +412,14 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         if let Ok(got) = rx.try_recv() {
             let mut e = e.clone();
             ins.extracting = None;
-            if let Some(path) = got {
-                e.path = path;
-                let key = ins.current.clone();
-                ins.load(&e, false, ui.ctx());
-                ins.current = key;
+            match got {
+                Ok(path) => {
+                    e.path = path;
+                    let key = ins.current.clone();
+                    ins.load(&e, false, ui.ctx());
+                    ins.current = key;
+                }
+                Err(err) => ins.locked = crate::archive::wants_password(&err),
             }
         }
     }
@@ -595,7 +602,8 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                 theme::paint_icon(bui.painter(), ic, theme::categorize(&e.ext(), e.is_dir, e.is_executable()), &e.ext(), e.is_link);
             }
             bui.painter().text(pos2(body.center().x, ic.bottom() + 14.0), Align2::CENTER_TOP, &e.name, FontId::proportional(env.cfg.font_size), pal.text);
-            bui.painter().text(pos2(body.center().x, ic.bottom() + 34.0), Align2::CENTER_TOP, fsx::fmt_size(e.size), FontId::proportional(env.cfg.font_size - 1.5), pal.text_dim);
+            let sub = if ins.locked { "Password-protected".to_string() } else { fsx::fmt_size(e.size) };
+            bui.painter().text(pos2(body.center().x, ic.bottom() + 34.0), Align2::CENTER_TOP, sub, FontId::proportional(env.cfg.font_size - 1.5), pal.text_dim);
         }
     }
     // Metadata dropdown overlays the body.

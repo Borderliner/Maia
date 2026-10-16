@@ -170,6 +170,24 @@ pub enum Popup {
     GroupMenu { panel: u64, label: String, pos: Pos2 },
     DropMenu { paths: Vec<PathBuf>, dest: PathBuf, pos: Pos2 },
     Connect(ConnectState),
+    ArchivePassword(PasswordState),
+}
+
+/// What runs again once an archive's password is given.
+pub enum Retry {
+    Job(crate::ops::OpKind),
+    /// The panel whose tab is inside the archive.
+    Reload(u64),
+    /// A file inside it, opened in its app.
+    Open(PathBuf),
+}
+
+/// The password for an archive, asked for when something inside it was refused.
+pub struct PasswordState {
+    pub archive: PathBuf,
+    pub retry: Option<Retry>,
+    pub text: String,
+    pub wrong: bool,
 }
 
 /// Connect to a network place: address, and a login when the server wants one.
@@ -205,6 +223,7 @@ impl Popup {
             Popup::OpenWith { .. } => "OpenWith",
             Popup::RunExec { .. } => "RunExec",
             Popup::Connect(..) => "Connect",
+            Popup::ArchivePassword(..) => "ArchivePassword",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -597,6 +616,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::OpenWith { paths, query, all } => open_with(app, ctx, paths, query, all),
         Popup::RunExec { path } => run_exec(app, ctx, path),
         Popup::Connect(st) => connect(app, ctx, st),
+        Popup::ArchivePassword(st) => archive_password(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -2400,6 +2420,59 @@ fn connect(app: &mut App, ctx: &egui::Context, st: &mut ConnectState) -> bool {
         app.connect_from_dialog(uri, login, panel);
     }
     !cancel && !app.connected(&crate::network::normalize(&st.uri))
+}
+
+fn archive_password(app: &mut App, ctx: &egui::Context, st: &mut PasswordState) -> bool {
+    let pal = app.pal;
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        return false;
+    }
+    let mut go = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) && !st.text.is_empty();
+    let mut cancel = false;
+    let name = st.archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    centered(ctx, "archive password", 400.0, &pal, |ui| {
+        let g = crate::listing::elided(ui, &format!("“{name}” is password-protected"), FontId::proportional(app.cfg.font_size), ui.available_width(), pal.text);
+        let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
+        ui.painter().galley(r.min, g, pal.text);
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Password").small().color(pal.text_dim));
+        let r = ui.add(egui::TextEdit::singleline(&mut st.text).password(true).desired_width(f32::INFINITY));
+        crate::ui::note_control(ui, r.rect, "archive password field");
+        r.request_focus();
+        if r.changed() {
+            st.wrong = false;
+        }
+        if st.wrong {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("Wrong password").color(pal.danger));
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(!st.text.is_empty(), egui::Button::new(egui::RichText::new("Unlock").color(Color32::WHITE)).fill(pal.accent)).clicked() {
+                    go = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+    });
+    if go {
+        crate::archive::set_password(&st.archive, std::mem::take(&mut st.text));
+        match st.retry.take() {
+            Some(Retry::Job(kind)) => app.actions.push(Action::StartJob(kind)),
+            Some(Retry::Reload(panel)) => {
+                if let Some(p) = app.panels.get_mut(&panel) {
+                    p.tab_mut().reload();
+                }
+            }
+            Some(Retry::Open(path)) => app.open_from_archive(path),
+            None => {}
+        }
+        return false;
+    }
+    !cancel
 }
 
 fn confirm(app: &mut App, ctx: &egui::Context, msg: &str, ok_label: &str, on_ok: &mut Option<Box<dyn FnOnce(&mut App)>>) -> bool {

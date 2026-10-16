@@ -2483,6 +2483,87 @@ mod journeys {
         report("archives", &s);
     }
 
+    /// Password-protected archives: Extract Here asks for the password (a wrong one is
+    /// said to be wrong), a 7z whose names are hidden asks on the way in, a file opened
+    /// from an AES zip asks before it opens, and Cancel leaves everything as it was.
+    #[test]
+    fn password_protected_archives() {
+        if !sandboxed() || !crate::archive::available() {
+            return;
+        }
+        let home = fixture("encrypted");
+        let d = home.join("Documents");
+        let src = root().join("encsrc");
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(src.join("Trip")).unwrap();
+        std::fs::write(src.join("plan.txt"), "the secret plan").unwrap();
+        std::fs::write(src.join("Trip/beach.txt"), "sand").unwrap();
+        let mk = |prog: &str, args: &[&str]| std::process::Command::new(prog).args(args).current_dir(&src).stdout(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+        let (zip, aes, hidden) = (d.join("vault.zip"), d.join("aes.zip"), d.join("hidden.7z"));
+        if !mk("zip", &["-q", "-r", "-P", "hunter2", zip.to_str().unwrap(), "."]) || !mk("7z", &["a", "-phunter2", "-tzip", "-mem=AES256", aes.to_str().unwrap(), "."]) || !mk("7z", &["a", "-phunter2", "-mhe=on", hidden.to_str().unwrap(), "."]) {
+            eprintln!("zip or 7z missing: skipped");
+            return;
+        }
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.cmd(ViewDetails);
+        s.settle();
+        let asking = |s: &Sim| matches!(&s.app.popup, Popup::ArchivePassword(_));
+        // Extract Here: asked, a wrong password refused, then the right one.
+        select_path(&mut s, &zip);
+        s.cmd(ExtractHere);
+        wait_until(&mut s, "password asked", 10, asking);
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t == "“vault.zip” is password-protected"));
+        look(&mut s, "password dialog");
+        s.act("text wrong");
+        s.click_text("Unlock");
+        wait_until(&mut s, "asked again", 10, |s| asking(s) && s.texts.iter().any(|(_, t)| t == "Wrong password"));
+        look(&mut s, "wrong password");
+        assert!(!d.join("vault").exists(), "nothing left behind by the refused attempt");
+        click_control(&mut s, "archive password field");
+        s.act("text hunter2");
+        s.act("key Enter");
+        wait_until(&mut s, "extracted", 10, |s| !asking(s) && d.join("vault/Trip/beach.txt").exists());
+        assert_eq!(std::fs::read_to_string(d.join("vault/plan.txt")).unwrap(), "the secret plan");
+        // Into the 7z whose names are encrypted too: asked on the way in.
+        s.cmd(Refresh);
+        s.settle();
+        select_path(&mut s, &hidden);
+        s.act("key Enter");
+        wait_until(&mut s, "asked for the 7z", 10, asking);
+        s.act("text hunter2");
+        s.act("key Enter");
+        wait_until(&mut s, "inside the 7z", 10, |s| s.tab().path == hidden && s.tab().entries.iter().any(|e| e.name == "plan.txt"));
+        look(&mut s, "inside an encrypted 7z");
+        // Cancel leaves the AES zip shut: nothing opened.
+        s.act("key Backspace");
+        wait_until(&mut s, "back", 10, |s| s.tab().path == d);
+        s.settle();
+        select_path(&mut s, &aes);
+        s.act("key Enter");
+        wait_until(&mut s, "inside the AES zip", 10, |s| s.tab().path == aes && !s.tab().is_loading());
+        s.settle();
+        // The preview doesn't ask, it says why it shows nothing.
+        s.cmd(ToggleInspector);
+        select_path(&mut s, &aes.join("plan.txt"));
+        wait_until(&mut s, "preview says locked", 10, |s| s.texts.iter().any(|(_, t)| t == "Password-protected"));
+        look(&mut s, "locked preview");
+        s.cmd(ToggleInspector);
+        let launched = crate::mime::LAUNCHED.lock().unwrap().len();
+        s.act("key Enter");
+        wait_until(&mut s, "asked before opening", 10, asking);
+        s.click_text("Cancel");
+        s.idle(3);
+        assert!(!asking(&s) && crate::mime::LAUNCHED.lock().unwrap().len() == launched, "cancelled: nothing opened");
+        // Opened for real once the password is given.
+        s.act("key Enter");
+        wait_until(&mut s, "asked again", 10, asking);
+        s.act("text hunter2");
+        s.act("key Enter");
+        wait_until(&mut s, "opened from the AES zip", 10, |_| crate::mime::LAUNCHED.lock().unwrap().len() > launched);
+        report("encrypted", &s);
+    }
+
     /// A view picked in one folder (every kind) stays as the user opens other folders by
     /// double-click and Enter and goes back up.
     #[test]

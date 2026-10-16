@@ -61,6 +61,9 @@ pub struct Progress {
     pub produced: Vec<(PathBuf, PathBuf)>,
     /// Items refused for lack of permission (offered again as administrator).
     pub denied: Vec<PathBuf>,
+    /// An archive that wants a password (or refused the one given): asked for, then the
+    /// job runs again.
+    pub password: Option<(PathBuf, bool)>,
 }
 
 pub struct Job {
@@ -252,7 +255,15 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
 /// Extract into a hidden staging folder beside the results, then move each top-level
 /// result into place (renamed if the name is taken), so a failure leaves nothing half done.
 fn extract(archive: &Path, members: &[PathBuf], dest: &Path, p: &Mutex<Progress>) {
-    let fail = |e: String| p.lock().unwrap_or_else(|e| e.into_inner()).errors.push(format!("{}: {e}", name_of(archive)));
+    let fail = |e: String| {
+        let mut g = p.lock().unwrap_or_else(|e| e.into_inner());
+        if crate::archive::wants_password(&e) {
+            g.password = Some((archive.to_path_buf(), e == crate::archive::WRONG_PASSWORD));
+        }
+        g.errors.push(format!("{}: {e}", name_of(archive)));
+    };
+    // The folder made for several top-level items, removed again if nothing lands in it.
+    let mut made: Option<PathBuf> = None;
     let (members, dest) = if members.is_empty() {
         let tops: Vec<PathBuf> = match crate::archive::list(archive) {
             Ok(all) => all.iter().filter(|i| i.path.components().count() == 1).map(|i| i.path.clone()).collect(),
@@ -266,6 +277,7 @@ fn extract(archive: &Path, members: &[PathBuf], dest: &Path, p: &Mutex<Progress>
             if let Err(e) = fs::create_dir(&d) {
                 return fail(e.to_string());
             }
+            made = Some(d.clone());
             d
         } else {
             dest.to_path_buf()
@@ -278,6 +290,9 @@ fn extract(archive: &Path, members: &[PathBuf], dest: &Path, p: &Mutex<Progress>
     let stage = dest.join(format!(".maia-extract-{}", std::process::id()));
     if let Err(e) = crate::archive::extract(archive, &members, &stage) {
         let _ = fs::remove_dir_all(&stage);
+        if let Some(d) = made {
+            let _ = fs::remove_dir(d);
+        }
         return fail(e);
     }
     for m in &members {

@@ -135,6 +135,10 @@ pub struct App {
     default_fm: std::sync::Arc<std::sync::atomic::AtomicU8>,
     /// Messages from background work, shown as toasts.
     notes: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Files opened from archives that want a password: (archive, refused, file).
+    pw_asks: std::sync::Arc<std::sync::Mutex<Vec<(PathBuf, bool, PathBuf)>>>,
+    /// The archive folder the password was last asked for (asked once per landing).
+    pw_asked: Option<PathBuf>,
     /// Network places being mounted.
     net_jobs: Vec<NetJob>,
     /// How the Connect dialog's last attempt ended: (address, Ok or the reason).
@@ -215,6 +219,8 @@ impl App {
             requests: None,
             default_fm: Default::default(),
             notes: Default::default(),
+            pw_asks: Default::default(),
+            pw_asked: None,
             net_jobs: vec![],
             dialog_result: None,
             cfg,
@@ -790,6 +796,7 @@ impl App {
         if let Some(n) = notes.into_iter().last() {
             self.toast(n);
         }
+        self.pump_passwords();
         let thumbs_landed = self.thumbs.pump(ctx);
         let stats_changed = self.stats.pump();
         let changed_dirs = self.watch.poll();
@@ -919,6 +926,7 @@ impl App {
         }
         // Jobs: mark finished, drop after a moment.
         let mut finished_dirs = vec![];
+        let mut pw_job = None;
         let mut admin_dirs: Vec<PathBuf> = vec![];
         for j in &mut self.jobs {
             if j.finished_at.is_none() && j.progress.lock().unwrap().finished {
@@ -940,6 +948,9 @@ impl App {
                     _ => {}
                 }
                 let p = j.progress.lock().unwrap();
+                if let Some((archive, wrong)) = &p.password {
+                    pw_job = Some((archive.clone(), *wrong, j.kind.clone(), j.id));
+                }
                 if let OpKind::Move { .. } = j.kind {
                     if !p.produced.is_empty() {
                         self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Move(p.produced.clone()) });
@@ -954,6 +965,11 @@ impl App {
                     self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Trashed(paths.clone()) });
                 }
             }
+        }
+        // An extraction refused for want of a password: ask, and run it again.
+        if let Some((archive, wrong, kind, id)) = pw_job.filter(|_| matches!(self.popup, Popup::None)) {
+            self.jobs.retain(|j| j.id != id);
+            self.popup = Popup::ArchivePassword(crate::popups::PasswordState { archive, retry: Some(crate::popups::Retry::Job(kind)), text: String::new(), wrong });
         }
         for d in finished_dirs {
             self.stats.invalidate(&d);
@@ -2407,16 +2423,44 @@ impl App {
     }
 
     /// Extract a file from an archive to the cache, then open it like any file.
-    fn open_from_archive(&mut self, path: PathBuf) {
+    pub fn open_from_archive(&mut self, path: PathBuf) {
         let Some((archive, inner)) = crate::archive::split(&path) else { return };
-        let (notes, ctx) = (self.notes.clone(), self.ctx.clone());
+        let (notes, asks, ctx) = (self.notes.clone(), self.pw_asks.clone(), self.ctx.clone());
         std::thread::spawn(move || {
             let r = crate::archive::extract_for_open(&archive, &inner).and_then(|f| crate::mime::open_default(&f));
-            if let Err(e) = r {
-                notes.lock().unwrap_or_else(|e| e.into_inner()).push(format!("Couldn't open {}: {e}", inner.display()));
+            match r {
+                Err(e) if crate::archive::wants_password(&e) => asks.lock().unwrap_or_else(|e| e.into_inner()).push((archive, e == crate::archive::WRONG_PASSWORD, path)),
+                Err(e) => notes.lock().unwrap_or_else(|e| e.into_inner()).push(format!("Couldn't open {}: {e}", inner.display())),
+                Ok(()) => {}
             }
             ctx.request_repaint();
         });
+    }
+
+    /// Ask for an archive's password when opening a file in it, or showing a folder in it,
+    /// was refused for want of one.
+    fn pump_passwords(&mut self) {
+        use crate::popups::{PasswordState, Retry};
+        if !matches!(self.popup, Popup::None) {
+            return;
+        }
+        if let Some((archive, wrong, path)) = self.pw_asks.lock().unwrap_or_else(|e| e.into_inner()).pop() {
+            self.popup = Popup::ArchivePassword(PasswordState { archive, retry: Some(Retry::Open(path)), text: String::new(), wrong });
+            return;
+        }
+        let id = self.active;
+        let Some(t) = self.panels.get(&id).map(|p| p.tab()) else { return };
+        match (&t.error, &t.archive) {
+            (Some(e), Some(archive)) if crate::archive::wants_password(e) => {
+                if self.pw_asked.as_ref() != Some(&t.path) {
+                    self.pw_asked = Some(t.path.clone());
+                    let (archive, wrong) = (archive.clone(), e == crate::archive::WRONG_PASSWORD);
+                    self.popup = Popup::ArchivePassword(PasswordState { archive, retry: Some(Retry::Reload(id)), text: String::new(), wrong });
+                }
+            }
+            (None, _) if !t.is_loading() || t.archive.is_none() => self.pw_asked = None,
+            _ => {}
+        }
     }
 
     fn move_tab(&mut self, from: u64, idx: usize, to: u64, to_idx: Option<usize>, side: Option<Side>, copy: bool) {

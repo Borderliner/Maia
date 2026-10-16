@@ -2,6 +2,11 @@
 //! rar, iso, cpio). A path inside an archive is the archive's path joined with the path
 //! inside it, so tabs, breadcrumbs and history need nothing special. Archives are
 //! read-only here: what is inside is extracted to be opened or copied out.
+//!
+//! Passwords: libarchive decrypts zip but not 7z, so encrypted 7z goes to the `7z`
+//! command when it is installed. Both tools run without a terminal and read the password
+//! from a pipe (never the command line, where any user could see it). Passwords are kept
+//! in memory for the session and never written anywhere.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,6 +29,56 @@ pub fn stem(name: &str) -> &str {
 
 pub fn available() -> bool {
     crate::media::have("bsdtar")
+}
+
+/// Errors that a password can fix: asking for one, and one that was refused.
+pub const NEEDS_PASSWORD: &str = "Password-protected";
+pub const WRONG_PASSWORD: &str = "Wrong password";
+
+pub fn wants_password(err: &str) -> bool {
+    err == NEEDS_PASSWORD || err == WRONG_PASSWORD
+}
+
+static PASSWORDS: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
+
+/// Use `pw` for `archive` from now on (this session only).
+pub fn set_password(archive: &Path, pw: String) {
+    let mut g = PASSWORDS.lock().unwrap_or_else(|e| e.into_inner());
+    g.retain(|(a, _)| a != archive);
+    g.push((archive.to_path_buf(), pw));
+}
+
+fn password(archive: &Path) -> Option<String> {
+    PASSWORDS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(a, _)| a == archive).map(|(_, p)| p.clone())
+}
+
+/// What bsdtar says when the encryption is one only the 7z tool can open.
+const NOT_SUPPORTED: &str = "encrypted, but currently not supported";
+
+/// Given to bsdtar when no password is known: an encrypted entry then fails at once
+/// instead of prompting (it would ask over and over, seconds each for AES zips). Not a
+/// secret, so the command line is fine.
+const NO_PASSWORD: &str = "maia: no password given";
+
+/// Zip and 7z, which the 7z command decrypts quickly (bsdtar takes seconds to refuse a
+/// wrong password for an AES zip).
+fn seven_kind(archive: &Path) -> bool {
+    let n = archive.to_string_lossy().to_lowercase();
+    [".zip", ".7z", ".jar", ".apk", ".cbz", ".xpi"].iter().any(|e| n.ends_with(e))
+}
+
+fn tool(name: &str) -> Command {
+    let mut c = Command::new(name);
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        c.pre_exec(|| {
+            // No controlling terminal: a password prompt reads the pipe, never a tty.
+            libc::setsid();
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
+    c
 }
 
 /// (archive, path inside it) when `p` lies inside an archive file. Only called for
@@ -83,6 +138,11 @@ pub fn parse_list(text: &str, now: SystemTime) -> Vec<Item> {
         }
         out.push(Item { path: PathBuf::from(name), is_dir: perms.starts_with('d'), link, size, modified: when(f[5], f[6], f[7], now), dot });
     }
+    with_implied(out)
+}
+
+/// The listing plus the folders that only exist as prefixes of other entries.
+fn with_implied(mut out: Vec<Item>) -> Vec<Item> {
     let have: std::collections::HashSet<PathBuf> = out.iter().map(|i| i.path.clone()).collect();
     let mut implied = std::collections::BTreeSet::new();
     for i in &out {
@@ -153,16 +213,22 @@ fn when(month: &str, day: &str, t: &str, now: SystemTime) -> Option<SystemTime> 
 }
 
 /// Output of a command, or its error text, with a time limit.
-fn run(c: Command, timeout: Duration) -> Result<Vec<u8>, String> {
-    let (ok, out, err) = run_full(c, timeout)?;
+fn run(c: Command, timeout: Duration, pw: Option<&str>) -> Result<Vec<u8>, String> {
+    let (ok, out, err) = run_full(c, timeout, pw)?;
     if ok { Ok(out) } else { Err(err) }
 }
 
-/// (succeeded, stdout, the useful line of stderr).
-fn run_full(mut c: Command, timeout: Duration) -> Result<(bool, Vec<u8>, String), String> {
+/// (succeeded, stdout, the useful line of stderr). `pw` is written to the tool's stdin,
+/// once: a refused password then meets the end of input instead of asking forever.
+fn run_full(mut c: Command, timeout: Duration, pw: Option<&str>) -> Result<(bool, Vec<u8>, String), String> {
     // C.UTF-8: English month names to parse, and any file name intact.
-    c.env("LC_ALL", "C.UTF-8").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = c.spawn().map_err(|e| format!("bsdtar: {e}"))?;
+    c.env("LC_ALL", "C.UTF-8").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = c.spawn().map_err(|e| format!("{}: {e}", c.get_program().to_string_lossy()))?;
+    if let Some(mut i) = child.stdin.take() {
+        if let Some(pw) = pw {
+            let _ = std::io::Write::write_all(&mut i, format!("{pw}\n").as_bytes());
+        }
+    }
     let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
     let ro = std::thread::spawn(move || {
         let mut v = vec![];
@@ -192,8 +258,14 @@ fn run_full(mut c: Command, timeout: Duration) -> Result<(bool, Vec<u8>, String)
     };
     let (o, e) = (ro.join().unwrap_or_default(), re.join().unwrap_or_default());
     let msg = String::from_utf8_lossy(&e);
-    // The first complaint says what went wrong ("Error exit delayed…" comes last).
-    let line = msg.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("bsdtar failed").trim_start_matches("bsdtar: ").to_string();
+    // A password asked for, or refused: bsdtar says "passphrase", 7z "password".
+    let lower = msg.to_lowercase();
+    let line = if (lower.contains("passphrase") || lower.contains("password")) && !lower.contains(NOT_SUPPORTED) {
+        if pw.is_some_and(|p| !p.is_empty()) { WRONG_PASSWORD.to_string() } else { NEEDS_PASSWORD.to_string() }
+    } else {
+        // The first complaint says what went wrong ("Error exit delayed…" comes last).
+        msg.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("Enter pass")).map(|l| l.replace("Enter passphrase:", "")).next().unwrap_or_else(|| "bsdtar failed".into()).trim_start_matches("bsdtar: ").to_string()
+    };
     match status {
         Some(st) => Ok((st.success(), o, line)),
         None => Err("Timed out".into()),
@@ -209,14 +281,23 @@ pub fn list(archive: &Path) -> Result<Listing, String> {
     if let Some(hit) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|c| c.0 == archive && c.1 == mtime) {
         return Ok(hit.2.clone());
     }
-    let mut c = Command::new("bsdtar");
+    let pw = password(archive);
+    let mut c = tool("bsdtar");
+    if pw.is_none() {
+        c.arg("--passphrase").arg(NO_PASSWORD);
+    }
     c.arg("-tvf").arg(archive);
     // One unreadable name makes bsdtar exit with an error after listing the rest: keep them.
-    let (ok, out, err) = run_full(c, Duration::from_secs(60))?;
-    if !ok && out.is_empty() {
-        return Err(err);
-    }
-    let items: Listing = Arc::new(parse_list(&String::from_utf8_lossy(&out), SystemTime::now()));
+    let (ok, out, err) = run_full(c, Duration::from_secs(60), pw.as_deref())?;
+    let items: Listing = Arc::new(if !ok && out.is_empty() {
+        // 7z with its names encrypted too.
+        if !err.contains(NOT_SUPPORTED) {
+            return Err(err);
+        }
+        list7(archive, pw.as_deref())?
+    } else {
+        parse_list(&String::from_utf8_lossy(&out), SystemTime::now())
+    });
     let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     g.retain(|c| c.0 != archive);
     if g.len() >= 8 {
@@ -259,32 +340,101 @@ pub fn list_async(path: PathBuf, archive: PathBuf, inner: PathBuf, ctx: egui::Co
 }
 
 /// Extract `members` (paths inside the archive, folders with their contents) into `dir`.
+/// On failure `dir` may hold partial or zero-filled files: callers extract into a
+/// staging folder and keep it only on success.
 pub fn extract(archive: &Path, members: &[PathBuf], dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let all = list(archive)?;
-    let mut c = Command::new("bsdtar");
+    let pw = password(archive);
+    if pw.is_some() && seven_kind(archive) && seven().is_ok() {
+        return extract7(archive, members, dir, pw.as_deref());
+    }
+    let mut c = tool("bsdtar");
+    if pw.is_none() {
+        c.arg("--passphrase").arg(NO_PASSWORD);
+    }
     c.arg("-xf").arg(archive).arg("-C").arg(dir).arg("--");
     for m in members {
         // A folder pattern takes everything under it; bsdtar matches names as stored.
         let dot = all.iter().find(|i| i.path == *m).is_some_and(|i| i.dot);
         c.arg(if dot { Path::new(".").join(m) } else { m.clone() });
     }
-    run(c, Duration::from_secs(3600)).map(|_| ())
+    match run(c, Duration::from_secs(3600), pw.as_deref()) {
+        Err(e) if e.contains(NOT_SUPPORTED) => extract7(archive, members, dir, pw.as_deref()),
+        r => r.map(|_| ()),
+    }
+}
+
+/// The 7z command, under whichever name it is installed.
+fn seven() -> Result<&'static str, String> {
+    ["7z", "7zz", "7za"].into_iter().find(|t| crate::media::have(t)).ok_or_else(|| "Encrypted 7z archives need the 7z command".to_string())
+}
+
+/// Failures of the 7z tool, which only runs for encrypted archives: without a password
+/// any failure means it wants one.
+fn seven_err(e: String, pw: Option<&str>) -> String {
+    if pw.is_none() { NEEDS_PASSWORD.into() } else { e }
+}
+
+/// An encrypted 7z's listing, from `7z l -slt`.
+fn list7(archive: &Path, pw: Option<&str>) -> Result<Vec<Item>, String> {
+    let mut c = tool(seven()?);
+    c.args(["l", "-slt", "-ba", "--"]).arg(archive);
+    let out = run(c, Duration::from_secs(60), pw).map_err(|e| seven_err(e, pw))?;
+    Ok(parse_slt(&String::from_utf8_lossy(&out)))
+}
+
+/// `7z l -slt` blocks ("Path = a/b.txt", "Size = 6", "Modified = 2026-10-15 19:19:57.79",
+/// "Attributes = D drwxr-xr-x") as listing items.
+pub fn parse_slt(text: &str) -> Vec<Item> {
+    let mut out = vec![];
+    for block in text.split("\n\n") {
+        let field = |k: &str| block.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix(" = "));
+        let Some(path) = field("Path").filter(|p| !p.is_empty() && !p.split('/').any(|c| c == "..")) else { continue };
+        let attrs = field("Attributes").unwrap_or("");
+        let unix = attrs.split_whitespace().nth(1).unwrap_or("");
+        out.push(Item {
+            path: PathBuf::from(path.trim_end_matches('/')),
+            is_dir: attrs.starts_with('D') || unix.starts_with('d'),
+            link: unix.starts_with('l'),
+            size: field("Size").and_then(|s| s.parse().ok()).unwrap_or(0),
+            modified: field("Modified").and_then(crate::timefmt::parse_local),
+            dot: false,
+        });
+    }
+    with_implied(out)
+}
+
+fn extract7(archive: &Path, members: &[PathBuf], dir: &Path, pw: Option<&str>) -> Result<(), String> {
+    let mut c = tool(seven()?);
+    let mut o = std::ffi::OsString::from("-o");
+    o.push(dir);
+    c.args(["x", "-bso0", "-bsp0", "-y"]).arg(o).arg("--").arg(archive).args(members);
+    run(c, Duration::from_secs(3600), pw).map(|_| ()).map_err(|e| seven_err(e, pw))
 }
 
 /// Where a member is extracted to be opened (one folder per archive and version).
 pub fn open_cache(archive: &Path) -> PathBuf {
     let mtime = std::fs::metadata(archive).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
     let key = crate::thumbcache::md5_hex(format!("{}\0{mtime}", archive.display()).as_bytes());
-    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("maia/archives").join(key)
+    // Tests run outside the sandbox too: never the real cache.
+    let base = if cfg!(test) { None } else { dirs::cache_dir() };
+    base.unwrap_or_else(std::env::temp_dir).join("maia/archives").join(key)
 }
 
-/// Extract one file to the cache and return where it landed.
+/// Extract one file to the cache and return where it landed. It goes through a staging
+/// folder, so a refused password never leaves a zero-filled file to be opened later.
 pub fn extract_for_open(archive: &Path, inner: &Path) -> Result<PathBuf, String> {
     let dir = open_cache(archive);
     let dest = dir.join(inner);
     if !dest.exists() {
-        extract(archive, &[inner.to_path_buf()], &dir)?;
+        let stage = dir.join(format!(".part-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let r = extract(archive, &[inner.to_path_buf()], &stage).and_then(|_| {
+            std::fs::create_dir_all(dest.parent().unwrap_or(&dir)).map_err(|e| e.to_string())?;
+            std::fs::rename(stage.join(inner), &dest).map_err(|e| e.to_string())
+        });
+        let _ = std::fs::remove_dir_all(&stage);
+        r?;
     }
     dest.exists().then_some(dest).ok_or_else(|| "Couldn't extract it".into())
 }
@@ -292,9 +442,9 @@ pub fn extract_for_open(archive: &Path, inner: &Path) -> Result<PathBuf, String>
 /// Compress `names` (inside `parent`) into `out`; the format follows its extension.
 pub fn create(out: &Path, parent: &Path, names: &[std::ffi::OsString]) -> Result<(), String> {
     let tmp = out.with_file_name(format!(".{}.part", out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
-    let mut c = Command::new("bsdtar");
+    let mut c = tool("bsdtar");
     c.arg("-cf").arg(&tmp).arg("--format").arg(format_for(out)).args(filter_for(out)).arg("-C").arg(parent).arg("--").args(names);
-    let r = run(c, Duration::from_secs(3600));
+    let r = run(c, Duration::from_secs(3600), None);
     match r {
         Ok(_) => std::fs::rename(&tmp, out).map_err(|e| e.to_string()),
         Err(e) => {

@@ -1870,3 +1870,68 @@ fn chosen_view_stays_while_browsing_and_saved_views_still_apply() {
     assert_eq!(t.settings.zoom, 0.0);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Make encrypted archives of `src` with the real tools: (ZipCrypto zip, AES zip,
+/// 7z, 7z with its names encrypted), or None when zip or 7z is missing.
+fn encrypted_archives(d: &Path, src: &Path, pw: &str) -> Option<[PathBuf; 4]> {
+    let run = |prog: &str, args: &[&str]| std::process::Command::new(prog).args(args).current_dir(src).stdout(std::process::Stdio::null()).status().ok().filter(|s| s.success());
+    let out = [d.join("crypto.zip"), d.join("aes.zip"), d.join("plain-names.7z"), d.join("hidden-names.7z")];
+    let p = |i: usize| out[i].to_str().unwrap().to_string();
+    run("zip", &["-q", "-r", "-P", pw, &p(0), "."])?;
+    run("7z", &["a", &format!("-p{pw}"), "-tzip", "-mem=AES256", &p(1), "."])?;
+    run("7z", &["a", &format!("-p{pw}"), &p(2), "."])?;
+    run("7z", &["a", &format!("-p{pw}"), "-mhe=on", &p(3), "."])?;
+    Some(out)
+}
+
+#[test]
+fn password_protected_archives_list_extract_and_refuse() {
+    use crate::archive::{self, NEEDS_PASSWORD, WRONG_PASSWORD};
+    let d = tmpdir("encrypted");
+    let src = d.join("src");
+    std::fs::create_dir_all(src.join("Trip photos")).unwrap();
+    touch(&src.join("notes.txt"), "the secret plan");
+    touch(&src.join("Trip photos/beach.txt"), "sand");
+    let Some(all) = encrypted_archives(&d, &src, "hunter2") else {
+        eprintln!("zip or 7z missing: skipped");
+        return;
+    };
+    for a in &all {
+        let name = a.file_name().unwrap().to_string_lossy().into_owned();
+        // Zips and plain-named 7z list without the password; hidden names need it.
+        let listed = archive::list(a);
+        if name.starts_with("hidden") {
+            assert_eq!(listed.err().as_deref(), Some(NEEDS_PASSWORD), "{name}");
+        } else {
+            let items = listed.unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(items.iter().any(|i| i.path == Path::new("Trip photos/beach.txt")), "{name}");
+        }
+        // Without it: refused, and nothing half-written is left to open later.
+        let x = d.join(format!("x-{name}"));
+        assert_eq!(archive::extract(a, &[PathBuf::from("notes.txt")], &x).err().as_deref(), Some(NEEDS_PASSWORD), "{name}");
+        assert_eq!(archive::extract_for_open(a, Path::new("notes.txt")).err().as_deref(), Some(NEEDS_PASSWORD), "{name}");
+        assert!(!archive::open_cache(a).join("notes.txt").exists(), "{name}: nothing cached");
+        archive::set_password(a, "wrong".into());
+        let r = archive::extract_for_open(a, Path::new("notes.txt"));
+        assert_eq!(r.err().as_deref(), Some(WRONG_PASSWORD), "{name}");
+        assert!(!archive::open_cache(a).join("notes.txt").exists(), "{name}: no zero-filled file cached");
+        // With it: listed and extracted whole, folders with their contents.
+        archive::set_password(a, "hunter2".into());
+        assert!(archive::list(a).unwrap().iter().any(|i| i.path == Path::new("Trip photos") && i.is_dir), "{name}");
+        let f = archive::extract_for_open(a, Path::new("notes.txt")).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(std::fs::read_to_string(f).unwrap(), "the secret plan", "{name}");
+        let y = d.join(format!("y-{name}"));
+        archive::extract(a, &[PathBuf::from("Trip photos")], &y).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(std::fs::read_to_string(y.join("Trip photos/beach.txt")).unwrap(), "sand", "{name}");
+    }
+    // 7z's own listing format.
+    let items = archive::parse_slt("Path = sub\nSize = 0\nModified = 2026-10-15 19:19:57.7977160\nAttributes = D drwxr-xr-x\n\nPath = sub/b.txt\nSize = 5\nModified = 2026-10-15 19:19:57.7977160\nAttributes = A -rw-r--r--\n\nPath = ../evil\nSize = 1\n\nPath = deep/x.txt\nSize = 2\n");
+    let get = |p: &str| items.iter().find(|i| i.path == Path::new(p)).cloned();
+    assert!(get("sub").is_some_and(|i| i.is_dir) && get("sub/b.txt").is_some_and(|i| i.size == 5 && i.modified.is_some()));
+    assert!(get("deep").is_some_and(|i| i.is_dir), "implied folder");
+    assert!(get("../evil").is_none(), "no climbing out");
+    for c in &all {
+        let _ = std::fs::remove_dir_all(archive::open_cache(c));
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
