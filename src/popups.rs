@@ -877,6 +877,10 @@ fn goto_items(app: &App, st: &mut GoToState, known: &crate::sidebar::Known, ctx:
         // Only folders known to exist (from the background snapshot or open tabs): no stat calls here.
         for (_, p) in scored.into_iter().filter(|(_, p)| tab::is_computer(p) || known.dirs.contains(p) || tab_dirs.contains(p)).take(200) {
             push(&mut items, &p);
+            // A folder seen only in an open tab is still a folder (it had a file's icon).
+            if let Some(it) = items.last_mut() {
+                it.is_dir = true;
+            }
         }
     }
     st.items = items;
