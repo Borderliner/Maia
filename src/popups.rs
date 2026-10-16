@@ -596,6 +596,13 @@ fn menu_item(ui: &mut Ui, label: &str, chip: Option<String>, pal: &Palette) -> b
     resp.clicked()
 }
 
+/// A group's name inside a menu: small and dim, in line with the items' text below it,
+/// with room above it so it reads as the start of a group.
+fn menu_heading(ui: &mut Ui, text: &str, pal: &Palette) {
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
+    ui.painter().text(pos2(r.left() + 10.0, r.bottom() - 4.0), Align2::LEFT_BOTTOM, text, FontId::proportional(11.5), pal.text_dim);
+}
+
 fn menu_sep(ui: &mut Ui, pal: &Palette) {
     ui.add_space(3.0);
     let y = ui.cursor().top();
@@ -2655,7 +2662,7 @@ fn tab_search(app: &mut App, ctx: &egui::Context, query: &mut String, sel: &mut 
             for (i, (label, path, loc)) in rows.iter().enumerate() {
                 if loc.is_none() && !closed_header {
                     closed_header = true;
-                    ui.label(egui::RichText::new("RECENTLY CLOSED").size(10.5).color(pal.text_dim));
+                    menu_heading(ui, "Recently closed", &pal);
                 }
                 let resp = row(ui, 30.0, i == *sel, &pal, |ui, r| {
                     let mut job = highlight_job(label, &q, FontId::proportional(13.5), pal.text, pal.accent);
@@ -3948,7 +3955,7 @@ fn quick_menu(app: &mut App, ctx: &egui::Context, panel: Option<(u64, Pos2)>) ->
     let quick: Vec<Cmd> = app.ud.quick.iter().filter_map(|id| Cmd::from_id(id)).collect();
     let group = app.panels.get(&app.active).map(|p| p.tab().settings.group).unwrap_or_default();
     let (_, rect) = anchored(ctx, "quickmenu", anchor, 280.0, &pal, |ui| {
-        ui.label(egui::RichText::new("QUICK").size(10.5).color(pal.text_dim));
+        menu_heading(ui, "Quick", &pal);
         for c in &quick {
             if cmd_item(ui, app, *c) {
                 run = Some(*c);
@@ -3956,14 +3963,14 @@ fn quick_menu(app: &mut App, ctx: &egui::Context, panel: Option<(u64, Pos2)>) ->
         }
         if panel.is_some() {
             menu_sep(ui, &pal);
-            ui.label(egui::RichText::new("SORT").size(10.5).color(pal.text_dim));
+            menu_heading(ui, "Sort", &pal);
             for c in [Cmd::SortName, Cmd::SortSize, Cmd::SortModified, Cmd::SortType, Cmd::ToggleFoldersFirst] {
                 if cmd_item(ui, app, c) {
                     run = Some(c);
                 }
             }
             menu_sep(ui, &pal);
-            ui.label(egui::RichText::new("GROUP").size(10.5).color(pal.text_dim));
+            menu_heading(ui, "Group", &pal);
             for c in crate::commands::GROUP_CMDS {
                 if !applicable(app, c) {
                     continue;
@@ -4149,7 +4156,7 @@ fn history(app: &mut App, ctx: &egui::Context, panel: u64, anchor: Pos2) -> bool
     let recents: Vec<PathBuf> = app.ud.recents.iter().take(10).cloned().collect();
     let mut go = None;
     let (_, rect) = anchored(ctx, "history", anchor, 320.0, &pal, |ui| {
-        ui.label(egui::RichText::new("HISTORY").size(10.5).color(pal.text_dim));
+        menu_heading(ui, "History", &pal);
         for (i, h) in hist.iter().take(15) {
             let name = if tab::is_computer(h) { "Computer".into() } else { h.display().to_string() };
             let label = if *i == pos { format!("● {name}") } else { name };
@@ -4159,7 +4166,7 @@ fn history(app: &mut App, ctx: &egui::Context, panel: u64, anchor: Pos2) -> bool
         }
         if !recents.is_empty() {
             menu_sep(ui, &pal);
-            ui.label(egui::RichText::new("RECENT").size(10.5).color(pal.text_dim));
+            menu_heading(ui, "Recent", &pal);
             for r in &recents {
                 if menu_item(ui, &r.display().to_string(), None, &pal) {
                     go = Some(r.clone());
