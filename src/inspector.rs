@@ -255,15 +255,22 @@ impl Inspector {
         if e.is_dir {
             self.folder_path = Some(e.path.clone());
         }
+        // An archive shows what is in it, as a folder does (its hex says nothing). Big
+        // compressed tarballs are read whole to be listed: those keep the hex.
+        let archive = !e.is_dir && e.size <= 64 << 20 && crate::archive::is_archive(&e.name) && crate::archive::available();
         let (tx, rx) = std::sync::mpsc::channel();
         let (path, is_dir, ctx) = (e.path.clone(), e.is_dir, ctx.clone());
         std::thread::spawn(move || {
-            let c = if is_dir {
-                let mut v = fsx::list_dir(&path).unwrap_or_default();
+            let sorted = |mut v: Vec<Entry>| {
                 v.retain(|x| !x.hidden);
                 v.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| tab::natural_cmp(&a.lname(), &b.lname())));
                 v.truncate(5000);
                 Content::Folder(v)
+            };
+            let c = if is_dir {
+                sorted(fsx::list_dir(&path).unwrap_or_default())
+            } else if archive {
+                crate::archive::entries(&path, Path::new("")).map(sorted).unwrap_or_else(|_| read_text(&path))
             } else {
                 read_text(&path)
             };
