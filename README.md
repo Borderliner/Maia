@@ -8,7 +8,17 @@ background file operations.
 
 ## Install
 
-You need Rust (1.88 or newer) and a Wayland or X11 desktop with OpenGL.
+You need a Wayland or X11 desktop with OpenGL. The releases have builds for x86_64
+and ARM64 (`maia-linux-aarch64`) that run on glibc 2.35 or newer, so Ubuntu 22.04,
+Debian 12, Fedora 36 and anything later:
+
+```bash
+curl -LO https://github.com/yappologistic/Maia/releases/latest/download/maia-linux-x86_64
+chmod +x maia-linux-x86_64
+./maia-linux-x86_64 --install
+```
+
+To build it yourself you need Rust (1.88 or newer):
 
 ```bash
 git clone https://github.com/yappologistic/Maia.git
@@ -104,10 +114,10 @@ on its battery.
 Updates come from this repository's releases. In Options, Startup & system, Check for
 updates asks GitHub whether a newer Maia is out; Update downloads it, checks it against
 the release's checksum and puts it in place of the installed one, and Restart opens it.
-`maia --update` does the same from a terminal. Maia never checks on its own. Release
-builds are made on a current rolling distribution and need glibc 2.43 or newer; the
-updater runs a new build once before it swaps anything in, so on an older system it
-says so and leaves Maia as it is (build from source there). One installed by a package manager is updated there.
+`maia --update` does the same from a terminal. Maia never checks on its own. The
+updater runs a new build once before it swaps anything in, so a build that can't run
+on your system is left out and Maia stays as it is. One installed by a package manager
+is updated there.
 
 Settings live in `~/.config/maia/config.json`, bookmarks and layouts in
 `~/.local/share/maia/userdata.json`.
