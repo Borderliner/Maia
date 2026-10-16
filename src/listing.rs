@@ -745,7 +745,8 @@ fn background_clicks(ui: &Ui, bg: &Response, t: &mut Tab, env: &mut Env) {
 fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query) {
     let pal = *env.pal;
     let row_h = row_height(env.cfg);
-    let header_h = 26.0;
+    // As tall as the inspector's toolbar beside it, so their lines run on as one.
+    let header_h = 30.0;
     let font = FontId::proportional(env.cfg.font_size);
     let small = FontId::proportional(env.cfg.font_size - 1.0);
     let pad = 10.0;
@@ -911,16 +912,16 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                     let suffix = rel.as_deref().and_then(|r| std::path::Path::new(r).parent()).filter(|p| !p.as_os_str().is_empty()).map(|p| format!("› {}", p.display()));
                                     let tags = if computer { None } else { row_tags(&e.path) };
                                     let room = tags.as_ref().map_or(0.0, |tg| tags_width(ui, tg, &font));
-                                    let mut job = name_job(&name, suffix.as_deref(), q, &font, dimc(pal.text), dimc(pal.text_dim), pal.accent, (name_r.width() - room).max(24.0), 1);
+                                    let mut job = name_job(&name, suffix.as_deref(), q, &font, dimc(pal.text), dimc(sub), acc, (name_r.width() - room).max(24.0), 1);
                                     // The line that matched, after the name (elided with it).
                                     if let Some(line) = t.content.snippet(&e.path) {
-                                        append_match(&mut job, line, crate::query::name_part(&t.filter).trim(), &font, dimc(pal.text_dim), pal.accent);
+                                        append_match(&mut job, line, crate::query::name_part(&t.filter).trim(), &font, dimc(sub), acc);
                                     }
                                     let g = ui.fonts_mut(|f| f.layout_job(job));
                                     let gw = g.size().x;
                                     ui.painter().galley(pos2(name_r.left(), cell.center().y - g.size().y / 2.0), g, pal.text);
                                     if let Some(tg) = &tags {
-                                        paint_tags(ui, name_r.left() + gw, cell.center().y, tg, &font, &pal, Color32::TRANSPARENT);
+                                        paint_tags(ui, name_r.left() + gw, cell.center().y, tg, &font, sub, ring);
                                     }
                                 }
                                 if env.cfg.highlight_recents && env.recents.contains(&e.path) {
@@ -973,9 +974,9 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                     Column::Extension => e.ext().to_string(),
                                     _ => String::new(),
                                 };
-                                let g = elided(ui, &txt, small.clone(), inner.width(), dimc(pal.text_dim));
+                                let g = elided(ui, &txt, small.clone(), inner.width(), dimc(sub));
                                 let gx = if other.right_aligned() { inner.right() - g.size().x } else { inner.left() };
-                                ui.painter().galley(pos2(gx, cell.center().y - g.size().y / 2.0), g, pal.text_dim);
+                                ui.painter().galley(pos2(gx, cell.center().y - g.size().y / 2.0), g, sub);
                             }
                         }
                         x += w;
