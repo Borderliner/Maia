@@ -149,7 +149,7 @@ pub fn read_page(r: &mut impl BufRead, n: usize) -> Vec<Commit> {
     v
 }
 
-fn git(root: &Path) -> std::process::Command {
+pub(crate) fn git(root: &Path) -> std::process::Command {
     let mut c = crate::media::tool("git");
     c.arg("--no-optional-locks").arg("--literal-pathspecs").args(crate::gitstatus::guard(root)).arg("-C").arg(root).args(["-c", "log.showSignature=false", "-c", "core.quotePath=false"]);
     c
@@ -495,9 +495,9 @@ pub fn author_color(pal: &Palette, email: &str, name: &str) -> Color32 {
 }
 
 /// A worker's answer, once it has one.
-type Slot<T> = Arc<Mutex<Option<T>>>;
+pub(crate) type Slot<T> = Arc<Mutex<Option<T>>>;
 
-fn spawn<T: Send + 'static>(ctx: &egui::Context, f: impl FnOnce() -> T + Send + 'static) -> Slot<T> {
+pub(crate) fn spawn<T: Send + 'static>(ctx: &egui::Context, f: impl FnOnce() -> T + Send + 'static) -> Slot<T> {
     let (slot, ctx) = (Slot::default(), ctx.clone());
     let theirs = Arc::clone(&slot);
     std::thread::spawn(move || {
@@ -510,7 +510,7 @@ fn spawn<T: Send + 'static>(ctx: &egui::Context, f: impl FnOnce() -> T + Send + 
     slot
 }
 
-fn take<T>(slot: &Option<Slot<T>>) -> Option<T> {
+pub(crate) fn take<T>(slot: &Option<Slot<T>>) -> Option<T> {
     slot.as_ref()?.lock().ok()?.take()
 }
 
@@ -867,6 +867,10 @@ pub struct History {
     /// Many files are shown by folder (the toggle above them switches).
     tree: bool,
     want: Option<Want>,
+    /// The work tree's changes: the row above the commits, and their page.
+    pub(crate) changes: crate::gitchanges::Changes,
+    /// The keyboard is on the Changes row (above the first commit).
+    on_changes: bool,
 }
 
 /// What a simulated user can check: the state behind the view.
@@ -942,6 +946,13 @@ impl History {
     pub fn wrapped_rows(&self) -> Option<usize> {
         self.wrapped.as_ref().map(|w| w.rows.len())
     }
+    pub fn changes(&self) -> crate::gitchanges::Probe {
+        self.changes.probe()
+    }
+    /// The keyboard is on the Changes row.
+    pub fn on_changes(&self) -> bool {
+        self.on_changes
+    }
     /// The running git (0 when none).
     pub fn git_pid(&self) -> u32 {
         self.list.feed.as_ref().map_or(0, |f| f.lock().pid)
@@ -956,17 +967,51 @@ impl History {
 
 impl History {
     pub fn new(root: PathBuf, branch: String, opened: bool) -> History {
-        History { root, branch, opened, list: List::new(None), all: None, keyed: false, reveal: false, open: None, wrapped: None, tree: true, want: None }
+        let changes = crate::gitchanges::Changes::new(root.clone());
+        History { root, branch, opened, list: List::new(None), all: None, keyed: false, reveal: false, open: None, wrapped: None, tree: true, want: None, changes, on_changes: false }
+    }
+
+    /// Read the history again from the top: HEAD moved (a commit, a switch).
+    pub fn reload(&mut self) {
+        self.list = List::new(None);
+        self.all = None;
+        self.open = None;
+        self.want = None;
+        self.wrapped = None;
+        self.reveal = true;
+    }
+
+    /// The status marks were read anew (`repo`): follow the work tree's changes, and a
+    /// branch switched elsewhere.
+    pub fn follow(&mut self, repo: Option<&std::rc::Rc<crate::gitstatus::Repo>>, ctx: &egui::Context) {
+        let Some(r) = repo.filter(|r| r.root == self.root) else { return };
+        self.changes.follow(std::rc::Rc::as_ptr(r) as usize, ctx);
+        if !r.branch.is_empty() && r.branch != self.branch {
+            self.branch = r.branch.clone();
+            if self.list.path.is_none() {
+                self.reload();
+            }
+        }
     }
 
     /// Back to the graph (the palette command run while the history is open).
     pub fn top(&mut self) {
         self.open = None;
+        self.changes.open = false;
         self.reveal = true;
+    }
+
+    /// The Changes page, in place of the graph.
+    pub fn show_changes(&mut self) {
+        self.open = None;
+        self.changes.open = true;
     }
 
     /// Take in what the workers finished, and start what is wanted.
     pub(crate) fn poll(&mut self, ctx: &egui::Context) {
+        if self.changes.poll(ctx) {
+            self.reload();
+        }
         // The first page is asked for here, the next ones as the graph nears its end.
         let l = &mut self.list;
         let f = l.feed.get_or_insert_with(|| feed(self.root.clone(), ctx, l.path.as_deref().map_or_else(|| log_args().map(String::from).to_vec(), file_log_args)));
@@ -1140,11 +1185,19 @@ impl History {
     /// Whether a key is the history's: moving, opening and going back always, and `[`
     /// and `]` (previous and next file) once a commit is open.
     pub fn takes(&self, k: Key) -> bool {
+        if self.changes.open {
+            return self.changes.takes(k);
+        }
         matches!(k, Key::ArrowUp | Key::ArrowDown | Key::PageUp | Key::PageDown | Key::Home | Key::End | Key::Enter | Key::Escape) || matches!(k, Key::OpenBracket | Key::CloseBracket) && self.open.is_some()
     }
 
     /// A key while the history has the keyboard; false when it should close.
-    pub fn key(&mut self, k: Key) -> bool {
+    pub fn key(&mut self, k: Key, panel: u64, actions: &mut Vec<Action>) -> bool {
+        if self.changes.open {
+            self.keyed = true;
+            self.changes.key(k, panel, actions);
+            return true;
+        }
         let step = |sel: &mut usize, n: usize| {
             let d: isize = match k {
                 Key::ArrowDown => 1,
@@ -1168,8 +1221,25 @@ impl History {
             }
             return true;
         }
+        // The Changes row sits above the first commit.
+        let changes = self.changes.any();
+        self.on_changes &= changes;
         match &mut self.open {
+            None if k == Key::Enter && self.on_changes => self.show_changes(),
             None if k == Key::Enter => self.open_commit(self.list.sel),
+            None if changes && (k == Key::Home || k == Key::ArrowUp && self.list.sel == 0 && !self.on_changes || k == Key::PageUp && self.list.sel < 10) => {
+                self.list.sel = 0;
+                self.on_changes = true;
+                self.reveal = true;
+            }
+            None if self.on_changes && matches!(k, Key::ArrowDown | Key::PageDown | Key::End) => {
+                self.on_changes = false;
+                if k != Key::ArrowDown {
+                    self.reveal |= step(&mut self.list.sel, self.list.commits.len());
+                }
+                self.reveal = true;
+            }
+            None if self.on_changes => {}
             None => self.reveal |= step(&mut self.list.sel, self.list.commits.len()),
             Some(o) if o.diff.is_some() => match k {
                 Key::OpenBracket => o.step_file(-1, tree),
@@ -1188,6 +1258,9 @@ impl History {
 
     /// A diff with lines is open, in the panel or under a file: the Wrap button applies.
     fn wraps(&self) -> bool {
+        if self.changes.open {
+            return self.changes.wraps();
+        }
         let Some(o) = &self.open else { return false };
         match &o.diff {
             Some(d) => matches!(d.text, Some(View::Lines(..))),
@@ -1322,16 +1395,20 @@ pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, wrap: &mut bool, env: &mut
     let mut hui = ui.new_child(UiBuilder::new().max_rect(hdr.shrink2(vec2(6.0, 3.0))).layout(Layout::left_to_right(Align::Center)));
     hui.set_clip_rect(hdr.intersect(ui.clip_rect()));
     hui.spacing_mut().item_spacing.x = 2.0;
-    let deep = h.open.is_some();
+    let deep = h.open.is_some() || h.changes.open;
     if crate::ui::glyph_button(&mut hui, Glyph::Close, if deep { "Close history" } else { "Close history (Esc)" }, true, &pal).clicked() {
         return false;
     }
     if deep && crate::ui::glyph_button(&mut hui, Glyph::Back, "Back (Esc)", true, &pal).clicked() {
-        h.back();
+        if h.changes.open {
+            h.changes.open = false;
+        } else {
+            h.back();
+        }
     }
     // Up and down walk the commits from a commit, and the files from a file.
     let (full, n) = (h.open.as_ref().is_some_and(|o| o.diff.is_some()), h.list.commits.len());
-    if let Some(o) = &h.open {
+    if let Some(o) = h.open.as_ref().filter(|_| !h.changes.open) {
         let (up, down) = if full {
             let order = o.order(h.tree);
             let k = o.diff.as_ref().and_then(|d| order.iter().position(|&f| f == d.file)).unwrap_or(0);
@@ -1365,6 +1442,7 @@ pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, wrap: &mut bool, env: &mut
     // What is shown, as the same tinted pill the preview puts its file name in. A
     // commit's short hash copies the whole one.
     let (icon, label, hash) = match &h.open {
+        _ if h.changes.open => ("git-compare", "Changes".to_string(), None),
         None => ("git-branch", h.branch.clone(), None),
         Some(o) => match (&o.diff, &o.info) {
             (Some(d), Some(i)) => (if d.blob { "file-text" } else { "git-compare" }, i.1[d.file].path.rsplit('/').next().unwrap_or("").to_string(), None),
@@ -1395,6 +1473,10 @@ pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, wrap: &mut bool, env: &mut
     let body = Rect::from_min_max(pos2(rect.left(), hdr.bottom() + 1.0), rect.max);
     let mut bui = ui.new_child(UiBuilder::new().max_rect(body).id_salt(("git", env.panel_id)));
     bui.set_clip_rect(body.intersect(ui.clip_rect()));
+    if h.changes.open {
+        crate::gitchanges::page(&mut bui, body, &mut h.changes, *wrap, env);
+        return true;
+    }
     match h.open.as_ref().map(|o| o.diff.is_some()) {
         None => graph(&mut bui, body, h, env),
         Some(false) => commit(&mut bui, body, h, *wrap, env),
@@ -1434,7 +1516,9 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
             return;
         }
     }
-    if h.list.commits.is_empty() {
+    // The work tree's changes come first, as a commit still to be made.
+    let off = usize::from(h.list.path.is_none() && h.changes.any());
+    if h.list.commits.is_empty() && off == 0 {
         let msg = match (h.list.done, h.list.path.is_some()) {
             (false, _) => "Loading…",
             (true, true) => "No commits changed this file",
@@ -1449,8 +1533,11 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
     let dot = (step * 0.27).max(3.0);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
     let l = &mut h.list;
-    let n = l.commits.len() + usize::from(!l.done);
+    let n = off + l.commits.len() + usize::from(!l.done);
     let anim = env.cfg.animations;
+    let on_changes = h.on_changes && off > 0;
+    let changes_line = if off > 0 { h.changes.summary_line() } else { String::new() };
+    let mut open_changes = false;
     // With pictures on, every author gets a picture-sized place, so the names don't shift
     // as pictures arrive.
     let pictures = env.cfg.github_pictures;
@@ -1464,18 +1551,19 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
     ScrollArea::vertical().auto_shrink([false, false]).id_salt(("git_graph", l.path.is_some())).show_viewport(&mut inner, |ui, vp| {
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), n as f32 * row_h), Sense::hover());
         if std::mem::take(&mut h.reveal) {
-            ui.scroll_to_rect(Rect::from_min_size(pos2(r.left(), r.top() + l.sel as f32 * row_h), vec2(r.width(), row_h)), None);
+            let at = if on_changes { 0 } else { l.sel + off };
+            ui.scroll_to_rect(Rect::from_min_size(pos2(r.left(), r.top() + at as f32 * row_h), vec2(r.width(), row_h)), None);
         }
         let first = (vp.min.y / row_h).floor().max(0.0) as usize;
         let last = ((vp.max.y / row_h).ceil() as usize + 1).min(n);
-        if last + 100 > l.commits.len() {
+        if last + 100 > l.commits.len() + off {
             l.ask();
         }
         let gx = r.left() + 8.0 + step / 2.0;
         let x = |l: u16| gx + (l as usize).min(LANES) as f32 * step;
         // The text starts after the widest row on screen, easing there as rows scroll by,
         // so a busy stretch far down never pushes the quiet ones aside.
-        let wide = l.rows[first.min(l.rows.len())..last.min(l.rows.len())].iter().flat_map(|r| r.pass.iter().chain(&r.outs).chain(&r.ins).chain([&r.col])).max().map_or(1, |&l| (l as usize + 1).min(LANES + 1));
+        let wide = l.rows[first.saturating_sub(off).min(l.rows.len())..last.saturating_sub(off).min(l.rows.len())].iter().flat_map(|r| r.pass.iter().chain(&r.outs).chain(&r.ins).chain([&r.col])).max().map_or(1, |&l| (l as usize + 1).min(LANES + 1));
         let wide = ui.ctx().animate_value_with_time(ui.id().with("gitw"), wide as f32, if anim { 0.18 } else { 0.0 });
         let tx = gx + (wide - 1.0) * step + step / 2.0 + 8.0;
         let fold = pal.text_dim.gamma_multiply(0.4);
@@ -1489,13 +1577,45 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
         };
         for i in first..last {
             let rr = Rect::from_min_size(pos2(r.left(), r.top() + i as f32 * row_h), vec2(r.width(), row_h));
+            if i < off {
+                // A hollow ring in the first lane, then what is changed.
+                let resp = ui.interact(rr, ui.id().with("gitchanges"), Sense::click());
+                crate::ui::note_control(ui, rr, "changes row");
+                let under = if on_changes && h.keyed { pal.row_hover } else if resp.hovered() { pal.hover } else { pal.bg };
+                if under != pal.bg {
+                    p.rect_filled(rr.shrink2(vec2(2.0, 1.0)), CornerRadius::same(5), under);
+                }
+                if resp.clicked() {
+                    open_changes = true;
+                }
+                let c = pos2(x(0), rr.center().y);
+                p.circle_stroke(c, dot, Stroke::new(1.6, pal.accent));
+                // A dotted line down to the commits below.
+                let mut yy = c.y + dot + 3.0;
+                while yy < rr.bottom() {
+                    p.line_segment([pos2(c.x, yy), pos2(c.x, (yy + 2.0).min(rr.bottom()))], Stroke::new(1.6, pal.accent.gamma_multiply(0.6)));
+                    yy += 5.0;
+                }
+                let w = rr.right() - 8.0 - tx;
+                if w >= 16.0 {
+                    let g = crate::listing::elided(ui, "Changes", font.clone(), w, pal.text);
+                    let m = small.size * 1.35;
+                    let y0 = rr.center().y - (g.size().y + m) / 2.0;
+                    let gh = g.size().y;
+                    p.galley(pos2(tx, y0), g, pal.text);
+                    let ag = crate::listing::elided(ui, &changes_line, small.clone(), w, pal.text_dim);
+                    p.galley(pos2(tx, y0 + gh + 1.0 + (small.size * 1.3 - ag.size().y) / 2.0), ag, pal.text_dim);
+                }
+                continue;
+            }
+            let i = i - off;
             if i >= l.commits.len() {
                 crate::ui::spinner(&p, pos2(tx + 6.0, rr.center().y), 5.0, pal.accent, ui.input(|i| i.time));
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
                 continue;
             }
             let resp = ui.interact(rr, ui.id().with(("gitrow", i)), Sense::click());
-            let under = if i == l.sel && h.keyed { pal.row_hover } else if resp.hovered() { pal.hover } else { pal.bg };
+            let under = if i == l.sel && h.keyed && !on_changes { pal.row_hover } else if resp.hovered() { pal.hover } else { pal.bg };
             if under != pal.bg {
                 p.rect_filled(rr.shrink2(vec2(2.0, 1.0)), CornerRadius::same(5), under);
             }
@@ -1580,7 +1700,12 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
         }
     });
     if let Some(i) = open {
+        h.on_changes = false;
         h.open_commit(i);
+    }
+    if open_changes {
+        h.on_changes = true;
+        h.show_changes();
     }
 }
 

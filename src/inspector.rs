@@ -420,6 +420,8 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         return;
     }
     if let Some(h) = ins.git.as_mut() {
+        // The changes follow the status marks; a branch switched elsewhere shows.
+        h.follow(crate::gitstatus::repo_for(&here).as_ref(), ui.ctx());
         // Leaving the work tree closes its history. Diffs wrap as code previews do.
         if !here.starts_with(&h.root) || !crate::gitlog::view(ui, rect, h, &mut ins.wrap_code, env) {
             close_history(panel);

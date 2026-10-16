@@ -1126,9 +1126,18 @@ impl App {
         for (n, ev) in events.iter().enumerate() {
             // An open history takes the keys that move through it, open and go back.
             if let Event::Key { key, pressed: true, modifiers, .. } = ev {
-                if let Some(p) = self.panels.get_mut(&self.active).filter(|_| !text_focus && !modifiers.ctrl && !modifiers.alt) {
+                // Ctrl+Enter on the Changes page commits, its fields focused or not.
+                if *key == Key::Enter && modifiers.ctrl && !modifiers.alt && !modifiers.shift {
+                    if let Some(h) = self.panels.get_mut(&self.active).and_then(|p| p.inspector.as_mut()).and_then(|i| i.git.as_mut()).filter(|h| h.changes.open) {
+                        h.changes.commit_now();
+                        consumed.push(n);
+                        continue;
+                    }
+                }
+                let id = self.active;
+                if let Some(p) = self.panels.get_mut(&id).filter(|_| !text_focus && !modifiers.ctrl && !modifiers.alt) {
                     if let Some(h) = p.inspector.as_mut().and_then(|i| i.git.as_mut()).filter(|h| h.takes(*key)) {
-                        if !h.key(*key) {
+                        if !h.key(*key, id, &mut self.actions) {
                             crate::inspector::close_history(p);
                         }
                         consumed.push(n);
@@ -1783,6 +1792,18 @@ impl App {
                         p.inspector.get_or_insert_with(Inspector::default).show_history(crate::gitlog::History::new(r.root.clone(), r.branch.clone(), opened));
                     }
                     _ => {}
+                }
+            }
+            Cmd::GitChanges => {
+                let p = self.panel();
+                if let Some(r) = crate::gitstatus::repo_for(&p.path()) {
+                    if p.inspector.as_ref().and_then(|i| i.git.as_ref()).is_none() {
+                        let opened = p.inspector.is_none();
+                        p.inspector.get_or_insert_with(Inspector::default).show_history(crate::gitlog::History::new(r.root.clone(), r.branch.clone(), opened));
+                    }
+                    if let Some(h) = p.inspector.as_mut().and_then(|i| i.git.as_mut()) {
+                        h.show_changes();
+                    }
                 }
             }
             Cmd::InspectorLineNumbers => {

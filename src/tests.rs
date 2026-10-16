@@ -3374,6 +3374,7 @@ fn a_broken_link_is_not_executable() {
     assert!(good.is_link && !good.is_broken_link());
     let _ = std::fs::remove_dir_all(&d);
 }
+
 /// A repository for changing things in: its own identity, no signing, and hooks only
 /// from its own `.git/hooks` (the machine's git config must not leak into a test).
 pub(crate) fn work_repo(d: &Path) {
@@ -3381,6 +3382,252 @@ pub(crate) fn work_repo(d: &Path) {
     for (k, v) in [("user.name", "Test"), ("user.email", "test@example.invalid"), ("commit.gpgsign", "false"), ("core.hooksPath", ".git/hooks")] {
         git(d, &["config", k, v]);
     }
+}
+
+fn work_of(d: &Path) -> crate::gitwork::Work {
+    crate::gitwork::work(d).expect("a work tree")
+}
+
+fn letters(v: &[crate::gitlog::Change]) -> Vec<(String, char)> {
+    v.iter().map(|c| (c.path.clone(), c.status as char)).collect()
+}
+
+/// Forty numbered lines: two changes far apart make two hunks.
+fn numbered(change: &[(usize, &str)]) -> String {
+    (1..=40).map(|i| change.iter().find(|c| c.0 == i).map_or(format!("line {i}\n"), |c| format!("{}\n", c.1))).collect()
+}
+
+#[test]
+fn git_changes_stage_and_unstage_files_and_hunks() {
+    use crate::gitwork::{Op, file_diff, run};
+    if !crate::media::have("git") {
+        return;
+    }
+    let d = tmpdir("gitwork");
+    work_repo(&d);
+    touch(&d.join("src/lib.rs"), &numbered(&[]));
+    touch(&d.join("old.txt"), "old\n");
+    git(&d, &["add", "-A"]);
+    git(&d, &["commit", "-qm", "Start"]);
+    touch(&d.join("src/lib.rs"), &numbered(&[(3, "line three"), (36, "line thirty-six")]));
+    std::fs::remove_file(d.join("old.txt")).unwrap();
+    touch(&d.join("notes.md"), "one\ntwo\nthree");
+    let w = work_of(&d);
+    assert!(w.staged.is_empty() && w.head.is_some());
+    assert_eq!(letters(&w.unstaged), [("old.txt".into(), 'D'), ("src/lib.rs".into(), 'M'), ("notes.md".into(), '?')]);
+    let lib = w.unstaged[1].clone();
+    assert_eq!(lib.lines, Some((2, 2)), "the counts");
+    assert_eq!(w.unstaged[2].lines, Some((3, 0)), "an untracked file counts its lines");
+    // Two hunks, each applying alone: stage the second only.
+    let diff = file_diff(&d, &lib, false, "HEAD");
+    assert_eq!(diff.hunks.len(), 2, "two hunks");
+    assert!(diff.hunks[1].lines.contains(&"+line thirty-six".to_string()) && diff.hunks[1].head.starts_with("@@ -33,"));
+    let patch = diff.hunks[1].patch().expect("applies alone").to_vec();
+    run(&d, &Op::Hunk { patch, staged: false }).unwrap();
+    let w = work_of(&d);
+    assert_eq!(letters(&w.staged), [("src/lib.rs".into(), 'M')]);
+    assert_eq!(w.staged[0].lines, Some((1, 1)), "one hunk staged");
+    let staged = file_diff(&d, &w.staged[0], true, "HEAD");
+    assert_eq!(staged.hunks.len(), 1);
+    assert!(staged.hunks[0].lines.contains(&"+line thirty-six".to_string()));
+    let left = file_diff(&d, &lib, false, "HEAD");
+    assert_eq!(left.hunks.len(), 1, "the other hunk is still unstaged");
+    assert!(left.hunks[0].lines.contains(&"+line three".to_string()));
+    // And out again.
+    let patch = staged.hunks[0].patch().unwrap().to_vec();
+    run(&d, &Op::Hunk { patch, staged: true }).unwrap();
+    assert!(work_of(&d).staged.is_empty(), "the hunk unstaged");
+    assert_eq!(std::fs::read_to_string(d.join("src/lib.rs")).unwrap(), numbered(&[(3, "line three"), (36, "line thirty-six")]), "the file itself untouched");
+    // Whole files: a deletion and an untracked file.
+    run(&d, &Op::Stage(vec!["old.txt".into(), "notes.md".into()])).unwrap();
+    let w = work_of(&d);
+    assert_eq!(letters(&w.staged), [("notes.md".into(), 'A'), ("old.txt".into(), 'D')]);
+    assert_eq!(letters(&w.unstaged), [("src/lib.rs".into(), 'M')]);
+    run(&d, &Op::Unstage(vec!["notes.md".into()])).unwrap();
+    assert_eq!(letters(&work_of(&d).staged), [("old.txt".into(), 'D')]);
+    assert_eq!(run(&d, &Op::StageAll).unwrap(), "Staged every change");
+    let w = work_of(&d);
+    assert_eq!(w.staged.len(), 3);
+    assert!(w.unstaged.is_empty());
+    run(&d, &Op::UnstageAll).unwrap();
+    let w = work_of(&d);
+    assert!(w.staged.is_empty() && w.unstaged.len() == 3, "{w:?}");
+    // Before the first commit there is no HEAD to unstage to.
+    let e = tmpdir("gitwork-new");
+    work_repo(&e);
+    touch(&e.join("a.txt"), "a\n");
+    let w = work_of(&e);
+    assert_eq!((w.head.clone(), letters(&w.unstaged)), (None, vec![("a.txt".into(), '?')]));
+    run(&e, &Op::Stage(vec!["a.txt".into()])).unwrap();
+    let w = work_of(&e);
+    assert_eq!(letters(&w.staged), [("a.txt".into(), 'A')]);
+    assert_eq!(w.staged[0].lines, Some((1, 0)));
+    let base = crate::gitwork::base(&e, None).unwrap();
+    assert_eq!(file_diff(&e, &w.staged[0], true, &base).hunks[0].lines, ["+a"]);
+    run(&e, &Op::Unstage(vec!["a.txt".into()])).unwrap();
+    run(&e, &Op::StageAll).unwrap();
+    run(&e, &Op::UnstageAll).unwrap();
+    assert!(work_of(&e).staged.is_empty());
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&e);
+}
+
+#[test]
+fn git_discard_keeps_what_it_discards() {
+    use crate::gitwork::{Op, run};
+    if !crate::media::have("git") {
+        return;
+    }
+    let d = tmpdir("gitdiscard");
+    work_repo(&d);
+    touch(&d.join("a.txt"), "one\n");
+    touch(&d.join("b.txt"), "bee\n");
+    git(&d, &["add", "-A"]);
+    git(&d, &["commit", "-qm", "Start"]);
+    // A staged change and an unstaged one on top: only the unstaged one goes.
+    touch(&d.join("a.txt"), "two\n");
+    git(&d, &["add", "a.txt"]);
+    touch(&d.join("a.txt"), "three\n");
+    touch(&d.join("b.txt"), "buzz\n");
+    let a = work_of(&d).unstaged.into_iter().find(|c| c.path == "a.txt").unwrap();
+    let said = run(&d, &Op::Discard(a)).unwrap();
+    assert!(said.contains("kept in the stash"), "{said}");
+    assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "two\n", "back to the staged version");
+    assert_eq!(std::fs::read_to_string(d.join("b.txt")).unwrap(), "buzz\n", "another file is left alone");
+    let w = work_of(&d);
+    assert_eq!(letters(&w.staged), [("a.txt".into(), 'M')], "the staged change stays");
+    let refs = crate::gitwork::refs(&d);
+    assert_eq!(refs.stashes.len(), 1);
+    assert!(refs.stashes[0].subject.ends_with("Discarded in Maia: a.txt"), "{:?}", refs.stashes[0]);
+    let out = std::process::Command::new("git").arg("-C").arg(&d).args(["show", &format!("{}:a.txt", refs.stashes[0].hash)]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "three\n", "the discarded text is in the stash");
+    // An untracked file goes to the trash, from where it comes back (only when the
+    // trash used is not the home folder's).
+    use std::os::unix::fs::MetadataExt;
+    let dev = |p: &Path| std::fs::metadata(p).map(|m| m.dev()).ok();
+    if dev(&d) == dirs::data_dir().and_then(|h| dev(&h)) {
+        let _ = std::fs::remove_dir_all(&d);
+        return;
+    }
+    touch(&d.join("scratch.txt"), "draft\n");
+    let s = work_of(&d).unstaged.into_iter().find(|c| c.status == b'?').unwrap();
+    assert!(run(&d, &Op::Discard(s)).unwrap().contains("trash"));
+    assert!(!d.join("scratch.txt").exists());
+    let it = crate::trashcan::list().into_iter().find(|i| i.original == d.join("scratch.txt")).expect("in the trash");
+    crate::trashcan::restore(&it).unwrap();
+    assert_eq!(std::fs::read_to_string(d.join("scratch.txt")).unwrap(), "draft\n");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn git_commit_amend_and_a_failing_hook() {
+    use crate::gitwork::{Op, head_message, run};
+    if !crate::media::have("git") {
+        return;
+    }
+    let d = tmpdir("gitcommit");
+    work_repo(&d);
+    touch(&d.join("a.txt"), "a\n");
+    let commit = |s: &str, b: &str, amend: bool| run(&d, &Op::Commit { summary: s.into(), body: b.into(), amend });
+    assert_eq!(commit("First", "", false).unwrap_err(), "Nothing is staged");
+    assert_eq!(commit("  ", "", false).unwrap_err(), "Write a summary first");
+    run(&d, &Op::Stage(vec!["a.txt".into()])).unwrap();
+    let said = commit("Add the first file", "Why it is there.\n\nTwo paragraphs.", false).unwrap();
+    assert!(said.starts_with("Committed "), "{said}");
+    assert_eq!(head_message(&d).unwrap(), ("Add the first file".to_string(), "Why it is there.\n\nTwo paragraphs.".to_string()));
+    assert!(work_of(&d).is_empty());
+    // Amending changes the message (and takes what is staged), not the count.
+    touch(&d.join("b.txt"), "b\n");
+    run(&d, &Op::Stage(vec!["b.txt".into()])).unwrap();
+    assert!(commit("Add two files", "", true).unwrap().starts_with("Amended "));
+    let count = std::process::Command::new("git").arg("-C").arg(&d).args(["rev-list", "--count", "HEAD"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&count.stdout).trim(), "1");
+    assert_eq!(head_message(&d).unwrap().0, "Add two files");
+    // A hook that refuses: its words come back, and nothing is committed.
+    let hook = d.join(".git/hooks/pre-commit");
+    touch(&hook, "#!/bin/sh\necho 'lint: trailing space in c.txt' >&2\nexit 1\n");
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    touch(&d.join("c.txt"), "c \n");
+    run(&d, &Op::Stage(vec!["c.txt".into()])).unwrap();
+    let e = commit("Add c", "", false).unwrap_err();
+    assert!(e.contains("lint: trailing space in c.txt"), "{e}");
+    assert_eq!(letters(&work_of(&d).staged), [("c.txt".into(), 'A')], "still staged");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn git_branches_switch_create_track_and_stash() {
+    use crate::gitwork::{Op, refs, run};
+    if !crate::media::have("git") {
+        return;
+    }
+    let d = tmpdir("gitbranches");
+    let server = d.join("server.git");
+    std::fs::create_dir_all(&server).unwrap();
+    git(&server, &["init", "-q", "--bare"]);
+    let ours = d.join("ours");
+    std::fs::create_dir_all(&ours).unwrap();
+    work_repo(&ours);
+    touch(&ours.join("a.txt"), "a\n");
+    git(&ours, &["add", "-A"]);
+    git(&ours, &["commit", "-qm", "Start"]);
+    git(&ours, &["remote", "add", "origin", server.to_str().unwrap()]);
+    git(&ours, &["push", "-q", "-u", "origin", "main"]);
+    git(&ours, &["branch", "topic"]);
+    git(&ours, &["push", "-q", "origin", "topic"]);
+    git(&ours, &["branch", "-q", "-D", "topic"]);
+    touch(&ours.join("a.txt"), "a2\n");
+    git(&ours, &["commit", "-qam", "Ahead"]);
+    let r = refs(&ours);
+    assert_eq!(r.local.len(), 1);
+    assert!(r.local[0].current && r.local[0].name == "main" && r.local[0].upstream == "origin/main" && (r.local[0].ahead, r.local[0].behind) == (1, 0), "{:?}", r.local);
+    assert_eq!(r.remote, ["origin/topic"], "a remote branch nothing tracks");
+    // A new branch from HEAD, then back.
+    assert_eq!(run(&ours, &Op::Create("docs".into())).unwrap(), "Created and switched to docs");
+    assert!(run(&ours, &Op::Create("-x".into())).is_err() && run(&ours, &Op::Create("a..b".into())).is_err(), "not branch names");
+    let r = refs(&ours);
+    assert!(r.local.iter().any(|b| b.name == "docs" && b.current));
+    touch(&ours.join("a.txt"), "on docs\n");
+    git(&ours, &["commit", "-qam", "Docs"]);
+    // Switching would overwrite a local change: git refuses, and says why.
+    touch(&ours.join("a.txt"), "local\n");
+    let e = run(&ours, &Op::Switch("main".into())).unwrap_err();
+    assert!(e.contains("would be overwritten") && e.contains("a.txt"), "{e}");
+    assert!(!e.starts_with("error:"));
+    assert_eq!(std::fs::read_to_string(ours.join("a.txt")).unwrap(), "local\n", "nothing lost");
+    // Stash it, switch, come back, pop it.
+    git(&ours, &["stash", "push", "-q", "-m", "Local tweak"]);
+    let s = refs(&ours).stashes;
+    assert_eq!((s.len(), s[0].sel.as_str()), (1, "stash@{0}"));
+    assert!(s[0].subject.contains("Local tweak"));
+    run(&ours, &Op::Switch("main".into())).unwrap();
+    assert_eq!(std::fs::read_to_string(ours.join("a.txt")).unwrap(), "a2\n");
+    run(&ours, &Op::Switch("docs".into())).unwrap();
+    // A selector that moved since it was read is refused.
+    let mut stale = s[0].clone();
+    stale.hash = "0".repeat(40);
+    assert!(run(&ours, &Op::StashDrop(stale)).unwrap_err().contains("changed"));
+    run(&ours, &Op::StashApply(s[0].clone())).unwrap();
+    assert_eq!(std::fs::read_to_string(ours.join("a.txt")).unwrap(), "local\n");
+    assert_eq!(refs(&ours).stashes.len(), 1, "apply keeps it");
+    git(&ours, &["checkout", "-q", "--", "a.txt"]);
+    run(&ours, &Op::StashPop(s[0].clone())).unwrap();
+    assert!(refs(&ours).stashes.is_empty(), "pop drops it");
+    git(&ours, &["stash", "push", "-q"]);
+    let s = refs(&ours).stashes;
+    run(&ours, &Op::StashDrop(s[0].clone())).unwrap();
+    assert!(refs(&ours).stashes.is_empty());
+    // A remote branch checked out tracks it.
+    assert_eq!(run(&ours, &Op::Track("origin/topic".into())).unwrap(), "Switched to topic");
+    let r = refs(&ours);
+    assert!(r.local.iter().any(|b| b.name == "topic" && b.current && b.upstream == "origin/topic"));
+    assert!(r.remote.is_empty());
+    // Another work tree of the repository is listed with its branch.
+    git(&ours, &["worktree", "add", "-q", d.join("wt").to_str().unwrap(), "docs"]);
+    let r = refs(&ours);
+    assert_eq!(r.worktrees, [crate::gitwork::Worktree { path: d.join("wt"), branch: "docs".into() }]);
+    assert_eq!(refs(&d.join("wt")).worktrees.iter().map(|w| w.path.clone()).collect::<Vec<_>>(), [ours.clone()]);
+    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
@@ -3427,3 +3674,59 @@ fn git_ignored_files_are_known_and_left_out_when_hidden() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// The guard holds for changes too: a repository's fsmonitor never runs, and what would
+/// pass through its own filters is refused instead of stored unfiltered.
+#[test]
+fn a_repositorys_own_config_runs_nothing_when_maia_changes_it() {
+    use crate::gitwork::{FILTERED, Op, run};
+    if !crate::media::have("git") {
+        return;
+    }
+    let d = tmpdir("evilwork");
+    work_repo(&d);
+    touch(&d.join("notes.txt"), "one\n");
+    git(&d, &["add", "-A"]);
+    git(&d, &["commit", "-qm", "Start"]);
+    let mark = |n: &str| format!("touch '{}'", d.join(n).display());
+    git(&d, &["config", "core.fsmonitor", &mark("ran-fsmonitor")]);
+    touch(&d.join("notes.txt"), "two\n");
+    run(&d, &Op::Stage(vec!["notes.txt".into()])).unwrap();
+    run(&d, &Op::Commit { summary: "Two".into(), body: String::new(), amend: false }).unwrap();
+    git(&d, &["branch", "side"]);
+    run(&d, &Op::Switch("side".into())).unwrap();
+    assert!(!d.join("ran-fsmonitor").exists(), "the fsmonitor hook ran");
+    // Filters of its own: staging through them emptied would store the wrong bytes.
+    git(&d, &["config", "filter.x.clean", &format!("sh -c \"{}; cat\"", mark("ran-clean"))]);
+    touch(&d.join(".gitattributes"), "*.txt filter=x\n");
+    touch(&d.join("notes.txt"), "three\n");
+    assert_eq!(run(&d, &Op::Stage(vec!["notes.txt".into()])).unwrap_err(), FILTERED);
+    assert_eq!(run(&d, &Op::StageAll).unwrap_err(), FILTERED);
+    assert_eq!(run(&d, &Op::Switch("main".into())).unwrap_err(), FILTERED);
+    let w = work_of(&d);
+    assert!(w.staged.is_empty(), "nothing staged: {w:?}");
+    // What only moves the index or names a branch still works.
+    run(&d, &Op::Create("other".into())).unwrap();
+    assert!(!d.join("ran-clean").exists() && !d.join("ran-fsmonitor").exists(), "the repository's config ran a command");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A work tree with changes of every kind for the Changes page: a file changed in two
+/// places (two hunks), a long line (for wrapping), a deletion, an untracked file and a
+/// staged change.
+pub(crate) fn changes_fixture(d: &Path) {
+    std::fs::create_dir_all(d).unwrap();
+    work_repo(d);
+    touch(&d.join("src/lib.rs"), &numbered(&[]));
+    touch(&d.join("src/view.rs"), "fn view() {}\n");
+    touch(&d.join("README.md"), "# Project\n");
+    touch(&d.join("old.txt"), "old\n");
+    git(d, &["add", "-A"]);
+    git(d, &["commit", "-qm", "Start the project"]);
+    touch(&d.join("src/lib.rs"), &numbered(&[(3, "line three"), (36, "line thirty-six")]));
+    let long = "A long line in a change keeps going past the edge of the panel, and wrapped it stays readable. ".repeat(4);
+    touch(&d.join("README.md"), &format!("# Project\n{long}\n"));
+    std::fs::remove_file(d.join("old.txt")).unwrap();
+    touch(&d.join("notes.md"), "one\ntwo\nthree\n");
+    touch(&d.join("src/view.rs"), "fn view() { draw(); }\n");
+    git(d, &["add", "src/view.rs"]);
+}

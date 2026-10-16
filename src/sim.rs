@@ -919,6 +919,27 @@ pub fn click_control_at(s: &mut Sim, what: &str) {
     }
 }
 
+/// Often enough, into one of the fixture's work trees first (by Go To, as a person
+/// would), so the git features have something to work on.
+fn into_repo(s: &mut Sim, rng: &mut Rng) {
+    if crate::gitstatus::repo_for(&s.tab().path).is_some() || rng.below(2) == 0 {
+        return;
+    }
+    let sub = *rng.pick(&["Code/repo", "Code/project"]);
+    let repo = std::fs::read_dir(root().join("home")).ok().and_then(|r| r.flatten().map(|d| d.path().join(sub)).find(|p| p.is_dir()));
+    if let Some(repo) = repo {
+        s.act("key ctrl+p");
+        s.act(&format!("text {}/", repo.display()));
+        s.act("key Enter");
+        s.settle();
+        let t0 = Instant::now();
+        while crate::gitstatus::repo_for(&s.tab().path).is_none() && t0.elapsed().as_secs() < 3 {
+            s.idle(1);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
+
 /// One random user action. Returns a description.
 pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const KEYS: &[&str] = &[
@@ -1159,6 +1180,39 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             s.idle(2);
             if s.ctx.input(|i| i.pointer.any_down()) {
                 s.act(&format!("up -40 {y:.0}"));
+            }
+        }
+        111 => {
+            into_repo(s, rng);
+            // The Changes page: rows hovered and their buttons, a hunk, everything at
+            // once, a summary typed and committed (by button or Ctrl+Enter), the keys.
+            if s.app.panels.get(&s.app.active).and_then(|p| p.inspector.as_ref()).and_then(|i| i.git.as_ref()).is_none_or(|h| !h.changes().open) {
+                s.cmd(Cmd::GitChanges);
+                s.idle(4);
+            }
+            for _ in 0..1 + rng.below(6) {
+                let ir = s.app.panels.get(&s.app.active).and_then(|p| p.inspector_rect);
+                match (ir, rng.below(5)) {
+                    (Some(r), 0) => {
+                        let (x, y) = (rng.f(r.left(), r.right()), rng.f(r.top(), r.bottom()));
+                        s.act(&format!("move {x:.0} {y:.0}"));
+                        s.idle(1);
+                        click_control_at(s, rng.pick(&["stage file", "unstage file", "discard file", "stage hunk", "unstage hunk"]));
+                    }
+                    (Some(_), 1) => click_control_at(s, rng.pick(&["stage all", "unstage all", "commit", "changes row", "Wrap lines"])),
+                    (Some(_), 2) => {
+                        click_control_at(s, "commit summary");
+                        s.act(&format!("text {}", rng.pick(&["Fix the thing", "wip", " ", "Ünïcode"])));
+                        if rng.below(2) == 0 {
+                            s.act("key ctrl+Enter");
+                        }
+                    }
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "Home", "Enter", "Space", "Delete", "Escape"]))),
+                }
+                s.idle(3);
+                if matches!(s.app.popup, Popup::Confirm { .. }) {
+                    s.act(rng.pick(&["key Enter", "key Escape"]));
+                }
             }
         }
         112 => {
@@ -4200,6 +4254,267 @@ mod journeys {
         report("gitcommit", &s);
     }
 
+    fn changes(s: &Sim) -> crate::gitchanges::Probe {
+        git_hist(s).changes()
+    }
+
+    /// Hover the row drawn as `label` in the inspector (the `nth` from the top), then
+    /// click its control `what`.
+    fn row_control(s: &mut Sim, label: &str, nth: usize, what: &str) {
+        s.idle(40);
+        scroll_to_label(s, label);
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("inspector shown"));
+        let mut rows: Vec<Rect> = s.texts.iter().filter(|(r, t)| t == label && ir.contains(r.center())).map(|(r, _)| *r).collect();
+        rows.sort_by(|a, b| a.top().total_cmp(&b.top()));
+        let r = *rows.get(nth).unwrap_or_else(|| s.fail(&format!("no {label:?} number {nth}")));
+        s.act(&format!("move {:.0} {:.0}", r.center().x, r.center().y));
+        s.idle(2);
+        let c = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, b, w)| *w == what && (b.center().y - r.center().y).abs() < 8.0).map(|(_, b, _)| *b));
+        let c = c.unwrap_or_else(|| {
+            let near: Vec<String> = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, b, _)| (b.center().y - r.center().y).abs() < 40.0).map(|(_, b, w)| format!("{w} {b:?}")).collect());
+            s.fail(&format!("no {what} on the {label} row at {r:?}; near: {near:?}"))
+        });
+        s.act(&format!("click {:.0} {:.0}", c.center().x, c.center().y));
+    }
+
+    /// The `nth` control called `what` from the top.
+    fn click_nth(s: &mut Sim, what: &str, nth: usize) {
+        s.idle(1);
+        let mut v: Vec<Rect> = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == what).map(|(_, r, _)| *r).collect());
+        v.sort_by(|a, b| a.top().total_cmp(&b.top()));
+        let r = *v.get(nth).unwrap_or_else(|| s.fail(&format!("no {what} number {nth}")));
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+    }
+
+    fn git_out(at: &Path, args: &[&str]) -> String {
+        String::from_utf8_lossy(&std::process::Command::new("git").arg("-C").arg(at).args(args).output().unwrap().stdout).trim().to_string()
+    }
+
+    /// The Changes page, as someone getting a commit together uses it: the Changes row
+    /// above the commits, a file's diff hunk by hunk, staging one hunk and taking it
+    /// back, whole files in and out, everything at once, discarding (into the stash, or
+    /// the trash for an untracked file), the keys, a commit, an amend, a hook that
+    /// refuses, wrapped lines, then small windows, a light theme, the bottom dock and a
+    /// split.
+    #[test]
+    fn git_changes_page() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let home = fixture("gitchanges");
+        let repo = home.join("Code/changes");
+        crate::tests::changes_fixture(&repo);
+        let mut s = Sim::new(&repo, vec2(1280.0, 800.0));
+        wait_until(&mut s, "branch read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
+        s.idle(2);
+        s.click_text("main");
+        wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 1));
+        wait_until(&mut s, "the changes", 10, |s| changes(s).staged.len() == 1 && changes(s).unstaged.len() == 4);
+        s.idle(2);
+        see(&mut s, "Changes");
+        see(&mut s, "1 staged · 4 not staged");
+        let (row, first) = (in_inspector(&s, "Changes"), in_inspector(&s, "Start the project"));
+        assert!(row.top() < first.top(), "the changes come above the commits");
+        look(&mut s, "changes row");
+        s.shot("changes-row");
+        click_in_inspector(&mut s, "Changes", "click");
+        wait_until(&mut s, "the page", 5, |s| changes(s).open);
+        assert_eq!(changes(&s).staged, ["src/view.rs"]);
+        assert_eq!(changes(&s).unstaged, ["README.md", "old.txt", "src/lib.rs", "notes.md"]);
+        for t in ["Staged", "Changes", "view.rs", "lib.rs", "notes.md", "old.txt", "Stage all", "Unstage all", "+2", "−2", "+3"] {
+            see(&mut s, t);
+        }
+        look(&mut s, "changes page");
+        s.shot("changes-page");
+        // A file's diff, hunk by hunk; the second hunk staged alone and taken back.
+        click_in_inspector(&mut s, "lib.rs", "click");
+        wait_until(&mut s, "the diff", 10, |s| changes(s).inline == [(false, "src/lib.rs".to_string(), 2)]);
+        s.idle(2);
+        see(&mut s, "+line three");
+        see(&mut s, "+line thirty-six");
+        look(&mut s, "hunks");
+        s.shot("changes-hunks");
+        click_nth(&mut s, "stage hunk", 1);
+        wait_until(&mut s, "one hunk staged", 10, |s| changes(s).staged.contains(&"src/lib.rs".to_string()) && changes(s).unstaged.contains(&"src/lib.rs".to_string()) && !changes(s).busy);
+        assert_eq!(git_out(&repo, &["diff", "--cached", "--numstat", "--", "src/lib.rs"]), "1	1	src/lib.rs");
+        wait_until(&mut s, "the rest read again", 10, |s| changes(s).inline == [(false, "src/lib.rs".to_string(), 1)]);
+        assert!(matches!(changes(&s).said, Some(Ok(ref m)) if m == "Staged the hunk"), "{:?}", changes(&s).said);
+        click_in_inspector(&mut s, "lib.rs", "click");
+        // The unstaged lib.rs is the lower one.
+        row_control(&mut s, "lib.rs", 1, "stage file");
+        s.idle(1);
+        // The staged lib.rs (the upper row) opens its own diff, whose hunk goes back.
+        wait_until(&mut s, "idle", 10, |s| !changes(s).busy);
+        let w = changes(&s);
+        assert!(w.staged.contains(&"src/lib.rs".to_string()) && !w.unstaged.contains(&"src/lib.rs".to_string()), "{w:?}");
+        click_in_inspector(&mut s, "lib.rs", "click");
+        wait_until(&mut s, "the staged diff", 10, |s| changes(s).inline.iter().any(|x| x.0 && x.2 == 2));
+        click_nth(&mut s, "unstage hunk", 0);
+        wait_until(&mut s, "the hunk unstaged", 10, |s| !changes(s).busy && changes(s).unstaged.contains(&"src/lib.rs".to_string()));
+        assert_eq!(git_out(&repo, &["diff", "--cached", "--numstat", "--", "src/lib.rs"]), "1	1	src/lib.rs");
+        // Whole files in and out, then everything.
+        row_control(&mut s, "notes.md", 0, "stage file");
+        wait_until(&mut s, "notes staged", 10, |s| !changes(s).busy && changes(s).staged.contains(&"notes.md".to_string()));
+        row_control(&mut s, "notes.md", 0, "unstage file");
+        wait_until(&mut s, "notes unstaged", 10, |s| !changes(s).busy && changes(s).unstaged.contains(&"notes.md".to_string()));
+        click_control(&mut s, "stage all");
+        wait_until(&mut s, "all staged", 10, |s| !changes(s).busy && changes(s).unstaged.is_empty());
+        assert_eq!(changes(&s).staged.len(), 5);
+        look(&mut s, "all staged");
+        click_control(&mut s, "unstage all");
+        wait_until(&mut s, "none staged", 10, |s| !changes(s).busy && changes(s).staged.is_empty());
+        // Nothing staged: Commit waits.
+        click_control(&mut s, "commit summary");
+        s.act("text Tidy the view");
+        s.idle(2);
+        let before = changes(&s).said;
+        click_control(&mut s, "commit");
+        s.idle(5);
+        assert!(changes(&s).said == before && !changes(&s).busy, "nothing staged, nothing tried");
+        // The keys (the button took the keyboard from the field): Home and Down to a
+        // file, Space stages it, Delete asks.
+        assert!(s.ctx.memory(|m| m.focused()).is_none());
+        for k in ["Home", "ArrowDown"] {
+            s.act(&format!("key {k}"));
+        }
+        assert_eq!(changes(&s).sel, 2, "on the second file");
+        s.act("key Space");
+        wait_until(&mut s, "staged by key", 10, |s| !changes(s).busy && changes(s).staged == ["old.txt"]);
+        s.act("key Home");
+        s.act("key ArrowDown");
+        s.act("key Delete");
+        assert!(matches!(s.app.popup, Popup::Confirm { .. }), "Delete asks first");
+        s.idle(12);
+        s.shot("changes-discard-confirm");
+        s.act("key Escape");
+        assert!(repo.join("README.md").exists());
+        // Discard: README's change goes to the stash, the untracked notes to the trash.
+        row_control(&mut s, "README.md", 0, "discard file");
+        assert!(matches!(s.app.popup, Popup::Confirm { .. }));
+        s.click_text("Discard");
+        wait_until(&mut s, "discarded", 10, |s| !changes(s).busy && !changes(s).unstaged.contains(&"README.md".to_string()));
+        assert_eq!(std::fs::read_to_string(repo.join("README.md")).unwrap(), "# Project
+");
+        assert!(git_out(&repo, &["stash", "list"]).contains("Discarded in Maia: README.md"));
+        row_control(&mut s, "notes.md", 0, "discard file");
+        s.click_text("Move to Trash");
+        wait_until(&mut s, "trashed", 10, |s| !changes(s).busy && !changes(s).unstaged.contains(&"notes.md".to_string()));
+        assert!(!repo.join("notes.md").exists() && crate::trashcan::list().iter().any(|i| i.original == repo.join("notes.md")), "in the trash");
+        // A commit: everything staged, the summary typed, the button.
+        click_control(&mut s, "stage all");
+        wait_until(&mut s, "all staged", 10, |s| !changes(s).busy && changes(s).unstaged.is_empty());
+        look(&mut s, "ready to commit");
+        s.shot("changes-ready");
+        click_control(&mut s, "commit");
+        wait_until(&mut s, "committed", 10, |s| matches!(changes(s).said, Some(Ok(_))));
+        assert!(changes(&s).said.as_ref().is_some_and(|r| r.as_ref().is_ok_and(|m| m.starts_with("Committed "))));
+        assert_eq!(git_out(&repo, &["log", "-1", "--format=%s"]), "Tidy the view");
+        wait_until(&mut s, "back on the graph", 10, |s| !changes(s).open && history(s).is_some_and(|h| h.1 && h.0 == 2));
+        s.idle(3);
+        see(&mut s, "Tidy the view");
+        assert!(!s.texts.iter().any(|(_, t)| t == "1 staged · 4 not staged"), "nothing left to commit");
+        look(&mut s, "after the commit");
+        s.shot("changes-committed");
+        // Amend: the last message comes in, is changed, and Ctrl+Enter amends.
+        std::fs::write(repo.join("src/view.rs"), "fn view() { draw(); flush(); }
+").unwrap();
+        crate::gitstatus::rescan(&repo);
+        wait_until(&mut s, "a new change", 10, |s| changes(s).unstaged == ["src/view.rs"]);
+        s.idle(3);
+        click_in_inspector(&mut s, "Changes", "click");
+        wait_until(&mut s, "the page", 5, |s| changes(s).open);
+        click_control(&mut s, "stage all");
+        wait_until(&mut s, "staged", 10, |s| !changes(s).busy && changes(s).staged == ["src/view.rs"]);
+        s.click_text("Amend the last commit");
+        wait_until(&mut s, "the last message", 5, |s| changes(s).amend && changes(s).summary == "Tidy the view");
+        click_control(&mut s, "commit summary");
+        s.act("key End");
+        s.act("text  and flush it");
+        look(&mut s, "amending");
+        s.shot("changes-amend");
+        s.act("key ctrl+Enter");
+        wait_until(&mut s, "amended", 10, |s| matches!(changes(s).said, Some(Ok(_))));
+        assert_eq!(git_out(&repo, &["log", "-1", "--format=%s"]), "Tidy the view and flush it");
+        assert_eq!(git_out(&repo, &["rev-list", "--count", "HEAD"]), "2", "amended, not added");
+        assert!(s.app.panels[&s.app.active].tabs.len() == 1, "Ctrl+Enter did not open a tab");
+        // A hook that refuses: its words, plainly, and the change still staged.
+        let hook = repo.join(".git/hooks/pre-commit");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\necho 'lint: view.rs has a trailing space' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::write(repo.join("src/view.rs"), "fn view() { draw(); } \n").unwrap();
+        crate::gitstatus::rescan(&repo);
+        wait_until(&mut s, "changed again", 10, |s| changes(s).unstaged == ["src/view.rs"]);
+        s.idle(3);
+        click_in_inspector(&mut s, "Changes", "click");
+        wait_until(&mut s, "the page", 5, |s| changes(s).open);
+        click_control(&mut s, "stage all");
+        wait_until(&mut s, "staged", 10, |s| !changes(s).busy && changes(s).staged == ["src/view.rs"]);
+        click_control(&mut s, "commit summary");
+        s.act("text Add a space");
+        click_control(&mut s, "commit");
+        wait_until(&mut s, "refused", 10, |s| matches!(changes(s).said, Some(Err(_))));
+        assert!(matches!(changes(&s).said, Some(Err(ref e)) if e.contains("lint: view.rs has a trailing space")), "{:?}", changes(&s).said);
+        assert_eq!(changes(&s).staged, ["src/view.rs"], "still staged");
+        see(&mut s, "lint: view.rs has a trailing space");
+        look(&mut s, "hook refused");
+        s.shot("changes-hook");
+        std::fs::remove_file(&hook).unwrap();
+        // A long line wraps under its row.
+        std::fs::write(repo.join("README.md"), format!("# Project\n{}\n", "Words that keep going past the edge of the panel. ".repeat(6))).unwrap();
+        crate::gitstatus::rescan(&repo);
+        wait_until(&mut s, "README changed", 10, |s| changes(s).unstaged.contains(&"README.md".to_string()));
+        click_in_inspector(&mut s, "README.md", "click");
+        wait_until(&mut s, "its diff", 10, |s| changes(s).inline.iter().any(|x| x.1 == "README.md" && x.2 == 1));
+        if !s.app.panels[&s.app.active].inspector.as_ref().is_some_and(|i| i.wrap_code) {
+            click_control(&mut s, "Wrap lines");
+        }
+        s.idle(3);
+        assert!(changes(&s).wrapped.iter().any(|&n| n > 3), "the long line wraps: {:?}", changes(&s).wrapped);
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
+        for r in s.texts.iter().filter(|(r, _)| ir.contains(r.left_center())).map(|(r, _)| *r) {
+            assert!(r.right() <= ir.right() + 0.5, "a wrapped row runs past the panel: {r:?}");
+        }
+        look(&mut s, "wrapped change");
+        s.shot("changes-wrapped");
+        click_control(&mut s, "Wrap lines");
+        // Around it: small windows, a light theme, no animations, the bottom dock, a split.
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        s.app.cfg.animations = false;
+        for (w, h) in [(520.0, 340.0), (640.0, 480.0), (900.0, 1200.0), (1920.0, 1080.0)] {
+            s.resize(w, h);
+            look(&mut s, &format!("changes {w}x{h}"));
+            s.shot(&format!("changes-paper-{w}x{h}"));
+        }
+        s.resize(1280.0, 800.0);
+        s.app.cfg.inspector_layout = crate::config::InspectorLayout::Bottom;
+        look(&mut s, "changes docked at the bottom");
+        s.shot("changes-bottom");
+        s.app.cfg.inspector_layout = crate::config::InspectorLayout::Auto;
+        s.cmd(SplitRight);
+        s.cmd(FocusPrevPanel);
+        look(&mut s, "changes beside a split");
+        s.shot("changes-split");
+        s.cmd(FocusNextPanel);
+        s.cmd(ClosePanel);
+        s.idle(2);
+        // Escape goes back to the graph, the Changes row there; the palette command
+        // opens the page again.
+        s.act("key Escape");
+        assert!(!changes(&s).open && history(&s).is_some());
+        s.act("key Home");
+        assert!(git_hist(&s).on_changes(), "Home is on the Changes row");
+        s.act("key Enter");
+        assert!(changes(&s).open, "Enter opens it");
+        s.act("key Escape");
+        s.act("key Escape");
+        assert!(s.app.panels[&s.app.active].inspector.is_none(), "closed with the inspector it opened");
+        palette_run(&mut s, "Show Git Changes");
+        wait_until(&mut s, "the page from the palette", 5, |s| s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_ref()).is_some_and(|h| h.changes().open));
+        look(&mut s, "changes from the palette");
+        report("gitchanges", &s);
+    }
+
     /// The colour `label` was last drawn in.
     fn color_of(s: &Sim, label: &str) -> egui::Color32 {
         let i = s.texts.iter().rposition(|(_, t)| t == label).unwrap_or_else(|| s.fail(&format!("no {label:?} on screen")));
@@ -5274,6 +5589,12 @@ mod journeys {
             // And a small project whose commits change files of every kind, pictures too.
             crate::tests::commit_view_fixture(&home.join("Code/project"));
             let _ = std::process::Command::new("git").args(["remote", "add", "origin", "https://github.com/octo-org/project.git"]).current_dir(home.join("Code/project")).status();
+            // Both repositories can be committed to: an identity of their own, no signing.
+            for r in ["Code/repo", "Code/project"] {
+                for (k, v) in [("user.name", "Monkey"), ("user.email", "monkey@example.invalid"), ("commit.gpgsign", "false")] {
+                    let _ = std::process::Command::new("git").args(["config", k, v]).current_dir(home.join(r)).status();
+                }
+            }
             // Fake drives, network places and pkexec to use at random (never the real tools).
             let drv = fake_drives(&format!("monkey{seed}"));
             let net = fake_network(&format!("monkey{seed}"));

@@ -535,7 +535,7 @@ fn dialog_buttons(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 }
 
 /// The main button of a dialog, in the accent.
-fn primary_button(ui: &mut Ui, label: &str, enabled: bool, pal: &Palette) -> egui::Response {
+pub(crate) fn primary_button(ui: &mut Ui, label: &str, enabled: bool, pal: &Palette) -> egui::Response {
     ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(label).color(Color32::WHITE)).fill(pal.accent).min_size(vec2(72.0, 0.0)))
 }
 
@@ -1222,7 +1222,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::Forward => t.can_forward(),
         Cmd::ClosePanel | Cmd::FocusNextPanel | Cmd::FocusPrevPanel | Cmd::CopyToOther | Cmd::MoveToOther => panels > 1,
         Cmd::InspectorLineNumbers | Cmd::InspectorWrap | Cmd::InspectorMinimap => p.inspector.is_some(),
-        Cmd::GitHistory => crate::gitstatus::repo_for(&t.path).is_some(),
+        Cmd::GitHistory | Cmd::GitChanges => crate::gitstatus::repo_for(&t.path).is_some(),
         Cmd::ComparePanels | Cmd::SelectDifferences | Cmd::SyncPanels => panels > 1,
         Cmd::OpenLinkTarget => t.target_entries().first().map(|e| e.is_link).unwrap_or(false),
         Cmd::RestoreTrash => t.path.starts_with(crate::sidebar::trash_dir()),
@@ -2002,6 +2002,11 @@ fn choice<T: PartialEq + Clone>(ui: &mut Ui, id: &str, cur: &mut T, opts: &[(T, 
         return true;
     }
     false
+}
+
+/// Options' switch, for other pages that want one.
+pub(crate) fn switch(ui: &mut Ui, on: &mut bool, pal: &Palette) -> bool {
+    toggle(ui, on, pal)
 }
 
 /// Switch: a pill whose knob carries a check (on) or a cross (off).

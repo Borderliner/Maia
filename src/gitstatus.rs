@@ -57,6 +57,8 @@ struct Git {
     /// The folder each tab showed when last looked at: a change is a navigation.
     seen: Vec<(u64, PathBuf)>,
     answers: Answers,
+    /// Work trees to read again next frame (after Maia changed one itself).
+    again: Vec<PathBuf>,
 }
 
 thread_local! {
@@ -71,6 +73,9 @@ pub fn pump(panels: &HashMap<u64, crate::panel::Panel>, changed: &[PathBuf], wat
         // Ignored files asked for or no longer: every folder is read again.
         if IGNORED.swap(ignored, std::sync::atomic::Ordering::Relaxed) != ignored {
             g.seen.clear();
+        }
+        for r in std::mem::take(&mut g.again) {
+            ask(g, r, ctx);
         }
         let answers = g.answers.lock().map(|mut a| std::mem::take(&mut *a)).unwrap_or_default();
         for (dir, repo) in answers {
@@ -151,6 +156,11 @@ pub fn repo_for(dir: &Path) -> Option<Rc<Repo>> {
     GIT.with(|g| g.borrow().dirs.get(dir)?.clone())
 }
 
+/// Read the work tree at `root` again, as soon as the next frame: Maia changed it.
+pub fn rescan(root: &Path) {
+    GIT.with(|g| g.borrow_mut().again.push(root.to_path_buf()));
+}
+
 /// Whether git ignores `path`, a folder's entry or one further down, as seen from the
 /// folder `shown`. Inside a folder that is itself ignored nothing is: everything there
 /// would be, and a listing faded or emptied as a whole says nothing.
@@ -190,15 +200,24 @@ pub fn inside_ignored(repo: &Repo, shown: &Path) -> bool {
 /// so their config is not trusted; the user's own (global, system) is left alone.
 pub fn guard(at: &Path) -> Vec<String> {
     let mut v = vec!["-c".to_string(), "core.fsmonitor=false".to_string()];
+    for key in local_filters(at) {
+        v.extend(["-c".to_string(), format!("{key}=")]);
+    }
+    v
+}
+
+/// The filter commands the repository's own config defines (which `guard` empties).
+pub fn local_filters(at: &Path) -> Vec<String> {
     let mut c = crate::media::tool("git");
     c.arg("-C").arg(at).args(["config", "--show-scope", "-z", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"]);
     // Entries are "scope\0key\nvalue\0" (a key may hold spaces: filter."my x".clean).
     let out = crate::media::output(c, std::time::Duration::from_secs(5)).unwrap_or_default();
     let mut f = out.split(|&b| b == 0);
+    let mut v = vec![];
     while let (Some(scope), Some(entry)) = (f.next(), f.next()) {
         let key = entry.split(|&b| b == b'\n').next().unwrap_or_default();
         if matches!(scope, b"local" | b"worktree") {
-            v.extend(["-c".to_string(), format!("{}=", String::from_utf8_lossy(key))]);
+            v.push(String::from_utf8_lossy(key).into_owned());
         }
     }
     v
