@@ -23,8 +23,11 @@ const MAX_PASSAGES: usize = 120;
 const MAX_TEXT: u64 = 4 << 20;
 const MAX_PDF: u64 = 60 << 20;
 const MAX_FILES: usize = 200_000;
-/// Passages per request to Ollama.
+/// Passages per request to Ollama: enough to keep a graphics card busy, few enough that
+/// a search waiting behind one is answered within a moment.
 const BATCH: usize = 16;
+/// Pictures per request.
+const PICTURE_BATCH: usize = 2;
 
 /// Pictures, read by the model as they look (with "Include pictures" on).
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp"];
@@ -224,8 +227,48 @@ fn run(folders: Vec<PathBuf>, pictures: bool, shared: Arc<Mutex<Shared>>, stop: 
     }
 }
 
+/// Work for the model: the fingerprint rows to fill and what goes in each.
+struct Job {
+    rows: Vec<usize>,
+    inputs: Vec<serde_json::Value>,
+}
+
+/// Rows and their fingerprints; None for an input the model couldn't take (a broken
+/// picture), whose file is left out.
+type Done = (Vec<usize>, Vec<Option<Vec<i8>>>);
+
+/// Searches running now: the indexer holds its next request until they are answered, so
+/// a question never queues behind a batch of files.
+static SEARCHING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn q8(e: &[f32]) -> Vec<i8> {
+    e.iter().map(|x| (x * 127.0).round().clamp(-127.0, 127.0) as i8).collect()
+}
+
+fn embed_job(rows: Vec<usize>, inputs: Vec<serde_json::Value>) -> Result<Done, String> {
+    let n = inputs.len();
+    match ollama::embed_values(inputs.clone()) {
+        Ok(v) => Ok((rows, v.iter().map(|e| Some(q8(e))).collect())),
+        // A single input refused while Ollama is fine: that input is the trouble.
+        Err(_) if n == 1 && ollama::status() == ollama::Status::Ready => Ok((rows, vec![None])),
+        Err(e) if n == 1 => Err(e),
+        // One bad picture spoils a batch: each again on its own.
+        Err(_) => {
+            let mut out = Vec::with_capacity(n);
+            for (r, i) in rows.iter().zip(inputs) {
+                out.extend(embed_job(vec![*r], vec![i])?.1);
+            }
+            Ok((rows, out))
+        }
+    }
+}
+
 /// Bring the index up to date with the folders: read new and changed files, drop gone
 /// ones. Saved as it goes, so an interrupted run keeps what it did.
+///
+/// Files are read and pictures shrunk on this thread while two others carry batches to
+/// the model, so the model (on a graphics card, the slow part is otherwise the waiting)
+/// always has the next batch ready.
 fn update(folders: &[PathBuf], pictures: bool, shared: &Mutex<Shared>, stop: &AtomicBool, ctx: &egui::Context) -> Result<(), String> {
     let mut found = vec![];
     for f in folders {
@@ -233,107 +276,167 @@ fn update(folders: &[PathBuf], pictures: bool, shared: &Mutex<Shared>, stop: &At
     }
     found.sort();
     found.dedup();
-    // Text first (quick), then pictures newest first (slow, and the recent ones are
-    // likelier to be looked for).
-    found.sort_by_key(|(p, mtime, _)| if is_picture(p) { (1, -*mtime) } else { (0, 0) });
+    // Newest first, text and pictures together: what was worked on lately is likeliest
+    // to be looked for, and pictures are findable from the start.
+    found.sort_by_key(|(_, mtime, _)| std::cmp::Reverse(*mtime));
     let old = shared.lock().unwrap_or_else(|e| e.into_inner()).index.clone();
     let known: std::collections::HashMap<&Path, &FileRec> = old.files.iter().map(|f| (f.path.as_path(), f)).collect();
-    let mut next = Index::default();
     let total = found.len();
-    let mut saved = std::time::Instant::now();
-    let mut changed = false;
-    let mut copies: std::collections::HashMap<(std::ffi::OsString, u64), usize> = Default::default();
-    let mut waiting = 0;
-    for (k, (path, mtime, size)) in found.into_iter().enumerate() {
-        if stop.load(Relaxed) {
-            return Ok(());
-        }
-        if k % 20 == 0 {
-            set(shared, ctx, Phase::Indexing(k, total));
-        }
-        // Unchanged since the last run: keep its passages as they are.
-        if let Some(f) = known.get(path.as_path()).filter(|f| f.mtime == mtime && f.size == size) {
-            let first = next.vecs.len() / DIMS;
-            if is_picture(&path) {
-                copies.entry((path.file_name().map(|n| n.to_os_string()).unwrap_or_default(), size)).or_insert(first);
-            }
-            next.vecs.extend_from_slice(&old.vecs[f.first * DIMS..(f.first + f.passages.len()) * DIMS]);
-            next.files.push(FileRec { path, mtime, size, passages: f.passages.clone(), previews: f.previews.clone(), first });
-            continue;
-        }
-        // A picture: one fingerprint for how it looks.
-        if is_picture(&path) {
-            // A copy of one already read (same name and size, as in a package unpacked
-            // twice) shares its fingerprint.
-            let key = (path.file_name().map(|n| n.to_os_string()).unwrap_or_default(), size);
-            let e = match copies.get(&key) {
-                Some(&at) => next.vecs[at * DIMS..(at + 1) * DIMS].to_vec(),
-                // Pictures keep the CPU busy for seconds each: on battery they wait for
-                // the charger (the next look, every few minutes, takes them up).
-                None if on_battery() => {
-                    waiting += 1;
-                    continue;
+    let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<Job>(4);
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<Done, String>>();
+    let job_rx = Mutex::new(job_rx);
+    std::thread::scope(|sc| {
+        for _ in 0..2 {
+            let (rx, tx) = (&job_rx, done_tx.clone());
+            sc.spawn(move || loop {
+                let Ok(job) = rx.lock().unwrap_or_else(|e| e.into_inner()).recv() else { return };
+                let t0 = std::time::Instant::now();
+                while SEARCHING.load(Relaxed) > 0 && t0.elapsed().as_secs() < 3 && !stop.load(Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                None => {
-                    let Some(bytes) = picture_bytes(&path) else { continue };
-                    let Some(e) = ollama::embed_images(&[bytes])?.pop() else { continue };
-                    e.iter().map(|x| (x * 127.0).round().clamp(-127.0, 127.0) as i8).collect()
+                if tx.send(embed_job(job.rows, job.inputs)).is_err() {
+                    return;
                 }
+            });
+        }
+        drop(done_tx);
+        // The loop owns the way to the senders: whatever way it ends, they then finish.
+        let run = |job_tx: std::sync::mpsc::SyncSender<Job>| -> Result<(), String> {
+            let mut next = Index::default();
+            let mut saved = std::time::Instant::now();
+            let mut changed = false;
+            let mut copies: std::collections::HashMap<(std::ffi::OsString, u64), usize> = Default::default();
+            let mut waiting = 0;
+            let mut failed: std::collections::HashSet<usize> = Default::default();
+            let (mut texts, mut pics): (Job, Job) = (Job { rows: vec![], inputs: vec![] }, Job { rows: vec![], inputs: vec![] });
+            let mut inflight = 0usize;
+            // Results in, written to their rows; with `all`, waits for every batch out.
+            let mut take = |next: &mut Index, failed: &mut std::collections::HashSet<usize>, inflight: &mut usize, all: bool| -> Result<(), String> {
+                while *inflight > 0 {
+                    let r = if all { done_rx.recv().map_err(|_| "The indexer stopped".to_string())? } else {
+                        match done_rx.try_recv() {
+                            Ok(r) => r,
+                            Err(_) => return Ok(()),
+                        }
+                    };
+                    *inflight -= 1;
+                    let (rows, vecs) = r?;
+                    for (row, v) in rows.into_iter().zip(vecs) {
+                        match v {
+                            Some(v) => next.vecs[row * DIMS..(row + 1) * DIMS].copy_from_slice(&v),
+                            None => {
+                                failed.insert(row);
+                            }
+                        }
+                    }
+                }
+                Ok(())
             };
-            let first = next.vecs.len() / DIMS;
-            copies.entry(key).or_insert(first);
-            next.vecs.extend(e);
-            next.files.push(FileRec { path, mtime, size, passages: vec![(0, 0)], previews: vec![String::new()], first });
-            changed = true;
-            if saved.elapsed().as_secs() >= 5 {
-                saved = std::time::Instant::now();
-                publish(shared, &next, ctx);
+            let send = |job: &mut Job, inflight: &mut usize| -> Result<(), String> {
+                if job.rows.is_empty() {
+                    return Ok(());
+                }
+                let j = std::mem::replace(job, Job { rows: vec![], inputs: vec![] });
+                job_tx.send(j).map_err(|_| "The indexer stopped".to_string())?;
+                *inflight += 1;
+                Ok(())
+            };
+            for (k, (path, mtime, size)) in found.into_iter().enumerate() {
+                if stop.load(Relaxed) {
+                    return Ok(());
+                }
+                if k % 20 == 0 {
+                    set(shared, ctx, Phase::Indexing(k, total));
+                }
+                take(&mut next, &mut failed, &mut inflight, false)?;
+                // Unchanged since the last run: keep its passages as they are.
+                if let Some(f) = known.get(path.as_path()).filter(|f| f.mtime == mtime && f.size == size) {
+                    let first = next.vecs.len() / DIMS;
+                    if is_picture(&path) {
+                        copies.entry((path.file_name().map(|n| n.to_os_string()).unwrap_or_default(), size)).or_insert(first);
+                    }
+                    next.vecs.extend_from_slice(&old.vecs[f.first * DIMS..(f.first + f.passages.len()) * DIMS]);
+                    next.files.push(FileRec { path, mtime, size, passages: f.passages.clone(), previews: f.previews.clone(), first });
+                } else if is_picture(&path) {
+                    // A picture: one fingerprint for how it looks. A copy of one already
+                    // read (same name and size, as in a package unpacked twice) shares it.
+                    let key = (path.file_name().map(|n| n.to_os_string()).unwrap_or_default(), size);
+                    let first = match copies.get(&key) {
+                        Some(&row) => row,
+                        // Pictures keep the machine busy: on battery they wait for the charger
+                        // (the next look, every few minutes, takes them up).
+                        None if on_battery() => {
+                            waiting += 1;
+                            continue;
+                        }
+                        None => {
+                            let Some(bytes) = picture_bytes(&path) else { continue };
+                            let row = next.vecs.len() / DIMS;
+                            next.vecs.resize((row + 1) * DIMS, 0);
+                            pics.rows.push(row);
+                            pics.inputs.push(ollama::image(&bytes));
+                            copies.insert(key, row);
+                            row
+                        }
+                    };
+                    next.files.push(FileRec { path, mtime, size, passages: vec![(0, 0)], previews: vec![String::new()], first });
+                    changed = true;
+                    if pics.rows.len() >= PICTURE_BATCH {
+                        send(&mut pics, &mut inflight)?;
+                    }
+                } else {
+                    let Some(text) = read(&path, size) else { continue };
+                    // Number dumps, logs of values and tables of figures say nothing a meaning can find.
+                    let whole = prose(&path);
+                    let mut passages: Vec<(u32, u32)> = cut(if whole { &text } else { &text[..text.floor_char_boundary(PASSAGE * 3)] }).into_iter().filter(|&(a, n)| wordy(&text[a as usize..(a + n) as usize])).collect();
+                    if !whole {
+                        passages.truncate(1);
+                    }
+                    if passages.is_empty() {
+                        continue;
+                    }
+                    let title = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let first = next.vecs.len() / DIMS;
+                    next.vecs.resize((first + passages.len()) * DIMS, 0);
+                    for (j, &(a, n)) in passages.iter().enumerate() {
+                        texts.rows.push(first + j);
+                        texts.inputs.push(format!("title: {title} | text: {}", &text[a as usize..(a + n) as usize]).into());
+                        if texts.rows.len() >= BATCH {
+                            send(&mut texts, &mut inflight)?;
+                        }
+                    }
+                    let previews = passages.iter().map(|&(a, n)| preview(&text[a as usize..(a + n) as usize])).collect();
+                    next.files.push(FileRec { path, mtime, size, passages, previews, first });
+                    changed = true;
+                }
+                // Searchable (and saved) as it grows, a few times a minute at most.
+                if saved.elapsed().as_secs() >= 8 {
+                    send(&mut texts, &mut inflight)?;
+                    send(&mut pics, &mut inflight)?;
+                    take(&mut next, &mut failed, &mut inflight, true)?;
+                    saved = std::time::Instant::now();
+                    publish(shared, &next, &failed, ctx);
+                }
             }
-            continue;
-        }
-        let Some(text) = read(&path, size) else { continue };
-        // Number dumps, logs of values and tables of figures say nothing a meaning can find.
-        let whole = prose(&path);
-        let mut passages: Vec<(u32, u32)> = cut(if whole { &text } else { &text[..text.floor_char_boundary(PASSAGE * 3)] }).into_iter().filter(|&(a, n)| wordy(&text[a as usize..(a + n) as usize])).collect();
-        if !whole {
-            passages.truncate(1);
-        }
-        if passages.is_empty() {
-            continue;
-        }
-        let title = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let mut vecs = Vec::with_capacity(passages.len() * DIMS);
-        for batch in passages.chunks(BATCH) {
-            let inputs: Vec<String> = batch.iter().map(|&(a, n)| format!("title: {title} | text: {}", &text[a as usize..(a + n) as usize])).collect();
-            for e in ollama::embed(&inputs)? {
-                vecs.extend(e.iter().map(|x| (x * 127.0).round().clamp(-127.0, 127.0) as i8));
+            send(&mut texts, &mut inflight)?;
+            send(&mut pics, &mut inflight)?;
+            take(&mut next, &mut failed, &mut inflight, true)?;
+            shared.lock().unwrap_or_else(|e| e.into_inner()).waiting = waiting;
+            // Nothing new and nothing gone: the index stands as it is.
+            if changed || next.files.len() != old.files.len() {
+                publish(shared, &next, &failed, ctx);
             }
-            if stop.load(Relaxed) {
-                return Ok(());
-            }
-        }
-        let previews = passages.iter().map(|&(a, n)| preview(&text[a as usize..(a + n) as usize])).collect();
-        let first = next.vecs.len() / DIMS;
-        next.vecs.extend(vecs);
-        next.files.push(FileRec { path, mtime, size, passages, previews, first });
-        changed = true;
-        // Searchable (and saved) as it grows, a few times a minute at most.
-        if saved.elapsed().as_secs() >= 5 {
-            saved = std::time::Instant::now();
-            publish(shared, &next, ctx);
-        }
-    }
-    shared.lock().unwrap_or_else(|e| e.into_inner()).waiting = waiting;
-    // Nothing new and nothing gone: the index stands as it is.
-    if changed || next.files.len() != old.files.len() {
-        publish(shared, &next, ctx);
-    }
-    Ok(())
+            Ok(())
+        };
+        run(job_tx)
+    })
 }
 
-/// Make `next` the index searches use, and save it.
-fn publish(shared: &Mutex<Shared>, next: &Index, ctx: &egui::Context) {
-    let copy = Index { files: next.files.iter().map(|f| FileRec { path: f.path.clone(), mtime: f.mtime, size: f.size, passages: f.passages.clone(), previews: f.previews.clone(), first: f.first }).collect(), vecs: next.vecs.clone() };
+/// Make `next` the index searches use, and save it; files whose fingerprint couldn't be
+/// made are left out.
+fn publish(shared: &Mutex<Shared>, next: &Index, failed: &std::collections::HashSet<usize>, ctx: &egui::Context) {
+    let files = next.files.iter().filter(|f| !failed.contains(&f.first)).map(|f| FileRec { path: f.path.clone(), mtime: f.mtime, size: f.size, passages: f.passages.clone(), previews: f.previews.clone(), first: f.first }).collect();
+    let copy = Index { files, vecs: next.vecs.clone() };
     let _ = save(&index_path(), &copy);
     shared.lock().unwrap_or_else(|e| e.into_inner()).index = Arc::new(copy);
     ctx.request_repaint();
@@ -483,7 +586,16 @@ pub fn cut(text: &str) -> Vec<(u32, u32)> {
 /// own words found in a file's name or in the passage add to it, so names, codes and
 /// rare words still count as typed.
 pub fn search(index: &Index, query: &str, limit: usize) -> Result<Vec<Hit>, String> {
+    struct Asking;
+    impl Drop for Asking {
+        fn drop(&mut self) {
+            SEARCHING.fetch_sub(1, Relaxed);
+        }
+    }
+    SEARCHING.fetch_add(1, Relaxed);
+    let asking = Asking;
     let q = ollama::embed(&[format!("task: search result | query: {query}")])?.pop().unwrap_or_default();
+    drop(asking);
     let q8: Vec<i32> = q.iter().map(|x| (x * 127.0).round() as i32).collect();
     let words = terms(query);
     let cos = |f: &FileRec, p: usize| -> f32 {

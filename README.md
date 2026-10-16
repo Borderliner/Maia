@@ -78,12 +78,14 @@ sidebar's Network section. Right-click files for Tags to give them colour labels
 named tags (kept on the files, where KDE's file managers see them too). In a git
 repository, the branch name in the status bar opens its commit history.
 
-Search by meaning (Ctrl+K) finds files by what they are about rather than their exact
-words, and pictures by what they show. It is off until you turn it on in Options, and
-then reads only the folders you list there, using a small model running on your
-computer through Ollama. The first read of a large folder takes a while; after that only
-new and changed files are read. With a graphics card and `ollama-vulkan` installed it is
-some thirty times faster. Pictures wait while a laptop runs on its battery.
+Ctrl+K finds files and folders anywhere in your home folder by name, as you type.
+With search by meaning turned on, it also finds files by what they are about rather
+than their exact words, and pictures by what they show. That is off until you turn it
+on in Options, and then reads only the folders you list there, using a small model
+running on your computer through Ollama. The first read of a large folder takes a
+while; after that only new and changed files are read. With a graphics card and
+`ollama-vulkan` installed it is several times faster. Pictures wait while a laptop runs
+on its battery.
 
 Settings live in `~/.config/maia/config.json`, bookmarks and layouts in
 `~/.local/share/maia/userdata.json`.

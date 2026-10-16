@@ -185,6 +185,14 @@ pub struct MeaningState {
     job: Option<std::sync::mpsc::Receiver<(String, Result<Vec<crate::semantic::Hit>, String>)>>,
     error: Option<String>,
     typed: Instant,
+    /// Every name under the home folder, gathered while the search is open.
+    names: Option<crate::namefind::Names>,
+    /// Name matches: path and whether it is a folder; and the query and name count they
+    /// were found for.
+    pub(crate) named: Vec<(PathBuf, bool)>,
+    named_for: (String, usize),
+    /// Rows' file details, for their icons.
+    entries: std::collections::HashMap<PathBuf, Option<fsx::Entry>>,
 }
 
 /// What runs again once an archive's password is given.
@@ -279,7 +287,7 @@ impl Popup {
         Popup::Layouts { delete }
     }
     pub fn meaning() -> Popup {
-        Popup::Meaning(MeaningState { query: String::new(), focus: true, sel: 0, hits: vec![], asked: String::new(), job: None, error: None, typed: Instant::now() })
+        Popup::Meaning(MeaningState { query: String::new(), focus: true, sel: 0, hits: vec![], asked: String::new(), job: None, error: None, typed: Instant::now(), names: None, named: vec![], named_for: (String::new(), 0), entries: Default::default() })
     }
     pub fn prompt(title: &str, text: String, on_ok: Box<dyn FnOnce(&mut App, String)>) -> Popup {
         Popup::Prompt { title: title.into(), text, on_ok: Some(on_ok) }
@@ -2554,7 +2562,8 @@ fn around(passage: &str, words: &[String]) -> String {
     }
 }
 
-/// Search by meaning: the setup step the engine is at, or the question and its matches.
+/// Ctrl+K: files and folders anywhere in the home folder by name, at once; with search by
+/// meaning on, files by what they are about under them.
 fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
     use crate::semantic::Phase;
     let pal = app.pal;
@@ -2562,6 +2571,7 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
     if k.esc {
         return false;
     }
+    let names = st.names.get_or_insert_with(|| crate::namefind::Names::start(crate::fsx::home(), ctx));
     let phase = app.semantic.as_ref().map(|e| e.phase());
     let index = app.semantic.as_ref().map(|e| e.index());
     let searchable = index.as_ref().is_some_and(|i| i.passages() > 0) && matches!(phase, Some(Phase::Ready | Phase::Indexing(..)));
@@ -2577,11 +2587,20 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
                     }
                     Err(e) => st.error = Some(e),
                 }
-                st.sel = 0;
             }
         }
     }
     let q = st.query.trim().to_string();
+    // Names: looked through again as the query changes, and as the walk brings more.
+    let count = names.len();
+    if (q != st.named_for.0 || count != st.named_for.1) && (q != st.named_for.0 || !names.walking() || st.typed.elapsed().as_millis() >= 150) {
+        st.named = names.find(&q, 40);
+        st.named_for = (q.clone(), count);
+        st.sel = 0;
+    }
+    if names.walking() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(150));
+    }
     if q.is_empty() {
         st.hits.clear();
         st.asked.clear();
@@ -2596,67 +2615,86 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
         });
         st.job = Some(rx);
     }
-    if st.job.is_some() || (!q.is_empty() && q != st.asked) {
+    if st.job.is_some() || (searchable && !q.is_empty() && q != st.asked) {
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
-    step(&mut st.sel, st.hits.len(), &k, |_| false);
-    let mut open: Option<PathBuf> = if k.enter { st.hits.get(st.sel).map(|h| h.path.clone()) } else { None };
+    // The rows: names first (a few when there are meaning matches too), then the
+    // meaning matches not already among them.
+    struct Row<'a> {
+        path: &'a Path,
+        is_dir: bool,
+        passage: Option<&'a str>,
+    }
+    let meant: Vec<&crate::semantic::Hit> = if q == st.asked { st.hits.iter().filter(|h| !st.named.iter().any(|(p, _)| p == &h.path)).collect() } else { vec![] };
+    let few = if meant.is_empty() { st.named.len() } else { st.named.len().min(5) };
+    let rows: Vec<Row> = st.named[..few].iter().map(|(p, d)| Row { path: p, is_dir: *d, passage: None }).chain(meant.iter().map(|h| Row { path: &h.path, is_dir: false, passage: Some(&h.passage) })).collect();
+    step(&mut st.sel, rows.len(), &k, |_| false);
+    let mut open: Option<PathBuf> = if k.enter { rows.get(st.sel).map(|r| r.path.to_path_buf()) } else { None };
     let mut turn_on = false;
     let (mut download, mut retry) = (false, false);
     let fs = app.cfg.font_size;
     let words = crate::semantic::terms(&st.query);
+    let marks: Vec<String> = st.query.split_whitespace().map(str::to_lowercase).collect();
     // The list may use most of the window's height; it claims what its rows need, since
     // the window keeps its first (empty) size otherwise and would show them in a sliver.
     let list_max = (ctx.content_rect().height() - 260.0).max(160.0);
     let thumbs = &mut app.thumbs;
     let ppp = ctx.pixels_per_point();
+    if st.entries.len() > 400 {
+        st.entries.clear();
+    }
+    for r in &rows {
+        st.entries.entry(r.path.to_path_buf()).or_insert_with(|| fsx::Entry::from_path(r.path));
+    }
+    let entries = &st.entries;
+    let walking = names.walking();
     centered(ctx, "meaning", 760.0, &pal, |ui| {
-        if phase.is_none() {
-            ui.label(egui::RichText::new("Search by meaning").strong());
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new("Finds files by what they are about, not their exact words, using a small model on this computer through Ollama. It is off; turning it on downloads nothing until you ask.").color(pal.text_dim));
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(egui::RichText::new("Turn on").color(Color32::WHITE)).fill(pal.accent)).clicked() {
-                    turn_on = true;
-                }
-            });
-            return;
-        }
-        let r = search_field(ui, &mut st.query, "Describe what you are looking for…", &mut st.focus, &pal, Glyph::Search);
+        let hint = if phase.is_some() { "Search by name, or describe what you are looking for…" } else { "Search files and folders by name…" };
+        let r = search_field(ui, &mut st.query, hint, &mut st.focus, &pal, Glyph::Search);
         crate::ui::note_control(ui, r.rect, "meaning field");
         if r.changed() {
             st.typed = Instant::now();
         }
         ui.add_space(2.0);
-        // Where the engine is: a line of status, and a button when there is a step to take.
         let dim = |ui: &mut Ui, s: &str| {
             ui.label(egui::RichText::new(s).size(fs - 1.5).color(pal.text_dim));
         };
-        match phase.clone().unwrap_or(Phase::Checking) {
-            Phase::Checking => dim(ui, "Looking for Ollama…"),
-            Phase::NotRunning => {
-                dim(ui, "Ollama isn't running. Install it (on Arch: pacman -S ollama) and start it, then try again.");
+        // Where search by meaning is: a line of status, and a button when there is a
+        // step to take. Off, a quiet way to turn it on while nothing is typed.
+        match phase.clone() {
+            None if q.is_empty() => {
+                ui.horizontal(|ui| {
+                    dim(ui, "Search by meaning is off.");
+                    let b = ui.add(egui::Button::new(egui::RichText::new("Turn on").size(fs - 1.5).color(pal.accent)).frame(false));
+                    crate::ui::note_control(ui, b.rect, "turn on search by meaning");
+                    turn_on = b.clicked();
+                });
+            }
+            None => {}
+            Some(Phase::Checking) => dim(ui, "Looking for Ollama…"),
+            Some(Phase::NotRunning) => {
+                dim(ui, "Ollama isn't running, so this finds names only. Install it (on Arch: pacman -S ollama) and start it, then try again.");
                 retry = ui.button("Try again").clicked();
             }
-            Phase::NoModel => {
+            Some(Phase::NoModel) => {
                 dim(ui, "The model (EmbeddingGemma 2, for text and pictures) isn't downloaded yet.");
                 download = ui.add(egui::Button::new(egui::RichText::new("Download, about 860 MB").color(Color32::WHITE)).fill(pal.accent)).clicked();
             }
-            Phase::Downloading(done, all) => {
+            Some(Phase::Downloading(done, all)) => {
                 let f = if all > 0 { done as f32 / all as f32 } else { 0.0 };
                 ui.add(egui::ProgressBar::new(f).desired_height(5.0).fill(pal.accent));
                 dim(ui, &format!("Downloading the model… {} of {}", fsx::fmt_size(done), fsx::fmt_size(all)));
             }
-            Phase::Indexing(n, all) => dim(ui, &format!("Reading your files… {n} of {all}")),
-            Phase::Ready => {
+            Some(Phase::Indexing(n, all)) => dim(ui, &format!("Reading your files for search by meaning… {n} of {all}")),
+            Some(Phase::Ready) if q.is_empty() => {
                 let read = index.as_ref().map_or(0, |i| i.files());
                 match app.semantic.as_ref().map_or(0, |e| e.waiting()) {
-                    0 => dim(ui, &format!("{read} files read")),
+                    0 => dim(ui, &format!("{read} files read for search by meaning")),
                     w => dim(ui, &format!("{read} files read · {w} pictures wait until the laptop is plugged in")),
                 }
             }
-            Phase::Failed(e) => {
+            Some(Phase::Ready) => {}
+            Some(Phase::Failed(e)) => {
                 ui.label(egui::RichText::new(e).color(pal.danger));
                 retry = ui.button("Try again").clicked();
             }
@@ -2664,20 +2702,31 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
         if let Some(e) = &st.error {
             ui.label(egui::RichText::new(e).color(pal.danger));
         }
-        if !st.hits.is_empty() {
+        if !rows.is_empty() {
             ui.add_space(4.0);
         }
-        let (small, row_h) = (fs - 1.5, (fs * 1.35 + 2.0 * (fs - 1.5) * 1.35 + 16.0).round());
-        let rows_h = st.hits.len() as f32 * (row_h + 2.0);
+        let small = fs - 1.5;
+        let row_h = (fs * 1.35 + 2.0 * small * 1.35 + 16.0).round();
+        let name_h = (fs * 1.35 + small * 1.35 + 16.0).round();
+        let label_h = (small * 1.35 + 10.0).round();
+        let both = few > 0 && !meant.is_empty();
+        let rows_h: f32 = rows.iter().map(|r| if r.passage.is_some() { row_h } else { name_h } + 2.0).sum::<f32>() + if both { 2.0 * label_h } else { 0.0 };
+        let home = crate::fsx::home();
         egui::ScrollArea::vertical().max_height(list_max).min_scrolled_height(rows_h.min(list_max)).auto_shrink([false, true]).show(ui, |ui| {
-            for (i, h) in st.hits.iter().enumerate() {
-                let name = h.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let home = crate::fsx::home();
-                let folder = h.path.parent().map(|p| match p.strip_prefix(&home) {
+            for (i, row) in rows.iter().enumerate() {
+                if both && (i == 0 || i == few) {
+                    let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width(), label_h), Sense::hover());
+                    let text = if i == 0 { "Names" } else { "By meaning" };
+                    ui.painter().text(pos2(lr.left() + 12.0, lr.bottom() - 4.0), Align2::LEFT_BOTTOM, text, FontId::proportional(small), pal.text_dim);
+                }
+                let name = row.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let folder = row.path.parent().map(|p| match p.strip_prefix(&home) {
+                    Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
                     Ok(rest) => format!("~/{}", rest.display()),
                     Err(_) => p.display().to_string(),
                 }).unwrap_or_default();
-                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                let h = if row.passage.is_some() { row_h } else { name_h };
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
                 ui.add_space(2.0);
                 if i == st.sel {
                     ui.painter().rect_filled(r, CornerRadius::same(6), pal.selected);
@@ -2685,43 +2734,64 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
                     ui.painter().rect_filled(r, CornerRadius::same(6), pal.hover);
                 }
                 let fmt = |size: f32, color: Color32| egui::TextFormat { font_id: FontId::proportional(size), color, ..Default::default() };
-                // A picture shows itself, small, at the left.
-                let picture = crate::semantic::is_picture(&h.path);
-                let mut x = r.left() + 12.0;
+                // A picture shows itself, small; anything else its icon.
+                let picture = !row.is_dir && crate::semantic::is_picture(row.path);
+                let side = (r.height() - 12.0).min(40.0);
+                let box_r = Rect::from_min_size(pos2(r.left() + 12.0, r.center().y - side / 2.0), Vec2::splat(side));
+                let mut drawn = false;
                 if picture {
-                    let box_r = Rect::from_min_size(pos2(x, r.top() + 6.0), Vec2::splat(r.height() - 12.0));
-                    ui.painter().rect_filled(box_r, CornerRadius::same(4), pal.raised);
-                    if let Some(l) = thumbs.get(&h.path, None, box_r.width() * ppp) {
+                    if let Some(l) = thumbs.get(row.path, None, box_r.width() * ppp) {
+                        ui.painter().rect_filled(box_r, CornerRadius::same(4), pal.raised);
                         let [tw, th] = l.tex.size();
                         let k = (box_r.width() / tw as f32).min(box_r.height() / th as f32);
                         let sz = vec2(tw as f32 * k, th as f32 * k);
                         ui.painter().image(l.tex.id(), Rect::from_center_size(box_r.center(), sz), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                        drawn = true;
                     }
-                    x = box_r.right() + 10.0;
                 }
+                if !drawn {
+                    let ic = Rect::from_center_size(box_r.center(), Vec2::splat(22.0_f32.min(side)));
+                    match entries.get(row.path).and_then(|e| e.as_ref()) {
+                        Some(e) => {
+                            if !crate::icons::entry(ui.painter(), ic, e) {
+                                theme::paint_icon(ui.painter(), ic, theme::categorize(&e.ext(), e.is_dir, e.is_executable()), &e.ext(), e.is_link);
+                            }
+                        }
+                        None => theme::paint_icon(ui.painter(), ic, theme::categorize("", row.is_dir, false), "", false),
+                    }
+                }
+                let x = box_r.right() + 10.0;
                 let w = r.right() - 12.0 - x;
                 let mut job = egui::text::LayoutJob::default();
-                append_marked(&mut job, &name, &words, fmt(fs, pal.text), fmt(fs, pal.accent));
-                job.append(&format!("   {folder}"), 0.0, fmt(small, pal.text_dim));
+                let marked: &[String] = if row.passage.is_some() { &words } else { &marks };
+                append_marked(&mut job, &name, marked, fmt(fs, pal.text), fmt(fs, pal.accent));
+                if row.passage.is_some() {
+                    job.append(&format!("   {folder}"), 0.0, fmt(small, pal.text_dim));
+                }
                 job.wrap = egui::text::TextWrapping { max_width: w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
                 let g = ui.fonts_mut(|f| f.layout_job(job));
                 ui.painter().galley(pos2(x, r.top() + 7.0), g, pal.text);
-                // The passage around the question's words, which show in the accent.
-                let text = if picture { "Picture".to_string() } else { around(&h.passage, &words) };
+                // Under a name, its folder; under a meaning match, the passage around the
+                // question's words (in the accent).
                 let mut job = egui::text::LayoutJob::default();
-                append_marked(&mut job, &text, &words, fmt(small, pal.text_dim), fmt(small, pal.accent));
-                job.wrap = egui::text::TextWrapping { max_width: w, max_rows: 2, break_anywhere: false, overflow_character: Some('…') };
+                match row.passage {
+                    None => job.append(&folder, 0.0, fmt(small, pal.text_dim)),
+                    Some(_) if picture => job.append("Picture", 0.0, fmt(small, pal.text_dim)),
+                    Some(p) => append_marked(&mut job, &around(p, &words), &words, fmt(small, pal.text_dim), fmt(small, pal.accent)),
+                }
+                let lines = if row.passage.is_some() { 2 } else { 1 };
+                job.wrap = egui::text::TextWrapping { max_width: w, max_rows: lines, break_anywhere: row.passage.is_none(), overflow_character: Some('…') };
                 let g = ui.fonts_mut(|f| f.layout_job(job));
                 ui.painter().galley(pos2(x, r.top() + 7.0 + fs * 1.35 + 2.0), g, pal.text_dim);
                 if i == st.sel && (k.up || k.down) {
                     ui.scroll_to_rect(r, None);
                 }
                 if resp.clicked() {
-                    open = Some(h.path.clone());
+                    open = Some(row.path.to_path_buf());
                 }
             }
-            if st.hits.is_empty() && !q.is_empty() && st.job.is_none() && q == st.asked && st.error.is_none() {
-                ui.label(egui::RichText::new("Nothing close to that yet").color(pal.text_dim));
+            if rows.is_empty() && !q.is_empty() && !walking && st.job.is_none() && (!searchable || q == st.asked) && st.error.is_none() {
+                ui.label(egui::RichText::new("Nothing by that name").color(pal.text_dim));
             }
         });
     });
@@ -2738,7 +2808,7 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
         }
     }
     if let Some(path) = open {
-        // Its folder, with the file selected.
+        // A folder opened; a file shown in its folder, selected.
         app.actions.push(Action::Navigate { panel: app.active, path });
         return false;
     }

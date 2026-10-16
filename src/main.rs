@@ -23,6 +23,7 @@ mod listing;
 mod media;
 mod lucide_map;
 mod mime;
+mod namefind;
 mod network;
 mod ollama;
 mod ops;

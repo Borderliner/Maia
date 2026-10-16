@@ -2609,3 +2609,28 @@ fn search_by_meaning_through_ollama() {
     assert_eq!(semantic::folders(" ~/Documents , /srv/notes,, "), vec![crate::fsx::home().join("Documents"), PathBuf::from("/srv/notes")]);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn names_found_anywhere_under_home() {
+    let d = tmpdir("names");
+    for f in ["Notes/Read Me.md", "Notes/readme-old.txt", "Code/maia/README.md", "Code/maia/src/main.rs", "Code/maia/node_modules/readme.md", ".hidden/readme.md", "Photos/Été à Paris.jpg"] {
+        touch(&d.join(f), "x");
+    }
+    let names = crate::namefind::Names::start(d.clone(), &egui::Context::default());
+    let t0 = Instant::now();
+    while names.walking() {
+        assert!(t0.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let find = |q: &str| names.find(q, 10).into_iter().map(|(p, _)| p.strip_prefix(&d).unwrap().display().to_string()).collect::<Vec<_>>();
+    // Any case; the name that is just the word first; build and hidden folders left out.
+    assert_eq!(find("readme"), vec!["Code/maia/README.md", "Notes/readme-old.txt"]);
+    assert_eq!(find("read me")[0], "Notes/Read Me.md", "every word; the name that is just them first");
+    assert_eq!(find("me read"), find("read me"), "in any order");
+    // A word may be in a folder's name, as long as one is in the file's.
+    assert_eq!(find("maia main"), vec!["Code/maia/src/main.rs"]);
+    assert_eq!(find("maia"), vec!["Code/maia"], "folders too");
+    assert_eq!(find("été"), vec!["Photos/Été à Paris.jpg"], "beyond ASCII");
+    assert!(find("").is_empty() && find("nothing like it").is_empty());
+    let _ = std::fs::remove_dir_all(&d);
+}

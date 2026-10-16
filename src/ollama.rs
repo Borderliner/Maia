@@ -170,7 +170,17 @@ pub fn embed(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
 
 /// Fingerprints for pictures (PNG or JPEG bytes), in the same space as text.
 pub fn embed_images(images: &[Vec<u8>]) -> Result<Vec<Vec<f32>>, String> {
-    embed_inputs(images.iter().map(|b| serde_json::json!({ "image": base64(b) })).collect())
+    embed_inputs(images.iter().map(|b| image(b)).collect())
+}
+
+/// A picture (PNG or JPEG bytes) as an input to `embed_values`.
+pub fn image(b: &[u8]) -> serde_json::Value {
+    serde_json::json!({ "image": base64(b) })
+}
+
+/// Fingerprints for a mix of texts and pictures (see `image`), in order.
+pub fn embed_values(inputs: Vec<serde_json::Value>) -> Result<Vec<Vec<f32>>, String> {
+    embed_inputs(inputs)
 }
 
 fn base64(b: &[u8]) -> String {

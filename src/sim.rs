@@ -1939,6 +1939,8 @@ mod journeys {
         let para = "Wrapped prose keeps every word on screen, however narrow the preview is made. ".repeat(12);
         std::fs::write(d.join("notes.md"), format!("# Notes\n\n{para}\n\n- short item\n{para}\n")).unwrap();
         s.cmd(Refresh);
+        // The folder is read again on a thread: the new file shows once that is done.
+        wait_until(&mut s, "notes listed", 10, |s| s.tab().entries.iter().any(|e| e.name == "notes.md"));
         select_path(&mut s, &d.join("notes.md"));
         wait_until(&mut s, "prose wrapped", 10, |s| inspector(s).wrapped_rows().is_some_and(|n| n > 10));
         let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
@@ -2987,9 +2989,33 @@ mod journeys {
         let mut s = Sim::new(&home, vec2(1280.0, 800.0));
         assert!(!s.app.cfg.semantic_search && s.app.semantic.is_none(), "off by default: nothing running");
         s.app.cfg.semantic_folders = docs.display().to_string();
+        // Off, Ctrl+K finds by name, anywhere in the home folder, at once.
         s.act("key ctrl+k");
         s.idle(2);
-        assert!(s.texts.iter().any(|(_, t)| t == "Search by meaning"));
+        assert!(s.texts.iter().any(|(_, t)| t == "Search by meaning is off."));
+        click_control(&mut s, "meaning field");
+        s.act("text summer");
+        wait_until(&mut s, "a name found", 5, |s| matches!(&s.app.popup, Popup::Meaning(st) if st.named.first().is_some_and(|(p, _)| p.ends_with("summer plans.md"))));
+        s.idle(2);
+        let shown_folder = format!("~/{}", docs.strip_prefix(crate::fsx::home()).unwrap().display());
+        assert!(s.texts.iter().any(|(_, t)| *t == shown_folder), "the folder under the name");
+        look(&mut s, "name search");
+        s.act("key Enter");
+        s.settle();
+        assert!(!s.popup_open());
+        assert_eq!(s.tab().cursor_path().as_deref(), Some(docs.join("summer plans.md").as_path()), "opened in its folder, selected");
+        // A folder's name, and words split between the folder and the name.
+        s.act("key ctrl+k");
+        s.idle(2);
+        click_control(&mut s, "meaning field");
+        s.act("text taxes pasta");
+        wait_until(&mut s, "by folder and name", 5, |s| matches!(&s.app.popup, Popup::Meaning(st) if st.named.first().is_some_and(|(p, _)| p.ends_with("Taxes/pasta.txt"))));
+        s.act("key ctrl+a");
+        s.act("text Taxes");
+        wait_until(&mut s, "a folder", 5, |s| matches!(&s.app.popup, Popup::Meaning(st) if st.named.first().is_some_and(|(p, d)| *d && p.ends_with("Taxes"))));
+        s.act("key ctrl+a");
+        s.act("key Backspace");
+        s.idle(2);
         look(&mut s, "meaning off");
         s.click_text("Turn on");
         wait_until(&mut s, "asks for the model", 10, |s| s.texts.iter().any(|(_, t)| t == "Download, about 860 MB"));
@@ -3001,7 +3027,7 @@ mod journeys {
         s.idle(2);
         let n = s.app.semantic.as_ref().map_or(0, |e| e.index().files());
         assert!(n >= 3, "the fixture's text files and ours: {n}");
-        assert!(s.texts.iter().any(|(_, t)| *t == format!("{n} files read")));
+        assert!(s.texts.iter().any(|(_, t)| *t == format!("{n} files read for search by meaning")));
         // A vague question, none of its words in the file.
         click_control(&mut s, "meaning field");
         s.act("text money back from the government");
