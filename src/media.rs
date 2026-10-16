@@ -25,7 +25,11 @@ pub fn have(tool: &str) -> bool {
 
 /// A command whose process ends when Maia does (even on a crash).
 pub(crate) fn tool(bin: &str) -> Command {
-    let mut c = Command::new(bin);
+    tool_cmd(Command::new(bin))
+}
+
+/// `tool` for a command made elsewhere (a fake under test, through `drives::Tools`).
+pub(crate) fn tool_cmd(mut c: Command) -> Command {
     c.stdin(Stdio::null()).stderr(Stdio::null());
     unsafe {
         use std::os::unix::process::CommandExt;

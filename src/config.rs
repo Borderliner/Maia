@@ -38,6 +38,15 @@ pub enum ThumbMode {
     Never,
 }
 
+/// How the listing shows what git ignores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum IgnoredFiles {
+    #[default]
+    Dim,
+    Hide,
+    Show,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CharKeyAction {
     #[default]
@@ -59,6 +68,34 @@ pub enum InspectorLayout {
     Auto,
     Right,
     Bottom,
+}
+
+/// Markdown, data files and tables each remember Rendered or Source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SourceViews {
+    pub markdown: bool,
+    pub data: bool,
+    pub table: bool,
+}
+
+impl SourceViews {
+    pub fn get(&self, k: crate::inspector::RichKind) -> bool {
+        use crate::inspector::RichKind as K;
+        match k {
+            K::Markdown => self.markdown,
+            K::Data => self.data,
+            K::Table => self.table,
+        }
+    }
+    pub fn set(&mut self, k: crate::inspector::RichKind, v: bool) {
+        use crate::inspector::RichKind as K;
+        match k {
+            K::Markdown => self.markdown = v,
+            K::Data => self.data = v,
+            K::Table => self.table = v,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -177,12 +214,16 @@ pub struct Config {
     pub middle_click: MiddleClick,
     // Inspector & startup
     pub inspector_layout: InspectorLayout,
+    /// Previews shown as written rather than rendered (the inspector's Source toggle).
+    pub source_views: SourceViews,
     pub startup: Startup,
     pub new_tab: NewTabShows,
     /// Authors' GitHub pictures in the history. Off: GitHub is never contacted.
     pub github_pictures: bool,
     /// The editor files open in at a line; empty finds one ($VISUAL, $EDITOR, installed).
     pub editor: String,
+    /// Files and folders git ignores: faded, left out, or shown like the rest.
+    pub git_ignored: IgnoredFiles,
     pub cross_filesystems: bool,
     // Hotkeys: command id -> bindings (overrides defaults when present).
     pub hotkeys: BTreeMap<String, Vec<String>>,
@@ -242,10 +283,12 @@ impl Default for Config {
             char_key_action: CharKeyAction::TriggerHotkey,
             middle_click: MiddleClick::OpenInSplit,
             inspector_layout: InspectorLayout::Auto,
+            source_views: SourceViews::default(),
             startup: Startup::LastSession,
             new_tab: NewTabShows::Current,
             github_pictures: false,
             editor: String::new(),
+            git_ignored: IgnoredFiles::Dim,
             cross_filesystems: false,
             hotkeys: BTreeMap::new(),
             custom_actions: vec![CustomAction {

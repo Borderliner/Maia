@@ -1133,7 +1133,8 @@ impl App {
         };
         let loading = t.is_loading();
         let branch = crate::gitstatus::repo_for(&t.path).map(|r| (r.branch.clone(), r.ahead, r.behind)).filter(|b| !b.0.is_empty());
-        let mut toggle_history = false;
+        let mut branch_menu = None;
+        let mut chip_at = None;
         let nsel = t.selected.len();
         let sel_size: u64 = if nsel > 1 && nsel < 200_000 {
             let stats = &self.stats.map;
@@ -1239,6 +1240,7 @@ impl App {
                 if w <= ui.available_width() {
                     let (r, resp) = ui.allocate_exact_size(vec2(w, 20.0), Sense::click());
                     note_control(ui, r, "status chip");
+                    chip_at = Some(r);
                     if resp.hovered() || history {
                         ui.painter().rect_filled(r, CornerRadius::same(5), if history { pal.accent.gamma_multiply(0.2) } else { pal.hover });
                     }
@@ -1261,13 +1263,13 @@ impl App {
                         x += g.size().x + 6.0;
                     }
                     let tip = match (*ahead, *behind) {
-                        (0, 0) => "Git branch · click for its history".to_string(),
-                        (a, 0) => format!("{a} commit{} to push · click for history", if a == 1 { "" } else { "s" }),
-                        (0, d) => format!("{d} commit{} to pull · click for history", if d == 1 { "" } else { "s" }),
-                        (a, d) => format!("{a} to push, {d} to pull · click for history"),
+                        (0, 0) => "Git branch · click for history and branches".to_string(),
+                        (a, 0) => format!("{a} commit{} to push · click for history and branches", if a == 1 { "" } else { "s" }),
+                        (0, d) => format!("{d} commit{} to pull · click for history and branches", if d == 1 { "" } else { "s" }),
+                        (a, d) => format!("{a} to push, {d} to pull · click for history and branches"),
                     };
                     if resp.on_hover_text(tip).clicked() {
-                        toggle_history = true;
+                        branch_menu = Some(r);
                     }
                 }
             }
@@ -1425,12 +1427,13 @@ impl App {
         }
         p.filter_has_focus = has_focus;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| right(ui));
-        if toggle_history {
+        if let Some(p) = self.panels.get_mut(&id) {
+            p.branch_chip = chip_at;
+        }
+        if let Some(r) = branch_menu {
             self.actions.push(Action::FocusPanel(id));
-            match self.panels.get_mut(&id) {
-                Some(p) if history => crate::inspector::close_history(p),
-                _ => self.actions.push(Action::Cmd(Cmd::GitHistory)),
-            }
+            self.actions.push(Action::Cmd(Cmd::GitBranches));
+            let _ = r;
         }
         if toggle_folders || toggle_files {
             let t = self.panels.get_mut(&id).unwrap().tab_mut();

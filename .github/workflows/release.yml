@@ -1,0 +1,81 @@
+# A version tag (v0.2.1) builds Maia for x86_64 and ARM64 Linux on Ubuntu 22.04, so
+# the downloads run on glibc 2.35 and newer, and publishes them as that tag's release
+# with their checksums and the crates' licence notices. The tag's message is the
+# release text. The nightly is pinned: build-dist.sh's size flags are nightly-only.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag and Cargo.toml agree
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          have=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "$want" = "$have" ] || { echo "tag $GITHUB_REF_NAME, Cargo.toml $have"; exit 1; }
+
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends lld
+          rustup toolchain install nightly-2026-10-13 --profile minimal --component rust-src
+
+      - name: Build
+        env:
+          MAIA_TARGET: ${{ matrix.arch }}-unknown-linux-gnu
+          MAIA_NO_RELR: "1"
+          MAIA_TOOLCHAIN: nightly-2026-10-13
+          XDG_BIN_HOME: ${{ runner.temp }}/noinstall
+        run: ./build-dist.sh
+
+      - name: Check the build
+        run: |
+          ./dist/maia --version | grep -qx "maia ${GITHUB_REF_NAME#v}"
+          if objdump -T dist/maia | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -1 | grep -qvE '^GLIBC_2\.([0-9]|[12][0-9]|3[0-5])$'; then
+            echo "needs a newer glibc than 2.35"; exit 1
+          fi
+
+      - name: Package
+        run: |
+          mkdir out
+          cp dist/maia "out/maia-linux-${{ matrix.arch }}"
+          cd out && sha256sum "maia-linux-${{ matrix.arch }}" > "maia-linux-${{ matrix.arch }}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: maia-${{ matrix.arch }}
+          path: out/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp assets/THIRD-PARTY-NOTICES.txt out/
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "Maia ${GITHUB_REF_NAME#v}" --notes-from-tag out/*

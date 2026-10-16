@@ -8,7 +8,7 @@ use egui::{self, Align2, Color32, CornerRadius, Event, FontId, Id, Key, Modifier
 
 use crate::app::{Action, App};
 use crate::commands::{self, ALL, Binding, Cat, Chord, Cmd};
-use crate::config::{CharKeyAction, InspectorLayout, MiddleClick, SaveScope, SavedView, RecentsStore, Startup, ThumbMode, NewTabShows};
+use crate::config::{CharKeyAction, IgnoredFiles, InspectorLayout, MiddleClick, SaveScope, SavedView, RecentsStore, Startup, ThumbMode, NewTabShows};
 use crate::ctxmenu::CtxState;
 use crate::fsx;
 use crate::fuzzy;
@@ -179,6 +179,12 @@ pub enum Popup {
     GroupMenu { panel: u64, label: String, pos: Pos2 },
     /// A file in a commit of the history.
     GitFile { panel: u64, file: usize, pos: Pos2 },
+    /// The branch chip's menu: the history, branches, stashes and work trees.
+    Branches(BranchState),
+    /// One stash: apply, pop, drop.
+    Stash { panel: u64, root: PathBuf, stash: crate::gitwork::Stash, anchor: Pos2, sel: usize },
+    /// Something that went wrong, said in full (git's own words).
+    Notice { title: String, text: String },
     DropMenu { paths: Vec<PathBuf>, dest: PathBuf, pos: Pos2 },
     Connect(ConnectState),
     ArchivePassword(PasswordState),
@@ -188,6 +194,19 @@ pub enum Popup {
     CodeSearch(Box<crate::devtools::CodeState>),
     Tasks(crate::devtools::TasksState),
     CleanBuilds(crate::devtools::CleanState),
+}
+
+/// The branch menu, its lists read on a worker as it opens.
+pub struct BranchState {
+    pub panel: u64,
+    pub root: PathBuf,
+    /// The chip it opens above.
+    pub anchor: Rect,
+    pub refs: Option<crate::gitwork::Refs>,
+    job: Option<crate::gitlog::Slot<crate::gitwork::Refs>>,
+    pub sel: usize,
+    keyed: bool,
+    opened: Instant,
 }
 
 /// The Search by Meaning window: a question, and the passages closest to it in meaning.
@@ -282,6 +301,9 @@ impl Popup {
             Popup::TabsOptions { .. } => "TabsOptions",
             Popup::GroupMenu { .. } => "GroupMenu",
             Popup::GitFile { .. } => "GitFile",
+            Popup::Branches(..) => "Branches",
+            Popup::Stash { .. } => "Stash",
+            Popup::Notice { .. } => "Notice",
             Popup::DropMenu { .. } => "DropMenu",
         }
     }
@@ -353,6 +375,12 @@ impl Popup {
     }
     pub fn git_file(panel: u64, file: usize, pos: Pos2) -> Popup {
         Popup::GitFile { panel, file, pos }
+    }
+    pub fn branches(panel: u64, root: PathBuf, anchor: Rect) -> Popup {
+        Popup::Branches(BranchState { panel, root, anchor, refs: None, job: None, sel: 0, keyed: false, opened: Instant::now() })
+    }
+    pub fn notice(title: String, text: String) -> Popup {
+        Popup::Notice { title, text }
     }
     pub fn rename_menu(panel: u64, pos: Pos2) -> Popup {
         Popup::RenameMenu { panel, pos }
@@ -591,13 +619,19 @@ pub(crate) fn centered<R>(ctx: &egui::Context, id: &str, width: f32, pal: &Palet
 }
 
 fn anchored<R>(ctx: &egui::Context, id: &str, pos: Pos2, width: f32, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
+    anchored_from(ctx, id, pos, Align2::LEFT_TOP, width, pal, add)
+}
+
+/// `anchored`, with `pos` the menu's corner given by `pivot`: a menu opening upward
+/// from the status bar hangs from its lower edge, whatever its height.
+fn anchored_from<R>(ctx: &egui::Context, id: &str, pos: Pos2, pivot: Align2, width: f32, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
     let screen = ctx.content_rect();
     let x = pos.x.min(screen.right() - width - 8.0).max(screen.left() + 4.0);
     // Kept off the window's edges, and scrolled when taller than the window (a Quick menu
     // with a long list ran off the bottom). The scroll area claims its height: the area
     // remembers its last size and would cut a longer menu short (see ctxmenu.rs).
-    let room = (screen.height() - 16.0 - 10.0).max(60.0);
-    let r = egui::Area::new(Id::new(id)).order(egui::Order::Foreground).fixed_pos(pos2(x, pos.y)).constrain_to(screen.shrink(6.0)).show(ctx, |ui| {
+    let room = if pivot == Align2::LEFT_BOTTOM { pos.y - screen.top() - 26.0 } else { screen.height() - 16.0 - 10.0 }.max(60.0);
+    let r = egui::Area::new(Id::new(id)).order(egui::Order::Foreground).pivot(pivot).fixed_pos(pos2(x, pos.y)).constrain_to(screen.shrink(6.0)).show(ctx, |ui| {
         popup_frame(pal)
             .inner_margin(egui::Margin::same(5))
             .show(ui, |ui| {
@@ -816,6 +850,9 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::TabsOptions { panel, pos } => tabs_options(app, ctx, *panel, *pos),
         Popup::GroupMenu { panel, label, pos } => group_menu(app, ctx, *panel, label, *pos),
         Popup::GitFile { panel, file, pos } => git_file_menu(app, ctx, *panel, *file, *pos),
+        Popup::Branches(st) => branch_menu(app, ctx, st),
+        Popup::Stash { panel, root, stash, anchor, sel } => stash_menu(app, ctx, *panel, root, stash, *anchor, sel),
+        Popup::Notice { title, text } => notice(app, ctx, title, text),
         Popup::DropMenu { paths, dest, pos } => drop_menu(app, ctx, paths, dest, *pos),
     };
     if keep && matches!(app.popup, Popup::None) {
@@ -1230,8 +1267,9 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::Back => t.can_back() || t.flatten,
         Cmd::Forward => t.can_forward(),
         Cmd::ClosePanel | Cmd::FocusNextPanel | Cmd::FocusPrevPanel | Cmd::CopyToOther | Cmd::MoveToOther => panels > 1,
-        Cmd::InspectorLineNumbers | Cmd::InspectorWrap | Cmd::InspectorMinimap => p.inspector.is_some(),
-        Cmd::GitHistory => crate::gitstatus::repo_for(&t.path).is_some(),
+        Cmd::InspectorLineNumbers | Cmd::InspectorWrap | Cmd::InspectorMinimap | Cmd::InspectorBlame | Cmd::InspectorFollow => p.inspector.is_some(),
+        Cmd::InspectorSource => p.inspector.as_ref().is_some_and(|i| i.rich_kind().is_some()),
+        Cmd::GitHistory | Cmd::GitBranches | Cmd::GitChanges => crate::gitstatus::repo_for(&t.path).is_some(),
         Cmd::ComparePanels | Cmd::SelectDifferences | Cmd::SyncPanels => panels > 1,
         Cmd::OpenLinkTarget => t.target_entries().first().map(|e| e.is_link).unwrap_or(false),
         Cmd::RestoreTrash => t.path.starts_with(crate::sidebar::trash_dir()),
@@ -1730,6 +1768,7 @@ pub(crate) enum Opt {
     Startup,
     NewTab,
     GitPictures,
+    IgnoredFiles,
     DefaultFm,
     SingleInstance,
     Meaning,
@@ -1867,6 +1906,7 @@ pub(crate) const OPTS: &[(Opt, Section, &str, &str, &str)] = &[
     (Opt::Meaning, Section::Search, "", "Search by meaning", "Find files by topic, with a local Ollama model."),
     (Opt::MeaningFolders, Section::Search, "", "Folders to search", "Separated by commas; ~ is your home folder."),
     (Opt::MeaningPictures, Section::Search, "", "Include pictures", "Find pictures by what they show."),
+    (Opt::IgnoredFiles, Section::Git, "", "Ignored files", "What git ignores, in the listing."),
     (Opt::GitPictures, Section::Git, "", "Show GitHub pictures", "Asks GitHub by username or email; kept on this computer."),
     (Opt::Startup, Section::System, "Startup", "On startup", "What Maia shows when it starts."),
     (Opt::NewTab, Section::System, "Startup", "New tab shows", "The folder a new tab opens."),
@@ -2019,6 +2059,11 @@ fn choice<T: PartialEq + Clone>(ui: &mut Ui, id: &str, cur: &mut T, opts: &[(T, 
     false
 }
 
+/// Options' switch, for other pages that want one.
+pub(crate) fn switch(ui: &mut Ui, on: &mut bool, pal: &Palette) -> bool {
+    toggle(ui, on, pal)
+}
+
 /// Switch: a pill whose knob carries a check (on) or a cross (off).
 fn toggle(ui: &mut Ui, on: &mut bool, pal: &Palette) -> bool {
     let (r, resp) = ui.allocate_exact_size(vec2(32.0, 16.0), Sense::click());
@@ -2125,6 +2170,7 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
         Opt::NewTab => f!(new_tab),
         Opt::GitPictures => f!(github_pictures),
         Opt::Editor => f!(editor),
+        Opt::IgnoredFiles => f!(git_ignored),
     }
 }
 
@@ -2208,6 +2254,7 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
             crate::ui::note_control(ui, r.rect, "editor field");
             r.lost_focus()
         }
+        Opt::IgnoredFiles => choice(ui, "ignored", &mut c.git_ignored, &[(IgnoredFiles::Dim, "Dim"), (IgnoredFiles::Hide, "Hide"), (IgnoredFiles::Show, "Show")]),
         Opt::MeaningFolders => ui.add(egui::TextEdit::singleline(&mut c.semantic_folders).hint_text("~/Documents").desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).lost_focus(),
         Opt::DefaultFm => false,
         Opt::Updates => {
@@ -2434,6 +2481,8 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
     }
     let searching = !st.query.trim().is_empty();
     let rows: Vec<usize> = if searching { find_options(&st.query) } else { (0..OPTS.len()).filter(|&i| OPTS[i].1 == section).collect() };
+    // Install only for a copy that isn't the installed one.
+    let rows: Vec<usize> = rows.into_iter().filter(|&i| OPTS[i].0 != Opt::Install || !crate::install::installed_here()).collect();
     if up && st.sel > 0 {
         st.sel -= 1;
         st.scroll_to_sel = true;
@@ -4805,6 +4854,284 @@ fn git_file_menu(app: &mut App, ctx: &egui::Context, panel: u64, file: usize, po
         _ => {}
     }
     false
+}
+
+/// One entry of the branch menu, in keyboard order.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum BranchItem {
+    History,
+    Branch(usize),
+    New,
+    Remote(usize),
+    Stash(usize),
+    Worktree(usize),
+}
+
+/// The branch menu's entries, and where its group headings go (before which entry).
+fn branch_items(r: Option<&crate::gitwork::Refs>) -> (Vec<BranchItem>, Vec<(usize, &'static str)>) {
+    let mut v = vec![BranchItem::History];
+    let mut heads = vec![];
+    let Some(r) = r else { return (v, heads) };
+    heads.push((v.len(), "Branches"));
+    v.extend((0..r.local.len().min(BRANCHES_SHOWN)).map(BranchItem::Branch));
+    v.push(BranchItem::New);
+    if !r.remote.is_empty() {
+        heads.push((v.len(), "Remote branches"));
+        v.extend((0..r.remote.len().min(BRANCHES_SHOWN)).map(BranchItem::Remote));
+    }
+    if !r.stashes.is_empty() {
+        heads.push((v.len(), "Stashes"));
+        v.extend((0..r.stashes.len().min(BRANCHES_SHOWN)).map(BranchItem::Stash));
+    }
+    if !r.worktrees.is_empty() {
+        heads.push((v.len(), "Work trees"));
+        v.extend((0..r.worktrees.len()).map(BranchItem::Worktree));
+    }
+    (v, heads)
+}
+
+/// Entries listed per group; the most recently used come first.
+const BRANCHES_SHOWN: usize = 30;
+
+/// Commits to push (up) and to pull (down), drawn right-aligned at `right`: the bundled
+/// fonts have no arrows. Returns where they start.
+fn paint_counts(p: &egui::Painter, right: f32, cy: f32, ahead: u32, behind: u32, font: &FontId, col: Color32) -> f32 {
+    let mut x = right;
+    let arrow = (font.size * 0.7).round();
+    for (up, n) in [(false, behind), (true, ahead)] {
+        if n == 0 {
+            continue;
+        }
+        let g = p.layout_no_wrap(n.to_string(), font.clone(), col);
+        x -= g.size().x;
+        p.galley(pos2(x, cy - g.size().y / 2.0), g, col);
+        x -= arrow + 2.0;
+        let (cx, h) = (x + arrow / 2.0, arrow / 2.0);
+        let st = Stroke::new(1.3, col);
+        let (tip, tail) = if up { (cy - h, cy + h) } else { (cy + h, cy - h) };
+        p.line_segment([pos2(cx, tail), pos2(cx, tip)], st);
+        let back = if up { tip + h * 0.7 } else { tip - h * 0.7 };
+        p.line_segment([pos2(cx - h * 0.7, back), pos2(cx, tip)], st);
+        p.line_segment([pos2(cx + h * 0.7, back), pos2(cx, tip)], st);
+        x -= 6.0;
+    }
+    x
+}
+
+/// The branch chip's menu: the history first, then the branches (the current one
+/// marked, each with what it has to push and pull), a new branch, the remote branches
+/// nothing tracks yet, the stashes and the other work trees. Up, Down and Enter work it.
+fn branch_menu(app: &mut App, ctx: &egui::Context, st: &mut BranchState) -> bool {
+    let pal = app.pal;
+    let k = take_keys(ctx);
+    if k.esc {
+        return false;
+    }
+    if st.refs.is_none() && st.job.is_none() {
+        st.job = Some(crate::gitwork::refs_job(ctx, &st.root));
+    }
+    if let Some(mut r) = crate::gitlog::take(&st.job) {
+        // The current branch first, then the most recently used.
+        if let Some(k) = r.local.iter().position(|b| b.current) {
+            let b = r.local.remove(k);
+            r.local.insert(0, b);
+        }
+        st.refs = Some(r);
+        st.job = None;
+    }
+    // Hanging from its lower edge, the menu would grow upward under the pointer as the
+    // lists come in: it waits for them (a moment at most, then it says it is reading).
+    if st.refs.is_none() && st.opened.elapsed() < std::time::Duration::from_millis(300) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(15));
+        return true;
+    }
+    let (items, heads) = branch_items(st.refs.as_ref());
+    if k.up || k.down || k.page_up || k.page_down {
+        st.keyed = true;
+    }
+    step(&mut st.sel, items.len(), &k, |_| false);
+    let history = app.panels.get(&st.panel).and_then(|p| p.inspector.as_ref()).is_some_and(|i| i.git.is_some());
+    let k_enter = k.enter;
+    let mut pick = if k.enter { items.get(st.sel).copied() } else { None };
+    // Opens upward from the chip, hanging from its lower edge.
+    let w = 300.0;
+    let pos = pos2(st.anchor.right() - w + 8.0, st.anchor.top() - 4.0);
+    let font = FontId::proportional(13.0);
+    let small = FontId::proportional(11.5);
+    let refs = st.refs.clone();
+    let (_, rect) = anchored_from(ctx, "branchmenu", pos, Align2::LEFT_BOTTOM, w, &pal, |ui| {
+        let mut h = heads.iter().peekable();
+        for (i, it) in items.iter().enumerate() {
+            if let Some((_, name)) = h.next_if(|(at, _)| *at == i) {
+                menu_sep(ui, &pal);
+                menu_heading(ui, name, &pal);
+            }
+            let sel = st.keyed && i == st.sel;
+            let resp = row(ui, 26.0, sel, &pal, |ui, r| {
+                let p = ui.painter();
+                let text = if sel { pal.on_sel() } else { pal.text };
+                let dim = if sel { pal.on_sel().gamma_multiply(0.75) } else { pal.text_dim };
+                let x = r.left() + 10.0;
+                let (label, right): (String, Option<String>) = match (*it, &refs) {
+                    (BranchItem::History, _) => ((if history { "Close history" } else { "History" }).into(), None),
+                    (BranchItem::New, _) => ("New branch…".into(), None),
+                    (BranchItem::Branch(b), Some(r)) => (r.local[b].name.clone(), None),
+                    (BranchItem::Remote(k), Some(r)) => (r.remote[k].clone(), None),
+                    (BranchItem::Stash(k), Some(r)) => (r.stashes[k].subject.clone(), Some(r.stashes[k].sel.clone())),
+                    (BranchItem::Worktree(k), Some(r)) => {
+                        let w = &r.worktrees[k];
+                        (w.path.file_name().map_or_else(|| w.path.display().to_string(), |n| n.to_string_lossy().into_owned()), Some(w.branch.clone()))
+                    }
+                    _ => (String::new(), None),
+                };
+                let mut end = r.right() - 8.0;
+                if let (BranchItem::Branch(b), Some(rf)) = (*it, &refs) {
+                    let b = &rf.local[b];
+                    end = paint_counts(p, end, r.center().y, b.ahead, b.behind, &small, dim) - 4.0;
+                    // The branch HEAD is on carries a dot in the accent.
+                    if b.current {
+                        p.circle_filled(pos2(x + 3.0, r.center().y), 3.0, if sel { pal.on_sel() } else { pal.accent });
+                    }
+                }
+                if let Some(t) = &right {
+                    let g = crate::listing::elided(ui, t, small.clone(), ((end - x) * 0.45).max(20.0), dim);
+                    end -= g.size().x;
+                    p.galley(pos2(end, r.center().y - g.size().y / 2.0), g, dim);
+                    end -= 10.0;
+                }
+                let lx = if matches!(it, BranchItem::Branch(_)) { x + 12.0 } else { x };
+                let g = if matches!(it, BranchItem::Remote(_)) { crate::listing::elided_tail(ui, &label, font.clone(), (end - lx).max(20.0), text) } else { crate::listing::elided(ui, &label, font.clone(), (end - lx).max(20.0), text) };
+                p.galley(pos2(lx, r.center().y - g.size().y / 2.0), g, text);
+            });
+            crate::ui::note_control(ui, resp.rect, "branch menu item");
+            let resp = match (*it, &refs) {
+                (BranchItem::Worktree(k), Some(r)) => resp.on_hover_text(r.worktrees[k].path.display().to_string()),
+                (BranchItem::Branch(b), Some(r)) if !r.local[b].upstream.is_empty() => resp.on_hover_text(format!("Tracks {}", r.local[b].upstream)),
+                _ => resp,
+            };
+            if sel && (k.up || k.down || k.page_up || k.page_down) {
+                resp.scroll_to_me(None);
+            }
+            if resp.clicked() {
+                pick = Some(*it);
+            }
+        }
+        if refs.is_none() {
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("Reading branches…").size(12.0).color(pal.text_dim));
+            });
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        }
+    });
+    let Some(it) = pick else { return !clicked_outside(ctx, rect) };
+    let (panel, root) = (st.panel, st.root.clone());
+    let start = |app: &mut App, op: crate::gitwork::Op, title: String| crate::gitwork::start(&app.ctx, &root, op, title);
+    match (it, &st.refs) {
+        (BranchItem::History, _) => {
+            app.actions.push(Action::FocusPanel(panel));
+            match app.panels.get_mut(&panel) {
+                Some(p) if history => crate::inspector::close_history(p),
+                _ => app.actions.push(Action::Cmd(Cmd::GitHistory)),
+            }
+        }
+        (BranchItem::Branch(b), Some(r)) if !r.local[b].current => {
+            let name = r.local[b].name.clone();
+            start(app, crate::gitwork::Op::Switch(name.clone()), format!("Couldn't switch to {name}"));
+        }
+        (BranchItem::New, _) => {
+            app.popup = Popup::prompt(
+                "New branch from here",
+                String::new(),
+                Box::new(move |app, name| {
+                    let name = name.trim().to_string();
+                    crate::gitwork::start(&app.ctx, &root, crate::gitwork::Op::Create(name.clone()), format!("Couldn't create {name}"));
+                }),
+            );
+        }
+        (BranchItem::Remote(k), Some(r)) => {
+            let name = r.remote[k].clone();
+            start(app, crate::gitwork::Op::Track(name.clone()), format!("Couldn't check out {name}"));
+        }
+        (BranchItem::Stash(k), Some(r)) => {
+            let anchor = pos2(pos.x + 24.0, (rect.top() + 40.0).min(st.anchor.top() - 120.0));
+            // Opened by Enter, its first item is ready for the next one.
+            app.popup = Popup::Stash { panel, root: root.clone(), stash: r.stashes[k].clone(), anchor, sel: if k_enter { 0 } else { usize::MAX } };
+        }
+        (BranchItem::Worktree(k), Some(r)) => {
+            app.actions.push(Action::NewTab { panel, path: r.worktrees[k].path.clone(), select: None, focus: true });
+        }
+        _ => {}
+    }
+    false
+}
+
+/// One stash's menu: apply it, apply and drop it, or drop it (after asking).
+fn stash_menu(app: &mut App, ctx: &egui::Context, panel: u64, root: &Path, stash: &crate::gitwork::Stash, anchor: Pos2, sel: &mut usize) -> bool {
+    let pal = app.pal;
+    let k = take_keys(ctx);
+    if k.esc {
+        return false;
+    }
+    let _ = panel;
+    const ITEMS: [&str; 3] = ["Apply", "Apply and drop", "Drop…"];
+    // Nothing is marked until the keys are used.
+    if *sel == usize::MAX && (k.up || k.down) {
+        *sel = 0;
+    } else if *sel != usize::MAX {
+        step(sel, ITEMS.len(), &k, |_| false);
+    }
+    let mut pick = if k.enter && *sel < ITEMS.len() { Some(*sel) } else { None };
+    let (_, rect) = anchored(ctx, "stashmenu", anchor, 260.0, &pal, |ui| {
+        menu_heading(ui, &stash.sel, &pal);
+        let g = crate::listing::elided(ui, &stash.subject, FontId::proportional(11.5), ui.available_width() - 20.0, pal.text_dim);
+        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), g.size().y + 4.0), Sense::hover());
+        ui.painter().galley(pos2(r.left() + 10.0, r.top()), g, pal.text_dim);
+        menu_sep(ui, &pal);
+        for (i, label) in ITEMS.iter().enumerate() {
+            let on = i == *sel;
+            let resp = row(ui, 26.0, on, &pal, |ui, r| {
+                ui.painter().text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, *label, FontId::proportional(13.0), if on { pal.on_sel() } else { pal.text });
+            });
+            crate::ui::note_control(ui, resp.rect, "stash menu item");
+            if resp.clicked() {
+                pick = Some(i);
+            }
+        }
+    });
+    let Some(i) = pick else { return !clicked_outside(ctx, rect) };
+    let s = stash.clone();
+    match i {
+        0 => crate::gitwork::start(&app.ctx, root, crate::gitwork::Op::StashApply(s.clone()), format!("Couldn't apply {}", s.sel)),
+        1 => crate::gitwork::start(&app.ctx, root, crate::gitwork::Op::StashPop(s.clone()), format!("Couldn't apply {}", s.sel)),
+        _ => {
+            let root = root.to_path_buf();
+            let msg = format!("Drop {}? {}", s.sel, "It can't be brought back from Maia.");
+            app.popup = Popup::confirm(msg, "Drop", Box::new(move |app| crate::gitwork::start(&app.ctx, &root, crate::gitwork::Op::StashDrop(s.clone()), format!("Couldn't drop {}", s.sel))));
+        }
+    }
+    false
+}
+
+/// What went wrong, in git's own words, with one button to close it.
+fn notice(app: &mut App, ctx: &egui::Context, title: &str, text: &str) -> bool {
+    let pal = app.pal;
+    let close = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter) || i.consume_key(Modifiers::NONE, Key::Escape));
+    let mut ok = false;
+    centered(ctx, "notice", 480.0, &pal, |ui| {
+        ui.add_space(4.0);
+        dialog_title(ui, title, None, &pal);
+        ui.add_space(8.0);
+        card(ui, &pal, |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(text).font(FontId::monospace(11.5)).color(pal.text)).wrap());
+        });
+        dialog_buttons(ui, |ui| {
+            if primary_button(ui, "OK", true, &pal).clicked() {
+                ok = true;
+            }
+        });
+    });
+    !(close || ok)
 }
 
 fn group_menu(app: &mut App, ctx: &egui::Context, panel: u64, label: &str, pos: Pos2) -> bool {

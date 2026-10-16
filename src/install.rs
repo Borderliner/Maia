@@ -52,6 +52,26 @@ fn icon_path() -> PathBuf {
     local().join("icons/hicolor/scalable/apps/io.github.yappologistic.Maia.svg")
 }
 
+/// 0 not looked at yet, 1 not installed, 2 this program is the installed one.
+static INSTALLED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// This program is the installed copy, with its launcher entry: Install has nothing to
+/// do (looked at once; an install marks it).
+pub fn installed_here() -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    if INSTALLED.load(Relaxed) == 0 {
+        let same = std::env::current_exe().ok().and_then(|e| std::fs::canonicalize(e).ok()).is_some_and(|e| std::fs::canonicalize(bin_path()).ok() == Some(e));
+        INSTALLED.store(if same && desktop_path().is_file() { 2 } else { 1 }, Relaxed);
+    }
+    INSTALLED.load(Relaxed) == 2
+}
+
+/// As if this program were (or weren't) the installed copy.
+#[cfg(test)]
+pub fn set_installed(yes: bool) {
+    INSTALLED.store(if yes { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn install() -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let bin = bin_path();
@@ -73,6 +93,8 @@ pub fn install() -> Result<String, String> {
     );
     std::fs::write(desktop_path(), desktop).map_err(|e| e.to_string())?;
     let _ = Command::new("update-desktop-database").arg(local().join("applications")).status();
+    // Running from elsewhere, this copy is still not the installed one; from there, it is.
+    INSTALLED.store(if exe == bin { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
     let on_path = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).any(|d| Some(d.as_path()) == bin.parent())).unwrap_or(false);
     Ok(if on_path {
         format!("Installed to {}", bin.display())

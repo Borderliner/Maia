@@ -10,8 +10,15 @@ use std::time::Duration;
 
 /// Where the releases are.
 pub const REPO: &str = "yappologistic/Maia";
-/// A release's files: the program, and its SHA-256 as `sha256sum` writes it.
+/// A release's files for this machine's processor: the program, and its SHA-256 as
+/// `sha256sum` writes it ("maia-linux-x86_64", "maia-linux-aarch64").
+#[cfg(target_arch = "aarch64")]
+pub const ASSET: &str = "maia-linux-aarch64";
+#[cfg(not(target_arch = "aarch64"))]
 pub const ASSET: &str = "maia-linux-x86_64";
+#[cfg(target_arch = "aarch64")]
+pub const SUMS: &str = "maia-linux-aarch64.sha256";
+#[cfg(not(target_arch = "aarch64"))]
 pub const SUMS: &str = "maia-linux-x86_64.sha256";
 /// A build is a few megabytes; anything near this is not one.
 const MAX_BIN: u64 = 64 << 20;

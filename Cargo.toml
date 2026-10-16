@@ -19,6 +19,7 @@ image-webp = "0.2.4"
 libc = "0.2.190"
 png = "=0.17.16"
 regex-lite = "0.1.9"
+saphyr-parser = "=0.2.2"
 sctk = { version = "=0.19.2", package = "smithay-client-toolkit", default-features = false, features = ["calloop"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

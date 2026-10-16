@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use egui::{self, Event, Key, Modifiers, Pos2};
+use egui::{self, Event, Key, Modifiers, Pos2, Rect, vec2};
 
 use crate::commands::{self, Chord, Cmd, Keymap};
 use crate::config::{self, Config, LayoutSnap, NewTabShows, SaveScope, Session, SortKey, Startup, TabSnap, UserData, ViewSettings};
@@ -41,6 +41,8 @@ pub enum Action {
     CommitRename(u64),
     CancelRename(u64),
     Toast(String),
+    /// A preview's Rendered / Source choice, remembered for its kind.
+    SourceView(crate::inspector::RichKind, bool),
     Open(Popup),
     StartJob(OpKind),
     ExternalDrop { paths: Vec<PathBuf>, dest: PathBuf },
@@ -902,7 +904,16 @@ impl App {
                 want.insert(ip);
             }
         }
-        crate::gitstatus::pump(&self.panels, &changed_dirs, &mut want, ctx);
+        // Changes started from the branch menu: said once done, and read again.
+        for (root, title, r) in crate::gitwork::finished() {
+            crate::gitstatus::rescan(&root);
+            match r {
+                Ok(msg) => self.toast(msg),
+                Err(e) if matches!(self.popup, Popup::None) => self.popup = Popup::notice(title, e),
+                Err(_) => self.toast(title),
+            }
+        }
+        crate::gitstatus::pump(&self.panels, &changed_dirs, &mut want, self.cfg.git_ignored != crate::config::IgnoredFiles::Show, ctx);
         self.watch.sync(&want);
         let recents = &self.recents_set;
         let stats = &self.stats.map;
@@ -915,8 +926,16 @@ impl App {
             stats,
         };
         let mut new_renames = vec![];
+        let hide = self.cfg.git_ignored == crate::config::IgnoredFiles::Hide;
         for p in self.panels.values_mut() {
             for t in &mut p.tabs {
+                // What git ignores leaves the view when it is to be hidden, and comes back
+                // when it is not (or once the next status says otherwise).
+                let ig = hide.then(|| crate::gitstatus::repo_for(&t.path)).flatten().filter(|r| !r.ignored.is_empty() && !crate::gitstatus::inside_ignored(r, &t.path)).map(|r| r.ignored.clone());
+                if ig.as_ref().map(std::sync::Arc::as_ptr) != t.git_hide.as_ref().map(std::sync::Arc::as_ptr) {
+                    t.git_hide = ig;
+                    t.dirty = true;
+                }
                 if t.dirty || t.built_tree != t.tree_active() {
                     t.rebuild(&ctxv);
                 } else if t.stream_dirty {
@@ -1118,11 +1137,27 @@ impl App {
         for (n, ev) in events.iter().enumerate() {
             // An open history takes the keys that move through it, open and go back.
             if let Event::Key { key, pressed: true, modifiers, .. } = ev {
-                if let Some(p) = self.panels.get_mut(&self.active).filter(|_| !text_focus && !modifiers.ctrl && !modifiers.alt) {
+                // Ctrl+Enter on the Changes page commits, its fields focused or not.
+                if *key == Key::Enter && modifiers.ctrl && !modifiers.alt && !modifiers.shift {
+                    if let Some(h) = self.panels.get_mut(&self.active).and_then(|p| p.inspector.as_mut()).and_then(|i| i.git.as_mut()).filter(|h| h.changes.open) {
+                        h.changes.commit_now();
+                        consumed.push(n);
+                        continue;
+                    }
+                }
+                let id = self.active;
+                if let Some(p) = self.panels.get_mut(&id).filter(|_| !text_focus && !modifiers.ctrl && !modifiers.alt) {
                     if let Some(h) = p.inspector.as_mut().and_then(|i| i.git.as_mut()).filter(|h| h.takes(*key)) {
-                        if !h.key(*key) {
+                        if !h.key(*key, id, &mut self.actions) {
                             crate::inspector::close_history(p);
                         }
+                        consumed.push(n);
+                        continue;
+                    }
+                    // A data tree or a database's tables, clicked: their keys until a
+                    // click elsewhere or Escape.
+                    if let Some(i) = p.inspector.as_mut().filter(|i| i.git.is_none() && i.takes(*key)) {
+                        i.key(*key);
                         consumed.push(n);
                         continue;
                     }
@@ -1803,6 +1838,27 @@ impl App {
                     _ => {}
                 }
             }
+            Cmd::GitBranches => {
+                let p = self.panel();
+                if let Some(r) = crate::gitstatus::repo_for(&p.path()) {
+                    // Above the branch chip; from the palette with no chip shown, above the
+                    // panel's lower right corner.
+                    let at = p.branch_chip.unwrap_or_else(|| Rect::from_min_size(p.rect.right_bottom() - vec2(120.0, 30.0), vec2(100.0, 20.0)));
+                    self.popup = Popup::branches(p.id, r.root.clone(), at);
+                }
+            }
+            Cmd::GitChanges => {
+                let p = self.panel();
+                if let Some(r) = crate::gitstatus::repo_for(&p.path()) {
+                    if p.inspector.as_ref().and_then(|i| i.git.as_ref()).is_none() {
+                        let opened = p.inspector.is_none();
+                        p.inspector.get_or_insert_with(Inspector::default).show_history(crate::gitlog::History::new(r.root.clone(), r.branch.clone(), opened));
+                    }
+                    if let Some(h) = p.inspector.as_mut().and_then(|i| i.git.as_mut()) {
+                        h.show_changes();
+                    }
+                }
+            }
             Cmd::InspectorLineNumbers => {
                 if let Some(i) = self.panel().inspector.as_mut() {
                     i.line_numbers = !i.line_numbers;
@@ -1816,6 +1872,23 @@ impl App {
                     } else {
                         i.toggle_wrap();
                     }
+                }
+            }
+            Cmd::InspectorSource => {
+                if let Some(k) = self.panel().inspector.as_ref().and_then(|i| i.rich_kind()) {
+                    let v = !self.cfg.source_views.get(k);
+                    self.cfg.source_views.set(k, v);
+                    self.cfg_dirty = true;
+                }
+            }
+            Cmd::InspectorBlame => {
+                if let Some(i) = self.panel().inspector.as_mut() {
+                    i.blame_on = !i.blame_on;
+                }
+            }
+            Cmd::InspectorFollow => {
+                if let Some(i) = self.panel().inspector.as_mut() {
+                    i.toggle_follow();
                 }
             }
             Cmd::InspectorMinimap => {
@@ -2452,6 +2525,10 @@ impl App {
                 }
             }
             Action::Activate { panel, idx, mods } => self.activate(panel, idx, mods),
+            Action::SourceView(k, source) => {
+                self.cfg.source_views.set(k, source);
+                self.cfg_dirty = true;
+            }
             Action::OpenFile(p) => {
                 if let Err(e) = crate::mime::open_default(&p) {
                     self.toast(format!("Couldn't open: {e}"));

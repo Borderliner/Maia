@@ -22,6 +22,9 @@ pub struct Panel {
     pub inspector_rect: Option<Rect>,
     /// A file and the line a search showed in it (for Copy Path With Line).
     pub line_hint: Option<(PathBuf, u32)>,
+    /// Where the status bar's branch chip was drawn last frame (the branch menu opens
+    /// above it).
+    pub branch_chip: Option<Rect>,
 }
 
 impl Panel {
@@ -38,6 +41,7 @@ impl Panel {
             list_rect: Rect::NOTHING,
             inspector_rect: None,
             line_hint: None,
+            branch_chip: None,
         }
     }
     pub fn tab(&self) -> &Tab {
