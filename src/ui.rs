@@ -52,6 +52,16 @@ pub fn note_control(ui: &Ui, r: Rect, what: &'static str) {
 
 /// In a single-row (non-wrapping) horizontal layout with no room left for `w` points:
 /// egui would stack the item on top of its neighbour at the edge, so callers skip it.
+/// Seconds left as a person says them: "40s", "3 min", "1 h 5 min".
+pub fn time_left(secs: f64) -> String {
+    let s = secs.max(0.0).round() as u64;
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{} min", s.div_ceil(60)),
+        _ => format!("{} h {} min", s / 3600, (s % 3600) / 60),
+    }
+}
+
 pub fn no_room(ui: &Ui, w: f32) -> bool {
     let l = ui.layout();
     l.main_dir().is_horizontal() && !l.main_wrap && ui.available_width() < w
@@ -1575,12 +1585,14 @@ impl App {
                             line = format!("{} of {} · {}/s", fsx::fmt_size(p.done_bytes), fsx::fmt_size(p.total_bytes), fsx::fmt_size(speed as u64));
                             if !done && speed > 0.0 {
                                 let eta = (p.total_bytes.saturating_sub(p.done_bytes)) as f64 / speed;
-                                line.push_str(&format!(" · {}s left", eta.round()));
+                                line.push_str(&format!(" · {} left", time_left(eta)));
                             }
                         }
                         ui.label(egui::RichText::new(line).small().color(pal.text_dim));
                         if !done && !p.current.is_empty() {
-                            ui.label(egui::RichText::new(&p.current).small().color(pal.text_dim));
+                            // One line, cut with "…": a long name wrapped and the card grew and
+                            // shrank from file to file.
+                            ui.add(egui::Label::new(egui::RichText::new(&p.current).small().color(pal.text_dim)).truncate());
                         }
                         if !p.errors.is_empty() {
                             let n = p.errors.len();

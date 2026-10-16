@@ -3338,3 +3338,14 @@ fn selected_rows_read_in_every_theme() {
         assert!(contrast(on, p.selected) > contrast(dim, p.selected));
     }
 }
+
+#[test]
+fn time_left_reads_as_minutes_and_hours() {
+    use crate::ui::time_left;
+    assert_eq!(time_left(0.4), "0s");
+    assert_eq!(time_left(42.0), "42s");
+    assert_eq!(time_left(61.0), "2 min");
+    assert_eq!(time_left(3599.0), "60 min");
+    assert_eq!(time_left(3725.0), "1 h 2 min");
+    assert_eq!(time_left(-3.0), "0s");
+}
