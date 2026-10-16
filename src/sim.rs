@@ -3143,12 +3143,27 @@ mod journeys {
         click_control(&mut s, "choose theme");
         s.settle();
         assert!(matches!(s.app.popup, Popup::Themes), "the picker opened");
+        // Every theme can be seen: in view, or scrolled to (the switch and Done stay put).
+        let card = |s: &Sim, name: &str| crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == name).map(|(_, r, _)| *r));
+        let done = card(&s, "themes done").unwrap_or_else(|| s.fail("no Done"));
+        let top = s.texts.iter().find(|(_, x)| x == "Themes").map(|(r, _)| r.bottom()).unwrap_or_else(|| s.fail("no title"));
         for t in ThemeName::ALL {
-            let r = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == t.label()).map(|(_, r, _)| *r));
-            let r = r.unwrap_or_else(|| s.fail(&format!("{} not on screen", t.label())));
-            assert!(r.top() >= 0.0 && r.bottom() <= s.size.y && r.left() >= 0.0 && r.right() <= s.size.x, "{} whole on screen: {r:?}", t.label());
-            assert!(s.texts.iter().any(|(_, x)| x == t.label()), "{} named", t.label());
+            // In view: its name drawn (the list clips what is scrolled out) above Done.
+            let named = |s: &Sim| s.texts.iter().any(|(tr, x)| x == t.label() && tr.top() >= top && tr.bottom() <= done.top());
+            for _ in 0..30 {
+                let r = card(&s, t.label()).unwrap_or_else(|| s.fail(&format!("{} not drawn", t.label())));
+                if named(&s) && r.top() >= top {
+                    break;
+                }
+                let dy = if r.top() < top { 60 } else { -60 };
+                s.act(&format!("scroll {:.0} {:.0} {dy}", done.center().x - 200.0, (top + done.top()) / 2.0));
+                s.idle(2);
+            }
+            let r = card(&s, t.label()).unwrap();
+            assert!(named(&s) && r.top() >= top && r.left() >= 0.0 && r.right() <= s.size.x, "{} in view: {r:?}", t.label());
         }
+        s.act(&format!("scroll {:.0} {:.0} 2000", done.center().x - 200.0, (top + done.top()) / 2.0));
+        s.idle(2);
         look(&mut s, "theme picker");
         s.shot("theme-picker");
         // Hovering shows a theme on the whole window, without choosing it.

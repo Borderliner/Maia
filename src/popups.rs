@@ -2877,7 +2877,8 @@ fn themes(app: &mut App, ctx: &egui::Context) -> bool {
         let cols = ((w + 12.0) / 170.0).floor().clamp(2.0, 4.0);
         let cw = ((w - 12.0 * (cols - 1.0)) / cols).floor();
         let card_h = (cw * 0.42).clamp(96.0, 132.0).round() + 10.0 + fs * 1.35 + (fs - 2.0) * 1.35 + 8.0 + 10.0;
-        let rows = (7.0 / cols).ceil() + (3.0 / cols).ceil();
+        let light = ThemeName::ALL.iter().filter(|t| t.is_light()).count() as f32;
+        let rows = ((ThemeName::ALL.len() as f32 - light) / cols).ceil() + (light / cols).ceil();
         let need = rows * card_h + 2.0 * (fs * 1.6);
         let max_h = (ctx.content_rect().height() - 230.0).max(200.0);
         egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(need.min(max_h)).auto_shrink([false, true]).show(ui, |ui| {

@@ -9,7 +9,6 @@ pub enum ThemeName {
     Midnight,
     Graphite,
     Lagoon,
-    #[serde(alias = "Nord")]
     Navy,
     #[serde(alias = "Light")]
     Paper,
@@ -19,10 +18,15 @@ pub enum ThemeName {
     TokyoNight,
     Gruvbox,
     Latte,
+    Dracula,
+    Nord,
+    OneDark,
+    SolarizedLight,
+    RosePineDawn,
 }
 
 impl ThemeName {
-    pub const ALL: [ThemeName; 10] = [
+    pub const ALL: [ThemeName; 15] = [
         ThemeName::Midnight,
         ThemeName::Graphite,
         ThemeName::Lagoon,
@@ -30,9 +34,14 @@ impl ThemeName {
         ThemeName::Mocha,
         ThemeName::TokyoNight,
         ThemeName::Gruvbox,
+        ThemeName::Dracula,
+        ThemeName::Nord,
+        ThemeName::OneDark,
         ThemeName::Paper,
         ThemeName::Linen,
         ThemeName::Latte,
+        ThemeName::SolarizedLight,
+        ThemeName::RosePineDawn,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -46,6 +55,11 @@ impl ThemeName {
             ThemeName::TokyoNight => "Tokyo Night",
             ThemeName::Gruvbox => "Gruvbox",
             ThemeName::Latte => "Catppuccin Latte",
+            ThemeName::Dracula => "Dracula",
+            ThemeName::Nord => "Nord",
+            ThemeName::OneDark => "One Dark",
+            ThemeName::SolarizedLight => "Solarized Light",
+            ThemeName::RosePineDawn => "Rosé Pine Dawn",
         }
     }
     /// A line about the theme, under its name in the theme picker.
@@ -61,10 +75,15 @@ impl ThemeName {
             ThemeName::TokyoNight => "City lights at night",
             ThemeName::Gruvbox => "Warm and retro",
             ThemeName::Latte => "Pastels on light",
+            ThemeName::Dracula => "Purple and pink",
+            ThemeName::Nord => "Arctic blue-grey",
+            ThemeName::OneDark => "The classic editor dark",
+            ThemeName::SolarizedLight => "Warm and low-glare",
+            ThemeName::RosePineDawn => "Soft rose and pine",
         }
     }
     pub fn is_light(self) -> bool {
-        matches!(self, ThemeName::Paper | ThemeName::Linen | ThemeName::Latte)
+        matches!(self, ThemeName::Paper | ThemeName::Linen | ThemeName::Latte | ThemeName::SolarizedLight | ThemeName::RosePineDawn)
     }
 }
 
@@ -104,6 +123,12 @@ impl Syntax {
             ThemeName::Gruvbox => (c(0xfb, 0x49, 0x34), c(0xfa, 0xbd, 0x2f), c(0xb8, 0xbb, 0x26), c(0x92, 0x83, 0x74), c(0xd3, 0x86, 0x9b)),
             // Its yellow, green and peach a shade deeper, to read on its light base.
             ThemeName::Latte => (c(0x88, 0x39, 0xef), c(0xb6, 0x74, 0x17), c(0x3c, 0x96, 0x28), c(0x8c, 0x8f, 0xa1), c(0xdf, 0x57, 0x09)),
+            ThemeName::Dracula => (c(0xff, 0x79, 0xc6), c(0x8b, 0xe9, 0xfd), c(0xf1, 0xfa, 0x8c), c(0x62, 0x72, 0xa4), c(0xbd, 0x93, 0xf9)),
+            ThemeName::Nord => (c(0x81, 0xa1, 0xc1), c(0x8f, 0xbc, 0xbb), c(0xa3, 0xbe, 0x8c), c(0x61, 0x6e, 0x88), c(0xb4, 0x8e, 0xad)),
+            ThemeName::OneDark => (c(0xc6, 0x78, 0xdd), c(0xe5, 0xc0, 0x7b), c(0x98, 0xc3, 0x79), c(0x5c, 0x63, 0x70), c(0xd1, 0x9a, 0x66)),
+            // The light ones' greens, yellows and cyans a shade deeper, to read on their base.
+            ThemeName::SolarizedLight => (c(0x7d, 0x8f, 0x00), c(0xaa, 0x80, 0x00), c(0x26, 0x94, 0x8b), c(0x93, 0xa1, 0xa1), c(0xd3, 0x36, 0x82)),
+            ThemeName::RosePineDawn => (c(0x28, 0x69, 0x83), c(0x52, 0x8e, 0x98), c(0xb6, 0x7a, 0x28), c(0x98, 0x93, 0xa5), c(0xbd, 0x72, 0x6e)),
         };
         Syntax { keyword, kind, string, comment, number }
     }
@@ -340,6 +365,101 @@ fn base_palette(t: ThemeName) -> Palette {
             text_dim: c(0x6c, 0x6f, 0x85),
             border: c(0xcc, 0xd0, 0xda),
             danger: c(0xd2, 0x0f, 0x39),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(false),
+        },
+        ThemeName::Dracula => Palette {
+            dark: true,
+            bg: c(0x21, 0x22, 0x2c),
+            panel: c(0x28, 0x2a, 0x36),
+            sidebar: c(0x21, 0x22, 0x2c),
+            raised: c(0x34, 0x37, 0x46),
+            hover: c(0x3a, 0x3d, 0x4e),
+            selected: c(0x44, 0x47, 0x5a),
+            cursor: c(0x56, 0x5a, 0x72),
+            accent: c(0xbd, 0x93, 0xf9),
+            text: c(0xf8, 0xf8, 0xf2),
+            text_dim: c(0x9e, 0xa2, 0xbd),
+            border: c(0x34, 0x37, 0x46),
+            danger: c(0xff, 0x55, 0x55),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+        },
+        ThemeName::Nord => Palette {
+            dark: true,
+            bg: c(0x27, 0x2c, 0x36),
+            panel: c(0x2e, 0x34, 0x40),
+            sidebar: c(0x29, 0x2e, 0x39),
+            raised: c(0x3b, 0x42, 0x52),
+            hover: c(0x3b, 0x42, 0x52),
+            selected: c(0x43, 0x4c, 0x5e),
+            cursor: c(0x4c, 0x56, 0x6a),
+            accent: c(0x88, 0xc0, 0xd0),
+            text: c(0xec, 0xef, 0xf4),
+            text_dim: c(0x9a, 0xa3, 0xb5),
+            border: c(0x3b, 0x42, 0x52),
+            danger: c(0xbf, 0x61, 0x6a),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+        },
+        ThemeName::OneDark => Palette {
+            dark: true,
+            bg: c(0x21, 0x25, 0x2b),
+            panel: c(0x28, 0x2c, 0x34),
+            sidebar: c(0x21, 0x25, 0x2b),
+            raised: c(0x2c, 0x31, 0x3a),
+            hover: c(0x2f, 0x34, 0x3e),
+            selected: c(0x3e, 0x44, 0x51),
+            cursor: c(0x4b, 0x52, 0x63),
+            accent: c(0x61, 0xaf, 0xef),
+            text: c(0xd7, 0xda, 0xe0),
+            text_dim: c(0x8b, 0x91, 0x9c),
+            border: c(0x3a, 0x3f, 0x4b),
+            danger: c(0xe0, 0x6c, 0x75),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+        },
+        ThemeName::SolarizedLight => Palette {
+            dark: false,
+            bg: c(0xee, 0xe8, 0xd5),
+            panel: c(0xfd, 0xf6, 0xe3),
+            sidebar: c(0xee, 0xe8, 0xd5),
+            raised: c(0xe9, 0xe2, 0xcb),
+            hover: c(0xf3, 0xec, 0xd8),
+            selected: c(0xd8, 0xe6, 0xe8),
+            cursor: c(0xc6, 0xda, 0xdf),
+            accent: c(0x26, 0x8b, 0xd2),
+            text: c(0x07, 0x36, 0x42),
+            text_dim: c(0x65, 0x7b, 0x83),
+            border: c(0xdd, 0xd6, 0xc1),
+            danger: c(0xdc, 0x32, 0x2f),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(false),
+        },
+        ThemeName::RosePineDawn => Palette {
+            dark: false,
+            bg: c(0xf2, 0xe9, 0xe1),
+            panel: c(0xfa, 0xf4, 0xed),
+            sidebar: c(0xf2, 0xe9, 0xe1),
+            raised: c(0xff, 0xfa, 0xf3),
+            hover: c(0xf4, 0xed, 0xe8),
+            selected: c(0xdf, 0xda, 0xd9),
+            cursor: c(0xce, 0xca, 0xcd),
+            accent: c(0x28, 0x69, 0x83),
+            text: c(0x52, 0x4d, 0x72),
+            text_dim: c(0x79, 0x75, 0x93),
+            border: c(0xdf, 0xda, 0xd9),
+            danger: c(0xb4, 0x63, 0x7a),
             chrome: z,
             alt: z,
             row_hover: z,
