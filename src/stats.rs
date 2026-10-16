@@ -99,7 +99,7 @@ impl Stats {
     }
 }
 
-fn compute(root: &Path, gen_: &AtomicU64, g: u64) -> DirStats {
+pub(crate) fn compute(root: &Path, gen_: &AtomicU64, g: u64) -> DirStats {
     let mut s = DirStats::default();
     if crate::fsx::is_virtual_fs(root) {
         return s;

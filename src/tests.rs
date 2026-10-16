@@ -3769,6 +3769,66 @@ fn tasks_keep_their_terminal_open() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "a b|\n[exit 0]\n");
 }
 
+/// Build folders are what a tool makes beside its manifest: target with a Cargo.toml (not
+/// without), node_modules once (not the ones inside it), dist and build beside a
+/// package.json or pyproject, environments by their pyvenv.cfg, caches by CACHEDIR.TAG;
+/// sizes are added up after.
+#[test]
+fn build_folder_detection() {
+    use crate::buildclean::{Msg, Scan};
+    let d = tmpdir("builds");
+    touch(&d.join("rust/Cargo.toml"), "[package]\n");
+    touch(&d.join("rust/target/debug/app"), &"x".repeat(5000));
+    touch(&d.join("rust/src/target/keep.rs"), "a source folder called target");
+    touch(&d.join("web/package.json"), "{}");
+    touch(&d.join("web/node_modules/a/index.js"), &"y".repeat(3000));
+    touch(&d.join("web/node_modules/a/node_modules/b/i.js"), "z");
+    touch(&d.join("web/dist/app.js"), "1");
+    touch(&d.join("web/.next/cache/x"), "2");
+    touch(&d.join("plain/dist/readme.txt"), "dist without a manifest is someone's");
+    touch(&d.join("plain/build/notes.txt"), "same");
+    touch(&d.join("py/pyproject.toml"), "");
+    touch(&d.join("py/.venv/pyvenv.cfg"), "home = /usr/bin\n");
+    touch(&d.join("py/.venv/lib/site.py"), "s");
+    touch(&d.join("py/env/pyvenv.cfg"), "");
+    touch(&d.join("py/pkg/__pycache__/m.cpython-313.pyc"), "c");
+    touch(&d.join("py/.pytest_cache/v"), "p");
+    touch(&d.join("misc/cache/CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55\n");
+    touch(&d.join(".hidden/node_modules/x.js"), "hidden folders are not walked");
+    let ctx = egui::Context::default();
+    let s = Scan::start(d.clone(), &ctx);
+    let (mut found, mut sizes) = (vec![], std::collections::HashMap::new());
+    let t = Instant::now();
+    loop {
+        match s.rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Msg::Found(f)) => found.push(f),
+            Ok(Msg::Size(p, n)) => {
+                sizes.insert(p, n);
+            }
+            Ok(Msg::Done) | Err(_) => break,
+        }
+    }
+    assert!(t.elapsed() < Duration::from_secs(5));
+    let mut got: Vec<(String, &str)> = found.iter().map(|f| (crate::project::relative(&f.path, &d), f.kind)).collect();
+    got.sort();
+    assert_eq!(got, vec![
+        ("misc/cache".to_string(), "Cache"),
+        ("py/.pytest_cache".to_string(), "Python tool cache"),
+        ("py/.venv".to_string(), "Python environment"),
+        ("py/env".to_string(), "Python environment"),
+        ("py/pkg/__pycache__".to_string(), "Python bytecode"),
+        ("rust/target".to_string(), "Rust build"),
+        ("web/.next".to_string(), "Next.js build"),
+        ("web/dist".to_string(), "Build output"),
+        ("web/node_modules".to_string(), "Node packages"),
+    ]);
+    assert_eq!(sizes.get(&d.join("rust/target")), Some(&5000));
+    assert_eq!(sizes.get(&d.join("web/node_modules")), Some(&3001), "everything inside, nested packages too");
+    assert_eq!(sizes.len(), found.len(), "every folder is sized");
+    assert!(found.iter().all(|f| f.modified.is_some()));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// Paths written from the project's top: its repository, else its manifest, else the
 /// folder itself; never the home folder or / for a folder inside them.
 #[test]

@@ -984,7 +984,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(114) {
+    match rng.below(115) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1255,6 +1255,18 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             if matches!(s.app.popup, Popup::Tasks(_)) {
                 s.act(&format!("text {}", rng.pick(&["build", "test", "run", "zz", ""])));
                 s.act(&format!("key {}", rng.pick(&["Enter", "Down", "Escape"])));
+            }
+        }
+        114 => {
+            // Clean Build Folders: check some, then trash them (asked first) or leave.
+            s.cmd(Cmd::CleanBuilds);
+            s.idle(5 + rng.below(20));
+            for _ in 0..rng.below(4) {
+                s.act(&format!("key {}", rng.pick(&["Down", "space", "ctrl+a", "Up"])));
+            }
+            s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
+            if matches!(s.app.popup, Popup::Confirm { .. }) {
+                s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
             }
         }
         97 => {
@@ -5232,10 +5244,76 @@ mod journeys {
         report("tasks", &s);
     }
 
+    /// Clean Build Folders: the scan finds each kind under the folder, sizes them, sorts
+    /// the biggest first; nothing goes without a check and a confirmation, the checked
+    /// ones go to the trash, and Undo brings them back.
+    #[test]
+    fn clean_build_folders() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("clean");
+        let app = dev_fixture(&home);
+        let mut s = Sim::new(&home.join("Code"), vec2(1280.0, 800.0));
+        palette_run(&mut s, "Clean Build Folders");
+        let st = |s: &Sim| match &s.app.popup {
+            Popup::CleanBuilds(c) => (c.done, c.items.clone(), c.checked.len()),
+            _ => s.fail("Clean Build Folders is not open"),
+        };
+        wait_until(&mut s, "the scan", 20, |s| st(s).0);
+        s.idle(2);
+        let items = st(&s).1;
+        let mut found: Vec<(String, &str)> = items.iter().map(|f| (crate::project::relative(&f.path, &home.join("Code")), f.kind)).collect();
+        found.sort();
+        assert_eq!(found, vec![("app/py/.venv".to_string(), "Python environment"), ("app/py/pkg/__pycache__".into(), "Python bytecode"), ("app/target".into(), "Rust build"), ("app/web/dist".into(), "Build output"), ("app/web/node_modules".into(), "Node packages")]);
+        assert!(items.windows(2).all(|w| w[0].size >= w[1].size) && items.iter().all(|f| f.size.is_some()), "sized, the biggest first");
+        assert_eq!(items[0].path, app.join("target"));
+        assert!(some_text(&s, "Rust build · changed today"));
+        shot_still(&mut s, "clean-builds");
+        // Nothing checked: Enter does nothing.
+        s.act("key Enter");
+        assert!(matches!(s.app.popup, Popup::CleanBuilds(_)));
+        s.act("key space");
+        let nm = list_row_y(&s, "app/web/node_modules");
+        s.act(&format!("click 640 {nm:.0}"));
+        assert_eq!(st(&s).2, 2, "the cursor's row and the clicked one");
+        shot_still(&mut s, "clean-builds-checked");
+        s.act("key Enter");
+        assert!(matches!(s.app.popup, Popup::Confirm { .. }), "asks first");
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with("Move 2 folders (") && t.ends_with(") to the trash?")));
+        shot_still(&mut s, "clean-builds-confirm");
+        s.act("key Enter");
+        wait_until(&mut s, "moved to the trash", 20, |_| !app.join("target").exists() && !app.join("web/node_modules").exists());
+        s.settle();
+        let trash = root().join("xdg/data/Trash/files");
+        assert!(trash.join("target").is_dir() && trash.join("node_modules").is_dir(), "in the trash, not deleted");
+        assert!(app.join("src/main.rs").exists() && app.join("web/dist").exists());
+        wait_until(&mut s, "the trash job done", 20, |s| s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Trashed(_))));
+        s.act("key ctrl+z");
+        wait_until(&mut s, "undone", 20, |_| app.join("target/debug/app.d").exists() && app.join("web/node_modules/left-pad/index.js").exists());
+        // A folder with nothing to clean.
+        go(&mut s, &home.join("Documents"));
+        palette_run(&mut s, "Clean Build Folders");
+        wait_until(&mut s, "an empty scan", 10, |s| st(s).0);
+        s.idle(2);
+        assert!(some_text(&s, "No build folders here"));
+        s.resize(520.0, 340.0);
+        shot_still(&mut s, "clean-builds-empty-small");
+        s.act("key Escape");
+        s.resize(1280.0, 800.0);
+        look(&mut s, "after cleaning");
+        report("clean builds", &s);
+    }
+
     /// Where the file list (not the preview beside it) shows `label`.
     fn row_text(s: &Sim, label: &str) -> Rect {
         let list = s.app.panels[&s.app.active].list_rect;
         s.texts.iter().find(|(r, t)| t == label && list.contains(r.center())).map(|x| x.0).unwrap_or_else(|| s.fail(&format!("{label:?} not in the list")))
+    }
+
+    /// The middle of the row in a popup's list whose text is `label`.
+    fn list_row_y(s: &Sim, label: &str) -> f32 {
+        s.texts.iter().rev().find(|(_, t)| t == label).map(|(r, _)| r.center().y + 6.0).unwrap_or_else(|| s.fail(&format!("no {label:?} row")))
     }
 
     /// Every surface photographed for a person to look at (MAIA_SIM_SHOTS): the window,
@@ -5509,6 +5587,11 @@ mod journeys {
         s.act("key ctrl+shift+b");
         wait_until(&mut s, "tasks", 10, |s| matches!(&s.app.popup, Popup::Tasks(t) if t.groups.is_some()));
         shot_open(&mut s, "run-task");
+        close(&mut s);
+        go(&mut s, &app);
+        s.cmd(CleanBuilds);
+        wait_until(&mut s, "build folders", 20, |s| matches!(&s.app.popup, Popup::CleanBuilds(c) if c.done));
+        shot_open(&mut s, "clean-builds");
         close(&mut s);
         // Popups and menus.
         go(&mut s, &docs);

@@ -1,15 +1,15 @@
-//! The developer popups: Search Code with its TODO list, and Run Task. Everything they
-//! read comes from worker threads (`codesearch`, `tasks`);
+//! The developer popups: Search Code with its TODO list, Run Task, and Clean Build Folders.
+//! Everything they read comes from worker threads (`codesearch`, `tasks`, `buildclean`);
 //! these only draw what has arrived and act on what is picked.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use egui::{self, Align2, Color32, CornerRadius, Event, FontId, Id, Key, Modifiers, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 
-use crate::app::App;
+use crate::app::{Action, App};
 use crate::codesearch::{FileHits, Hit, Query, Search};
 use crate::popups::{self as pp, Popup};
 use crate::theme::{self, Glyph, Palette};
@@ -55,6 +55,21 @@ fn take_copy_line(ctx: &egui::Context) -> bool {
         }
         hit
     })
+}
+
+/// "3 days ago", "5 weeks ago": how long since `t`.
+pub fn ago(t: Option<SystemTime>) -> String {
+    let Some(d) = t.and_then(|t| SystemTime::now().duration_since(t).ok()) else { return String::new() };
+    let days = d.as_secs() / 86_400;
+    let n = |k: u64, unit: &str| format!("{k} {unit}{} ago", if k == 1 { "" } else { "s" });
+    match days {
+        0 => "today".into(),
+        1 => "yesterday".into(),
+        2..=13 => n(days, "day"),
+        14..=59 => n(days / 7, "week"),
+        60..=729 => n(days / 30, "month"),
+        _ => n(days / 365, "year"),
+    }
 }
 
 /// 1234 as "1,234".
@@ -721,6 +736,162 @@ pub fn tasks_popup(app: &mut App, ctx: &egui::Context, st: &mut TasksState) -> b
             Err(e) => format!("Couldn't start a terminal: {e}"),
         };
         app.toast(msg);
+        return false;
+    }
+    true
+}
+
+// ------------------------------------------------------------------ Clean Build Folders
+
+pub struct CleanState {
+    pub root: PathBuf,
+    scan: Option<crate::buildclean::Scan>,
+    pub items: Vec<crate::buildclean::Found>,
+    pub checked: HashSet<PathBuf>,
+    pub sel: usize,
+    pub done: bool,
+    sorted: bool,
+}
+
+pub fn clean(ctx: &egui::Context, root: PathBuf) -> Popup {
+    let scan = crate::buildclean::Scan::start(root.clone(), ctx);
+    Popup::CleanBuilds(CleanState { root, scan: Some(scan), items: vec![], checked: HashSet::new(), sel: 0, done: false, sorted: false })
+}
+
+/// Clean Build Folders: what the scan finds, with sizes as they are added up; the checked
+/// ones go to the trash once confirmed.
+pub fn clean_popup(app: &mut App, ctx: &egui::Context, st: &mut CleanState) -> bool {
+    use crate::buildclean::Msg;
+    let pal = app.pal;
+    let k = pp::take_keys(ctx);
+    if k.esc {
+        return false;
+    }
+    if let Some(s) = &st.scan {
+        while let Ok(m) = s.rx.try_recv() {
+            match m {
+                Msg::Found(f) => st.items.push(f),
+                Msg::Size(p, n) => {
+                    if let Some(f) = st.items.iter_mut().find(|f| f.path == p) {
+                        f.size = Some(n);
+                    }
+                }
+                Msg::Done => st.done = true,
+            }
+        }
+    }
+    if st.done && !st.sorted {
+        // Biggest first once every size is in; the selection stays on its folder.
+        let at = st.items.get(st.sel).map(|f| f.path.clone());
+        st.items.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+        st.sel = at.and_then(|p| st.items.iter().position(|f| f.path == p)).unwrap_or(0);
+        st.sorted = true;
+        st.scan = None;
+    }
+    pp::step(&mut st.sel, st.items.len(), &k, |_| false);
+    if take(ctx, Modifiers::NONE, Key::Space) {
+        if let Some(f) = st.items.get(st.sel) {
+            if !st.checked.remove(&f.path) {
+                st.checked.insert(f.path.clone());
+            }
+        }
+    }
+    if take(ctx, Modifiers::COMMAND, Key::A) {
+        if st.checked.len() == st.items.len() {
+            st.checked.clear();
+        } else {
+            st.checked = st.items.iter().map(|f| f.path.clone()).collect();
+        }
+    }
+    let fs = app.cfg.font_size;
+    let small = fs - 1.5;
+    let mut trash = k.enter && !st.checked.is_empty();
+    let mut cancel = false;
+    let mut toggle: Option<usize> = None;
+    let list_max = pp::fit_list(ctx, 440.0, 190.0);
+    let chosen = st.items.iter().filter(|f| st.checked.contains(&f.path)).count();
+    let chosen_size: u64 = st.items.iter().filter(|f| st.checked.contains(&f.path)).filter_map(|f| f.size).sum();
+    let all_size: u64 = st.items.iter().filter_map(|f| f.size).sum();
+    pp::centered(ctx, "clean builds", 700.0, &pal, |ui| {
+        let sub = format!("In {}. Checked folders go to the trash; a build or an install makes them again.", pp::home_short(&st.root));
+        pp::dialog_title(ui, "Clean build folders", Some(&sub), &pal);
+        ui.add_space(8.0);
+        let row_h = (fs * 1.35 + small * 1.35 + 14.0).round();
+        let rows_h = st.items.len() as f32 * row_h;
+        if !st.items.is_empty() {
+            egui::ScrollArea::vertical().id_salt("clean list").max_height(list_max).min_scrolled_height(rows_h.min(list_max)).auto_shrink([false, true]).show(ui, |ui| {
+                for (i, f) in st.items.iter().enumerate() {
+                    let on = i == st.sel;
+                    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                    if on {
+                        ui.painter().rect_filled(r, CornerRadius::same(6), pal.selected);
+                    } else if resp.hovered() {
+                        ui.painter().rect_filled(r, CornerRadius::same(6), pal.hover);
+                    }
+                    if on && (k.up || k.down || k.page_up || k.page_down) {
+                        ui.scroll_to_rect(r, None);
+                    }
+                    if resp.clicked() {
+                        toggle = Some(i);
+                    }
+                    let (tc, dc) = if on { (pal.on_sel(), pal.on_sel_dim()) } else { (pal.text, pal.text_dim) };
+                    let cb = Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), Vec2::splat(14.0));
+                    crate::popups::checkbox_glyph(ui.painter(), cb, st.checked.contains(&f.path), &pal);
+                    crate::ui::note_control(ui, cb, "clean check");
+                    let size = f.size.map_or("…".to_string(), crate::fsx::fmt_size);
+                    let sg = ui.painter().layout_no_wrap(size, FontId::proportional(fs), tc);
+                    let sw = sg.size().x;
+                    ui.painter().galley(pos2(r.right() - 12.0 - sw, r.center().y - sg.size().y / 2.0), sg, tc);
+                    let x = cb.right() + 12.0;
+                    let room = r.right() - 24.0 - sw - x;
+                    let rel = crate::project::relative(&f.path, &st.root);
+                    let g = crate::listing::elided_tail(ui, &rel, FontId::proportional(fs), room, tc);
+                    ui.painter().galley(pos2(x, r.top() + 6.0), g, tc);
+                    let when = ago(f.modified);
+                    let sub = if when.is_empty() { f.kind.to_string() } else { format!("{} · changed {when}", f.kind) };
+                    let g = crate::listing::elided(ui, &sub, FontId::proportional(small), room, dc);
+                    ui.painter().galley(pos2(x, r.top() + 8.0 + fs * 1.35), g, dc);
+                }
+            });
+        }
+        ui.add_space(6.0);
+        let status = if !st.done {
+            format!("Looking… {} found", st.items.len())
+        } else if st.items.is_empty() {
+            "No build folders here".to_string()
+        } else {
+            format!("{} {}, {}", st.items.len(), if st.items.len() == 1 { "folder" } else { "folders" }, crate::fsx::fmt_size(all_size))
+        };
+        ui.label(egui::RichText::new(status).size(small).color(pal.text_dim));
+        pp::hints(ui, &[("Space", "check"), ("Ctrl+A", "all"), ("Enter", "move to trash"), ("Esc", "close")], &pal);
+        pp::dialog_buttons(ui, |ui| {
+            let label = if chosen == 0 { "Move to Trash".to_string() } else { format!("Move {} to Trash", crate::fsx::fmt_size(chosen_size)) };
+            let b = pp::primary_button(ui, &label, chosen > 0, &pal);
+            crate::ui::note_control(ui, b.rect, "clean trash");
+            trash |= b.clicked();
+            let c = pp::plain_button(ui, "Cancel", &pal);
+            crate::ui::note_control(ui, c.rect, "clean cancel");
+            cancel = c.clicked();
+        });
+    });
+    if let Some(i) = toggle {
+        st.sel = i;
+        if let Some(f) = st.items.get(i) {
+            if !st.checked.remove(&f.path) {
+                st.checked.insert(f.path.clone());
+            }
+        }
+    }
+    if cancel {
+        return false;
+    }
+    if trash && !st.checked.is_empty() {
+        let paths: Vec<PathBuf> = st.items.iter().filter(|f| st.checked.contains(&f.path)).map(|f| f.path.clone()).collect();
+        let size: u64 = st.items.iter().filter(|f| st.checked.contains(&f.path)).filter_map(|f| f.size).sum();
+        let what = if paths.len() == 1 { format!("“{}”", crate::project::relative(&paths[0], &st.root)) } else { format!("{} folders", paths.len()) };
+        app.popup = Popup::confirm(format!("Move {what} ({}) to the trash?", crate::fsx::fmt_size(size)), "Move to Trash", Box::new(move |app: &mut App| {
+            app.actions.push(Action::StartJob(crate::ops::OpKind::Trash { paths }));
+        }));
         return false;
     }
     true

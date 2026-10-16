@@ -1650,6 +1650,10 @@ impl App {
                 Some(d) => self.popup = crate::devtools::tasks(&ctx, d),
                 None => self.toast("Run Task needs a folder"),
             },
+            Cmd::CleanBuilds => match crate::devtools::target_dir(self) {
+                Some(d) => self.popup = crate::devtools::clean(&ctx, d),
+                None => self.toast("Clean Build Folders needs a folder"),
+            },
             Cmd::OpenInEditor => {
                 let mut paths = self.tab().selected_paths();
                 if paths.is_empty() {

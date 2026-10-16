@@ -6,6 +6,7 @@ mod checksum;
 mod codesearch;
 mod archive;
 mod avatars;
+mod buildclean;
 mod update;
 mod clipboard;
 mod commands;
