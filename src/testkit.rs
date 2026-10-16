@@ -199,9 +199,12 @@ pub(crate) fn parse(line: &str) -> Vec<Vec<Event>> {
             let mut ev = vec![Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers: m }];
             // Clipboard shortcuts arrive as their own events, like on a real keyboard.
             if m.ctrl && !m.alt {
+                // With the keys' release in the same frame: it carries the modifiers held
+                // with them (Ctrl+Shift+C is not Ctrl+C), as the window's own state does.
+                let up = Event::Key { key, physical_key: Some(key), pressed: false, repeat: false, modifiers: m };
                 match key {
-                    Key::C => ev = vec![Event::Copy],
-                    Key::X => ev = vec![Event::Cut],
+                    Key::C => ev = vec![Event::Copy, up],
+                    Key::X => ev = vec![Event::Cut, up],
                     _ => {}
                 }
             }

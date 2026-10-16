@@ -422,6 +422,8 @@ pub struct Sim {
     pub texts: Vec<(Rect, String)>,
     /// What the last frame drew, kept for `shot` when MAIA_SIM_SHOTS names a folder.
     shots: Option<Box<Shots>>,
+    /// Text the app put on the clipboard, oldest first.
+    pub copied: Vec<String>,
 }
 
 /// The textures egui has handed out and the last frame's triangles: enough to paint the
@@ -526,7 +528,7 @@ impl Sim {
         let ctx = egui::Context::default();
         let app = App::new(&ctx, vec![path.to_path_buf()]);
         let shots = std::env::var_os("MAIA_SIM_SHOTS").map(|d| Box::new(Shots { dir: PathBuf::from(d), textures: Default::default(), prims: vec![] }));
-        let mut s = Sim { ctx, app, size, ppp: 1.6, time: 0.0, pointer: pos2(-10.0, -10.0), frame_ms: vec![], log: VecDeque::new(), check_overlap: false, slow: vec![], popup_checks: Default::default(), texts: vec![], shots };
+        let mut s = Sim { ctx, app, size, ppp: 1.6, time: 0.0, pointer: pos2(-10.0, -10.0), frame_ms: vec![], log: VecDeque::new(), check_overlap: false, slow: vec![], popup_checks: Default::default(), texts: vec![], shots, copied: vec![] };
         // MAIA_SIM_LOOK=FONT,SPACING runs a session at another font size and Spacing.
         if let Some((f, sp)) = std::env::var("MAIA_SIM_LOOK").ok().and_then(|v| v.split_once(',').and_then(|(f, sp)| Some((f.trim().parse().ok()?, sp.trim().parse().ok()?)))) {
             s.app.cfg.font_size = f;
@@ -572,6 +574,11 @@ impl Sim {
         let app = &mut self.app;
         let out = self.ctx.run(raw, |ctx| app.frame(ctx));
         let prims = self.ctx.tessellate(out.shapes.clone(), out.pixels_per_point);
+        for c in &out.platform_output.commands {
+            if let egui::OutputCommand::CopyText(t) = c {
+                self.copied.push(t.clone());
+            }
+        }
         let ms = t0.elapsed().as_secs_f32() * 1000.0;
         if let Some(sh) = &mut self.shots {
             sh.take(&out.textures_delta);
