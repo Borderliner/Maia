@@ -420,6 +420,101 @@ pub struct Sim {
     pub popup_checks: std::cell::Cell<usize>,
     /// Text drawn in the last frame (visible rect, string), for clicking by label.
     pub texts: Vec<(Rect, String)>,
+    /// What the last frame drew, kept for `shot` when COMET_SIM_SHOTS names a folder.
+    shots: Option<Box<Shots>>,
+}
+
+/// The textures egui has handed out and the last frame's triangles: enough to paint the
+/// frame in software, without a window or a GPU.
+struct Shots {
+    dir: PathBuf,
+    textures: std::collections::HashMap<egui::TextureId, egui::ColorImage>,
+    prims: Vec<epaint::ClippedPrimitive>,
+}
+
+impl Shots {
+    fn take(&mut self, delta: &egui::TexturesDelta) {
+        for (id, d) in &delta.set {
+            let egui::ImageData::Color(img) = &d.image;
+            match d.pos {
+                None => {
+                    self.textures.insert(*id, (**img).clone());
+                }
+                Some([x, y]) => {
+                    if let Some(t) = self.textures.get_mut(id) {
+                        for row in 0..img.size[1] {
+                            for col in 0..img.size[0] {
+                                if let Some(px) = t.pixels.get_mut((y + row) * t.size[0] + x + col) {
+                                    *px = img.pixels[row * img.size[0] + col];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Paint the triangles: each pixel centre inside a triangle takes its texel times its
+    /// colour (both premultiplied), blended over what is there.
+    fn paint(&self, w: usize, h: usize, ppp: f32) -> Vec<u8> {
+        let mut px = vec![[0f32, 0.0, 0.0, 1.0]; w * h];
+        let sample = |t: &egui::ColorImage, uv: Pos2| -> [f32; 4] {
+            let (tw, th) = (t.size[0] as f32, t.size[1] as f32);
+            let (x, y) = (uv.x * tw - 0.5, uv.y * th - 0.5);
+            let (x0, y0) = (x.floor(), y.floor());
+            let (fx, fy) = (x - x0, y - y0);
+            let at = |xx: f32, yy: f32| {
+                let (xx, yy) = (xx.clamp(0.0, tw - 1.0) as usize, yy.clamp(0.0, th - 1.0) as usize);
+                let c = t.pixels[yy * t.size[0] + xx];
+                [c.r() as f32, c.g() as f32, c.b() as f32, c.a() as f32]
+            };
+            let (a, b, c, d) = (at(x0, y0), at(x0 + 1.0, y0), at(x0, y0 + 1.0), at(x0 + 1.0, y0 + 1.0));
+            std::array::from_fn(|i| ((a[i] * (1.0 - fx) + b[i] * fx) * (1.0 - fy) + (c[i] * (1.0 - fx) + d[i] * fx) * fy) / 255.0)
+        };
+        let edge = |a: Pos2, b: Pos2, c: Pos2| (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+        for cp in &self.prims {
+            let epaint::Primitive::Mesh(m) = &cp.primitive else { continue };
+            let Some(tex) = self.textures.get(&m.texture_id) else { continue };
+            let clip = cp.clip_rect;
+            let (cx0, cy0) = ((clip.min.x * ppp).max(0.0) as usize, (clip.min.y * ppp).max(0.0) as usize);
+            let (cx1, cy1) = (((clip.max.x * ppp).ceil().max(0.0) as usize).min(w), ((clip.max.y * ppp).ceil().max(0.0) as usize).min(h));
+            for tri in m.indices.chunks_exact(3) {
+                let v = [&m.vertices[tri[0] as usize], &m.vertices[tri[1] as usize], &m.vertices[tri[2] as usize]];
+                let p = v.map(|v| pos2(v.pos.x * ppp, v.pos.y * ppp));
+                let area = edge(p[0], p[1], p[2]);
+                if area.abs() < 1e-6 {
+                    continue;
+                }
+                let x0 = (p.iter().map(|p| p.x).fold(f32::MAX, f32::min).floor().max(0.0) as usize).max(cx0);
+                let x1 = (p.iter().map(|p| p.x).fold(f32::MIN, f32::max).ceil().max(0.0) as usize).min(cx1);
+                let y0 = (p.iter().map(|p| p.y).fold(f32::MAX, f32::min).floor().max(0.0) as usize).max(cy0);
+                let y1 = (p.iter().map(|p| p.y).fold(f32::MIN, f32::max).ceil().max(0.0) as usize).min(cy1);
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let c = pos2(x as f32 + 0.5, y as f32 + 0.5);
+                        let (w0, w1) = (edge(p[1], p[2], c) / area, edge(p[2], p[0], c) / area);
+                        let w2 = 1.0 - w0 - w1;
+                        if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                            continue;
+                        }
+                        let uv = pos2(v[0].uv.x * w0 + v[1].uv.x * w1 + v[2].uv.x * w2, v[0].uv.y * w0 + v[1].uv.y * w1 + v[2].uv.y * w2);
+                        let t = sample(tex, uv);
+                        let col = |i: usize| {
+                            let f = |c: egui::Color32| [c.r(), c.g(), c.b(), c.a()][i] as f32 / 255.0;
+                            f(v[0].color) * w0 + f(v[1].color) * w1 + f(v[2].color) * w2
+                        };
+                        let src: [f32; 4] = std::array::from_fn(|i| t[i] * col(i));
+                        let d = &mut px[y * w + x];
+                        for i in 0..4 {
+                            d[i] = src[i] + d[i] * (1.0 - src[3]);
+                        }
+                    }
+                }
+            }
+        }
+        px.iter().flat_map(|p| [0, 1, 2].map(|i| (p[i].clamp(0.0, 1.0) * 255.0).round() as u8)).collect()
+    }
 }
 
 /// A frame slower than this is a visible stall.
@@ -430,7 +525,8 @@ impl Sim {
         root();
         let ctx = egui::Context::default();
         let app = App::new(&ctx, vec![path.to_path_buf()]);
-        let mut s = Sim { ctx, app, size, ppp: 1.6, time: 0.0, pointer: pos2(-10.0, -10.0), frame_ms: vec![], log: VecDeque::new(), check_overlap: false, slow: vec![], popup_checks: Default::default(), texts: vec![] };
+        let shots = std::env::var_os("COMET_SIM_SHOTS").map(|d| Box::new(Shots { dir: PathBuf::from(d), textures: Default::default(), prims: vec![] }));
+        let mut s = Sim { ctx, app, size, ppp: 1.6, time: 0.0, pointer: pos2(-10.0, -10.0), frame_ms: vec![], log: VecDeque::new(), check_overlap: false, slow: vec![], popup_checks: Default::default(), texts: vec![], shots };
         // COMET_SIM_LOOK=FONT,SPACING runs a session at another font size and Spacing.
         if let Some((f, sp)) = std::env::var("COMET_SIM_LOOK").ok().and_then(|v| v.split_once(',').and_then(|(f, sp)| Some((f.trim().parse().ok()?, sp.trim().parse().ok()?)))) {
             s.app.cfg.font_size = f;
@@ -477,6 +573,13 @@ impl Sim {
         let out = self.ctx.run(raw, |ctx| app.frame(ctx));
         let prims = self.ctx.tessellate(out.shapes.clone(), out.pixels_per_point);
         let ms = t0.elapsed().as_secs_f32() * 1000.0;
+        if let Some(sh) = &mut self.shots {
+            sh.take(&out.textures_delta);
+            sh.prims = prims.clone();
+            for id in &out.textures_delta.free {
+                sh.textures.remove(id);
+            }
+        }
         self.frame_ms.push(ms);
         if ms > SLOW_MS && self.frame_ms.len() > 3 {
             let traced = self.slow.iter().any(|x| x.0 > 1000.0);
@@ -575,6 +678,23 @@ impl Sim {
             self.fail(&format!("no {label:?} on screen; visible: {near:?}"));
         };
         self.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+    }
+
+    /// Save what the last frame drew as `<COMET_SIM_SHOTS>/<name>.png` (nothing when the
+    /// variable is not set). The look in use goes into the name.
+    pub fn shot(&self, name: &str) {
+        let Some(sh) = &self.shots else { return };
+        let (w, h) = ((self.size.x * self.ppp).round() as usize, (self.size.y * self.ppp).round() as usize);
+        let rgb = sh.paint(w, h, self.ppp);
+        let look = std::env::var("COMET_SIM_LOOK").unwrap_or_default().replace(',', "-");
+        let name: String = format!("{name}{}{look}", if look.is_empty() { "" } else { "@" }).chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '@') { c } else { '_' }).collect();
+        let Ok(f) = std::fs::File::create(sh.dir.join(format!("{name}.png"))) else { return };
+        let mut e = png::Encoder::new(std::io::BufWriter::new(f), w as u32, h as u32);
+        e.set_color(png::ColorType::Rgb);
+        e.set_depth(png::BitDepth::Eight);
+        if let Ok(mut wr) = e.write_header() {
+            let _ = wr.write_image_data(&rgb);
+        }
     }
 
     pub fn resize(&mut self, w: f32, h: f32) {
