@@ -478,7 +478,12 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
     let screen = ctx.content_rect();
     let row_h = 24.0;
     let w = 340.0;
-    let est_h = (n as f32 * row_h + 50.0).min(screen.height() - 20.0);
+    // The menu's height as drawn: rows and separators each with the Spacing gap after
+    // them, the search row and the margins. Short of it, a menu opened low ran off the
+    // bottom of the window.
+    let gap = ctx.style().spacing.item_spacing.y;
+    let seps = rows.iter().filter(|r| is_sep(&r.1)).count();
+    let est_h = ((n - seps) as f32 * (row_h + gap) + seps as f32 * (7.0 + gap) + 44.0 + 3.0 * gap).min(screen.height() - 20.0);
     let x = st.pos.x.min(screen.right() - w - 6.0).max(4.0);
     let y = if st.pos.y + est_h > screen.bottom() { (screen.bottom() - est_h - 6.0).max(4.0) } else { st.pos.y };
     let mut close_now = false;
