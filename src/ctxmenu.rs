@@ -25,6 +25,10 @@ pub enum Act {
     Drive(crate::drives::Op),
     /// Unmount this network place.
     Disconnect(String),
+    /// Add a tag to the selection, or remove it when every item has it (true).
+    Tag(String, bool),
+    /// Ask for a new tag's name, then add it.
+    NewTag,
     None,
 }
 
@@ -97,6 +101,8 @@ pub struct CtxState {
     pub expanded: HashSet<String>,
     pub targets: Vec<PathBuf>,
     focus: bool,
+    /// A submenu just opened: scrolled into view on the next frame.
+    reveal: Option<String>,
 }
 
 pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
@@ -254,23 +260,46 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         }
         items.push(Item::cmd(Cmd::DeletePermanent));
         items.push(Item::sep());
+        if t.archive.is_none() && !in_trash {
+            items.push(Item::sub("tags", "Tags", tag_items(&ents.iter().map(|e| e.0.clone()).collect::<Vec<_>>())));
+        }
         if all_dirs {
             items.push(Item::cmd(Cmd::ToggleBookmark));
         }
         items.push(Item::cmd(Cmd::Properties));
     }
     let targets = ents.into_iter().map(|e| e.0).collect();
-    Popup::Ctx(CtxState { sidebar: None, pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets, focus: true })
+    Popup::Ctx(CtxState { sidebar: None, pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets, focus: true, reveal: None })
 }
 
 /// Context menu for a sidebar place (recent, bookmark, drive or standard folder).
+/// The colour labels, then the other tags in use, each marked when every selected item
+/// has it; then New Tag.
+fn tag_items(paths: &[PathBuf]) -> Vec<Item> {
+    // Read now for a usual selection; a huge one goes by what has been read already.
+    let have: Vec<Vec<String>> = paths.iter().map(|p| if paths.len() <= 500 { crate::tags::read(p) } else { crate::tags::get(p, |t| t.to_vec()).unwrap_or_default() }).collect();
+    let all_have = |tag: &str| !have.is_empty() && have.iter().all(|t| t.iter().any(|x| x.eq_ignore_ascii_case(tag)));
+    let mut names: Vec<String> = crate::tags::COLORS.iter().map(|(n, _)| n.to_string()).collect();
+    let mut words: Vec<String> = crate::tags::known();
+    for t in have.iter().flatten() {
+        if crate::tags::color_of(t).is_none() && !words.iter().any(|w| w.eq_ignore_ascii_case(t)) {
+            words.push(t.clone());
+        }
+    }
+    words.sort_by_key(|w| w.to_lowercase());
+    names.extend(words);
+    let mut v: Vec<Item> = names.into_iter().map(|n| Item { id: format!("tag:{n}"), act: Act::Tag(n.clone(), all_have(&n)), label: n, children: vec![] }).collect();
+    v.push(Item { id: "new_tag".into(), label: "New Tag…".into(), act: Act::NewTag, children: vec![] });
+    v
+}
+
 pub fn build_place(panel: u64, path: PathBuf, bookmarked: bool, drive: Option<crate::drives::Drive>, network: Option<String>, pos: Pos2) -> Popup {
     let place = |id: &str, label: &str, a: PlaceAct| Item { id: format!("place:{id}"), label: label.into(), act: Act::Place(a, panel), children: vec![] };
     if let (Some(d), Some(_)) = (&drive, tab::drive_dev(&path)) {
         // A drive that isn't mounted: opening it mounts it.
         let mut items = vec![place("open", "Open", PlaceAct::Open), place("new_tab", "Open In New Tab", PlaceAct::NewTab), Item::sep()];
         items.extend(Item::drive_items(std::slice::from_ref(d)));
-        return Popup::Ctx(CtxState { sidebar: Some(path.clone()), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![path], focus: true });
+        return Popup::Ctx(CtxState { sidebar: Some(path.clone()), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![path], focus: true, reveal: None });
     }
     let computer = tab::is_computer(&path);
     let mut items = vec![
@@ -300,7 +329,7 @@ pub fn build_place(panel: u64, path: PathBuf, bookmarked: bool, drive: Option<cr
         items.push(Item::sep());
         items.push(place("properties", "Properties", PlaceAct::Properties));
     }
-    Popup::Ctx(CtxState { sidebar: Some(path.clone()), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![path], focus: true })
+    Popup::Ctx(CtxState { sidebar: Some(path.clone()), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![path], focus: true, reveal: None })
 }
 
 /// Visible rows: (depth, item, breadcrumb label)
@@ -503,6 +532,12 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                         }
                         let sel = i == st.sel;
                         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                        // An opened submenu near the bottom: scroll so all of it shows.
+                        if st.reveal.as_deref() == Some(it.id.as_str()) {
+                            let kids = rows[i + 1..].iter().take_while(|row| row.0 > *depth).count();
+                            ui.scroll_to_rect(Rect::from_min_size(r.min, vec2(r.width(), row_h * (kids + 1) as f32)), None);
+                            st.reveal = None;
+                        }
                         let hovered = resp.hovered();
                         if hovered && !sel {
                             st.sel = i;
@@ -520,6 +555,14 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                         }
                         if let Act::Terminal(_) = &it.act {
                             crate::icons::named(ui.painter(), ic, "utilities-terminal");
+                        }
+                        if let Act::Tag(name, _) = &it.act {
+                            match crate::tags::color_of(name) {
+                                Some(c) => {
+                                    ui.painter().circle_filled(ic.center(), 5.0, c);
+                                }
+                                None => paint_glyph(ui.painter(), ic.shrink(1.5), Glyph::Tag, if sel { egui::Color32::WHITE } else { pal.text_dim }),
+                            }
                         }
                         let x0 = r.left() + 32.0 + *depth as f32 * 22.0;
                         let enabled = match &it.act {
@@ -545,6 +588,13 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                             let g = if st.expanded.contains(&it.id) { Glyph::ChevronDown } else { Glyph::ChevronRight };
                             paint_glyph(ui.painter(), Rect::from_center_size(c, Vec2::splat(12.0)), g, dimc);
                         } else {
+                            if let Act::Tag(_, true) = &it.act {
+                                // Every selected item has this tag: a check, and a click removes it.
+                                let c = pos2(rx - 6.0, r.center().y);
+                                let col = if sel { egui::Color32::WHITE } else { pal.accent };
+                                ui.painter().add(egui::Shape::line(vec![c + vec2(-4.5, 0.0), c + vec2(-1.5, 3.0), c + vec2(4.5, -3.5)], Stroke::new(1.6, col)));
+                                rx -= 22.0;
+                            }
                             if let Act::Cmd(c) = &it.act {
                                 // Radio mark for the current view / sort / grouping.
                                 if let Some(on_now) = radio_of(*c) {
@@ -597,7 +647,8 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
     }
     if let Some(id) = toggle {
         if !st.expanded.remove(&id) {
-            st.expanded.insert(id);
+            st.expanded.insert(id.clone());
+            st.reveal = Some(id);
         }
     }
     if let Some(id) = pin {
@@ -646,6 +697,28 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
             Act::Disconnect(uri) => {
                 let path = st.targets.first().cloned();
                 app.disconnect(uri, path);
+            }
+            Act::Tag(tag, on) => {
+                let paths = app.tab().targets();
+                if let Err(e) = crate::tags::toggle(&paths, &tag, !on) {
+                    app.toast(format!("Couldn't tag {e}"));
+                }
+            }
+            Act::NewTag => {
+                let paths = app.tab().targets();
+                app.actions.push(Action::Open(Popup::prompt(
+                    "New tag",
+                    String::new(),
+                    Box::new(move |app: &mut App, name: String| {
+                        let name = name.replace(',', " ").trim().to_string();
+                        if name.is_empty() {
+                            return;
+                        }
+                        if let Err(e) = crate::tags::toggle(&paths, &name, true) {
+                            app.toast(format!("Couldn't tag {e}"));
+                        }
+                    }),
+                )));
             }
             Act::Drive(op) => {
                 for t in &st.targets {

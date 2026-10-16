@@ -1935,3 +1935,71 @@ fn password_protected_archives_list_extract_and_refuse() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn tags_live_on_the_files_and_filter_the_list() {
+    use crate::tags;
+    let d = tmpdir("tags");
+    let (a, b, c) = (d.join("a.txt"), d.join("b.txt"), d.join("c.txt"));
+    for p in [&a, &b, &c] {
+        touch(p, "x");
+    }
+    // Stored as KDE's file managers store them: one comma-separated attribute.
+    if tags::write(&a, &["Red".into(), "work".into()]).is_err() {
+        eprintln!("no user xattrs here: skipped");
+        return;
+    }
+    let raw = |p: &Path| {
+        let mut buf = [0u8; 256];
+        let cp = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
+        let n = unsafe { libc::getxattr(cp.as_ptr(), c"user.xdg.tags".as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+        (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+    };
+    assert_eq!(raw(&a).as_deref(), Some("Red,work"));
+    assert_eq!(tags::read(&a), ["Red", "work"]);
+    assert_eq!(tags::parse(" Blue, ,taxes,Blue,"), ["Blue", "taxes"]);
+    // One tag added to several files, then removed from all; the last one gone takes the
+    // attribute with it.
+    tags::toggle(&[a.clone(), b.clone()], "Green", true).unwrap();
+    assert_eq!(tags::read(&a), ["Red", "work", "Green"]);
+    assert_eq!(tags::read(&b), ["Green"]);
+    tags::toggle(&[a.clone(), b.clone()], "green", false).unwrap();
+    assert_eq!(tags::read(&b), Vec::<String>::new());
+    assert_eq!(raw(&b), None, "no empty attribute left behind");
+    // Tags written by another app are read too.
+    let cp = std::ffi::CString::new(c.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::setxattr(cp.as_ptr(), c"user.xdg.tags".as_ptr(), b"Blue,taxes".as_ptr().cast(), 10, 0) }, 0);
+    // The list filters by tag once the reader has them.
+    let stats = HashMap::new();
+    let mut t = Tab::new(91, d.clone(), ViewSettings::default(), egui::Context::default());
+    pump(&mut t, &stats);
+    let ctx = egui::Context::default();
+    let shown = |t: &mut Tab, f: &str| -> Vec<String> {
+        t.filter = f.into();
+        let start = Instant::now();
+        loop {
+            pump(t, &stats);
+            tags::flush(&ctx);
+            let pending = t.entries.iter().any(|e| tags::get(&e.path, |_| ()).is_none());
+            if !pending || start.elapsed() > Duration::from_secs(5) {
+                pump(t, &stats);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut v: Vec<String> = t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(shown(&mut t, "tag:red"), ["a.txt"]);
+    assert_eq!(shown(&mut t, "tag:TAXES"), ["c.txt"]);
+    assert_eq!(shown(&mut t, "tag:red tag:work"), ["a.txt"]);
+    assert_eq!(shown(&mut t, "tag:red tag:taxes"), Vec::<String>::new());
+    assert_eq!(crate::query::name_part("report tag:work"), "report");
+    // A change made elsewhere is picked up once the watcher says the file changed.
+    tags::write(&a, &[]).unwrap();
+    tags::invalidate(&c);
+    assert_eq!(shown(&mut t, "tag:red"), Vec::<String>::new());
+    assert!(tags::known().contains(&"taxes".to_string()));
+    let _ = std::fs::remove_dir_all(&d);
+}

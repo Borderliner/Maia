@@ -139,6 +139,8 @@ pub struct App {
     pw_asks: std::sync::Arc<std::sync::Mutex<Vec<(PathBuf, bool, PathBuf)>>>,
     /// The archive folder the password was last asked for (asked once per landing).
     pw_asked: Option<PathBuf>,
+    /// The tag cache's generation last seen.
+    tags_gen: u64,
     /// Network places being mounted.
     net_jobs: Vec<NetJob>,
     /// How the Connect dialog's last attempt ended: (address, Ok or the reason).
@@ -221,6 +223,7 @@ impl App {
             notes: Default::default(),
             pw_asks: Default::default(),
             pw_asked: None,
+            tags_gen: 0,
             net_jobs: vec![],
             dialog_result: None,
             cfg,
@@ -803,6 +806,19 @@ impl App {
         let changed_files = std::mem::take(&mut self.watch.changed_files);
         for f in &changed_files {
             self.thumbs.invalidate(f);
+            crate::tags::invalidate(f);
+        }
+        // Tags asked for by last frame's rows go to the reader; when some land, a tag:
+        // filter looks again.
+        crate::tags::flush(ctx);
+        let tg = crate::tags::generation();
+        if tg != self.tags_gen {
+            self.tags_gen = tg;
+            for t in self.panels.values_mut().flat_map(|p| p.tabs.iter_mut()) {
+                if t.filter.contains("tag") {
+                    t.stream_dirty = true;
+                }
+            }
         }
         for d in &changed_dirs {
             self.stats.invalidate(d);

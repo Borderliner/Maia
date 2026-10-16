@@ -2533,6 +2533,83 @@ mod journeys {
         report("archives", &s);
     }
 
+    /// Tags from the context menu: a colour on two files (dots beside their names), the
+    /// check mark that takes it off again, a new tag by name, and the list filtered by
+    /// tag, in every view.
+    #[test]
+    fn tags_and_colour_labels() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("tags");
+        let d = home.join("Documents");
+        let (notes, rep) = (d.join("notes.txt"), d.join("report.md"));
+        if crate::tags::write(&notes, &[]).is_err() {
+            eprintln!("no user xattrs here: skipped");
+            return;
+        }
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.cmd(ViewDetails);
+        s.settle();
+        let right_click = |s: &mut Sim, name: &str| {
+            let r = s.text_rect(name);
+            s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+            s.idle(2);
+        };
+        // Both selected, Red from the Tags submenu.
+        select_path(&mut s, &notes);
+        let r = s.text_rect("report.md");
+        s.act(&format!("click {:.0} {:.0} ctrl", r.center().x, r.center().y));
+        right_click(&mut s, "report.md");
+        // Typed into the menu's search, as the Tags entry may sit below its fold.
+        s.act("text tags red");
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t == "Tags › Red"), "found by search");
+        look(&mut s, "tags in the menu");
+        s.act("key Enter");
+        s.idle(3);
+        assert_eq!(crate::tags::read(&notes), ["Red"]);
+        assert_eq!(crate::tags::read(&rep), ["Red"]);
+        // The menu now marks Red as on; choosing it again takes it off this one file.
+        s.act("key Escape");
+        select_path(&mut s, &rep);
+        right_click(&mut s, "report.md");
+        s.act("text tags red");
+        s.idle(2);
+        look(&mut s, "red is on");
+        s.act("key Enter");
+        s.idle(3);
+        assert!(crate::tags::read(&rep).is_empty() && crate::tags::read(&notes) == ["Red"]);
+        // A new tag by name, shown after the name in small text.
+        right_click(&mut s, "report.md");
+        s.act("text new tag");
+        s.idle(2);
+        s.act("key Enter");
+        s.idle(2);
+        assert!(matches!(s.app.popup, Popup::Prompt { .. }), "asks for the name");
+        s.act("text taxes 2025");
+        s.act("key Enter");
+        s.idle(3);
+        assert_eq!(crate::tags::read(&rep), ["taxes 2025"]);
+        wait_until(&mut s, "tag shown", 5, |s| s.texts.iter().any(|(_, t)| t == "taxes 2025"));
+        for v in [ViewTree, ViewList, ViewMedium, ViewLarge, ViewXL, ViewDetails] {
+            s.cmd(v);
+            look(&mut s, &format!("tags in {v:?}"));
+        }
+        // Filter by tag: only what carries it.
+        s.act("key ctrl+f");
+        s.act("text tag:red");
+        wait_until(&mut s, "filtered by tag", 5, |s| s.tab().view.len() == 1 && s.tab().entries[s.tab().view[0] as usize].path == notes);
+        look(&mut s, "filtered by tag");
+        s.act("key Escape");
+        // Properties lists them.
+        select_path(&mut s, &rep);
+        s.act("key alt+Enter");
+        wait_until(&mut s, "properties shows tags", 5, |s| s.texts.iter().any(|(_, t)| t == "taxes 2025") && s.texts.iter().any(|(_, t)| t == "Tags"));
+        s.act("key Escape");
+        report("tags", &s);
+    }
+
     /// Password-protected archives: Extract Here asks for the password (a wrong one is
     /// said to be wrong), a 7z whose names are hidden asks on the way in, a file opened
     /// from an AES zip asks before it opens, and Cancel leaves everything as it was.

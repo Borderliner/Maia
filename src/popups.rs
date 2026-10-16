@@ -2647,6 +2647,9 @@ fn properties(app: &mut App, ctx: &egui::Context, st: &mut PropState) -> bool {
                 kv("Modified", fsx::fmt_time(e.modified));
                 kv("Accessed", fsx::fmt_time(m.accessed().ok()));
                 kv("Owner", format!("{} : {}", user_name(m.uid(), "/etc/passwd"), user_name(m.gid(), "/etc/group")));
+                if let Some(t) = crate::tags::get(&p, |t| t.join(", ")).filter(|t| !t.is_empty()) {
+                    kv("Tags", t);
+                }
                 if let Some(t) = &snap.link {
                     kv("Link target", t.clone());
                 }

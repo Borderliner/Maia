@@ -194,6 +194,52 @@ fn name_job(name: &str, suffix: Option<&str>, q: &fuzzy::Query, font: &FontId, c
     job
 }
 
+/// A row's colour labels and other tags once read (they are asked for until then).
+fn row_tags(p: &std::path::Path) -> Option<(Vec<Color32>, String)> {
+    crate::tags::get(p, |t| {
+        if t.is_empty() {
+            return None;
+        }
+        let dots = t.iter().filter_map(|x| crate::tags::color_of(x)).collect();
+        let words: Vec<&str> = t.iter().filter(|x| crate::tags::color_of(x).is_none()).map(String::as_str).collect();
+        Some((dots, words.join(", ")))
+    })
+    .flatten()
+}
+
+/// Colour dots in a row from `x`, centred on `y`, each ringed in `ring` so they read on
+/// any background. Returns the width they take.
+fn paint_dots(p: &egui::Painter, x: f32, y: f32, dots: &[Color32], r: f32, ring: Color32) -> f32 {
+    let step = r * 2.0 + 2.5;
+    for (i, c) in dots.iter().enumerate() {
+        let cc = pos2(x + r + i as f32 * step, y);
+        p.circle_filled(cc, r + 1.2, ring);
+        p.circle_filled(cc, r, *c);
+    }
+    if dots.is_empty() { 0.0 } else { step * dots.len() as f32 - 2.5 }
+}
+
+/// After a row's name: its colour dots, then its other tags in small dim text. Returns
+/// the width they need, measured before the name is laid out so it leaves the room.
+fn tags_width(ui: &Ui, tags: &(Vec<Color32>, String), font: &FontId) -> f32 {
+    let r = (font.size * 0.28).clamp(3.0, 5.0);
+    let dots = if tags.0.is_empty() { 0.0 } else { 8.0 + (r * 2.0 + 2.5) * tags.0.len() as f32 };
+    let words = if tags.1.is_empty() { 0.0 } else { 8.0 + ui.painter().layout_no_wrap(tags.1.clone(), FontId::proportional(font.size - 1.5), Color32::WHITE).size().x };
+    dots + words
+}
+
+fn paint_tags(ui: &Ui, x: f32, y: f32, tags: &(Vec<Color32>, String), font: &FontId, pal: &theme::Palette, ring: Color32) {
+    let r = (font.size * 0.28).clamp(3.0, 5.0);
+    let mut x = x;
+    if !tags.0.is_empty() {
+        x += 8.0 + paint_dots(ui.painter(), x + 8.0, y, &tags.0, r, ring);
+    }
+    if !tags.1.is_empty() {
+        let g = ui.painter().layout_no_wrap(tags.1.clone(), FontId::proportional(font.size - 1.5), pal.text_dim);
+        ui.painter().galley(pos2(x + 8.0, y - g.size().y / 2.0), g, pal.text_dim);
+    }
+}
+
 /// A matched line after the name, with the words it matched in the accent colour.
 fn append_match(job: &mut LayoutJob, line: &str, needle: &str, font: &FontId, dim: Color32, accent: Color32) {
     let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
@@ -854,13 +900,19 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                     let name = display_name(&e, env.cfg);
                                     let rel = e.rel();
                                     let suffix = rel.as_deref().and_then(|r| std::path::Path::new(r).parent()).filter(|p| !p.as_os_str().is_empty()).map(|p| format!("› {}", p.display()));
-                                    let mut job = name_job(&name, suffix.as_deref(), q, &font, dimc(pal.text), dimc(pal.text_dim), pal.accent, name_r.width(), 1);
+                                    let tags = if computer { None } else { row_tags(&e.path) };
+                                    let room = tags.as_ref().map_or(0.0, |tg| tags_width(ui, tg, &font));
+                                    let mut job = name_job(&name, suffix.as_deref(), q, &font, dimc(pal.text), dimc(pal.text_dim), pal.accent, (name_r.width() - room).max(24.0), 1);
                                     // The line that matched, after the name (elided with it).
                                     if let Some(line) = t.content.snippet(&e.path) {
                                         append_match(&mut job, line, crate::query::name_part(&t.filter).trim(), &font, dimc(pal.text_dim), pal.accent);
                                     }
                                     let g = ui.fonts_mut(|f| f.layout_job(job));
+                                    let gw = g.size().x;
                                     ui.painter().galley(pos2(name_r.left(), cell.center().y - g.size().y / 2.0), g, pal.text);
+                                    if let Some(tg) = &tags {
+                                        paint_tags(ui, name_r.left() + gw, cell.center().y, tg, &font, &pal, Color32::TRANSPARENT);
+                                    }
                                 }
                                 if env.cfg.highlight_recents && env.recents.contains(&e.path) {
                                     ui.painter().circle_filled(pos2(inner.right() - 3.0, cell.center().y), 2.5, pal.accent.gamma_multiply(0.8));
@@ -1178,9 +1230,15 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                     crate::gitstatus::paint(ui.painter(), ic, git.as_deref(), &e.path, &pal);
                     let name_r = Rect::from_min_max(pos2(ic.right() + 7.0, r.top()), pos2(r.right() - 8.0, r.bottom()));
                     if !rename_field(ui, name_r, idx, t, env, &font) {
-                        let job = name_job(&display_name(&e, env.cfg), None, q, &font, dimc(pal.text), pal.text_dim, pal.accent, name_r.width(), 1);
+                        let tags = row_tags(&e.path);
+                        let room = tags.as_ref().map_or(0.0, |tg| tags_width(ui, tg, &font));
+                        let job = name_job(&display_name(&e, env.cfg), None, q, &font, dimc(pal.text), pal.text_dim, pal.accent, (name_r.width() - room).max(24.0), 1);
                         let g = ui.fonts_mut(|f| f.layout_job(job));
+                        let gw = g.size().x;
                         ui.painter().galley(pos2(name_r.left(), r.center().y - g.size().y / 2.0), g, pal.text);
+                        if let Some(tg) = &tags {
+                            paint_tags(ui, name_r.left() + gw, r.center().y, tg, &font, &pal, Color32::TRANSPARENT);
+                        }
                     }
                 }
                 Mode::Icons(s) => {
@@ -1226,6 +1284,12 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                         }
                     }
                     crate::gitstatus::paint(ui.painter(), icon_r.shrink(s * 0.1), git.as_deref(), &e.path, &pal);
+                    // Colour labels as a badge on the icon's top right corner.
+                    if let Some((dots, _)) = row_tags(&e.path).filter(|t| !t.0.is_empty()) {
+                        let rr = (s * 0.07).clamp(3.5, 6.0);
+                        let w = (rr * 2.0 + 2.5) * dots.len() as f32 - 2.5;
+                        paint_dots(ui.painter(), icon_r.right() - w, icon_r.top() + rr + 1.0, &dots, rr, pal.bg);
+                    }
                     let text_r = Rect::from_min_max(pos2(r.left() + 5.0, icon_r.bottom() + 5.0), pos2(r.right() - 5.0, r.bottom() - 3.0));
                     let name_line = Rect::from_min_size(text_r.min, vec2(text_r.width(), font.size + 6.0));
                     if !rename_field(ui, name_line, idx, t, env, &font) {

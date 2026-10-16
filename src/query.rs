@@ -1,6 +1,6 @@
 //! Conditions in the filter: `size>100M`, `size<1k`, `modified<7d`, `modified>2026-01`,
-//! `created:today`. Each recognised word becomes a condition; the other words stay the
-//! name search. Ages count back from now; dates are local days, months or years.
+//! `created:today`, `tag:red`. Each recognised word becomes a condition; the other words
+//! stay the name search. Ages count back from now; dates are local days, months or years.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,17 +28,24 @@ pub struct Filter {
     /// The words that are not conditions, for the name search.
     pub name: String,
     conds: Vec<Cond>,
+    /// Tags every item must have (`tag:work`, any case).
+    tags: Vec<String>,
     /// Byte ranges of the recognised words in the filter text (drawn in the accent).
     pub spans: Vec<(usize, usize)>,
 }
 
 impl Filter {
     pub fn has_conds(&self) -> bool {
-        !self.conds.is_empty()
+        !self.conds.is_empty() || !self.tags.is_empty()
     }
 
     /// Whether `e` meets every condition. A folder's size is known only once worked out.
     pub fn ok(&self, e: &Entry, stats: &HashMap<PathBuf, crate::stats::DirStats>) -> bool {
+        // Tags not read yet count as none for now; reading them was asked for, and the
+        // view is filtered again as they land.
+        if !self.tags.is_empty() && !crate::tags::get(&e.path, |t| self.tags.iter().all(|w| t.iter().any(|x| x.eq_ignore_ascii_case(w)))).unwrap_or(false) {
+            return false;
+        }
         self.conds.iter().all(|c| {
             let v = match c.field {
                 Field::Size if e.is_dir => stats.get(&e.path).map(|s| s.size as i64),
@@ -76,6 +83,12 @@ pub fn parse(text: &str, now: SystemTime) -> Filter {
     for w in text.split_whitespace() {
         let start = at + text[at..].find(w).unwrap_or(0);
         at = start + w.len();
+        let tag = w.split_once(':').filter(|(k, v)| k.eq_ignore_ascii_case("tag") && !v.is_empty()).map(|(_, v)| v);
+        if let Some(t) = tag {
+            f.tags.push(t.to_string());
+            f.spans.push((start, at));
+            continue;
+        }
         match cond(w, secs(now)) {
             Some(c) => {
                 f.conds.push(c);
