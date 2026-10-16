@@ -4679,6 +4679,359 @@ mod journeys {
         report("admin", &s);
     }
 
+    /// Every surface photographed for a person to look at (COMET_SIM_SHOTS): the window,
+    /// each view, the inspector's previews, the history, popups and menus, in a dark and
+    /// a light theme and two of the newer ones, at a normal and a small window. Without
+    /// shots it walks the first theme and size only, as one more check of every frame.
+    /// COMET_SIM_AUDIT=midnight-1280 keeps the passes whose name contains it.
+    #[test]
+    fn ui_audit() {
+        if !sandboxed() {
+            return;
+        }
+        use crate::theme::ThemeName;
+        let home = fixture("audit");
+        let long = home.join("Projects/Quarterly planning and the long tail of everything else");
+        std::fs::create_dir_all(long.join("Drafts that nobody has opened since the spring offsite")).unwrap();
+        for (i, n) in ["Agenda.md", "Minutes of the weekly sync with every team lead.txt", "budget.csv"].iter().enumerate() {
+            std::fs::write(long.join(n), "x".repeat(100 * (i + 1))).unwrap();
+        }
+        let docs = home.join("Documents");
+        std::fs::write(docs.join("letter from the bank.txt"), "Dear customer, your tax refund has been paid into your account.").unwrap();
+        std::fs::write(docs.join("data.bin"), (0u8..=255).cycle().take(4096).collect::<Vec<u8>>()).unwrap();
+        std::fs::write(docs.join("main.rs"), "// demo\nfn main() {\n    let x: u32 = 42;\n    println!(\"{x} is the answer to a question long enough to run past the right edge of any preview\");\n}\n").unwrap();
+        if crate::tags::write(&docs.join("notes.txt"), &["Red".into(), "Work".into()]).is_ok() {
+            let _ = crate::tags::write(&docs.join("report.md"), &["Blue".into()]);
+        }
+        if crate::archive::available() {
+            let _ = crate::archive::create(&docs.join("bundle.zip"), &docs, &["notes.txt".into(), "Taxes".into()]);
+            let _ = std::process::Command::new("zip").args(["-q", "-r", "-P", "pw"]).arg(docs.join("locked.zip")).arg("Taxes").current_dir(&docs).status();
+        }
+        let media = media_fixture("auditmedia");
+        let git = crate::media::have("git");
+        if git {
+            crate::tests::commit_view_fixture(&home.join("Code/project"));
+        }
+        let drv = fake_drives("audit");
+        let net = fake_network("audit");
+        for f in ["gio", "phones"] {
+            let _ = std::fs::copy(net.join(f), drv.join(f));
+        }
+        for sub in ["gvfs", "netmounts"] {
+            let _ = std::fs::create_dir_all(drv.join(sub));
+        }
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(drv));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+                *crate::ollama::TEST_HOST.lock().unwrap() = None;
+            }
+        }
+        let _reset = Reset;
+        let (addr, _, _) = crate::tests::fake_ollama(true);
+        *crate::ollama::TEST_HOST.lock().unwrap() = Some(addr);
+        let shots = std::env::var_os("COMET_SIM_SHOTS").is_some();
+        let only = std::env::var("COMET_SIM_AUDIT").unwrap_or_default().to_lowercase();
+        for theme in [ThemeName::Midnight, ThemeName::Paper, ThemeName::Latte, ThemeName::Gruvbox] {
+            for (w, h) in [(1280.0, 800.0), (720.0, 480.0)] {
+                let tag = format!("{}-{w}", theme.label().to_lowercase().replace(' ', ""));
+                if !tag.contains(&only) {
+                    continue;
+                }
+                audit_pass(&home, &media, git, theme, w, h, &tag);
+                if !shots {
+                    return;
+                }
+            }
+        }
+    }
+
+    fn audit_pass(home: &Path, media: &Path, git: bool, theme: crate::theme::ThemeName, w: f32, h: f32, tag: &str) {
+        let docs = home.join("Documents");
+        let mut s = Sim::new(home, vec2(w, h));
+        s.app.cfg.theme = theme;
+        s.app.cfg.semantic_folders = docs.display().to_string();
+        // Growing tabs run on the wall clock, fades on the frames' clock: let both end.
+        let still = |s: &mut Sim| {
+            std::thread::sleep(std::time::Duration::from_millis(350));
+            s.idle(15);
+        };
+        let shot = |s: &mut Sim, name: &str| {
+            look(s, name);
+            still(s);
+            s.shot(&format!("{tag}-{name}"));
+        };
+        let shot_open = |s: &mut Sim, name: &str| {
+            still(s);
+            s.shot(&format!("{tag}-{name}"));
+        };
+        let close = |s: &mut Sim| {
+            for _ in 0..3 {
+                if s.popup_open() {
+                    s.act("key Escape");
+                    s.idle(2);
+                }
+            }
+        };
+        let pause = |s: &mut Sim| {
+            for _ in 0..30 {
+                s.idle(1);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            s.settle();
+        };
+        wait_until(&mut s, "drives in the sidebar", 10, |s| sidebar_text(s, "Photo Card").is_some());
+        // The window: several tabs, long names, the sidebar's sections.
+        for p in [docs.clone(), home.join("Projects/Quarterly planning and the long tail of everything else"), home.join("Code/deep/a/b/c/d/e/f/g/h"), home.join("Pictures/Trip")] {
+            s.cmd(NewTab);
+            s.settle();
+            go(&mut s, &p);
+        }
+        s.cmd(Tab1);
+        s.settle();
+        s.act("key ArrowDown");
+        shot(&mut s, "home-details");
+        s.cmd(Tab4);
+        s.settle();
+        shot(&mut s, "deep-path");
+        s.app.cfg.compact_paths = false;
+        shot(&mut s, "deep-path-full");
+        s.app.cfg.compact_paths = true;
+        s.cmd(Tab3);
+        s.settle();
+        s.act("key ArrowDown");
+        s.act("key shift+ArrowDown");
+        let lr = s.app.panels[&s.app.active].list_rect;
+        shot(&mut s, "long-names-selection");
+        // Hovering a row below the selection.
+        s.act(&format!("move {:.0} {:.0}", lr.center().x, lr.top() + 100.0));
+        still(&mut s);
+        s.shot(&format!("{tag}-hover"));
+        // Views of a folder with names and tags, then pictures.
+        s.cmd(Tab2);
+        s.settle();
+        for (v, n) in [(ViewDetails, "details"), (ViewList, "list"), (ViewTree, "tree"), (ViewMedium, "icons-m"), (ViewLarge, "icons-l"), (ViewXL, "icons-xl")] {
+            s.cmd(v);
+            s.act("key ArrowDown");
+            shot(&mut s, &format!("docs-{n}"));
+        }
+        s.cmd(Tab5);
+        s.settle();
+        for (v, n) in [(ViewMedium, "icons-m"), (ViewXL, "icons-xl"), (ViewDetails, "details")] {
+            s.cmd(v);
+            pause(&mut s);
+            shot(&mut s, &format!("pictures-{n}"));
+        }
+        s.cmd(Tab2);
+        s.settle();
+        s.cmd(ViewTree);
+        s.act("key Home");
+        s.act("key ArrowRight");
+        shot(&mut s, "docs-tree-open");
+        s.cmd(ViewDetails);
+        // Renaming, an empty folder, a folder that can't be read.
+        select_path(&mut s, &docs.join("report.md"));
+        s.act("key F2");
+        still(&mut s);
+        s.shot(&format!("{tag}-rename"));
+        s.act("key Escape");
+        go(&mut s, &home.join("Empty"));
+        shot(&mut s, "empty");
+        go(&mut s, &home.join("Locked"));
+        shot(&mut s, "locked");
+        go(&mut s, &docs);
+        // The filter, with conditions; contents search; the whole tree flattened.
+        s.act("key ctrl+f");
+        s.act("text size>10 modified<7d no");
+        still(&mut s);
+        s.shot(&format!("{tag}-filter-query"));
+        s.act("key ctrl+a");
+        s.act("text nothing-matches-this");
+        still(&mut s);
+        s.shot(&format!("{tag}-filter-none"));
+        s.act("key ctrl+a");
+        s.act("key Backspace");
+        s.act("key Escape");
+        click_control(&mut s, "contents toggle");
+        s.act("text notes");
+        wait_until(&mut s, "contents search", 10, |s| !s.tab().is_loading());
+        s.settle();
+        still(&mut s);
+        s.shot(&format!("{tag}-contents"));
+        click_control(&mut s, "contents toggle");
+        s.act("key Escape");
+        s.act("key Escape");
+        s.cmd(ToggleFlatten);
+        s.settle();
+        shot(&mut s, "flatten");
+        s.cmd(ToggleFlatten);
+        s.settle();
+        // Split panels.
+        s.cmd(SplitRight);
+        s.settle();
+        shot(&mut s, "split-right");
+        s.cmd(SplitBottom);
+        s.settle();
+        shot(&mut s, "split-three");
+        s.cmd(ClosePanel);
+        s.cmd(ClosePanel);
+        s.settle();
+        // The inspector beside the list and under it, with every kind of preview.
+        go(&mut s, &docs);
+        s.cmd(ToggleInspector);
+        for (layout, side) in [(crate::config::InspectorLayout::Right, "right"), (crate::config::InspectorLayout::Bottom, "bottom")] {
+            s.app.cfg.inspector_layout = layout;
+            s.settle();
+            for (f, n) in [("notes.txt", "text"), ("report.md", "markdown"), ("main.rs", "code"), ("data.bin", "hex"), ("Taxes", "folder"), ("bundle.zip", "archive")] {
+                let p = docs.join(f);
+                if !p.exists() {
+                    continue;
+                }
+                select_path(&mut s, &p);
+                pause(&mut s);
+                if n == "archive" {
+                    // Its contents, as a folder's are, not its bytes.
+                    in_inspector(&s, "notes.txt");
+                }
+                shot(&mut s, &format!("inspect-{side}-{n}"));
+            }
+            if side == "right" {
+                select_path(&mut s, &docs.join("main.rs"));
+                s.settle();
+                s.cmd(InspectorWrap);
+                shot(&mut s, "inspect-right-code-wrapped");
+                s.cmd(InspectorWrap);
+            }
+        }
+        s.app.cfg.inspector_layout = crate::config::InspectorLayout::Right;
+        go(&mut s, media);
+        for (f, n) in [("photo.png", "image"), ("doc.pdf", "pdf"), ("clip.mp4", "video"), ("song.mp3", "audio"), ("drawing.svg", "svg")] {
+            select_path(&mut s, &media.join(f));
+            match n {
+                "pdf" => wait_until(&mut s, "pdf page", 20, |s| inspector(s).pdf_state().is_some_and(|(_, _, shown)| shown.is_some())),
+                "video" | "audio" => wait_until(&mut s, "media probed", 15, |s| inspector(s).media_state().is_some()),
+                _ => {}
+            }
+            pause(&mut s);
+            shot(&mut s, &format!("inspect-{n}"));
+        }
+        s.cmd(ToggleInspector);
+        // The history and a commit.
+        if git {
+            go(&mut s, &home.join("Code/project"));
+            wait_until(&mut s, "branch read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
+            s.idle(2);
+            shot(&mut s, "git-status");
+            s.cmd(GitHistory);
+            wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1));
+            shot(&mut s, "git-graph");
+            click_in_inspector(&mut s, "Lay out the panels", "click");
+            wait_until(&mut s, "files", 10, |s| history(s).is_some_and(|h| h.3.is_some()));
+            wait_until(&mut s, "pictures", 10, |s| probe(s).pictures >= 3 || probe(s).failed > 0);
+            shot(&mut s, "git-commit");
+            s.cmd(ToggleInspector);
+            s.settle();
+        }
+        // Popups and menus.
+        go(&mut s, &docs);
+        select_path(&mut s, &docs.join("notes.txt"));
+        let lr = s.app.panels[&s.app.active].list_rect;
+        let r = s.text_rect("notes.txt");
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        shot_open(&mut s, "context-menu");
+        close(&mut s);
+        s.act(&format!("click {:.0} {:.0} right", lr.center().x, lr.bottom() - 20.0));
+        shot_open(&mut s, "context-menu-empty");
+        close(&mut s);
+        s.cmd(Palette);
+        shot_open(&mut s, "palette");
+        s.act("text view");
+        shot_open(&mut s, "palette-query");
+        close(&mut s);
+        s.cmd(GoTo);
+        s.act("text doc");
+        s.settle();
+        shot_open(&mut s, "goto");
+        close(&mut s);
+        s.act("key ctrl+k");
+        s.idle(3);
+        shot_open(&mut s, "search-empty");
+        click_control(&mut s, "meaning field");
+        s.act("text notes");
+        wait_until(&mut s, "a name found", 5, |s| matches!(&s.app.popup, Popup::Meaning(st) if !st.named.is_empty()));
+        shot_open(&mut s, "search-names");
+        // Meaning, from the stand-in Ollama: turned on, the files read, a vague question.
+        s.act("key ctrl+a");
+        s.act("key Backspace");
+        s.idle(2);
+        // A pass after the first finds it on (the setting is kept).
+        if s.texts.iter().any(|(_, t)| t == "Turn on") {
+            s.click_text("Turn on");
+        }
+        wait_until(&mut s, "files read", 20, |s| matches!(s.app.semantic.as_ref().map(|e| e.phase()), Some(crate::semantic::Phase::Ready)));
+        click_control(&mut s, "meaning field");
+        s.act("text money back from the government");
+        wait_until(&mut s, "answer", 10, |s| matches!(&s.app.popup, Popup::Meaning(st) if !st.hits.is_empty()));
+        shot_open(&mut s, "search-meaning");
+        close(&mut s);
+        s.app.cfg.semantic_search = false;
+        s.cmd(Options);
+        shot_open(&mut s, "options");
+        close(&mut s);
+        select_path(&mut s, &docs.join("notes.txt"));
+        s.act("key alt+Enter");
+        s.idle(3);
+        click_control(&mut s, "checksum button");
+        wait_until(&mut s, "checksum", 10, |s| s.texts.iter().any(|(_, t)| t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit())));
+        shot_open(&mut s, "properties");
+        close(&mut s);
+        s.cmd(ConnectServer);
+        shot_open(&mut s, "connect");
+        close(&mut s);
+        if docs.join("locked.zip").exists() {
+            select_path(&mut s, &docs.join("locked.zip"));
+            s.cmd(ExtractHere);
+            wait_until(&mut s, "password asked", 10, |s| matches!(&s.app.popup, Popup::ArchivePassword(_)));
+            shot_open(&mut s, "archive-password");
+            close(&mut s);
+        }
+        s.cmd(ChooseTheme);
+        s.settle();
+        shot_open(&mut s, "themes");
+        close(&mut s);
+        s.app.cfg.theme = theme;
+        for (c, n) in [(MainMenu, "main-menu"), (QuickMenu, "quick-menu"), (About, "about"), (TabSearch, "tab-search"), (TypesFilter, "types")] {
+            s.cmd(c);
+            shot_open(&mut s, n);
+            close(&mut s);
+        }
+        // A conflict: the same name copied into a folder that has it.
+        std::fs::write(home.join("Code/maia/report.md"), "older").unwrap();
+        s.cmd(SplitRight);
+        go(&mut s, &home.join("Code/maia"));
+        s.act("key Tab");
+        s.settle();
+        select_path(&mut s, &docs.join("report.md"));
+        s.act("key F5");
+        s.settle();
+        shot_open(&mut s, "conflict");
+        close(&mut s);
+        s.cmd(ClosePanel);
+        // A toast and a job card.
+        let progress = std::sync::Arc::new(std::sync::Mutex::new(crate::ops::Progress { total_bytes: 900 << 20, done_bytes: 300 << 20, total_items: 120, done_items: 41, current: "a very long file name that keeps going and going well past any column width you would pick.txt".into(), ..Default::default() }));
+        s.app.jobs.push(crate::ops::Job { id: 9999, label: "Copying 120 items to Backups".into(), kind: crate::ops::OpKind::Copy { srcs: vec![], dest: home.join("Backups"), decide: Default::default() }, progress: progress.clone(), cancel: Default::default(), pause: Default::default(), started: Instant::now(), finished_at: None, show_errors: false });
+        s.app.toast("Copied the path of notes.txt");
+        s.idle(5);
+        s.act("move -50 -50");
+        still(&mut s);
+        s.shot(&format!("{tag}-toast-job"));
+        progress.lock().unwrap().finished = true;
+        s.app.jobs.clear();
+        s.idle(3);
+        report(&format!("audit {tag}"), &s);
+    }
+
     #[test]
     fn monkey_sessions() {
         if !sandboxed() {
