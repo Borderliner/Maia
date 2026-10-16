@@ -462,7 +462,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 } else if row_hover || ctx_target.as_deref() == Some(p.as_path()) {
                     ui.painter().rect_filled(r2, CornerRadius::same(6), pal.hover);
                 }
-                let ic = Rect::from_center_size(pos2(r.left() + 36.0, r.top() + row_h / 2.0 + 1.0), Vec2::splat(15.0));
+                // A drive that is not mounted has a second line: the name moves up a little
+                // so the two lines don't touch.
+                let ic = Rect::from_center_size(pos2(r.left() + 36.0, r.top() + row_h / 2.0 + if mounted { 1.0 } else { -1.0 }), Vec2::splat(15.0));
                 let g = if drive.is_some_and(|d| d.removable) { Glyph::Usb } else { Glyph::Drive };
                 let icol = if sel { pal.on_sel() } else if mounted { pal.text_dim } else { pal.text_dim.gamma_multiply(0.6) };
                 paint_glyph(ui.painter(), ic, g, icol);
@@ -474,10 +476,11 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 ui.painter().galley(pos2(r.left() + 52.0, ic.center().y - lg.size().y / 2.0), lg, tcol);
                 if !mounted {
                     let sub = crate::listing::elided(ui, &format!("{} · Not mounted", fsx::fmt_size(*total)), FontId::proportional(app.cfg.font_size - 3.0), r.width() - 60.0 - reserve, pal.text_dim);
-                    ui.painter().galley(pos2(r.left() + 52.0, r.bottom() - 4.0 - sub.size().y), sub, pal.text_dim);
+                    ui.painter().galley(pos2(r.left() + 52.0, r.bottom() - 3.0 - sub.size().y), sub, pal.text_dim);
                 } else if *total > 0 {
                     let frac = (total - free) as f32 / *total as f32;
-                    let bar = Rect::from_min_size(pos2(r.left() + 52.0, r.bottom() - 8.0), vec2((r.width() - 70.0 - reserve).clamp(0.0, 110.0), 4.0));
+                    // Every drive's bar the same length, eject button or not.
+                    let bar = Rect::from_min_size(pos2(r.left() + 52.0, r.bottom() - 8.0), vec2((r.width() - 96.0).clamp(0.0, 110.0), 4.0));
                     ui.painter().rect_filled(bar, CornerRadius::same(2), pal.raised);
                     let col = if frac > 0.9 { pal.danger } else if frac > 0.75 { Color32::from_rgb(0xe8, 0xa3, 0x3d) } else { pal.accent };
                     ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * frac, 4.0)), CornerRadius::same(2), col);
