@@ -139,7 +139,13 @@ impl Entry {
     }
 
     pub fn is_executable(&self) -> bool {
-        !self.is_dir && !self.special && self.mode & 0o111 != 0
+        !self.is_dir && !self.special && !self.is_broken_link() && self.mode & 0o111 != 0
+    }
+
+    /// A link whose target is missing: its own details stand in for the target's, and a
+    /// link's own mode (lrwxrwxrwx) made it look executable.
+    pub fn is_broken_link(&self) -> bool {
+        self.is_link && self.mode & 0o170000 == 0o120000
     }
 
     /// Type label for sockets, pipes and device nodes (from the st_mode type bits).

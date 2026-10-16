@@ -3359,3 +3359,16 @@ fn an_svg_says_its_own_size() {
     let (w, h, _) = crate::svg::render(svg, 2048).unwrap();
     assert_eq!((w, h), (2048, 1536), "drawn larger than it says it is");
 }
+
+#[test]
+fn a_broken_link_is_not_executable() {
+    let d = tmpdir("brokenlink");
+    std::os::unix::fs::symlink(d.join("nowhere"), d.join("gone")).unwrap();
+    std::fs::write(d.join("there"), "x").unwrap();
+    std::os::unix::fs::symlink(d.join("there"), d.join("good")).unwrap();
+    let gone = crate::fsx::Entry::from_path(&d.join("gone")).unwrap();
+    assert!(gone.is_link && gone.is_broken_link() && !gone.is_executable(), "lrwxrwxrwx is not a program");
+    let good = crate::fsx::Entry::from_path(&d.join("good")).unwrap();
+    assert!(good.is_link && !good.is_broken_link());
+    let _ = std::fs::remove_dir_all(&d);
+}

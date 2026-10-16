@@ -414,6 +414,9 @@ fn type_text(e: &Entry, t: &Tab) -> String {
     if let Some(k) = e.special_kind() {
         return k.into();
     }
+    if e.is_broken_link() {
+        return "Broken link".into();
+    }
     let db = crate::mime::mime_db();
     let m = db.for_name(&e.name, false, e.is_executable());
     let c = db.comment(&m);
