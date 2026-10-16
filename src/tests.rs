@@ -4713,3 +4713,143 @@ fn blame_reads_authors_ages_and_uncommitted_lines() {
     touch(&d.join("new.txt"), "x\n");
     assert!(crate::blame::run(&d, &d.join("new.txt")).is_err());
 }
+
+/// Copy As Code Blocks on real files: each under its path from the project's top in a
+/// fence its text can't close, a folder giving the files git keeps (not hidden or
+/// ignored ones), a big file cut at a line's end, a binary one left out and said so.
+#[test]
+fn share_code_blocks() {
+    use crate::share::{Blocks, FILE_CAP, code_blocks};
+    let d = tmpdir("share-blocks");
+    git(&d, &["init", "-q"]);
+    touch(&d.join(".gitignore"), "target/\n*.log\n");
+    touch(&d.join("src/main.rs"), "fn main() {}\n");
+    touch(&d.join("src/lib.rs"), "pub fn f() {}");
+    touch(&d.join("src/.hidden.rs"), "secret\n");
+    touch(&d.join("src/run.log"), "noise\n");
+    touch(&d.join("target/out.rs"), "built\n");
+    touch(&d.join("README.md"), "Use it like this:\n\n```sh\ncargo run\n```\n");
+    touch(&d.join("Makefile"), "all:\n\ttrue\n");
+    std::fs::write(d.join("logo.png"), b"\x89PNG\x00\x01").unwrap();
+    let big: String = (0..20_000).map(|i| format!("line {i}\n")).collect();
+    touch(&d.join("big.txt"), &big);
+
+    let b = code_blocks(&[d.join("src"), d.join("README.md"), d.join("Makefile")], &d);
+    assert_eq!(b.text, "src/lib.rs\n```rust\npub fn f() {}\n```\n\nsrc/main.rs\n```rust\nfn main() {}\n```\n\nREADME.md\n````markdown\nUse it like this:\n\n```sh\ncargo run\n```\n````\n\nMakefile\n```makefile\nall:\n\ttrue\n```\n");
+    assert_eq!((b.files, b.cut, b.skipped.len()), (4, 0, 0));
+    assert_eq!(b.note(), "Copied 4 files as code blocks");
+
+    let b = code_blocks(&[d.join("big.txt"), d.join("logo.png")], &d);
+    assert_eq!(b.skipped, vec![("logo.png".to_string(), "binary")]);
+    assert_eq!((b.files, b.cut), (1, 1));
+    let first = b.text.lines().next().unwrap();
+    assert!(first.starts_with("big.txt (the first 100 KB of "), "{first}");
+    let body: Vec<&str> = b.text.lines().skip(2).collect();
+    assert_eq!(body.last(), Some(&"```"), "the fence is closed");
+    assert!(body[..body.len() - 1].iter().all(|l| l.starts_with("line ")), "cut at a line's end");
+    assert!(b.text.len() <= FILE_CAP + 200);
+    assert_eq!(b.note(), "Copied 1 file as code blocks, 1 file cut at 100 KB; left out logo.png (binary)");
+    let none = code_blocks(&[d.join("logo.png")], &d);
+    assert_eq!(none, Blocks { text: String::new(), files: 0, cut: 0, skipped: vec![("logo.png".into(), "binary")] });
+    assert_eq!(crate::share::fence_lang("app.tsx"), "tsx");
+    assert_eq!(crate::share::fence_lang("Dockerfile"), "dockerfile");
+    assert_eq!(crate::share::fence_lang("notes"), "");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Remote URLs as git prints them, and the website and link each one gives.
+#[test]
+fn share_web_links_from_remotes() {
+    use crate::share::{Forge, file_url, web_base};
+    let ok = |u: &str| web_base(u).unwrap_or_else(|e| panic!("{u}: {e}"));
+    assert_eq!(ok("git@github.com:acme/tidepool.git"), ("https://github.com/acme/tidepool".into(), Forge::GitHub));
+    assert_eq!(ok("https://github.com/acme/tidepool"), ("https://github.com/acme/tidepool".into(), Forge::GitHub));
+    assert_eq!(ok("https://user:token@github.com/acme/tidepool.git/"), ("https://github.com/acme/tidepool".into(), Forge::GitHub));
+    assert_eq!(ok("ssh://git@github.com:22/acme/tidepool.git"), ("https://github.com/acme/tidepool".into(), Forge::GitHub));
+    assert_eq!(ok("git@github.com-work:acme/tidepool.git"), ("https://github.com/acme/tidepool".into(), Forge::GitHub), "an ssh alias for a second account");
+    assert_eq!(ok("git@gitlab.com:group/sub/proj.git"), ("https://gitlab.com/group/sub/proj".into(), Forge::GitLab));
+    assert_eq!(ok("https://gitlab.example.com:8443/team/proj"), ("https://gitlab.example.com:8443/team/proj".into(), Forge::GitLab));
+    assert_eq!(ok("https://codeberg.org/ana/notes.git"), ("https://codeberg.org/ana/notes".into(), Forge::Gitea));
+    assert_eq!(ok("git@bitbucket.org:team/repo.git"), ("https://bitbucket.org/team/repo".into(), Forge::Bitbucket));
+    assert_eq!(ok("https://git.sr.ht/~ana/notes"), ("https://git.sr.ht/~ana/notes".into(), Forge::SourceHut));
+    assert!(web_base("/srv/git/notes.git").is_err());
+    assert!(web_base("file:///srv/git/notes.git").is_err());
+    assert_eq!(web_base("git@example.com:x/y.git").unwrap_err(), "No web page is known for example.com");
+
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let gh = "https://github.com/acme/tidepool";
+    assert_eq!(file_url(gh, Forge::GitHub, sha, "src/store.rs", false, Some(18)), format!("{gh}/blob/{sha}/src/store.rs#L18"));
+    assert_eq!(file_url(gh, Forge::GitHub, sha, "src", true, Some(18)), format!("{gh}/tree/{sha}/src"), "no line on a folder");
+    assert_eq!(file_url(gh, Forge::GitHub, sha, "", true, None), format!("{gh}/tree/{sha}"));
+    assert_eq!(file_url(gh, Forge::GitHub, sha, "docs/Field notes #2.md", false, None), format!("{gh}/blob/{sha}/docs/Field%20notes%20%232.md"));
+    assert_eq!(file_url("https://gitlab.com/g/p", Forge::GitLab, sha, "a.rs", false, Some(3)), format!("https://gitlab.com/g/p/-/blob/{sha}/a.rs#L3"));
+    assert_eq!(file_url("https://codeberg.org/a/n", Forge::Gitea, sha, "a.rs", false, Some(3)), format!("https://codeberg.org/a/n/src/commit/{sha}/a.rs#L3"));
+    assert_eq!(file_url("https://bitbucket.org/t/r", Forge::Bitbucket, sha, "a.rs", false, Some(3)), format!("https://bitbucket.org/t/r/src/{sha}/a.rs#lines-3"));
+    assert_eq!(file_url("https://git.sr.ht/~a/n", Forge::SourceHut, sha, "a.rs", false, Some(3)), format!("https://git.sr.ht/~a/n/tree/{sha}/item/a.rs#L3"));
+}
+
+/// Copy Web Link in a real repository: the commit checked out, the line a search
+/// showed, and a caution while the commit isn't pushed or a file isn't committed.
+#[test]
+fn share_web_links_in_a_repository() {
+    let d = tmpdir("share-links");
+    work_repo(&d);
+    touch(&d.join("src/store.rs"), "a\nb\n");
+    git(&d, &["add", "-A"]);
+    git(&d, &["commit", "-qm", "Start"]);
+    let sha = String::from_utf8(std::process::Command::new("git").arg("-C").arg(&d).args(["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap().trim().to_string();
+    let store = d.join("src/store.rs");
+    assert_eq!(crate::share::web_links(&[(store.clone(), false)], None).unwrap_err(), "The repository has no remote");
+    git(&d, &["remote", "add", "origin", "git@github.com:acme/tidepool.git"]);
+    let base = format!("https://github.com/acme/tidepool/blob/{sha}");
+    let (links, caution) = crate::share::web_links(&[(store.clone(), false)], Some((store.clone(), 2))).unwrap();
+    assert_eq!(links, format!("{base}/src/store.rs#L2"));
+    assert_eq!(caution.as_deref(), Some("this commit isn't pushed, so the link won't open until it is"));
+    // Pushed: what the remote has is the commit.
+    git(&d, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let (links, caution) = crate::share::web_links(&[(store.clone(), false), (d.join("src"), true), (d.clone(), true)], None).unwrap();
+    assert_eq!(links, format!("{base}/src/store.rs\nhttps://github.com/acme/tidepool/tree/{sha}/src\nhttps://github.com/acme/tidepool/tree/{sha}"));
+    assert_eq!(caution, None);
+    touch(&d.join("src/new.rs"), "x\n");
+    let (_, caution) = crate::share::web_links(&[(d.join("src/new.rs"), false)], None).unwrap();
+    assert_eq!(caution.as_deref(), Some("src/new.rs isn't committed, so its link won't open yet"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Add To .gitignore: lines git reads as the exact names (checked with git itself),
+/// added once, after a last line that had no line break, and a word about files git
+/// still tracks.
+#[test]
+fn share_gitignore_lines() {
+    use crate::share::{add_ignores, ignore_ext_line, ignore_line, ignore_note, shared_ext};
+    assert_eq!(ignore_line("build", true), "/build/");
+    assert_eq!(ignore_line("notes [draft]*.txt", false), "/notes \\[draft]\\*.txt");
+    assert_eq!(ignore_line("trailing ", false), "/trailing\\ ");
+    assert_eq!(ignore_ext_line("log"), "*.log");
+    let d = tmpdir("share-ignore");
+    work_repo(&d);
+    touch(&d.join(".gitignore"), "target/");
+    touch(&d.join("notes [draft]*.txt"), "x\n");
+    touch(&d.join("notes d.txt"), "x\n");
+    touch(&d.join("tracked.env"), "A=1\n");
+    touch(&d.join("logs/a.log"), "x\n");
+    git(&d, &["add", "tracked.env"]);
+    git(&d, &["commit", "-qm", "Start"]);
+    let lines = vec![ignore_line("notes [draft]*.txt", false), ignore_line("logs", true), ignore_line("tracked.env", false)];
+    let paths = vec![d.join("notes [draft]*.txt"), d.join("logs"), d.join("tracked.env")];
+    let (added, tracked) = add_ignores(&d, &lines, &paths).unwrap();
+    assert_eq!((added, tracked.clone()), (3, vec!["tracked.env".to_string()]));
+    assert_eq!(std::fs::read_to_string(d.join(".gitignore")).unwrap(), "target/\n/notes \\[draft]\\*.txt\n/logs/\n/tracked.env\n");
+    assert_eq!(ignore_note(&lines, added, &tracked), "Added 3 lines to .gitignore; git still tracks tracked.env until it's removed with git rm --cached");
+    let ignored = |p: &str| std::process::Command::new("git").arg("-C").arg(&d).args(["check-ignore", "-q", "--no-index", p]).status().unwrap().success();
+    assert!(ignored("notes [draft]*.txt") && ignored("logs/a.log"));
+    assert!(!ignored("notes d.txt"), "the brackets and star are the name's own, not a pattern");
+    assert_eq!(add_ignores(&d, &lines[..1], &paths[..1]).unwrap(), (0, vec![]), "already there");
+    assert_eq!(ignore_note(&lines[..1], 0, &[]), ".gitignore already has /notes \\[draft]\\*.txt");
+    let p = |s: &str| PathBuf::from(s);
+    assert_eq!(shared_ext([(p("/a/x.log").as_path(), false), (p("/a/y.log").as_path(), false)].into_iter()), Some("log".into()));
+    assert_eq!(shared_ext([(p("/a/x.log").as_path(), false), (p("/a/y.txt").as_path(), false)].into_iter()), None);
+    assert_eq!(shared_ext([(p("/a/.env").as_path(), false)].into_iter()), None, "a dotfile has no extension");
+    assert_eq!(shared_ext([(p("/a/x.log").as_path(), true)].into_iter()), None);
+    let _ = std::fs::remove_dir_all(&d);
+}

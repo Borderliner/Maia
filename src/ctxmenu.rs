@@ -250,6 +250,11 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         if p.line_hint.as_ref().is_some_and(|h| ents.iter().any(|e| e.0 == h.0)) {
             copy.push(Item::cmd(Cmd::CopyPathLine));
         }
+        copy.push(Item::cmd(Cmd::CopyCodeBlocks));
+        let repo = crate::gitstatus::repo_for(&here);
+        if repo.is_some() {
+            copy.push(Item::cmd(Cmd::CopyWebLink));
+        }
         items.push(Item::sub("copy_as", "Copy as", copy));
         items.push(Item::sep());
         items.push(Item::labeled(Cmd::Rename, if single { "Rename" } else { "Rename All (inline)" }));
@@ -259,6 +264,19 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
                 items.push(Item::cmd(Cmd::ExtractHere));
             }
             items.push(Item::sub("compress", "Compress", vec![Item::labeled(Cmd::CompressZip, "Zip (.zip)"), Item::labeled(Cmd::CompressTarGz, "Tar.gz (.tar.gz)"), Item::labeled(Cmd::CompressTarXz, "Tar.xz (.tar.xz)"), Item::labeled(Cmd::Compress7z, "7-Zip (.7z)")]));
+        }
+        // Only what git doesn't ignore yet can be added.
+        if repo.as_deref().is_some_and(|r| ents.iter().any(|e| e.0 != r.root && !crate::gitstatus::ignored(Some(r), &e.0, &here))) {
+            let what = match ents.as_slice() {
+                [e] if e.1 => "This Folder".to_string(),
+                [_] => "This File".to_string(),
+                _ => format!("These {} Items", ents.len()),
+            };
+            let mut kids = vec![Item::labeled(Cmd::GitIgnore, &what)];
+            if let Some(ext) = crate::share::shared_ext(ents.iter().map(|e| (e.0.as_path(), e.1))) {
+                kids.push(Item::labeled(Cmd::GitIgnoreExt, &format!("All *.{ext} Files")));
+            }
+            items.push(Item::sub("gitignore", "Add to .gitignore", kids));
         }
         items.push(Item::cmd(Cmd::CreateLink));
         if in_trash {

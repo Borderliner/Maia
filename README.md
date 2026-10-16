@@ -92,7 +92,10 @@ branches to switch to or create, the stash and the other work trees. In the hist
 commit shows its files with their diffs, and right-clicking a file shows the commits
 that changed it. Changes, above the commits, stages files or single hunks, discards
 (into the stash, or the trash for a new file) and commits; Ctrl+Enter commits. Files
-git ignores are drawn faded, or hidden (Options, Git). Maia never pushes.
+git ignores are drawn faded, or hidden (Options, Git), and Add to .gitignore in a file's
+menu ignores it or every file with its extension. Copy as gives files as Markdown code
+blocks under their paths, or as links to them on GitHub, GitLab or Codeberg at the
+commit checked out. Maia never pushes.
 
 The inspector renders Markdown, shows JSON, TOML and YAML as trees you fold with the
 arrow keys, and CSV and TSV as tables; its toolbar switches any of them to the text as

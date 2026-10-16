@@ -46,6 +46,7 @@ mod query;
 mod rename;
 mod runner;
 mod semantic;
+mod share;
 mod sidebar;
 mod signals;
 mod sqlite;

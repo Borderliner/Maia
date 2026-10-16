@@ -240,6 +240,10 @@ commands! {
     CopyName, "copy_name", Files, "Copy Name", "Copy just the file names.", [];
     CopyPathRelative, "copy_path_relative", Files, "Copy Relative Path", "Copy paths written from the top of the project.", [];
     CopyPathLine, "copy_path_line", Files, "Copy Path With Line", "Copy path:line for the line a search showed in this file.", [];
+    CopyCodeBlocks, "copy_code_blocks", Files, "Copy As Code Blocks", "Copy the selected files' text as Markdown code blocks under their paths; a folder gives the files git keeps.", [];
+    CopyWebLink, "copy_web_link", Files, "Copy Web Link", "Copy a link to the selection on GitHub, GitLab or Codeberg at this commit, with the line a search showed.", [];
+    GitIgnore, "git_ignore", Files, "Add To .gitignore", "Ignore the selected files or folders in this repository's .gitignore.", [];
+    GitIgnoreExt, "git_ignore_ext", Files, "Ignore Files Like This", "Ignore every file with the selected file's extension in this repository's .gitignore.", [];
     Trash, "trash", Files, "Move To Trash", "Move the selection to the trash.", ["Delete"];
     DeletePermanent, "delete_permanent", Files, "Delete Permanently", "Delete the selection without using the trash (asks first).", ["Shift+Delete"];
     Rename, "rename", Files, "Rename", "Rename in place; with several items selected, edit all names at once.", ["F2"];

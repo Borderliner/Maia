@@ -152,8 +152,18 @@ pub struct App {
     pub updater: crate::update::Updater,
     /// Network places being mounted.
     net_jobs: Vec<NetJob>,
+    /// Copies and .gitignore changes running on threads.
+    shares: Vec<std::sync::mpsc::Receiver<ShareDone>>,
     /// How the Connect dialog's last attempt ended: (address, Ok or the reason).
     dialog_result: Option<(String, Result<(), String>)>,
+}
+
+/// What a thread sharing files hands back: text for the clipboard, what to say, and a
+/// work tree to read again.
+struct ShareDone {
+    copy: Option<String>,
+    toast: String,
+    rescan: Option<PathBuf>,
 }
 
 /// A network place being mounted, and where to show it once it is.
@@ -241,6 +251,7 @@ impl App {
             avatars: crate::avatars::Avatars::new(),
             updater: Default::default(),
             net_jobs: vec![],
+            shares: vec![],
             dialog_result: None,
             cfg,
             ud,
@@ -466,6 +477,40 @@ impl App {
             crate::sidebar::invalidate();
             ctx.request_repaint();
         });
+    }
+
+    fn share(&mut self, ctx: &egui::Context, work: impl FnOnce() -> ShareDone + Send + 'static) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let c = ctx.clone();
+        let started = std::thread::Builder::new().name("share".into()).spawn(move || {
+            let _ = tx.send(work());
+            c.request_repaint();
+        });
+        if started.is_ok() {
+            self.shares.push(rx);
+        }
+    }
+
+    fn pump_shares(&mut self, ctx: &egui::Context) {
+        let mut i = 0;
+        while i < self.shares.len() {
+            match self.shares[i].try_recv() {
+                Ok(done) => {
+                    self.shares.remove(i);
+                    if let Some(t) = done.copy {
+                        ctx.copy_text(t);
+                    }
+                    if let Some(root) = done.rescan {
+                        crate::gitstatus::rescan(&root);
+                    }
+                    self.toast(done.toast);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => i += 1,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.shares.remove(i);
+                }
+            }
+        }
     }
 
     fn pump_net(&mut self) {
@@ -815,6 +860,7 @@ impl App {
         self.pump_drives(ctx);
         self.pump_requests(ctx);
         self.pump_net();
+        self.pump_shares(ctx);
         let notes = std::mem::take(&mut *self.notes.lock().unwrap_or_else(|e| e.into_inner()));
         if let Some(n) = notes.into_iter().last() {
             self.toast(n);
@@ -1935,6 +1981,69 @@ impl App {
                 let s = paths.iter().map(|p| crate::project::relative(p, &root)).collect::<Vec<_>>().join("\n");
                 ctx.copy_text(s.clone());
                 self.toast(format!("Copied {}", if paths.len() == 1 { s } else { format!("{} paths", paths.len()) }));
+            }
+            Cmd::CopyCodeBlocks => {
+                let mut paths = self.tab().selected_paths();
+                if paths.is_empty() {
+                    paths = self.tab().target_entries().iter().map(|e| e.path.clone()).collect();
+                }
+                if paths.is_empty() {
+                    self.toast("Select files to copy");
+                    return;
+                }
+                self.share(&ctx, move || {
+                    let first = &paths[0];
+                    let root = crate::project::root(if first.is_dir() { first } else { first.parent().unwrap_or(first) });
+                    let b = crate::share::code_blocks(&paths, &root);
+                    ShareDone { copy: (b.files > 0).then(|| b.text.clone()), toast: b.note(), rescan: None }
+                });
+            }
+            Cmd::CopyWebLink => {
+                let mut ents: Vec<(PathBuf, bool)> = self.tab().target_entries().iter().map(|e| (e.path.clone(), e.is_dir)).collect();
+                if ents.is_empty() {
+                    ents = vec![(self.panel().path(), true)];
+                }
+                let hint = self.panel().line_hint.clone();
+                self.share(&ctx, move || {
+                    let toast = match crate::share::web_links(&ents, hint) {
+                        Ok((links, caution)) => {
+                            let what = if ents.len() == 1 { "Copied the link".to_string() } else { format!("Copied {} links", ents.len()) };
+                            return ShareDone { copy: Some(links), toast: caution.map_or(what.clone(), |c| format!("{what}; {c}")), rescan: None };
+                        }
+                        Err(e) => format!("Couldn't make a link: {e}"),
+                    };
+                    ShareDone { copy: None, toast, rescan: None }
+                });
+            }
+            Cmd::GitIgnore | Cmd::GitIgnoreExt => {
+                let Some(root) = crate::gitstatus::repo_for(&self.tab().path).map(|r| r.root.clone()) else {
+                    self.toast("Not in a git repository");
+                    return;
+                };
+                let ents: Vec<(PathBuf, bool)> = self.tab().target_entries().iter().map(|e| (e.path.clone(), e.is_dir)).filter(|e| e.0 != root).collect();
+                let lines: Vec<String> = if cmd == Cmd::GitIgnoreExt {
+                    match crate::share::shared_ext(ents.iter().map(|e| (e.0.as_path(), e.1))) {
+                        Some(ext) => vec![crate::share::ignore_ext_line(&ext)],
+                        None => {
+                            self.toast("Select files with one extension");
+                            return;
+                        }
+                    }
+                } else {
+                    ents.iter().map(|(p, d)| crate::share::ignore_line(&crate::project::relative(p, &root), *d)).collect()
+                };
+                if lines.is_empty() {
+                    self.toast("Select files or folders to ignore");
+                    return;
+                }
+                let paths: Vec<PathBuf> = ents.into_iter().map(|e| e.0).collect();
+                self.share(&ctx, move || {
+                    let toast = match crate::share::add_ignores(&root, &lines, &paths) {
+                        Ok((added, tracked)) => crate::share::ignore_note(&lines, added, &tracked),
+                        Err(e) => e,
+                    };
+                    ShareDone { copy: None, toast, rescan: Some(root) }
+                });
             }
             Cmd::CopyPathLine => {
                 // Only the file a search showed a line of has one.

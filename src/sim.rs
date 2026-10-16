@@ -1012,7 +1012,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(121) {
+    match rng.below(122) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1296,6 +1296,21 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             if matches!(s.app.popup, Popup::Confirm { .. }) {
                 s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
             }
+        }
+        121 => {
+            // Sharing: code blocks, a web link or .gitignore, from the palette or a menu.
+            match rng.below(4) {
+                0 => s.cmd(Cmd::CopyCodeBlocks),
+                1 => s.cmd(Cmd::CopyWebLink),
+                2 => s.cmd(*rng.pick(&[Cmd::GitIgnore, Cmd::GitIgnoreExt])),
+                _ => {
+                    let (x, y) = p(rng);
+                    s.act(&format!("click {x:.0} {y:.0} right"));
+                    s.act(&format!("text {}", rng.pick(&["code blocks", "web link", "this file", "all *", "gitignore"])));
+                    s.act("key Enter");
+                }
+            }
+            s.idle(1 + rng.below(4));
         }
         97 => {
             // A drag that leaves the window (handed to the system when it carries files).
@@ -6078,6 +6093,108 @@ mod journeys {
     }
 
     /// Where the file list (not the preview beside it) shows `label`.
+    /// Sharing from a project: a file and a folder copied as code blocks from the file's
+    /// menu (the folder without what git ignores), a link to a file on its forge and to
+    /// the line a search found, and a file and an extension added to .gitignore, faded
+    /// in the listing once git reads it again and gone from their menus after.
+    #[test]
+    fn share_from_a_project() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let home = fixture("share");
+        let app = dev_fixture(&home);
+        let g = |args: &[&str]| crate::tests::git(&app, args);
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "Start"]);
+        g(&["remote", "add", "origin", "git@github.com:acme/app.git"]);
+        let sha = String::from_utf8_lossy(&std::process::Command::new("git").arg("-C").arg(&app).args(["rev-parse", "HEAD"]).output().unwrap().stdout).trim().to_string();
+        for f in ["scratch.txt", "a.tmp", "b.tmp"] {
+            std::fs::write(app.join(f), "x\n").unwrap();
+        }
+        let mut s = Sim::new(&app.join("src"), vec2(1280.0, 800.0));
+        wait_until(&mut s, "the repository", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
+        s.idle(2);
+        let menu = |s: &mut Sim, name: &str, what: &str| {
+            reveal(s, name);
+            let row = row_text(s, name);
+            s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+            s.act(&format!("text {what}"));
+            s.act("key Enter");
+        };
+        let n = s.copied.len();
+        menu(&mut s, "main.rs", "code blocks");
+        wait_until(&mut s, "the file's block", 10, |s| s.copied.len() > n);
+        assert!(s.copied.last().unwrap().starts_with("src/main.rs\n```rust\nuse std::io;\n"), "{:?}", s.copied.last());
+        assert!(toast_is(&s, "Copied 1 file as code blocks"));
+        // A folder: its files git keeps, from the project's top.
+        go(&mut s, &app);
+        let n = s.copied.len();
+        menu(&mut s, "web", "code blocks");
+        wait_until(&mut s, "the folder's blocks", 10, |s| s.copied.len() > n);
+        let heads: Vec<&str> = s.copied.last().unwrap().lines().filter(|l| l.starts_with("web/")).collect();
+        assert_eq!(heads, ["web/package.json", "web/pnpm-lock.yaml", "web/src/app.js"], "without node_modules or dist");
+        assert!(toast_is(&s, "Copied 3 files as code blocks"));
+        // A link to the file, at the commit checked out.
+        go(&mut s, &app.join("src"));
+        select_path(&mut s, &app.join("src/main.rs"));
+        let n = s.copied.len();
+        palette_run(&mut s, "Copy Web Link");
+        wait_until(&mut s, "the link", 10, |s| s.copied.len() > n);
+        assert_eq!(s.copied.last().unwrap(), &format!("https://github.com/acme/app/blob/{sha}/src/main.rs"));
+        assert!(toast_is(&s, "Copied the link; this commit isn't pushed, so the link won't open until it is"), "{:?}", s.app.toast);
+        // At the line a search found.
+        s.act("key ctrl+alt+f");
+        s.act("text find_needle");
+        code_settled(&mut s, "find_needle");
+        let r = s.text_rect("let needle = find_needle();");
+        s.act(&format!("click {:.0} {:.0} ctrl", r.center().x, r.center().y));
+        s.settle();
+        let n = s.copied.len();
+        menu(&mut s, "main.rs", "web link");
+        wait_until(&mut s, "the line's link", 10, |s| s.copied.len() > n);
+        assert_eq!(s.copied.last().unwrap(), &format!("https://github.com/acme/app/blob/{sha}/src/main.rs#L5"));
+        // Ignoring a file, then every file like another.
+        go(&mut s, &app);
+        let root = app.clone();
+        let faded = move |s: &Sim, f: &str| crate::gitstatus::ignored(crate::gitstatus::repo_for(&root).as_deref(), &root.join(f), &root);
+        assert!(!faded(&s, "scratch.txt"));
+        reveal(&mut s, "scratch.txt");
+        let row = row_text(&s, "scratch.txt");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        let at = s.text_rect("Add to .gitignore").center();
+        s.act(&format!("click {:.0} {:.0}", at.x, at.y));
+        s.idle(2);
+        assert!(some_text(&s, "This File") && some_text(&s, "All *.txt Files"), "the submenu");
+        look(&mut s, "gitignore menu");
+        s.shot("share-gitignore-menu");
+        s.click_text("This File");
+        wait_until(&mut s, "scratch.txt ignored", 10, |s| faded(s, "scratch.txt"));
+        assert!(toast_is(&s, "Added /scratch.txt to .gitignore"), "{:?}", s.app.toast);
+        menu(&mut s, "a.tmp", "all *.tmp");
+        wait_until(&mut s, "*.tmp ignored", 10, |s| faded(s, "a.tmp") && faded(s, "b.tmp"));
+        let gi = std::fs::read_to_string(app.join(".gitignore")).unwrap();
+        assert!(gi.ends_with("*.log\n/scratch.txt\n*.tmp\n"), "{gi:?}");
+        // What git ignores has nothing to add.
+        reveal(&mut s, "b.tmp");
+        let row = row_text(&s, "b.tmp");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        assert!(!some_text(&s, "Add to .gitignore"), "an ignored file's menu");
+        assert!(some_text(&s, "Copy as"));
+        s.act("key Escape");
+        look(&mut s, "ignored");
+        report("share", &s);
+    }
+
+    /// Select the listed item named `label`, which scrolls it into view.
+    fn reveal(s: &mut Sim, label: &str) {
+        let p = s.tab().entries.iter().find(|e| e.name == label).map(|e| e.path.clone()).unwrap_or_else(|| s.fail(&format!("{label:?} not listed")));
+        select_path(s, &p);
+        s.settle();
+    }
+
     fn row_text(s: &Sim, label: &str) -> Rect {
         let list = s.app.panels[&s.app.active].list_rect;
         s.texts.iter().find(|(r, t)| t == label && list.contains(r.center())).map(|x| x.0).unwrap_or_else(|| s.fail(&format!("{label:?} not in the list")))
