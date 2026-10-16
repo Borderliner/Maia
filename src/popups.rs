@@ -2193,7 +2193,9 @@ fn tab_search(app: &mut App, ctx: &egui::Context, query: &mut String, sel: &mut 
                     ui.label(egui::RichText::new("RECENTLY CLOSED").size(10.5).color(pal.text_dim));
                 }
                 let resp = row(ui, 30.0, i == *sel, &pal, |ui, r| {
-                    let job = highlight_job(label, &q, FontId::proportional(13.5), pal.text, pal.accent);
+                    let mut job = highlight_job(label, &q, FontId::proportional(13.5), pal.text, pal.accent);
+                    // A tab named after a long folder is cut, not drawn past the window.
+                    job.wrap = egui::text::TextWrapping { max_width: (r.width() - 20.0).max(8.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
                     let g = ui.fonts_mut(|f| f.layout_job(job));
                     let gw = g.size().x;
                     ui.painter().galley(pos2(r.left() + 10.0, r.center().y - g.size().y / 2.0), g, pal.text);
