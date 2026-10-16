@@ -3522,6 +3522,26 @@ mod journeys {
         s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_ref()).map(|h| h.state())
     }
 
+    /// Install Maia in Options only for a copy that isn't the installed one.
+    #[test]
+    fn install_row_only_when_not_installed() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("installrow");
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        for (installed, shown) in [(false, true), (true, false)] {
+            crate::install::set_installed(installed);
+            s.app.popup = Popup::options_at(crate::popups::Section::System);
+            s.idle(3);
+            assert_eq!(s.texts.iter().any(|(_, t)| t == "Install Maia"), shown, "installed: {installed}");
+            s.act("key Escape");
+            s.idle(2);
+        }
+        crate::install::set_installed(false);
+        report("install row", &s);
+    }
+
     /// Updates from Options: Check for Updates (the command) opens Startup & system and
     /// asks; a newer release offers Update, which puts the checked build in place and
     /// offers Restart. A bad download or a folder Maia can't write says so.

@@ -2456,6 +2456,8 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
     }
     let searching = !st.query.trim().is_empty();
     let rows: Vec<usize> = if searching { find_options(&st.query) } else { (0..OPTS.len()).filter(|&i| OPTS[i].1 == section).collect() };
+    // Install only for a copy that isn't the installed one.
+    let rows: Vec<usize> = rows.into_iter().filter(|&i| OPTS[i].0 != Opt::Install || !crate::install::installed_here()).collect();
     if up && st.sel > 0 {
         st.sel -= 1;
         st.scroll_to_sel = true;
