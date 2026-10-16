@@ -34,9 +34,10 @@ These are optional. Maia works without them and uses them when they are there:
 | Program | Used for |
 |---|---|
 | `bsdtar` (libarchive) | opening zip, tar, 7z, rar and iso archives like folders; extracting and compressing |
+| `7z` | password-protected 7z archives (and quicker password checks for zip) |
 | `gio` (GVFS) | network places (smb, sftp, ftp, WebDAV) and phones over MTP |
 | `pkexec` (polkit) | retrying a refused copy, move, delete or rename as administrator |
-| `git` | change marks on files in git repositories |
+| `git` | change marks on files in git repositories, and their commit history |
 | `ffmpeg`, `ffprobe`, `ffplay` | video and audio previews and thumbnails |
 | `pdfinfo`, `pdftoppm` (poppler) | PDF pages in the inspector |
 | `udisksctl` (udisks2), `lsblk` | mounting, unmounting and ejecting drives |
@@ -48,7 +49,8 @@ These are optional. Maia works without them and uses them when they are there:
 maia [PATH...]
 ```
 
-Start typing to filter the folder you are in. Some keys to start with:
+Start typing to filter the folder you are in. The filter also takes conditions such
+as `size>100M`, `modified<7d`, `created:today` or `tag:red`. Some keys to start with:
 
 | Action | Keys |
 |---|---|
@@ -71,7 +73,9 @@ Every binding can be changed from the command palette.
 An archive opens like a folder; right-click it for Extract Here, or right-click
 files for Compress. Connect To Server (in the menu, or type an `smb://`, `sftp://`
 or `ftp://` address into Go To) opens network shares, which then stay in the
-sidebar's Network section.
+sidebar's Network section. Right-click files for Tags to give them colour labels or
+named tags (kept on the files, where KDE's file managers see them too). In a git
+repository, the branch name in the status bar opens its commit history.
 
 Settings live in `~/.config/maia/config.json`, bookmarks and layouts in
 `~/.local/share/maia/userdata.json`.
