@@ -117,6 +117,21 @@ fn curl(_: &str, _: Option<&Path>) -> Result<Vec<u8>, String> {
     Err("No network in tests".into())
 }
 
+/// Whether the build at `path` runs here and says it is `version` (one built for a newer
+/// system than this one would not start: better found now than after the swap).
+#[cfg(not(test))]
+fn runs(path: &Path, version: &str) -> bool {
+    let mut c = std::process::Command::new(path);
+    c.arg("--version");
+    crate::media::output(c, Duration::from_secs(10)).is_some_and(|out| String::from_utf8_lossy(&out).trim() == format!("maia {}", version.trim_start_matches(['v', 'V'])))
+}
+
+/// Test builds' stand-in programs aren't real ones.
+#[cfg(test)]
+fn runs(_: &Path, _: &str) -> bool {
+    true
+}
+
 /// SHA-256 of a file, by coreutils' sha256sum.
 fn sha256(path: &Path) -> Option<String> {
     let mut c = crate::media::tool("sha256sum");
@@ -243,6 +258,9 @@ fn put_in_place(r: &Release, exe: &Path, fetch: &Fetch) -> Result<(), String> {
         }
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+        if !runs(&tmp, &r.version) {
+            return Err("This release doesn't run on this system; Maia is unchanged".to_string());
+        }
         std::fs::rename(&tmp, exe).map_err(|e| e.to_string())
     })();
     if done.is_err() {
