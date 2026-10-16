@@ -1288,7 +1288,10 @@ impl App {
         // Never wider than the space the right-hand group leaves (narrow split panels).
         let room = rect.right() - right_w - 10.0 - ui.cursor().min.x;
         let fw = (rect.width() * 0.36).clamp(140.0, 380.0).min(room).max(64.0);
-        let frame_rect = Rect::from_min_size(ui.cursor().min, vec2(fw, 22.0));
+        // Tall enough for the text at larger font sizes: a taller line than the box hung
+        // below its middle.
+        let fh = (self.cfg.font_size * 1.3 + 6.0).clamp(22.0, FOOTER_H - 2.0);
+        let frame_rect = Rect::from_min_size(ui.cursor().min, vec2(fw, fh));
         let frame_rect = Rect::from_center_size(pos2(frame_rect.center().x, rect.center().y), frame_rect.size());
         ui.allocate_rect(frame_rect, Sense::hover());
         ui.painter().rect(frame_rect, CornerRadius::same(6), pal.bg, Stroke::new(1.0, if p_filter_active(t) { pal.accent.gamma_multiply(0.7) } else { pal.border }), StrokeKind::Inside);
@@ -1322,7 +1325,7 @@ impl App {
             job.wrap.max_width = wrap;
             ui.fonts_mut(|f| f.layout_job(job))
         };
-        let mut edit = egui::TextEdit::singleline(&mut t.filter).hint_text(hint).frame(false).desired_width(edit_rect.width()).font(egui::TextStyle::Body);
+        let mut edit = egui::TextEdit::singleline(&mut t.filter).hint_text(hint).frame(false).margin(egui::Margin::symmetric(4, 0)).desired_width(edit_rect.width()).font(egui::TextStyle::Body);
         if before.contains(['>', '<', '=', ':']) {
             edit = edit.layouter(&mut conds);
         }
