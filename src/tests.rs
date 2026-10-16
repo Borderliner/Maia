@@ -1693,8 +1693,7 @@ fn wrapped(line: &str, cols: usize) -> Vec<String> {
 fn word_wrap_keeps_every_character_and_breaks_at_spaces() {
     let width = |s: &str| s.chars().map(crate::inspector::char_cols).sum::<usize>();
     // Real text: the licence and this crate's own sources, at narrow to wide columns.
-    let mut text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/LICENSE")).unwrap();
-    text.push_str(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/inspector.rs")).unwrap());
+    let text = [include_str!("../LICENSE"), include_str!("inspector.rs")].concat();
     let mut wrapped_some = 0;
     for cols in [8, 13, 40, 79] {
         for line in text.lines() {
