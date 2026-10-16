@@ -76,7 +76,9 @@ files for Compress. Connect To Server (in the menu, or type an `smb://`, `sftp:/
 or `ftp://` address into Go To) opens network shares, which then stay in the
 sidebar's Network section. Right-click files for Tags to give them colour labels or
 named tags (kept on the files, where KDE's file managers see them too). In a git
-repository, the branch name in the status bar opens its commit history.
+repository, the branch name in the status bar opens its commit history: a commit
+shows its files with their diffs, and right-clicking a file shows the commits that
+changed it.
 
 Ctrl+K finds files and folders anywhere in your home folder by name, as you type.
 With search by meaning turned on, it also finds files by what they are about rather

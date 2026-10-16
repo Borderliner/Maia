@@ -999,8 +999,9 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             s.idle(2);
         }
         99 => {
-            // Into the git work tree (Go To), then edit a file there now and then.
-            let repo = std::fs::read_dir(root().join("home")).ok().and_then(|r| r.flatten().map(|d| d.path().join("Code/repo")).find(|p| p.is_dir()));
+            // Into a git work tree (Go To), then edit a file there now and then.
+            let sub = *rng.pick(&["Code/repo", "Code/project"]);
+            let repo = std::fs::read_dir(root().join("home")).ok().and_then(|r| r.flatten().map(|d| d.path().join(sub)).find(|p| p.is_dir()));
             if let Some(repo) = repo {
                 s.act("key ctrl+p");
                 s.act(&format!("text {}/", repo.display()));
@@ -1069,12 +1070,29 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.act(&format!("click {:.0} {:.0}", c.x, c.y));
                 s.idle(3);
             }
-            for _ in 0..rng.below(6) {
-                if let Some(r) = s.app.panels.get(&s.app.active).and_then(|p| p.inspector_rect).filter(|_| rng.below(3) == 0) {
-                    let (x, y) = (rng.f(r.left(), r.right()), rng.f(r.top(), r.bottom()));
-                    s.act(&format!("click {x:.0} {y:.0}"));
-                } else {
-                    s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "PageDown", "End", "Home", "Enter", "Escape"])));
+            for _ in 0..rng.below(8) {
+                let ir = s.app.panels.get(&s.app.active).and_then(|p| p.inspector_rect);
+                match (ir, rng.below(6)) {
+                    (Some(r), 0) => {
+                        let (x, y) = (rng.f(r.left(), r.right()), rng.f(r.top(), r.bottom()));
+                        s.act(&format!("click {x:.0} {y:.0}"));
+                    }
+                    // A file's menu in an open commit, and one of its items.
+                    (Some(r), 1) => {
+                        let (x, y) = (rng.f(r.left(), r.right()), rng.f(r.top(), r.bottom()));
+                        s.act(&format!("click {x:.0} {y:.0} right"));
+                        s.idle(2);
+                        if matches!(s.app.popup, Popup::GitFile { .. }) {
+                            let item = *rng.pick(&["Open", "Show in folder", "View as of this commit", "View before it was deleted", "File history", "Copy path"]);
+                            if s.texts.iter().any(|(_, t)| t == item) {
+                                s.click_text(item);
+                            } else {
+                                s.act("key Escape");
+                            }
+                        }
+                    }
+                    (Some(_), 2) => click_control_at(s, rng.pick(&["newer commit", "older commit", "previous file", "next file", "open large", "parent link", "copy hash", "show all commits", "Show as a list", "Group by folder", "Wrap lines"])),
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "PageDown", "End", "Home", "Enter", "Escape", "OpenBracket", "CloseBracket"]))),
                 }
             }
         }
@@ -3278,7 +3296,10 @@ mod journeys {
         s.click_text("Write the long notes");
         wait_until(&mut s, "files", 10, |s| history(s).is_some_and(|h| h.3 == Some(1)));
         s.idle(2);
-        s.click_text("notes.md");
+        // A double click shows the diff in the whole panel.
+        s.idle(40);
+        let r = s.text_rect("notes.md");
+        s.act(&format!("dclick {:.0} {:.0}", r.center().x, r.center().y));
         wait_until(&mut s, "diff", 10, |s| history(s).is_some_and(|h| h.4.is_some()));
         s.idle(2);
         let hist = |s: &Sim| s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_ref()).and_then(|h| h.wrapped_rows());
@@ -3298,6 +3319,318 @@ mod journeys {
         s.idle(2);
         assert_eq!(hist(&s), None);
         report("gitwrap", &s);
+    }
+
+    fn probe(s: &Sim) -> crate::gitlog::Probe {
+        s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_ref()).map(|h| h.probe()).unwrap_or_else(|| s.fail("history closed"))
+    }
+
+    fn git_hist(s: &Sim) -> &crate::gitlog::History {
+        s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_deref()).unwrap_or_else(|| s.fail("history closed"))
+    }
+
+    /// Where `label` is drawn inside the inspector (the listing beside it may show the
+    /// same name).
+    fn in_inspector(s: &Sim, label: &str) -> Rect {
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("inspector shown"));
+        s.texts.iter().rev().find(|(r, t)| t == label && ir.contains(r.center())).map(|(r, _)| *r).unwrap_or_else(|| {
+            let near: Vec<&str> = s.texts.iter().filter(|(r, _)| ir.contains(r.center())).map(|(_, t)| t.as_str()).take(60).collect();
+            s.fail(&format!("no {label:?} in the inspector; there: {near:?}"))
+        })
+    }
+
+    /// Scroll the inspector, as a person would with the wheel, until `label` is in view.
+    fn scroll_to_label(s: &mut Sim, label: &str) {
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("inspector shown"));
+        let body = Rect::from_min_max(pos2(ir.left(), ir.top() + 40.0), pos2(ir.right(), ir.bottom() - 10.0));
+        for k in 0..60 {
+            if s.texts.iter().any(|(r, t)| t == label && body.contains_rect(*r)) {
+                return;
+            }
+            s.act(&format!("scroll {:.0} {:.0} {}", body.center().x, body.center().y, if k < 20 { -2 } else { 2 }));
+            s.idle(12);
+        }
+    }
+
+    /// A click at a person's pace: never close enough to the last one to count as a
+    /// double click.
+    fn click_in_inspector(s: &mut Sim, label: &str, how: &str) {
+        s.idle(40);
+        scroll_to_label(s, label);
+        let r = in_inspector(s, label);
+        s.act(&format!("{how} {:.0} {:.0}", r.center().x, r.center().y));
+    }
+
+    /// `label` is in the inspector, scrolled into view if it has to be.
+    fn see(s: &mut Sim, label: &str) -> Rect {
+        scroll_to_label(s, label);
+        in_inspector(s, label)
+    }
+
+    fn right_click_in_inspector(s: &mut Sim, label: &str) {
+        s.idle(40);
+        scroll_to_label(s, label);
+        let r = in_inspector(s, label);
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(2);
+    }
+
+    fn file_index(s: &Sim, path: &str) -> usize {
+        git_hist(s).files().iter().position(|f| f.path == path).unwrap_or_else(|| s.fail(&format!("{path} not in the commit")))
+    }
+
+    /// The commit view, as someone reading a change would use it: files grouped by
+    /// folder and the switch to a plain list, folding a folder, pictures before and
+    /// after, diffs opening under their rows and in the whole panel, the keys, the
+    /// right-click menu (open, show in folder, as of this commit, file history, copy
+    /// path), walking commits with the arrows and parent links, copying the hash, wrapped
+    /// diffs, a deleted picture, then small windows and a light theme.
+    #[test]
+    fn git_commit_view() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let home = fixture("gitcommit");
+        let repo = home.join("Code/project");
+        crate::tests::commit_view_fixture(&repo);
+        let mut s = Sim::new(&repo, vec2(1280.0, 800.0));
+        wait_until(&mut s, "branch read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
+        s.idle(2);
+        s.click_text("main");
+        wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 5));
+        look(&mut s, "graph");
+        s.shot("graph");
+        click_in_inspector(&mut s, "Lay out the panels", "click");
+        wait_until(&mut s, "files", 10, |s| history(s).is_some_and(|h| h.3 == Some(12)));
+        // Twelve files in several folders: grouped, folders first.
+        let p = probe(&s);
+        assert!(p.tree && p.items > 12, "grouped by folder: {p:?}");
+        for t in ["assets", "icons", "docs", "src", "ui", "tests", "12 files changed", "+30", "−9", "Grace Hopper", "GH", "v1.0", "Parent", "binary"] {
+            see(&mut s, t);
+        }
+        // A rename reads old → new.
+        see(&mut s, "guide.md→handbook.md");
+        // Pictures: the changed logo's two sides and the new icon's one.
+        wait_until(&mut s, "pictures", 10, |s| probe(s).pictures >= 3);
+        assert_eq!(probe(&s).failed, 0);
+        look(&mut s, "commit grouped");
+        s.shot("commit-grouped");
+        // The plain list and back; the folder then shows after each name.
+        click_control(&mut s, "Show as a list");
+        assert!(!probe(&s).tree && probe(&s).items == 12);
+        see(&mut s, "src/ui");
+        look(&mut s, "commit as a list");
+        s.shot("commit-list");
+        click_control(&mut s, "Group by folder");
+        assert!(probe(&s).tree);
+        // A folder folds and unfolds.
+        let n = probe(&s).items;
+        click_in_inspector(&mut s, "assets", "click");
+        assert_eq!((probe(&s).folded, probe(&s).items), (1, n - 3), "assets folded: its subfolder, the icon and the logo");
+        click_in_inspector(&mut s, "assets", "click");
+        assert_eq!((probe(&s).folded, probe(&s).items), (0, n));
+        // A diff opens under its row, and closes again.
+        let view = file_index(&s, "src/ui/view.rs");
+        click_in_inspector(&mut s, "view.rs", "click");
+        wait_until(&mut s, "inline diff", 10, |s| probe(s).inline_lines.len() == 1);
+        assert_eq!(probe(&s).inline, [view]);
+        s.idle(2);
+        see(&mut s, "+// view two");
+        look(&mut s, "inline diff");
+        s.shot("inline-diff");
+        click_in_inspector(&mut s, "view.rs", "click");
+        assert!(probe(&s).inline.is_empty(), "closed again");
+        // A picture opens larger.
+        click_in_inspector(&mut s, "logo.png", "click");
+        assert_eq!(probe(&s).inline, [file_index(&s, "assets/logo.png")]);
+        look(&mut s, "pictures larger");
+        s.shot("pictures-larger");
+        click_in_inspector(&mut s, "logo.png", "click");
+        // Keys: Home, down twice to the icon, Enter opens it and Enter closes it; [ and ]
+        // open the files one at a time.
+        s.act("key Home");
+        s.act("key ArrowDown");
+        s.act("key ArrowDown");
+        let icon = file_index(&s, "assets/icons/icon.png");
+        assert_eq!(probe(&s).sel, 2);
+        s.act("key Enter");
+        assert_eq!(probe(&s).inline, [icon]);
+        s.act("key Enter");
+        assert!(probe(&s).inline.is_empty());
+        s.act("key CloseBracket");
+        assert_eq!(probe(&s).inline, [icon], "] opens the selected file first");
+        s.act("key CloseBracket");
+        assert_eq!(probe(&s).inline, [file_index(&s, "assets/logo.png")], "then the next one, alone");
+        s.act("key OpenBracket");
+        assert_eq!((probe(&s).inline.clone(), probe(&s).sel), (vec![icon], 2));
+        s.act("key Enter");
+        // The whole panel: a double click, then [ and ] through the files, Esc back.
+        let main = file_index(&s, "src/main.rs");
+        let r = see(&mut s, "main.rs");
+        s.act(&format!("dclick {:.0} {:.0}", r.center().x, r.center().y));
+        assert_eq!(probe(&s).full, Some((main, false)));
+        wait_until(&mut s, "the diff", 10, |s| probe(s).full.is_some() && history(s).is_some_and(|h| h.4.is_some()));
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t == "+    ui::run();"), "the diff in the panel");
+        look(&mut s, "diff in the panel");
+        s.shot("diff-large");
+        s.act("key CloseBracket");
+        let after = probe(&s).full.unwrap_or_else(|| s.fail("still in the panel")).0;
+        assert_ne!(after, main, "] goes to the next file");
+        click_control(&mut s, "previous file");
+        assert_eq!(probe(&s).full, Some((main, false)), "and the arrow back");
+        s.act("key Escape");
+        assert_eq!(probe(&s).full, None);
+        assert!(probe(&s).inline.contains(&main), "a double click leaves the diff open under its row");
+        click_in_inspector(&mut s, "main.rs", "click");
+        // The open-large button on a hovered row.
+        let r = see(&mut s, "README.md");
+        s.act(&format!("move {:.0} {:.0}", r.center().x, r.center().y));
+        click_control(&mut s, "open large");
+        assert_eq!(probe(&s).full, Some((file_index(&s, "README.md"), false)));
+        s.act("key Escape");
+        // The right-click menu.
+        right_click_in_inspector(&mut s, "main.rs");
+        assert!(matches!(s.app.popup, Popup::GitFile { .. }), "the file's menu");
+        for t in ["Open", "Show in folder", "View as of this commit", "File history", "Copy path"] {
+            s.text_rect(t);
+        }
+        // Menus fade in over a few frames.
+        s.idle(12);
+        s.shot("file-menu");
+        s.click_text("Copy path");
+        let want = repo.join("src/main.rs").display().to_string();
+        assert!(toast_is(&s, &format!("Copied {want}")), "{:?}", s.app.toast);
+        right_click_in_inspector(&mut s, "main.rs");
+        s.click_text("View as of this commit");
+        assert_eq!(probe(&s).full, Some((main, true)));
+        wait_until(&mut s, "the file as it was", 10, |s| git_hist(s).full_text().is_some());
+        assert_eq!(git_hist(&s).full_text().unwrap()[0], "mod ui;");
+        s.idle(2);
+        look(&mut s, "file as of the commit");
+        s.shot("as-of-commit");
+        s.act("key Escape");
+        let before = crate::mime::LAUNCHED.lock().unwrap().len();
+        right_click_in_inspector(&mut s, "main.rs");
+        s.click_text("Open");
+        s.idle(2);
+        let launched = crate::mime::LAUNCHED.lock().unwrap().clone();
+        assert!(launched.len() > before && launched.iter().any(|l| format!("{l:?}").contains("src/main.rs")), "opened in its app: {launched:?}");
+        right_click_in_inspector(&mut s, "main.rs");
+        s.click_text("Show in folder");
+        s.settle();
+        assert_eq!(s.tab().path, repo.join("src"), "its folder");
+        let t = s.tab();
+        assert!(t.cursor.is_some_and(|c| t.entries[c as usize].name == "main.rs"), "with the file selected");
+        assert!(probe(&s).at.is_some(), "the commit stays open inside the work tree");
+        // A deleted file is read as it was before.
+        right_click_in_inspector(&mut s, "old.txt");
+        assert!(s.texts.iter().any(|(_, t)| t == "View before it was deleted"));
+        s.click_text("View before it was deleted");
+        wait_until(&mut s, "the deleted file", 10, |s| git_hist(s).full_text().is_some());
+        assert_eq!(git_hist(&s).full_text().unwrap()[0], "old line 1");
+        s.act("key Escape");
+        // One file's history, through its rename, and back to every commit.
+        right_click_in_inspector(&mut s, "guide.md→handbook.md");
+        s.click_text("File history");
+        wait_until(&mut s, "the file's commits", 10, |s| history(s).is_some_and(|h| h.1));
+        assert_eq!(probe(&s).filter.as_deref(), Some("docs/handbook.md"));
+        assert_eq!(history(&s).map(|h| h.0), Some(2), "the rename followed back");
+        see(&mut s, "Start the project");
+        see(&mut s, "handbook.md");
+        look(&mut s, "file history");
+        s.shot("file-history");
+        click_in_inspector(&mut s, "Start the project", "click");
+        wait_until(&mut s, "its files", 10, |s| history(s).is_some_and(|h| h.3.is_some()));
+        s.act("key Escape");
+        assert!(probe(&s).at.is_none() && probe(&s).filter.is_some(), "back to the file's commits");
+        click_control(&mut s, "show all commits");
+        assert_eq!((probe(&s).filter, history(&s).map(|h| h.0)), (None, Some(5)), "every commit again");
+        // Esc clears it too.
+        click_in_inspector(&mut s, "Tune the panel", "click");
+        wait_until(&mut s, "files", 10, |s| history(s).is_some_and(|h| h.3 == Some(1)));
+        right_click_in_inspector(&mut s, "panel.rs");
+        s.click_text("File history");
+        wait_until(&mut s, "panel.rs's commits", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 2));
+        s.act("key Escape");
+        assert_eq!(probe(&s).filter, None, "Esc shows every commit again");
+        assert!(history(&s).is_some(), "and leaves the history open");
+        // The arrows walk the commits; the oldest has no older one.
+        click_in_inspector(&mut s, "Lay out the panels", "click");
+        wait_until(&mut s, "files", 10, |s| history(s).is_some_and(|h| h.3 == Some(12)));
+        click_control(&mut s, "newer commit");
+        assert_eq!(probe(&s).subject.as_deref(), Some("Write the long notes"));
+        wait_until(&mut s, "files", 10, |s| history(s).is_some_and(|h| h.3 == Some(1)));
+        // A long line wraps under its row too.
+        click_in_inspector(&mut s, "notes.md", "click");
+        wait_until(&mut s, "inline diff", 10, |s| probe(s).inline_lines.len() == 1);
+        click_control(&mut s, "Wrap lines");
+        s.idle(2);
+        let p = probe(&s);
+        assert!(p.inline_wrapped.first().is_some_and(|&w| w > p.inline_lines[0] + 1), "the long line wraps: {p:?}");
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
+        for r in s.texts.iter().filter(|(r, _)| ir.contains(r.left_center())).map(|(r, _)| *r) {
+            assert!(r.right() <= ir.right() + 0.5, "a wrapped row runs past the panel: {r:?}");
+        }
+        look(&mut s, "wrapped inline diff");
+        s.shot("inline-wrapped");
+        click_control(&mut s, "Wrap lines");
+        click_control(&mut s, "older commit");
+        click_control(&mut s, "older commit");
+        assert_eq!(probe(&s).subject.as_deref(), Some("Start the project"));
+        click_control(&mut s, "older commit");
+        assert_eq!(probe(&s).subject.as_deref(), Some("Start the project"), "nothing older");
+        // Parent links: from the panels commit to its parent.
+        click_control(&mut s, "newer commit");
+        assert_eq!(probe(&s).subject.as_deref(), Some("Lay out the panels"));
+        click_control(&mut s, "parent link");
+        assert_eq!(probe(&s).subject.as_deref(), Some("Start the project"));
+        // The hash pill copies the whole hash.
+        click_control(&mut s, "copy hash");
+        let full = git_hist(&s).hash(4).unwrap();
+        assert!(toast_is(&s, &format!("Copied {full}")), "{:?}", s.app.toast);
+        // A deleted picture: only its old side.
+        for _ in 0..3 {
+            click_control(&mut s, "newer commit");
+        }
+        assert_eq!(probe(&s).subject.as_deref(), Some("Remove the logo"));
+        wait_until(&mut s, "the old logo", 10, |s| probe(s).pictures == 1);
+        look(&mut s, "deleted picture");
+        s.shot("deleted-picture");
+        // The authors keep their colours: the same in the header as in the graph.
+        assert_eq!(crate::gitlog::author_hue("ada@example.invalid", ""), crate::gitlog::author_hue("ADA@example.invalid ", "x"));
+        // Small windows, a light theme, no animations.
+        click_control(&mut s, "older commit");
+        click_control(&mut s, "older commit");
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        s.app.cfg.animations = false;
+        for (w, h) in [(520.0, 340.0), (640.0, 480.0), (900.0, 1200.0), (1920.0, 1080.0)] {
+            s.resize(w, h);
+            look(&mut s, &format!("commit {w}x{h}"));
+            s.shot(&format!("commit-paper-{w}x{h}"));
+        }
+        s.resize(1280.0, 800.0);
+        // Docked at the bottom, and beside a split.
+        s.app.cfg.inspector_layout = crate::config::InspectorLayout::Bottom;
+        look(&mut s, "commit docked at the bottom");
+        s.shot("commit-bottom");
+        s.app.cfg.inspector_layout = crate::config::InspectorLayout::Auto;
+        s.cmd(SplitRight);
+        s.cmd(FocusPrevPanel);
+        look(&mut s, "commit beside a split");
+        s.cmd(FocusNextPanel);
+        s.cmd(ClosePanel);
+        s.idle(2);
+        click_in_inspector(&mut s, "view.rs", "click");
+        wait_until(&mut s, "inline diff", 10, |s| probe(s).inline_lines.len() == 1);
+        look(&mut s, "light inline diff");
+        s.shot("commit-paper-inline");
+        for _ in 0..2 {
+            s.act("key Escape");
+        }
+        s.act("key Escape");
+        assert!(s.app.panels[&s.app.active].inspector.is_none(), "closed with its inspector");
+        report("gitcommit", &s);
     }
 
     /// Git history: the branch chip opens the commit graph in the inspector, scrolling
@@ -3354,7 +3687,14 @@ mod journeys {
         assert_eq!(history(&s).and_then(|h| h.3), Some(1));
         s.idle(2);
         look(&mut s, "commit files");
+        // A click opens the diff under the file; a double click in the whole panel.
+        s.idle(40);
         s.click_text("topic_700.rs");
+        wait_until(&mut s, "diff under the file", 10, |s| s.texts.iter().any(|(_, t)| t == "+fn part_3() {}"));
+        assert_eq!(history(&s).and_then(|h| h.4), None);
+        s.idle(40);
+        let r = s.text_rect("topic_700.rs");
+        s.act(&format!("dclick {:.0} {:.0}", r.center().x, r.center().y));
         wait_until(&mut s, "diff", 10, |s| history(s).is_some_and(|h| h.4.is_some()));
         s.idle(2);
         assert!(s.texts.iter().any(|(_, t)| t == "+fn part_3() {}"), "the diff is drawn");
@@ -3375,9 +3715,9 @@ mod journeys {
         assert_eq!(history(&s).and_then(|h| h.2), Some(2));
         wait_until(&mut s, "files by keyboard", 10, |s| history(s).is_some_and(|h| h.3.is_some()));
         s.act("key Enter");
-        wait_until(&mut s, "diff by keyboard", 10, |s| history(s).is_some_and(|h| h.4.is_some()));
+        wait_until(&mut s, "diff by keyboard", 10, |s| s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_ref()).is_some_and(|h| h.probe().inline_lines.len() == 1));
         look(&mut s, "diff by keyboard");
-        for _ in 0..3 {
+        for _ in 0..2 {
             s.act("key Escape");
         }
         assert!(s.app.panels[&s.app.active].inspector.is_none());
@@ -3739,6 +4079,8 @@ mod journeys {
             let home = fixture(&format!("monkey{seed}"));
             // A git work tree with every kind of change, for the status marks.
             crate::tests::git_fixture(&home.join("Code/repo"));
+            // And a small project whose commits change files of every kind, pictures too.
+            crate::tests::commit_view_fixture(&home.join("Code/project"));
             // Fake drives, network places and pkexec to use at random (never the real tools).
             let drv = fake_drives(&format!("monkey{seed}"));
             let net = fake_network(&format!("monkey{seed}"));

@@ -513,7 +513,7 @@ fn lighten(c: Color32, t: f32) -> Color32 {
 }
 
 /// Small line-art glyphs for the sidebar & toolbar.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Glyph {
     Home,
     Desktop,
@@ -552,6 +552,10 @@ pub enum Glyph {
     Wrap,
     Tag,
     Cloud,
+    ChevronUp,
+    List,
+    ListTree,
+    Maximize,
 }
 
 /// Draw a Lucide icon by name, centered in `rect` (the icon's stroke box roughly fills it).
@@ -602,7 +606,8 @@ fn glyph_name(g: Glyph) -> &'static str {
         Glyph::Usb => "usb",
         Glyph::Globe => "globe",
         Glyph::Phone => "smartphone",
-        Glyph::Eject | Glyph::Wrap | Glyph::Tag | Glyph::Cloud => "", // drawn below
+        Glyph::Maximize => "maximize-2",
+        Glyph::Eject | Glyph::Wrap | Glyph::Tag | Glyph::Cloud | Glyph::ChevronUp | Glyph::List | Glyph::ListTree => "", // drawn below
     }
 }
 
@@ -728,7 +733,7 @@ pub fn paint_glyph(painter: &Painter, rect: Rect, g: Glyph, col: Color32) {
             line(p(0.34, 0.0), p(-0.16, 0.0));
             painter.add(Shape::line(vec![p(0.0, -0.16), p(-0.16, 0.0), p(0.0, 0.16)], st));
         }
-        Glyph::ChevronRight | Glyph::ChevronDown | Glyph::Lock | Glyph::LockOpen | Glyph::Usb | Glyph::Globe | Glyph::Phone => {}
+        Glyph::ChevronRight | Glyph::ChevronDown | Glyph::Lock | Glyph::LockOpen | Glyph::Usb | Glyph::Globe | Glyph::Phone | Glyph::Maximize => {}
         // On Lucide's 24-unit grid, so they sit with the font's icons.
         Glyph::Wrap => {
             let m = |x: f32, y: f32| p((x - 12.0) * 0.036, (y - 12.0) * 0.036);
@@ -773,6 +778,29 @@ pub fn paint_glyph(painter: &Painter, rect: Rect, g: Glyph, col: Color32) {
         Glyph::Menu => {
             for y in [-0.24, 0.0, 0.24] {
                 line(p(-0.32, y), p(0.32, y));
+            }
+        }
+        Glyph::ChevronUp => {
+            // Lucide's chevron-up on the same scale as the font's chevron-down.
+            let m = |x: f32, y: f32| p((x - 12.0) / 20.0, (y - 12.0) / 20.0);
+            let st = Stroke::new(s / 10.0, col);
+            painter.add(Shape::line(vec![m(6.0, 15.0), m(12.0, 9.0), m(18.0, 15.0)], st));
+        }
+        Glyph::List | Glyph::ListTree => {
+            // Lucide's list (dots before three lines) and list-tree (lines branching off a stem).
+            let m = |x: f32, y: f32| p((x - 12.0) / 20.0, (y - 12.0) / 20.0);
+            let st = Stroke::new(s / 10.0, col);
+            if g == Glyph::List {
+                for y in [6.0, 12.0, 18.0] {
+                    painter.circle_filled(m(3.5, y), s / 18.0, col);
+                    painter.line_segment([m(8.0, y), m(21.0, y)], st);
+                }
+            } else {
+                painter.line_segment([m(8.0, 6.0), m(21.0, 6.0)], st);
+                painter.line_segment([m(13.0, 12.0), m(21.0, 12.0)], st);
+                painter.line_segment([m(13.0, 18.0), m(21.0, 18.0)], st);
+                painter.add(Shape::line(vec![m(4.0, 6.0), m(4.0, 17.0), m(5.0, 18.0), m(8.0, 18.0)], st));
+                painter.line_segment([m(4.0, 12.0), m(8.0, 12.0)], st);
             }
         }
         Glyph::Clock => {

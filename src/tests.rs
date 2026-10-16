@@ -2062,6 +2062,87 @@ pub(crate) fn git_history_fixture(d: &Path, n: usize) {
     git(d, &["reset", "-q", "--hard"]);
 }
 
+/// A PNG of `w`×`h` with a pattern made from `seed`.
+pub(crate) fn png_bytes(w: u32, h: u32, seed: u32) -> Vec<u8> {
+    let mut out = vec![];
+    let mut e = png::Encoder::new(&mut out, w, h);
+    e.set_color(png::ColorType::Rgba);
+    e.set_depth(png::BitDepth::Eight);
+    let px: Vec<u8> = (0..h).flat_map(|y| (0..w).flat_map(move |x| [(x * 9 + seed * 70) as u8, (y * 7 + seed * 30) as u8, (120 + seed * 50) as u8, 255])).collect();
+    e.write_header().unwrap().write_image_data(&px).unwrap();
+    out
+}
+
+/// A small project for the commit view, five commits by three authors. "Lay out the
+/// panels" changes twelve files in several folders in every way git records: added,
+/// modified, deleted, renamed with an edit, a picture changed and one added, a binary
+/// file, a file that became a link. Then a long line, a deleted picture and one more
+/// edit. main is in step with origin/main, v0.1 and v1.0 are tags, and origin/feature
+/// is a branch only the remote has.
+pub(crate) fn commit_view_fixture(d: &Path) {
+    std::fs::create_dir_all(d).unwrap();
+    let mut day = 0;
+    let mut commit = |who: &str, msg: &str| {
+        day += 1;
+        let (name, email) = who.split_once(" <").unwrap();
+        let date = format!("2026-09-{day:02}T10:00:00+00:00");
+        let ok = std::process::Command::new("git")
+            .args(["-c", &format!("user.name={name}"), "-c", &format!("user.email={}", email.trim_end_matches('>')), "-c", "commit.gpgsign=false", "add", "-A"])
+            .current_dir(d)
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "git add");
+        let ok = std::process::Command::new("git")
+            .args(["-c", &format!("user.name={name}"), "-c", &format!("user.email={}", email.trim_end_matches('>')), "-c", "commit.gpgsign=false", "commit", "-q", "-m", msg])
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .current_dir(d)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "git commit {msg}");
+    };
+    let lines = |n: usize, word: &str| (1..=n).map(|i| format!("{word} line {i}\n")).collect::<String>();
+    git(d, &["init", "-q"]);
+    touch(&d.join("README.md"), "# Project\n\nA small project.\n");
+    touch(&d.join("src/main.rs"), &format!("fn main() {{\n{}}}\n", lines(8, "    // main")));
+    touch(&d.join("src/ui/view.rs"), &lines(6, "// view"));
+    touch(&d.join("docs/guide.md"), &lines(12, "Guide"));
+    touch(&d.join("old.txt"), &lines(3, "old"));
+    touch(&d.join("notes.md"), "# Notes\n");
+    touch(&d.join("tool.sh"), "#!/bin/sh\necho tool\n");
+    std::fs::create_dir_all(d.join("assets/icons")).unwrap();
+    std::fs::write(d.join("assets/logo.png"), png_bytes(48, 32, 1)).unwrap();
+    std::fs::write(d.join("data.bin"), [0u8, 1, 2, 3, 0, 9, 8, 7]).unwrap();
+    commit("Ada Lovelace <ada@example.invalid>", "Start the project");
+    git(d, &["tag", "v0.1"]);
+    touch(&d.join("src/main.rs"), &format!("mod ui;\n\nfn main() {{\n{}    ui::run();\n    ui::stop();\n}}\n", lines(7, "    // main")));
+    touch(&d.join("src/ui/panel.rs"), &lines(12, "// panel"));
+    touch(&d.join("src/ui/view.rs"), &format!("{}// view two\n// view three\n", lines(4, "// view")));
+    std::fs::remove_file(d.join("old.txt")).unwrap();
+    std::fs::remove_file(d.join("docs/guide.md")).unwrap();
+    touch(&d.join("docs/handbook.md"), &format!("{}The handbook ends here.\n", lines(12, "Guide")));
+    std::fs::write(d.join("assets/logo.png"), png_bytes(64, 40, 2)).unwrap();
+    std::fs::write(d.join("assets/icons/icon.png"), png_bytes(24, 24, 3)).unwrap();
+    std::fs::write(d.join("data.bin"), [0u8, 1, 2, 3, 0, 9, 8, 6, 5]).unwrap();
+    std::fs::remove_file(d.join("tool.sh")).unwrap();
+    std::os::unix::fs::symlink("src/main.rs", d.join("tool.sh")).unwrap();
+    touch(&d.join("tests/layout.rs"), &lines(5, "// layout test"));
+    touch(&d.join("tests/panel.rs"), &lines(4, "// panel test"));
+    touch(&d.join("README.md"), "# Project\n\nA small project with panels.\n");
+    commit("Grace Hopper <grace@example.invalid>", "Lay out the panels\n\nSplit the view into panels. The old layout code goes,\nand the guide is now the handbook.");
+    git(d, &["tag", "v1.0"]);
+    let long = "A long line in the notes keeps going well past the right edge of the panel, and wrapped it stays readable. ".repeat(3);
+    touch(&d.join("notes.md"), &format!("# Notes\n{long}\n"));
+    commit("Linus <linus@example.invalid>", "Write the long notes");
+    git(d, &["update-ref", "refs/remotes/origin/feature", "HEAD"]);
+    std::fs::remove_file(d.join("assets/logo.png")).unwrap();
+    commit("Ada Lovelace <ada@example.invalid>", "Remove the logo");
+    touch(&d.join("src/ui/panel.rs"), &format!("{}// tuned\n", lines(12, "// panel")));
+    commit("Grace Hopper <grace@example.invalid>", "Tune the panel");
+    git(d, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+}
+
 /// The history's commits as the graph reads them, all at once.
 fn git_log_all(d: &Path) -> Vec<crate::gitlog::Commit> {
     let out = std::process::Command::new("git").arg("-C").arg(d).args(crate::gitlog::log_args()).output().unwrap();
@@ -2184,6 +2265,143 @@ fn git_history_pages_and_wide_merges() {
     let (_, ch) = crate::gitlog::changes(&d, &ren.hash, &ren.parents);
     assert_eq!((ch[0].status, ch[0].path.as_str(), ch[0].from.as_deref()), (b'R', "new name.txt", Some("old name.txt")));
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Line counts as `git diff-tree -z --numstat` writes them (binary files, a rename with
+/// its two paths) joined to the name-status list, then against real git.
+#[test]
+fn git_numstat_and_renames_in_a_commit() {
+    use crate::gitlog::{Change, join_numstat, parse_changes, parse_numstat};
+    let num = b"-\t-\tb.bin\x001\t0\t\x00a.txt\x00d/a2.txt\x000\t1\td/x\x001\t0\tnew\x00";
+    let counts = parse_numstat(num);
+    assert_eq!(counts, [(None, "b.bin".to_string()), (Some((1, 0)), "d/a2.txt".into()), (Some((0, 1)), "d/x".into()), (Some((1, 0)), "new".into())]);
+    let mut files = parse_changes(b"M\x00b.bin\x00R075\x00a.txt\x00d/a2.txt\x00D\x00d/x\x00A\x00new\x00");
+    join_numstat(&mut files, &counts);
+    let ch = |status: u8, path: &str, from: Option<&str>, lines: Option<(u32, u32)>| Change { status, path: path.into(), from: from.map(String::from), lines };
+    assert_eq!(files, [ch(b'M', "b.bin", None, None), ch(b'R', "d/a2.txt", Some("a.txt"), Some((1, 0))), ch(b'D', "d/x", None, Some((0, 1))), ch(b'A', "new", None, Some((1, 0)))]);
+    // A count list cut short or out of order is matched by path.
+    let mut files = parse_changes(b"A\x00new\x00D\x00d/x\x00");
+    join_numstat(&mut files, &counts[2..]);
+    assert_eq!((files[0].lines, files[1].lines), (Some((1, 0)), Some((0, 1))));
+    if !crate::media::have("git") {
+        eprintln!("git not installed: the rest skipped");
+        return;
+    }
+    let d = tmpdir("commitview");
+    commit_view_fixture(&d);
+    let log = git_log_all(&d);
+    let panels = log.iter().find(|c| c.subject == "Lay out the panels").unwrap();
+    let (body, files) = crate::gitlog::changes(&d, &panels.hash, &panels.parents);
+    assert!(body.starts_with("Split the view into panels."), "{body:?}");
+    let get = |p: &str| files.iter().find(|f| f.path == p).unwrap_or_else(|| panic!("{p} in {files:?}"));
+    assert_eq!(files.len(), 12);
+    assert_eq!((get("src/main.rs").status, get("src/main.rs").lines), (b'M', Some((4, 1))));
+    assert_eq!((get("src/ui/panel.rs").status, get("src/ui/panel.rs").lines), (b'A', Some((12, 0))));
+    assert_eq!((get("old.txt").status, get("old.txt").lines), (b'D', Some((0, 3))));
+    assert_eq!((get("docs/handbook.md").status, get("docs/handbook.md").from.as_deref(), get("docs/handbook.md").lines), (b'R', Some("docs/guide.md"), Some((1, 0))));
+    assert_eq!((get("assets/logo.png").status, get("assets/logo.png").lines), (b'M', None), "a picture is binary");
+    assert_eq!(get("data.bin").lines, None);
+    assert_eq!(get("tool.sh").status, b'T', "a file that became a link");
+    assert_eq!(files.iter().filter_map(|f| f.lines).map(|l| l.0).sum::<u32>(), 30);
+    // Both sides of the changed picture, only the new side of the added one; the file
+    // as of the commit; one file's commits followed through its rename.
+    let logo = get("assets/logo.png");
+    let side = |old: bool, f: &Change| crate::gitlog::picture_side(&d, &panels.hash, &panels.parents, f, old, 512).map(|p| p.1);
+    assert_eq!((side(true, logo), side(false, logo)), (Some([48, 32]), Some([64, 40])));
+    assert_eq!(side(true, get("assets/icons/icon.png")), None);
+    assert_eq!(side(false, get("assets/icons/icon.png")), Some([24, 24]));
+    match crate::gitlog::blob(&d, &panels.hash, "src/main.rs") {
+        crate::gitlog::Blob::Text(l, spans, cut) => assert!(l[0] == "mod ui;" && spans.is_some() && !cut),
+        _ => panic!("main.rs as text"),
+    }
+    assert!(matches!(crate::gitlog::blob(&d, &panels.hash, "data.bin"), crate::gitlog::Blob::Nothing("Binary file")));
+    assert!(matches!(crate::gitlog::blob(&d, &panels.hash, "assets/logo.png"), crate::gitlog::Blob::Picture(_, [64, 40])));
+    let out = std::process::Command::new("git").arg("-C").arg(&d).args(crate::gitlog::file_log_args("docs/handbook.md")).output().unwrap();
+    let follow: Vec<String> = crate::gitlog::read_page(&mut &out.stdout[..], 100).into_iter().map(|c| c.subject).collect();
+    assert_eq!(follow, ["Lay out the panels", "Start the project"]);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A commit's header: author and email, and its refs from git's decorations (a remote's
+/// HEAD dropped, a branch in step with its remote one pill, a remote-only branch with
+/// its own, tags).
+#[test]
+fn git_header_refs_and_author() {
+    use crate::gitlog::{RefKind, labels, parse};
+    let rec = "\n0123456789abcdef0123456789abcdef01234567\x1faaaaaaa bbbbbbb\x1fAda Lovelace\x1fada@example.invalid\x1f1700000000\x1fHEAD -> refs/heads/main, refs/remotes/origin/main, refs/remotes/origin/HEAD, tag: refs/tags/v1.0, refs/remotes/origin/feature, refs/stash\x1fLay out the panels";
+    let c = parse(rec.as_bytes()).expect("a record");
+    assert_eq!((c.author.as_str(), c.email.as_str(), c.time, c.parents.len(), c.subject.as_str()), ("Ada Lovelace", "ada@example.invalid", 1_700_000_000, 2, "Lay out the panels"));
+    assert_eq!(c.refs, [(RefKind::Head, "main".to_string()), (RefKind::Remote, "origin/main".into()), (RefKind::Tag, "v1.0".into()), (RefKind::Remote, "origin/feature".into())]);
+    assert_eq!(labels(&c.refs), [(RefKind::Head, "main", Some("origin")), (RefKind::Tag, "v1.0", None), (RefKind::Remote, "origin/feature", None)]);
+    let detached = parse(b"0123456789abcdef0123456789abcdef01234567\x1f\x1fX\x1f\x1f0\x1fHEAD\x1froot").unwrap();
+    assert_eq!((detached.refs.clone(), detached.parents.len()), (vec![(RefKind::Head, "HEAD".to_string())], 0));
+    assert!(parse(b"short\x1f\x1fX\x1f\x1f0\x1f\x1fs").is_none(), "not a hash");
+}
+
+/// An author keeps one colour: from the email, whatever its case or spacing, else from
+/// the name; the hash is fixed, so it stays across sessions. Initials read the first
+/// and last words.
+#[test]
+fn git_author_colour_is_stable() {
+    use crate::gitlog::{author_color, author_hue, initials};
+    let a = author_hue("ada@example.invalid", "Ada Lovelace");
+    assert_eq!(a, author_hue(" ADA@Example.invalid ", "someone else"));
+    assert_eq!(author_hue("", "Linus"), author_hue("", "linus"), "no email: the name");
+    // Pinned: a change to the hash would recolour every author.
+    assert_eq!((a, author_hue("grace@example.invalid", ""), author_hue("linus@example.invalid", "")), (8, 0, 9));
+    let hues: HashSet<usize> = (0..40).map(|i| author_hue(&format!("dev{i}@example.invalid"), "")).collect();
+    assert!(hues.len() >= 6, "authors spread over the colours: {hues:?}");
+    let (dark, light) = (crate::theme::palette(crate::theme::ThemeName::Midnight), crate::theme::palette(crate::theme::ThemeName::Paper));
+    assert_eq!(author_color(&dark, "ada@example.invalid", ""), author_color(&dark, "ADA@example.invalid", ""));
+    assert_ne!(author_color(&dark, "ada@example.invalid", ""), author_color(&light, "ada@example.invalid", ""), "toned to the theme");
+    assert_eq!(initials("Ada Lovelace"), "AL");
+    assert_eq!(initials("Grace Brewster Murray Hopper"), "GH");
+    assert_eq!(initials("linus"), "L");
+    assert_eq!(initials("first.last"), "FL");
+    assert_eq!(initials("  "), "?");
+    assert_eq!(initials("émile zola"), "ÉZ");
+}
+
+/// Many files grouped by folder: folders first, a folder holding only a folder as one
+/// heading, each heading knowing how many rows and files it holds. Few files, or files
+/// in one folder, stay a list. And the counts' five blocks and summary.
+#[test]
+fn git_files_grouped_by_folder() {
+    use crate::gitlog::{Change, Node, blocks, group, grouped, summary};
+    let f = |p: &str| Change { status: b'M', path: p.into(), from: None, lines: Some((1, 1)) };
+    let files: Vec<Change> = ["README.md", "src/main.rs", "src/ui/view.rs", "src/ui/panel.rs", "docs/a/b/guide.md", "tests/x.rs", "tests/y.rs", "Cargo.toml", "src/lib.rs"].iter().map(|p| f(p)).collect();
+    assert!(grouped(&files));
+    assert!(!grouped(&files[..8]), "eight files stay a list");
+    let one: Vec<Change> = (0..20).map(|i| f(&format!("src/f{i}.rs"))).collect();
+    assert!(!grouped(&one), "all in one folder");
+    let dir = |path: &str, name: &str, depth: u16, len: usize, files: usize| Node::Dir { path: path.into(), name: name.into(), depth, len, files };
+    let file = |idx: usize, depth: u16| Node::File { idx, depth };
+    assert_eq!(
+        group(&files),
+        [
+            dir("docs/a/b", "docs/a/b", 0, 1, 1),
+            file(4, 1),
+            dir("src", "src", 0, 5, 4),
+            dir("src/ui", "ui", 1, 2, 2),
+            file(3, 2),
+            file(2, 2),
+            file(8, 1),
+            file(1, 1),
+            dir("tests", "tests", 0, 2, 2),
+            file(5, 1),
+            file(6, 1),
+            file(7, 0),
+            file(0, 0),
+        ]
+    );
+    assert_eq!(blocks(0, 0), (0, 0));
+    assert_eq!(blocks(3, 0), (3, 0), "fewer lines than blocks");
+    assert_eq!(blocks(100, 0), (5, 0));
+    assert_eq!(blocks(1, 99), (1, 4), "a side with lines keeps a block");
+    assert_eq!(blocks(99, 1), (4, 1));
+    assert_eq!(blocks(30, 30), (3, 2));
+    assert_eq!((summary(1), summary(12)), ("1 file changed".to_string(), "12 files changed".to_string()));
+    assert!(crate::gitlog::is_picture("assets/Logo.PNG") && crate::gitlog::is_picture("a.svg") && !crate::gitlog::is_picture("png") && !crate::gitlog::is_picture("x.png/notes"));
 }
 
 /// The history's git runs a page ahead of nothing: after the first page it waits on its

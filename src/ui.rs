@@ -58,11 +58,16 @@ pub fn no_room(ui: &Ui, w: f32) -> bool {
 }
 
 pub fn glyph_button(ui: &mut Ui, g: Glyph, tip: &str, enabled: bool, pal: &Palette) -> egui::Response {
+    glyph_button_as(ui, g, tip, enabled, pal, "toolbar button")
+}
+
+/// A toolbar glyph button the simulations find by its own name.
+pub fn glyph_button_as(ui: &mut Ui, g: Glyph, tip: &str, enabled: bool, pal: &Palette, what: &'static str) -> egui::Response {
     if no_room(ui, 26.0) {
         return ui.allocate_exact_size(Vec2::ZERO, Sense::hover()).1;
     }
     let (rect, resp) = ui.allocate_exact_size(vec2(26.0, 24.0), if enabled { Sense::click() } else { Sense::hover() });
-    note_control(ui, rect, "toolbar button");
+    note_control(ui, rect, what);
     if resp.hovered() && enabled {
         // Toolbar buttons light up with a tint of the accent.
         ui.painter().rect_filled(rect, CornerRadius::same(5), pal.row_hover);

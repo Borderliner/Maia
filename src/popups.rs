@@ -168,6 +168,8 @@ pub enum Popup {
     TabMenu { panel: u64, idx: usize, pos: Pos2 },
     TabsOptions { panel: u64, pos: Pos2 },
     GroupMenu { panel: u64, label: String, pos: Pos2 },
+    /// A file in a commit of the history.
+    GitFile { panel: u64, file: usize, pos: Pos2 },
     DropMenu { paths: Vec<PathBuf>, dest: PathBuf, pos: Pos2 },
     Connect(ConnectState),
     ArchivePassword(PasswordState),
@@ -259,6 +261,7 @@ impl Popup {
             Popup::TabMenu { .. } => "TabMenu",
             Popup::TabsOptions { .. } => "TabsOptions",
             Popup::GroupMenu { .. } => "GroupMenu",
+            Popup::GitFile { .. } => "GitFile",
             Popup::DropMenu { .. } => "DropMenu",
         }
     }
@@ -319,6 +322,9 @@ impl Popup {
     }
     pub fn history(panel: u64, anchor: Pos2) -> Popup {
         Popup::History { panel, anchor }
+    }
+    pub fn git_file(panel: u64, file: usize, pos: Pos2) -> Popup {
+        Popup::GitFile { panel, file, pos }
     }
     pub fn rename_menu(panel: u64, pos: Pos2) -> Popup {
         Popup::RenameMenu { panel, pos }
@@ -659,6 +665,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::TabMenu { panel, idx, pos } => tab_menu(app, ctx, *panel, *idx, *pos),
         Popup::TabsOptions { panel, pos } => tabs_options(app, ctx, *panel, *pos),
         Popup::GroupMenu { panel, label, pos } => group_menu(app, ctx, *panel, label, *pos),
+        Popup::GitFile { panel, file, pos } => git_file_menu(app, ctx, *panel, *file, *pos),
         Popup::DropMenu { paths, dest, pos } => drop_menu(app, ctx, paths, dest, *pos),
     };
     if keep && matches!(app.popup, Popup::None) {
@@ -3715,6 +3722,67 @@ fn tabs_options(app: &mut App, ctx: &egui::Context, panel: u64, pos: Pos2) -> bo
         return false;
     }
     !clicked_outside(ctx, rect)
+}
+
+/// A file in a commit of the history: open it, find it, read it as it was, follow its
+/// own history, copy its path.
+fn git_file_menu(app: &mut App, ctx: &egui::Context, panel: u64, file: usize, pos: Pos2) -> bool {
+    let pal = app.pal;
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        return false;
+    }
+    let Some(h) = app.panels.get(&panel).and_then(|p| p.inspector.as_ref()).and_then(|i| i.git.as_ref()) else { return false };
+    let Some(f) = h.file(file) else { return false };
+    let (path, gone) = (h.root.join(&f.path), f.status == b'D');
+    let rel = f.path.clone();
+    let item = |ui: &mut Ui, text: &str, enabled: bool| -> bool {
+        let r = row(ui, 26.0, false, &pal, |ui, r| {
+            ui.painter().text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, text, FontId::proportional(13.0), if enabled { pal.text } else { pal.text_dim.gamma_multiply(0.6) });
+        });
+        enabled && r.clicked()
+    };
+    enum Pick {
+        Open,
+        Show,
+        AsOf,
+        History,
+        Copy,
+    }
+    let mut pick = None;
+    let (_, rect) = anchored(ctx, "gitfilemenu", pos, 240.0, &pal, |ui| {
+        if item(ui, "Open", !gone) {
+            pick = Some(Pick::Open);
+        }
+        if item(ui, "Show in folder", true) {
+            pick = Some(Pick::Show);
+        }
+        if item(ui, if gone { "View before it was deleted" } else { "View as of this commit" }, true) {
+            pick = Some(Pick::AsOf);
+        }
+        if item(ui, "File history", true) {
+            pick = Some(Pick::History);
+        }
+        menu_sep(ui, &pal);
+        if item(ui, "Copy path", true) {
+            pick = Some(Pick::Copy);
+        }
+    });
+    let Some(pick) = pick else { return !clicked_outside(ctx, rect) };
+    let h = app.panels.get_mut(&panel).and_then(|p| p.inspector.as_mut()).and_then(|i| i.git.as_mut());
+    match (pick, h) {
+        (Pick::Open, _) => app.actions.push(Action::OpenFile(path)),
+        // A deleted file's folder, else the file itself, selected.
+        (Pick::Show, _) => app.actions.push(Action::Navigate { panel, path: if gone { path.parent().map(Path::to_path_buf).unwrap_or(path) } else { path } }),
+        (Pick::AsOf, Some(h)) => h.view_as_of(file),
+        (Pick::History, Some(h)) => h.show_file_history(rel),
+        (Pick::Copy, _) => {
+            let s = crate::clipboard::quote_if_needed(&path.to_string_lossy());
+            ctx.copy_text(s.clone());
+            app.toast(format!("Copied {s}"));
+        }
+        _ => {}
+    }
+    false
 }
 
 fn group_menu(app: &mut App, ctx: &egui::Context, panel: u64, label: &str, pos: Pos2) -> bool {

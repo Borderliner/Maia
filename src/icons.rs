@@ -263,13 +263,18 @@ pub fn names_for(e: &Entry) -> Vec<String> {
     if e.is_dir {
         return dir_names(&e.path, e.is_link);
     }
-    let mime = crate::mime::mime_db().for_name(&e.name, false, e.is_executable());
+    file_names(&e.name, e.is_executable())
+}
+
+/// Icon names to try for a file called `name` (no folder, nothing read from disk).
+fn file_names(name: &str, exec: bool) -> Vec<String> {
+    let mime = crate::mime::mime_db().for_name(name, false, exec);
     let mut v = vec![mime.replace('/', "-")];
     if let Some(g) = generic_icons().get(&mime) {
         v.push(g.clone());
     }
     let top = mime.split('/').next().unwrap_or("");
-    if e.is_executable() && !matches!(top, "image" | "audio" | "video" | "text") {
+    if exec && !matches!(top, "image" | "audio" | "video" | "text") {
         v.push("application-x-executable".into());
     }
     match top {
@@ -357,6 +362,22 @@ pub fn entry(painter: &Painter, rect: Rect, e: &Entry) -> bool {
 /// Theme icon by name (or an absolute icon file path), e.g. an application's Icon=.
 pub fn named(painter: &Painter, rect: Rect, name: &str) -> bool {
     !name.is_empty() && enabled() && paint_names(painter, rect, vec![name.to_string()], false)
+}
+
+/// The icon a file called `name` has in the listing: the theme's, or Maia's own drawn
+/// one while the theme's loads or when there is none.
+pub fn file(painter: &Painter, rect: Rect, name: &str) {
+    if !(enabled() && paint_names(painter, rect, file_names(name, false), false)) {
+        let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+        crate::theme::paint_icon(painter, rect, crate::theme::categorize(&ext, false, false), "", false);
+    }
+}
+
+/// A folder's icon in the listing, by its path.
+pub fn folder(painter: &Painter, rect: Rect, path: &Path) {
+    if !dir(painter, rect, path) {
+        crate::theme::paint_icon(painter, rect, crate::theme::FileCat::Folder, "", false);
+    }
 }
 
 /// Theme icon for the folder at `path`.

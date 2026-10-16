@@ -2,7 +2,13 @@
 //! one row per commit, each line of work in a lane of its own. A single `git log` runs
 //! per history and is held back by its own pipe between pages, so a repository of any
 //! size costs only the pages scrolled through. Nothing here writes to the repository.
+//!
+//! A commit opens to its files with their line counts, grouped by folder when there are
+//! many. A file's diff (or, for a picture, its old and new versions) opens under its row,
+//! or on its own in the whole panel. Everything git is asked runs on a worker, through
+//! `gitstatus::guard`, and is read only once it is on screen.
 
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -10,8 +16,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use egui::epaint::CubicBezierShape;
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{Align, Align2, Color32, CornerRadius, FontId, Key, Layout, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
+use egui::{Align, Align2, Color32, CornerRadius, FontId, Key, Layout, Pos2, Rect, ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2, pos2, vec2};
 
+use crate::app::Action;
 use crate::listing::Env;
 use crate::theme::{Glyph, Palette};
 
@@ -34,6 +41,7 @@ pub struct Commit {
     pub hash: String,
     pub parents: Vec<String>,
     pub author: String,
+    pub email: String,
     pub time: i64,
     pub refs: Vec<(RefKind, String)>,
     pub subject: String,
@@ -103,6 +111,7 @@ pub fn parse(rec: &[u8]) -> Option<Commit> {
     let hash = f.next()?.to_string();
     let parents = f.next()?.split_whitespace().map(String::from).collect();
     let author = f.next()?.to_string();
+    let email = f.next()?.to_string();
     let time = f.next()?.parse().unwrap_or(0);
     let mut refs = vec![];
     for d in f.next()?.split(", ") {
@@ -122,10 +131,10 @@ pub fn parse(rec: &[u8]) -> Option<Commit> {
         refs.push((r.0, r.1.to_string()));
     }
     let subject = f.next()?.to_string();
-    (hash.len() >= 7).then_some(Commit { hash, parents, author, time, refs, subject })
+    (hash.len() >= 7).then_some(Commit { hash, parents, author, email, time, refs, subject })
 }
 
-pub const FORMAT: &str = "--format=%H%x1f%P%x1f%an%x1f%at%x1f%D%x1f%s";
+pub const FORMAT: &str = "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%D%x1f%s";
 
 /// Up to `n` records from a running `git log -z`.
 pub fn read_page(r: &mut impl BufRead, n: usize) -> Vec<Commit> {
@@ -154,11 +163,16 @@ pub fn log_args() -> [&'static str; 11] {
     ["log", "--topo-order", "-z", "--no-color", "--decorate=full", FORMAT, "--branches", "--remotes", "--tags", "HEAD", "--"]
 }
 
+/// The commits on HEAD that changed one file, following it back through renames.
+pub fn file_log_args(path: &str) -> Vec<String> {
+    ["log", "-z", "--no-color", "--decorate=full", FORMAT, "--follow", "HEAD", "--", path].map(String::from).to_vec()
+}
+
 /// Output of a short git command, at most `limit` bytes (the rest is cut, and the
 /// process killed). The flag says whether it was cut.
 fn run(root: &Path, args: &[&str], limit: u64) -> (Vec<u8>, bool) {
     let mut v = vec![];
-    let Ok(mut child) = git(root).args(args).stdout(Stdio::piped()).spawn() else { return (v, false) };
+    let Ok(mut child) = git(root).args(args).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return (v, false) };
     if let Some(out) = child.stdout.take() {
         let _ = out.take(limit + 1).read_to_end(&mut v);
     }
@@ -169,12 +183,14 @@ fn run(root: &Path, args: &[&str], limit: u64) -> (Vec<u8>, bool) {
     (v, cut)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Change {
     /// `A`dded, `M`odified, `D`eleted, `R`enamed, `C`opied or `T`ype changed.
     pub status: u8,
     pub path: String,
     pub from: Option<String>,
+    /// Lines added and removed; None for a binary file.
+    pub lines: Option<(u32, u32)>,
 }
 
 /// `git diff-tree -z --name-status` output.
@@ -185,9 +201,44 @@ pub fn parse_changes(out: &[u8]) -> Vec<Change> {
         let Some(&k) = st.as_bytes().first() else { continue };
         let Some(a) = it.next() else { break };
         let (path, from) = if matches!(k, b'R' | b'C') { (it.next().unwrap_or_default(), Some(a)) } else { (a, None) };
-        v.push(Change { status: k, path, from });
+        v.push(Change { status: k, path, from, lines: Some((0, 0)) });
     }
     v
+}
+
+/// `git diff-tree -z --numstat` output: lines added and removed per file (None when git
+/// calls it binary), under its new path.
+pub fn parse_numstat(out: &[u8]) -> Vec<(Option<(u32, u32)>, String)> {
+    let mut v = vec![];
+    let mut it = out.split(|&b| b == 0);
+    while let Some(rec) = it.next() {
+        let s = String::from_utf8_lossy(rec);
+        let mut f = s.splitn(3, '\t');
+        let (Some(a), Some(d), Some(p)) = (f.next(), f.next(), f.next()) else { continue };
+        let n = a.parse().ok().zip(d.parse().ok());
+        // A rename or copy leaves the path empty and gives the old and the new one after.
+        let path = if p.is_empty() {
+            let _ = it.next();
+            it.next().map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()
+        } else {
+            p.to_string()
+        };
+        v.push((n, path));
+    }
+    v
+}
+
+/// Line counts into the changes they belong to. Both lists come from the same diff, so
+/// they are in the same order; a path that doesn't match (one list cut short) is looked
+/// up instead.
+pub fn join_numstat(files: &mut [Change], counts: &[(Option<(u32, u32)>, String)]) {
+    let mut by_path: Option<HashMap<&str, Option<(u32, u32)>>> = None;
+    for (i, f) in files.iter_mut().enumerate() {
+        f.lines = match counts.get(i) {
+            Some((n, p)) if *p == f.path => *n,
+            _ => by_path.get_or_insert_with(|| counts.iter().map(|(n, p)| (p.as_str(), *n)).collect()).get(f.path.as_str()).copied().unwrap_or(Some((0, 0))),
+        };
+    }
 }
 
 /// The commit against its first parent (a merge shows what it brought in), or against
@@ -199,12 +250,16 @@ fn base<'a>(hash: &'a str, parents: &'a [String]) -> [&'a str; 2] {
     }
 }
 
-/// The changed files of a commit, and its message body.
+/// The changed files of a commit, with their line counts, and its message body.
 pub fn changes(root: &Path, hash: &str, parents: &[String]) -> (String, Vec<Change>) {
     let mut a = vec!["diff-tree", "--no-commit-id", "-r", "-z", "-M", "--name-status"];
     a.extend(base(hash, parents));
+    let mut n = vec!["diff-tree", "--no-commit-id", "-r", "-z", "-M", "--numstat"];
+    n.extend(base(hash, parents));
     let body = run(root, &["show", "-s", "--format=%b", hash], 64 << 10).0;
-    (String::from_utf8_lossy(&body).trim().to_string(), parse_changes(&run(root, &a, 4 << 20).0))
+    let mut files = parse_changes(&run(root, &a, 4 << 20).0);
+    join_numstat(&mut files, &parse_numstat(&run(root, &n, 4 << 20).0));
+    (String::from_utf8_lossy(&body).trim().to_string(), files)
 }
 
 pub type Spans = Vec<Vec<(usize, usize, crate::syntax::Kind)>>;
@@ -230,6 +285,67 @@ pub fn diff_lines(out: &[u8]) -> Vec<String> {
     s.lines().skip_while(|l| !l.starts_with("@@")).map(|l| if l.len() > 2000 { format!("{}…", &l[..l.floor_char_boundary(2000)]) } else { l.replace('\t', "    ") }).collect()
 }
 
+/// Pictures get their old and new versions shown instead of a diff.
+pub fn is_picture(path: &str) -> bool {
+    let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    !ext.contains('/') && (crate::thumbs::is_image_ext(&ext) || ext == "svg")
+}
+
+/// A picture's bytes decoded and scaled to fit `px`, with its own size.
+fn picture(bytes: &[u8], path: &str, px: u32) -> Option<(egui::ColorImage, [u32; 2])> {
+    if path.to_ascii_lowercase().ends_with(".svg") {
+        let (w, h, d) = crate::svg::render(bytes, px)?;
+        return Some((egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], &d), [w, h]));
+    }
+    let img = crate::imgdec::decode_bytes(bytes)?;
+    let dims = [img.w, img.h];
+    let img = if img.w > px || img.h > px { crate::imgdec::downscale(&img, px) } else { img };
+    Some((egui::ColorImage::from_rgba_unmultiplied([img.w as usize, img.h as usize], &img.px), dims))
+}
+
+/// Pictures larger than this are not read (a few large photos would fill memory).
+const PICTURE_BYTES: u64 = 32 << 20;
+
+/// One side of a changed picture: `old` reads it from the commit's first parent, under
+/// the name it had there.
+pub fn picture_side(root: &Path, hash: &str, parents: &[String], ch: &Change, old: bool, px: u32) -> Option<(egui::ColorImage, [u32; 2])> {
+    let (rev, path) = if old { (parents.first()?.as_str(), ch.from.as_deref().unwrap_or(&ch.path)) } else { (hash, ch.path.as_str()) };
+    let (bytes, cut) = run(root, &["cat-file", "blob", &format!("{rev}:{path}")], PICTURE_BYTES);
+    if cut || bytes.is_empty() {
+        return None;
+    }
+    picture(&bytes, path, px)
+}
+
+/// A file as it was in a commit.
+pub enum Blob {
+    Text(Vec<String>, Option<Spans>, bool),
+    Picture(egui::ColorImage, [u32; 2]),
+    /// Why there is nothing to show.
+    Nothing(&'static str),
+}
+
+/// The file as of `rev`: highlighted text, a picture, or why neither.
+pub fn blob(root: &Path, rev: &str, path: &str) -> Blob {
+    let spec = format!("{rev}:{path}");
+    if is_picture(path) {
+        let (bytes, cut) = run(root, &["cat-file", "blob", &spec], PICTURE_BYTES);
+        return match picture(&bytes, path, 2048) {
+            _ if cut => Blob::Nothing("Too large to show"),
+            Some((i, d)) => Blob::Picture(i, d),
+            None => Blob::Nothing("Can't show this picture"),
+        };
+    }
+    let (bytes, cut) = run(root, &["cat-file", "blob", &spec], 1 << 20);
+    match crate::inspector::text_lines(&bytes) {
+        Some(lines) => {
+            let spans = crate::syntax::lang_for(path).map(|l| crate::syntax::highlight(l, &lines, 20_000));
+            Blob::Text(lines, spans, cut)
+        }
+        None => Blob::Nothing("Binary file"),
+    }
+}
+
 /// "3 days ago" for a commit time (seconds since the epoch).
 pub fn ago(t: i64, now: i64) -> String {
     let d = (now - t).max(0);
@@ -243,6 +359,133 @@ pub fn ago(t: i64, now: i64) -> String {
         _ => (d / 31_536_000, "year"),
     };
     format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
+}
+
+/// "5 files changed" above a commit's files.
+pub fn summary(files: usize) -> String {
+    format!("{files} file{} changed", if files == 1 { "" } else { "s" })
+}
+
+/// How a file's change splits the five blocks after its counts: (green, red). Fewer
+/// than five lines fill as many blocks as there are lines, and a side that has any
+/// lines always gets a block.
+pub fn blocks(add: u32, del: u32) -> (usize, usize) {
+    let t = add as u64 + del as u64;
+    if t == 0 {
+        return (0, 0);
+    }
+    let n = t.min(5);
+    let mut g = (add as u64 * n + t / 2) / t;
+    if add > 0 && g == 0 {
+        g = 1;
+    }
+    if del > 0 && g == n {
+        g = n - 1;
+    }
+    (g as usize, (n - g) as usize)
+}
+
+/// A folder heading or a file in a commit's files grouped by folder, in the order shown.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Node {
+    /// `name` is what the heading says: a folder that only holds one folder is one
+    /// heading ("src/ui"). `len` nodes inside it follow; `files` is how many files.
+    Dir { path: String, name: String, depth: u16, len: usize, files: usize },
+    File { idx: usize, depth: u16 },
+}
+
+/// Group many files by folder: worth it past eight files in more than one folder.
+pub fn grouped(files: &[Change]) -> bool {
+    fn dir(f: &Change) -> &str {
+        f.path.rsplit_once('/').map_or("", |d| d.0)
+    }
+    files.len() > 8 && files.iter().any(|f| dir(f) != dir(&files[0]))
+}
+
+/// A commit's files as a tree: folders first, then files, each sorted by name.
+pub fn group(files: &[Change]) -> Vec<Node> {
+    #[derive(Default)]
+    struct T {
+        dirs: BTreeMap<String, T>,
+        files: Vec<usize>,
+    }
+    fn count(t: &T) -> usize {
+        t.files.len() + t.dirs.values().map(count).sum::<usize>()
+    }
+    fn walk(t: &T, prefix: &str, depth: u16, out: &mut Vec<Node>) {
+        for (name, d) in &t.dirs {
+            let (mut name, mut d) = (name.clone(), d);
+            while d.files.is_empty() && d.dirs.len() == 1 {
+                let Some((n, inner)) = d.dirs.iter().next() else { break };
+                name = format!("{name}/{n}");
+                d = inner;
+            }
+            let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            let at = out.len();
+            out.push(Node::Dir { path: path.clone(), name, depth, len: 0, files: count(d) });
+            walk(d, &path, depth + 1, out);
+            let n = out.len() - at - 1;
+            if let Node::Dir { len, .. } = &mut out[at] {
+                *len = n;
+            }
+        }
+        out.extend(t.files.iter().map(|&idx| Node::File { idx, depth }));
+    }
+    let mut root = T::default();
+    for (i, f) in files.iter().enumerate() {
+        let mut t = &mut root;
+        if let Some((dir, _)) = f.path.rsplit_once('/') {
+            for p in dir.split('/') {
+                t = t.dirs.entry(p.to_string()).or_default();
+            }
+        }
+        t.files.push(i);
+    }
+    for t in std::iter::once(&mut root) {
+        sort_files(t, files);
+    }
+    fn sort_files(t: &mut T, files: &[Change]) {
+        t.files.sort_by(|&a, &b| files[a].path.cmp(&files[b].path));
+        for d in t.dirs.values_mut() {
+            sort_files(d, files);
+        }
+    }
+    let mut out = Vec::with_capacity(files.len() + 8);
+    walk(&root, "", 0, &mut out);
+    out
+}
+
+/// One or two letters for an author's circle: the first and last words' initials.
+pub fn initials(name: &str) -> String {
+    let words: Vec<&str> = name.split(|c: char| c.is_whitespace() || matches!(c, '.' | '_' | '-' | '@')).filter(|w| w.chars().next().is_some_and(char::is_alphanumeric)).collect();
+    let first = |w: &str| w.chars().next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
+    match words.as_slice() {
+        [] => "?".into(),
+        [w] => first(w),
+        [a, .., z] => first(a) + &first(z),
+    }
+}
+
+/// Which of the author colours a person has: from their email (their name when there is
+/// none), so the same person keeps it everywhere and across sessions.
+pub fn author_hue(email: &str, name: &str) -> usize {
+    let key = if email.trim().is_empty() { name } else { email }.trim().to_lowercase();
+    let mut h: u32 = 0x811c_9dc5;
+    for b in key.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    (h % AUTHOR_HUES.len() as u32) as usize
+}
+
+const AUTHOR_HUES: [u32; 10] = [0x7aa2f7, 0xd9a05b, 0xb58ee0, 0x62b58f, 0xe0849a, 0x58b4c9, 0xc9b36a, 0x9aa5b8, 0xe07a5f, 0x8fbf6a];
+
+/// An author's colour, toned like the lanes so it sits on the theme.
+pub fn author_color(pal: &Palette, email: &str, name: &str) -> Color32 {
+    let h = AUTHOR_HUES[author_hue(email, name)];
+    let c = Color32::from_rgb((h >> 16) as u8, (h >> 8) as u8, h as u8);
+    let (to, t) = if pal.dark { (pal.text_dim, 0.15) } else { (pal.text, 0.3) };
+    c.lerp_to_gamma(to, t)
 }
 
 /// A worker's answer, once it has one.
@@ -308,12 +551,12 @@ impl Drop for Feed {
     }
 }
 
-fn feed(root: PathBuf, ctx: &egui::Context) -> Feed {
+fn feed(root: PathBuf, ctx: &egui::Context, args: Vec<String>) -> Feed {
     let f = Feed(Arc::default());
     let (sh, ctx) = (Arc::clone(&f.0), ctx.clone());
     std::thread::spawn(move || {
         let (m, cv) = &*sh;
-        let Ok(mut child) = git(&root).args(log_args()).stdout(Stdio::piped()).spawn() else {
+        let Ok(mut child) = git(&root).args(&args).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else {
             lock(m).end = true;
             ctx.request_repaint();
             return;
@@ -352,25 +595,9 @@ fn feed(root: PathBuf, ctx: &egui::Context) -> Feed {
     f
 }
 
-struct Open {
-    at: usize,
-    sel: usize,
-    info: Option<(String, Vec<Change>)>,
-    job: Option<Slot<(String, Vec<Change>)>>,
-    diff: Option<Diff>,
-}
-
-struct Diff {
-    file: usize,
-    text: Option<(Vec<String>, Option<Spans>, bool)>,
-    job: Option<Slot<(Vec<String>, Option<Spans>, bool)>>,
-}
-
-pub struct History {
-    pub root: PathBuf,
-    branch: String,
-    /// The inspector was opened for the history: closing one closes both.
-    pub opened: bool,
+/// One list of commits: the whole history, or the commits that changed one file.
+struct List {
+    path: Option<String>,
     commits: Vec<Commit>,
     rows: Vec<Row>,
     lanes: Lanes,
@@ -378,20 +605,332 @@ pub struct History {
     asked: bool,
     done: bool,
     sel: usize,
+}
+
+impl List {
+    fn new(path: Option<String>) -> List {
+        List { path, commits: vec![], rows: vec![], lanes: Lanes::default(), feed: None, asked: false, done: false, sel: 0 }
+    }
+    fn ask(&mut self) {
+        if let Some(f) = self.feed.as_ref().filter(|_| !self.done && !self.asked) {
+            f.ask();
+            self.asked = true;
+        }
+    }
+}
+
+type DiffText = (Vec<String>, Option<Spans>, bool);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+enum Item {
+    Dir(usize),
+    File(usize),
+}
+
+/// A file whose diff is open under its row (for a picture: its larger versions).
+struct Inline {
+    file: usize,
+    text: Option<DiffText>,
+    job: Option<Slot<DiffText>>,
+    wrapped: Option<crate::inspector::Wrapped>,
+}
+
+/// One side of a changed picture, decoded only once it is on screen.
+struct Pic {
+    file: usize,
+    old: bool,
+    px: u32,
+    started: bool,
+    job: Option<Slot<Option<(egui::ColorImage, [u32; 2])>>>,
+    tex: Option<(egui::TextureHandle, [u32; 2])>,
+    failed: bool,
+}
+
+/// Pictures decoded at once; the rest wait their turn.
+const PICTURE_JOBS: usize = 3;
+
+struct Open {
+    at: usize,
+    /// The keyboard's place in `items`.
+    sel: usize,
+    info: Option<(String, Vec<Change>)>,
+    job: Option<Slot<(String, Vec<Change>)>>,
+    /// Lines added and removed in all, and the largest counts of one file (so the
+    /// columns are as wide as they need to be).
+    totals: (u64, u64),
+    widest: (u32, u32),
+    picture: Vec<bool>,
+    /// The files grouped by folder (empty when they are few), and the folded headings.
+    nodes: Vec<Node>,
+    folded: HashSet<usize>,
+    /// What the file list shows, with each one's depth.
+    items: Vec<(Item, u16)>,
+    inline: Vec<Inline>,
+    pics: Vec<Pic>,
+    /// A file in the whole panel.
+    diff: Option<Diff>,
+    reveal: bool,
+}
+
+/// One file in the whole panel: its change, or (`blob`) the file as of the commit.
+struct Diff {
+    file: usize,
+    blob: bool,
+    text: Option<View>,
+    job: Option<Slot<Got>>,
+}
+
+enum Got {
+    Diff(DiffText),
+    Blob(Blob),
+}
+
+enum View {
+    /// Lines, highlighting, cut at 1 MB, and whether they are a diff.
+    Lines(Vec<String>, Option<Spans>, bool, bool),
+    Pic(egui::TextureHandle, [u32; 2]),
+    Msg(&'static str),
+}
+
+impl Diff {
+    fn new(file: usize, blob: bool) -> Diff {
+        Diff { file, blob, text: None, job: None }
+    }
+}
+
+impl Open {
+    fn new(at: usize) -> Open {
+        Open { at, sel: 0, info: None, job: None, totals: (0, 0), widest: (0, 0), picture: vec![], nodes: vec![], folded: HashSet::new(), items: vec![], inline: vec![], pics: vec![], diff: None, reveal: false }
+    }
+
+    fn files(&self) -> &[Change] {
+        self.info.as_ref().map_or(&[][..], |i| &i.1[..])
+    }
+
+    fn set_info(&mut self, info: (String, Vec<Change>), tree: bool) {
+        let files = &info.1;
+        let mut totals = (0, 0);
+        let mut widest = (0, 0);
+        for (a, d) in files.iter().filter_map(|f| f.lines) {
+            totals = (totals.0 + a as u64, totals.1 + d as u64);
+            widest = (widest.0.max(a), widest.1.max(d));
+        }
+        (self.totals, self.widest) = (totals, widest);
+        self.picture = files.iter().map(|f| is_picture(&f.path)).collect();
+        self.nodes = if grouped(files) { group(files) } else { vec![] };
+        self.info = Some(info);
+        self.rebuild(tree);
+    }
+
+    /// The rows of the file list, as the grouping and the folded headings leave them.
+    fn rebuild(&mut self, tree: bool) {
+        let keep = self.items.get(self.sel).copied();
+        self.items.clear();
+        if tree && !self.nodes.is_empty() {
+            let mut i = 0;
+            while i < self.nodes.len() {
+                match &self.nodes[i] {
+                    Node::Dir { depth, len, .. } => {
+                        self.items.push((Item::Dir(i), *depth));
+                        if self.folded.contains(&i) {
+                            i += len;
+                        }
+                    }
+                    Node::File { idx, depth } => self.items.push((Item::File(*idx), *depth)),
+                }
+                i += 1;
+            }
+        } else {
+            let n = self.files().len();
+            self.items.extend((0..n).map(|i| (Item::File(i), 0)));
+        }
+        self.sel = keep.and_then(|k| self.items.iter().position(|x| *x == k)).unwrap_or(self.sel).min(self.items.len().saturating_sub(1));
+    }
+
+    /// The files in the order the list shows them, folded ones included.
+    fn order(&self, tree: bool) -> Vec<usize> {
+        if tree && !self.nodes.is_empty() {
+            self.nodes.iter().filter_map(|n| if let Node::File { idx, .. } = n { Some(*idx) } else { None }).collect()
+        } else {
+            (0..self.files().len()).collect()
+        }
+    }
+
+    fn expanded(&self, file: usize) -> bool {
+        self.inline.iter().any(|x| x.file == file)
+    }
+
+    fn toggle(&mut self, item: usize, tree: bool) {
+        match self.items.get(item).map(|x| x.0) {
+            Some(Item::Dir(n)) => {
+                if !self.folded.remove(&n) {
+                    self.folded.insert(n);
+                }
+                self.rebuild(tree);
+            }
+            Some(Item::File(f)) => match self.inline.iter().position(|x| x.file == f) {
+                Some(k) => {
+                    self.inline.remove(k);
+                }
+                None => self.inline.push(Inline { file: f, text: None, job: None, wrapped: None }),
+            },
+            None => {}
+        }
+    }
+
+    /// `[` and `]` in the list: open the selected file's diff alone, then move to the
+    /// previous or next file and open its instead.
+    fn walk(&mut self, d: isize) {
+        let only = |o: &mut Open, f: usize| {
+            o.inline.retain(|x| x.file == f);
+            if o.inline.is_empty() {
+                o.inline.push(Inline { file: f, text: None, job: None, wrapped: None });
+            }
+            o.reveal = true;
+        };
+        if let Some(&(Item::File(f), _)) = self.items.get(self.sel) {
+            if !(self.expanded(f) && self.inline.len() == 1) {
+                return only(self, f);
+            }
+        }
+        let mut i = self.sel as isize;
+        loop {
+            i += d;
+            let Some(&(it, _)) = usize::try_from(i).ok().and_then(|i| self.items.get(i)) else { return };
+            if let Item::File(f) = it {
+                self.sel = i as usize;
+                return only(self, f);
+            }
+        }
+    }
+
+    /// `[` and `]` with a file in the whole panel: the previous or next file there.
+    fn step_file(&mut self, d: isize, tree: bool) {
+        let Some((cur, blob)) = self.diff.as_ref().map(|x| (x.file, x.blob)) else { return };
+        let order = self.order(tree);
+        let Some(k) = order.iter().position(|&f| f == cur) else { return };
+        let Some(&next) = k.checked_add_signed(d).and_then(|k| order.get(k)) else { return };
+        self.diff = Some(Diff::new(next, blob));
+        if let Some(i) = self.items.iter().position(|x| x.0 == Item::File(next)) {
+            self.sel = i;
+            self.reveal = true;
+        }
+    }
+}
+
+/// A picture's side, asked for if it is not yet and a worker is free.
+#[allow(clippy::too_many_arguments)]
+fn want_pic(pics: &mut Vec<Pic>, ctx: &egui::Context, root: &Path, hash: &str, parents: &[String], ch: &Change, file: usize, old: bool, px: u32) -> usize {
+    let k = match pics.iter().position(|p| p.file == file && p.old == old && p.px == px) {
+        Some(k) => k,
+        None => {
+            pics.push(Pic { file, old, px, started: false, job: None, tex: None, failed: false });
+            pics.len() - 1
+        }
+    };
+    let busy = pics.iter().filter(|p| p.job.is_some()).count();
+    let p = &mut pics[k];
+    if !p.started && busy < PICTURE_JOBS {
+        p.started = true;
+        let (root, hash, parents, ch) = (root.to_path_buf(), hash.to_string(), parents.to_vec(), ch.clone());
+        p.job = Some(spawn(ctx, move || picture_side(&root, &hash, &parents, &ch, old, px)));
+    }
+    k
+}
+
+/// A commit to open once the page holding it is read.
+enum Want {
+    Hash(String),
+    At(usize),
+}
+
+pub struct History {
+    pub root: PathBuf,
+    branch: String,
+    /// The inspector was opened for the history: closing one closes both.
+    pub opened: bool,
+    list: List,
+    /// The whole history, kept while one file's is shown.
+    all: Option<List>,
     /// The keyboard has been used: the selected row is marked from then on.
     keyed: bool,
     reveal: bool,
     open: Option<Open>,
     /// Where the open diff's wrapped rows start, when wrapping.
     wrapped: Option<crate::inspector::Wrapped>,
+    /// Many files are shown by folder (the toggle above them switches).
+    tree: bool,
+    want: Option<Want>,
+}
+
+/// What a simulated user can check: the state behind the view.
+#[cfg(test)]
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Probe {
+    /// The file whose history is shown.
+    pub filter: Option<String>,
+    pub at: Option<usize>,
+    pub subject: Option<String>,
+    pub tree: bool,
+    /// Rows of the file list, and the keyboard's place in them.
+    pub items: usize,
+    pub sel: usize,
+    /// Files with their diff open under them, and how many of those have lines.
+    pub inline: Vec<usize>,
+    pub inline_lines: Vec<usize>,
+    /// Rows the open diffs are drawn in when wrapped.
+    pub inline_wrapped: Vec<usize>,
+    /// The file shown in the whole panel, as of the commit or as its change.
+    pub full: Option<(usize, bool)>,
+    /// Picture sides decoded, and those that could not be.
+    pub pictures: usize,
+    pub failed: usize,
+    pub folded: usize,
 }
 
 #[cfg(test)]
 impl History {
-    /// (commits loaded, all read, commit open, its files, diff lines shown).
+    /// (commits loaded, all read, commit open, its files, lines shown in the whole panel).
     pub fn state(&self) -> (usize, bool, Option<usize>, Option<usize>, Option<usize>) {
         let o = self.open.as_ref();
-        (self.commits.len(), self.done, o.map(|o| o.at), o.and_then(|o| o.info.as_ref()).map(|i| i.1.len()), o.and_then(|o| o.diff.as_ref()?.text.as_ref()).map(|t| t.0.len()))
+        let lines = o.and_then(|o| match o.diff.as_ref()?.text.as_ref()? {
+            View::Lines(l, ..) => Some(l.len()),
+            _ => None,
+        });
+        (self.list.commits.len(), self.list.done, o.map(|o| o.at), o.and_then(|o| o.info.as_ref()).map(|i| i.1.len()), lines)
+    }
+    pub fn probe(&self) -> Probe {
+        let o = self.open.as_ref();
+        Probe {
+            filter: self.list.path.clone(),
+            at: o.map(|o| o.at),
+            subject: o.map(|o| self.list.commits[o.at].subject.clone()),
+            tree: self.tree,
+            items: o.map_or(0, |o| o.items.len()),
+            sel: o.map_or(0, |o| o.sel),
+            inline: o.map_or(vec![], |o| o.inline.iter().map(|x| x.file).collect()),
+            inline_lines: o.map_or(vec![], |o| o.inline.iter().filter_map(|x| x.text.as_ref().map(|t| t.0.len())).collect()),
+            inline_wrapped: o.map_or(vec![], |o| o.inline.iter().filter_map(|x| x.wrapped.as_ref().map(|w| w.rows.len())).collect()),
+            full: o.and_then(|o| o.diff.as_ref().map(|d| (d.file, d.blob))),
+            pictures: o.map_or(0, |o| o.pics.iter().filter(|p| p.tex.is_some()).count()),
+            failed: o.map_or(0, |o| o.pics.iter().filter(|p| p.failed).count()),
+            folded: o.map_or(0, |o| o.folded.len()),
+        }
+    }
+    /// The open commit's files, as listed.
+    pub fn files(&self) -> Vec<Change> {
+        self.open.as_ref().map_or(vec![], |o| o.files().to_vec())
+    }
+    /// The hash of a loaded commit.
+    pub fn hash(&self, i: usize) -> Option<String> {
+        self.list.commits.get(i).map(|c| c.hash.clone())
+    }
+    /// What the whole panel shows: (first lines, as of the commit).
+    pub fn full_text(&self) -> Option<Vec<String>> {
+        match self.open.as_ref()?.diff.as_ref()?.text.as_ref()? {
+            View::Lines(l, ..) => Some(l.iter().take(40).cloned().collect()),
+            _ => None,
+        }
     }
     /// Rows the open diff is drawn in when wrapped (None when not wrapping).
     pub fn wrapped_rows(&self) -> Option<usize> {
@@ -399,11 +938,11 @@ impl History {
     }
     /// The running git (0 when none).
     pub fn git_pid(&self) -> u32 {
-        self.feed.as_ref().map_or(0, |f| f.lock().pid)
+        self.list.feed.as_ref().map_or(0, |f| f.lock().pid)
     }
     pub fn more(&mut self, ctx: &egui::Context) {
         self.poll(ctx);
-        if let Some(f) = &self.feed {
+        if let Some(f) = &self.list.feed {
             f.ask();
         }
     }
@@ -411,7 +950,7 @@ impl History {
 
 impl History {
     pub fn new(root: PathBuf, branch: String, opened: bool) -> History {
-        History { root, branch, opened, commits: vec![], rows: vec![], lanes: Lanes::default(), feed: None, asked: false, done: false, sel: 0, keyed: false, reveal: false, open: None, wrapped: None }
+        History { root, branch, opened, list: List::new(None), all: None, keyed: false, reveal: false, open: None, wrapped: None, tree: true, want: None }
     }
 
     /// Back to the graph (the palette command run while the history is open).
@@ -423,49 +962,131 @@ impl History {
     /// Take in what the workers finished, and start what is wanted.
     pub(crate) fn poll(&mut self, ctx: &egui::Context) {
         // The first page is asked for here, the next ones as the graph nears its end.
-        let f = self.feed.get_or_insert_with(|| feed(self.root.clone(), ctx));
-        if self.commits.is_empty() && !self.asked && !self.done {
+        let l = &mut self.list;
+        let f = l.feed.get_or_insert_with(|| feed(self.root.clone(), ctx, l.path.as_deref().map_or_else(|| log_args().map(String::from).to_vec(), file_log_args)));
+        if l.commits.is_empty() && !l.asked && !l.done {
             f.ask();
-            self.asked = true;
+            l.asked = true;
         }
         let mut p = f.lock();
         let page = std::mem::take(&mut p.got);
-        self.done = p.end;
+        l.done = p.end;
         drop(p);
-        if !page.is_empty() || self.done {
-            self.asked = false;
+        if !page.is_empty() || l.done {
+            l.asked = false;
         }
+        // One file's commits are not a graph: they go down in one line.
+        let follow = l.path.is_some();
         for c in page {
-            self.rows.push(self.lanes.place(&c));
-            self.commits.push(c);
+            l.rows.push(if follow { Row { col: 0, up: !l.commits.is_empty(), ins: vec![], outs: vec![0], pass: vec![] } } else { l.lanes.place(&c) });
+            l.commits.push(c);
         }
+        if follow && l.done {
+            if let Some(r) = l.rows.last_mut() {
+                r.outs.clear();
+            }
+        }
+        if let Some(w) = self.want.take() {
+            let l = &mut self.list;
+            let at = match &w {
+                Want::Hash(x) => l.commits.iter().position(|c| c.hash == *x),
+                Want::At(i) => (*i < l.commits.len()).then_some(*i),
+            };
+            match at {
+                Some(i) => self.open_commit(i),
+                None if l.done => {}
+                None => {
+                    l.ask();
+                    self.want = Some(w);
+                }
+            }
+        }
+        let tree = self.tree;
         if let Some(o) = &mut self.open {
-            let (c, root) = (&self.commits[o.at], self.root.clone());
+            let (c, root) = (&self.list.commits[o.at], &self.root);
             if o.info.is_none() && o.job.is_none() {
                 let (root, hash, parents) = (root.clone(), c.hash.clone(), c.parents.clone());
                 o.job = Some(spawn(ctx, move || changes(&root, &hash, &parents)));
             }
             if let Some(r) = take(&o.job) {
-                o.info = Some(r);
+                o.set_info(r, tree);
                 o.job = None;
             }
-            if let (Some(d), Some((_, files))) = (&mut o.diff, &o.info) {
-                if d.text.is_none() && d.job.is_none() {
-                    let (hash, parents, ch) = (c.hash.clone(), c.parents.clone(), files[d.file].clone());
-                    d.job = Some(spawn(ctx, move || diff(&root, &hash, &parents, &ch)));
+            if let Some((_, files)) = &o.info {
+                for x in &mut o.inline {
+                    if x.text.is_none() && x.job.is_none() && !o.picture[x.file] {
+                        let (root, hash, parents, ch) = (root.clone(), c.hash.clone(), c.parents.clone(), files[x.file].clone());
+                        x.job = Some(spawn(ctx, move || diff(&root, &hash, &parents, &ch)));
+                    }
+                    if let Some(r) = take(&x.job) {
+                        x.text = Some(r);
+                        x.job = None;
+                    }
                 }
-                if let Some(r) = take(&d.job) {
-                    d.text = Some(r);
-                    d.job = None;
+                if let Some(d) = &mut o.diff {
+                    if d.text.is_none() && d.job.is_none() && (d.blob || !o.picture[d.file]) {
+                        let (root, hash, parents, ch, blob_of) = (root.clone(), c.hash.clone(), c.parents.clone(), files[d.file].clone(), d.blob);
+                        d.job = Some(spawn(ctx, move || {
+                            if !blob_of {
+                                return Got::Diff(diff(&root, &hash, &parents, &ch));
+                            }
+                            // A deleted file is shown as it was just before.
+                            match (ch.status, parents.first()) {
+                                (b'D', Some(p)) => Got::Blob(blob(&root, p, &ch.path)),
+                                (b'D', None) => Got::Blob(Blob::Nothing("Deleted here")),
+                                _ => Got::Blob(blob(&root, &hash, &ch.path)),
+                            }
+                        }));
+                    }
+                    if let Some(g) = take(&d.job) {
+                        d.job = None;
+                        d.text = Some(match g {
+                            Got::Diff((l, s, cut)) => View::Lines(l, s, cut, true),
+                            Got::Blob(Blob::Text(l, s, cut)) => View::Lines(l, s, cut, false),
+                            Got::Blob(Blob::Picture(img, dims)) => View::Pic(ctx.load_texture("git-file", img, egui::TextureOptions::LINEAR), dims),
+                            Got::Blob(Blob::Nothing(m)) => View::Msg(m),
+                        });
+                    }
+                }
+            }
+            for p in &mut o.pics {
+                if let Some(r) = take(&p.job) {
+                    p.job = None;
+                    match r {
+                        Some((img, dims)) => p.tex = Some((ctx.load_texture("git-picture", img, egui::TextureOptions::LINEAR), dims)),
+                        None => p.failed = true,
+                    }
                 }
             }
         }
     }
 
     fn open_commit(&mut self, i: usize) {
-        if i < self.commits.len() {
-            self.sel = i;
-            self.open = Some(Open { at: i, sel: 0, info: None, job: None, diff: None });
+        if i < self.list.commits.len() {
+            self.list.sel = i;
+            self.reveal = true;
+            self.wrapped = None;
+            self.open = Some(Open::new(i));
+        }
+    }
+
+    /// A commit by its hash (a parent link): looked for in the pages still to come, and
+    /// in the whole history when one file's does not have it.
+    fn open_hash(&mut self, hash: String) {
+        if self.list.path.is_some() && !self.list.commits.iter().any(|c| c.hash == hash) {
+            self.show_all();
+        }
+        self.want = Some(Want::Hash(hash));
+    }
+
+    /// The next newer (-1) or older (+1) commit in the list.
+    fn step_commit(&mut self, d: isize) {
+        let Some(at) = self.open.as_ref().and_then(|o| o.at.checked_add_signed(d)) else { return };
+        if at < self.list.commits.len() {
+            self.open_commit(at);
+        } else if !self.list.done {
+            self.want = Some(Want::At(at));
+            self.list.ask();
         }
     }
 
@@ -474,6 +1095,46 @@ impl History {
             Some(o) if o.diff.is_some() => o.diff = None,
             _ => self.top(),
         }
+    }
+
+    /// A file of the open commit (the right-click menu's).
+    pub fn file(&self, i: usize) -> Option<&Change> {
+        self.open.as_ref()?.files().get(i)
+    }
+
+    /// The file as it was in the open commit, in the whole panel.
+    pub fn view_as_of(&mut self, file: usize) {
+        if let Some(o) = self.open.as_mut().filter(|o| file < o.files().len()) {
+            self.wrapped = None;
+            o.diff = Some(Diff::new(file, true));
+        }
+    }
+
+    /// The commits that changed one file, in place of the whole history.
+    pub fn show_file_history(&mut self, path: String) {
+        let whole = std::mem::replace(&mut self.list, List::new(Some(path)));
+        if whole.path.is_none() {
+            self.all = Some(whole);
+        }
+        self.open = None;
+        self.want = None;
+        self.reveal = true;
+    }
+
+    /// The whole history again, where it was left.
+    pub fn show_all(&mut self) {
+        if let Some(l) = self.all.take() {
+            self.list = l;
+            self.open = None;
+            self.want = None;
+            self.reveal = true;
+        }
+    }
+
+    /// Whether a key is the history's: moving, opening and going back always, and `[`
+    /// and `]` (previous and next file) once a commit is open.
+    pub fn takes(&self, k: Key) -> bool {
+        matches!(k, Key::ArrowUp | Key::ArrowDown | Key::PageUp | Key::PageDown | Key::Home | Key::End | Key::Enter | Key::Escape) || matches!(k, Key::OpenBracket | Key::CloseBracket) && self.open.is_some()
     }
 
     /// A key while the history has the keyboard; false when it should close.
@@ -492,26 +1153,40 @@ impl History {
             true
         };
         self.keyed = true;
+        let tree = self.tree;
+        if k == Key::Escape {
+            match &self.open {
+                Some(_) => self.back(),
+                None if self.all.is_some() => self.show_all(),
+                None => return false,
+            }
+            return true;
+        }
         match &mut self.open {
-            _ if k == Key::Escape => {
-                if self.open.is_none() {
-                    return false;
-                }
-                self.back();
-            }
-            None if k == Key::Enter => self.open_commit(self.sel),
-            None => self.reveal |= step(&mut self.sel, self.commits.len()),
-            Some(o) if o.diff.is_none() => {
-                let n = o.info.as_ref().map_or(0, |i| i.1.len());
-                if k == Key::Enter && o.sel < n {
-                    o.diff = Some(Diff { file: o.sel, text: None, job: None });
-                } else {
-                    step(&mut o.sel, n);
-                }
-            }
-            Some(_) => {}
+            None if k == Key::Enter => self.open_commit(self.list.sel),
+            None => self.reveal |= step(&mut self.list.sel, self.list.commits.len()),
+            Some(o) if o.diff.is_some() => match k {
+                Key::OpenBracket => o.step_file(-1, tree),
+                Key::CloseBracket => o.step_file(1, tree),
+                _ => {}
+            },
+            Some(o) => match k {
+                Key::Enter => o.toggle(o.sel, tree),
+                Key::OpenBracket => o.walk(-1),
+                Key::CloseBracket => o.walk(1),
+                _ => o.reveal |= step(&mut o.sel, o.items.len()),
+            },
         }
         true
+    }
+
+    /// A diff with lines is open, in the panel or under a file: the Wrap button applies.
+    fn wraps(&self) -> bool {
+        let Some(o) = &self.open else { return false };
+        match &o.diff {
+            Some(d) => matches!(d.text, Some(View::Lines(..))),
+            None => o.inline.iter().any(|x| x.text.as_ref().is_some_and(|t| !t.0.is_empty())),
+        }
     }
 }
 
@@ -540,8 +1215,18 @@ fn status_color(s: u8, pal: &Palette) -> Color32 {
     }
 }
 
-/// A small rounded label, at most `max` wide; returns its width.
-#[allow(clippy::too_many_arguments)]
+/// What a file's letter means, for its tooltip.
+fn status_tip(f: &Change) -> String {
+    match (f.status, &f.from) {
+        (b'A', _) => "Added".into(),
+        (b'D', _) => "Deleted".into(),
+        (b'R', Some(from)) => format!("Renamed from {from}"),
+        (b'C', Some(from)) => format!("Copied from {from}"),
+        (b'T', _) => "Type changed (a file, a link or a submodule)".into(),
+        _ => "Modified".into(),
+    }
+}
+
 /// A commit's refs as pills: a local branch whose remote copy sits on the same commit
 /// becomes one ("main · origin"), the remote's own pill dropped.
 pub fn labels(refs: &[(RefKind, String)]) -> Vec<(RefKind, &str, Option<&str>)> {
@@ -592,6 +1277,12 @@ fn pill(ui: &Ui, p: &egui::Painter, at: Pos2, text: &str, remote: Option<&str>, 
     r.width()
 }
 
+/// An author's initials in a circle of their colour.
+fn avatar(p: &egui::Painter, c: Pos2, d: f32, name: &str, col: Color32) {
+    p.circle_filled(c, d / 2.0, col.gamma_multiply(0.24));
+    p.text(c, Align2::CENTER_CENTER, initials(name), FontId::proportional((d * 0.4).round()), col);
+}
+
 /// The history in place of the inspector's preview. False when it should close.
 /// `wrap`: diffs wrap their long lines (the code previews' setting, shared).
 pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, wrap: &mut bool, env: &mut Env) -> bool {
@@ -610,8 +1301,32 @@ pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, wrap: &mut bool, env: &mut
     if deep && crate::ui::glyph_button(&mut hui, Glyph::Back, "Back (Esc)", true, &pal).clicked() {
         h.back();
     }
+    // Up and down walk the commits from a commit, and the files from a file.
+    let (full, n) = (h.open.as_ref().is_some_and(|o| o.diff.is_some()), h.list.commits.len());
+    if let Some(o) = &h.open {
+        let (up, down) = if full {
+            let order = o.order(h.tree);
+            let k = o.diff.as_ref().and_then(|d| order.iter().position(|&f| f == d.file)).unwrap_or(0);
+            (k > 0, k + 1 < order.len())
+        } else {
+            (o.at > 0, o.at + 1 < n || !h.list.done)
+        };
+        let (tu, td) = if full { ("Previous file ([)", "Next file (])") } else { ("Newer commit", "Older commit") };
+        let (nu, nd) = if full { ("previous file", "next file") } else { ("newer commit", "older commit") };
+        hui.add_space(2.0);
+        let a = crate::ui::glyph_button_as(&mut hui, Glyph::ChevronUp, tu, up, &pal, nu).clicked();
+        let b = crate::ui::glyph_button_as(&mut hui, Glyph::ChevronDown, td, down, &pal, nd).clicked();
+        let tree = h.tree;
+        match (a, b, full) {
+            (true, _, true) => h.open.as_mut().into_iter().for_each(|o| o.step_file(-1, tree)),
+            (_, true, true) => h.open.as_mut().into_iter().for_each(|o| o.step_file(1, tree)),
+            (true, _, false) => h.step_commit(-1),
+            (_, true, false) => h.step_commit(1),
+            _ => {}
+        }
+    }
     // A diff wraps like a code preview, from the same button.
-    if h.open.as_ref().is_some_and(|o| o.diff.is_some()) {
+    if h.wraps() {
         hui.add_space(4.0);
         crate::inspector::seg_frame(&mut hui, &pal, |ui| {
             if crate::inspector::seg_button(ui, *wrap, "Wrap lines", &pal, |p, r, c| crate::theme::paint_glyph(p, r, Glyph::Wrap, c)) {
@@ -619,12 +1334,13 @@ pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, wrap: &mut bool, env: &mut
             }
         });
     }
-    // What is shown, as the same tinted pill the preview puts its file name in.
-    let (icon, label) = match &h.open {
-        None => ("git-branch", h.branch.clone()),
+    // What is shown, as the same tinted pill the preview puts its file name in. A
+    // commit's short hash copies the whole one.
+    let (icon, label, hash) = match &h.open {
+        None => ("git-branch", h.branch.clone(), None),
         Some(o) => match (&o.diff, &o.info) {
-            (Some(d), Some(i)) => ("file", i.1[d.file].path.rsplit('/').next().unwrap_or("").to_string()),
-            _ => ("", h.commits[o.at].hash[..7].to_string()),
+            (Some(d), Some(i)) => (if d.blob { "file-text" } else { "git-compare" }, i.1[d.file].path.rsplit('/').next().unwrap_or("").to_string(), None),
+            _ => ("", h.list.commits[o.at].hash[..7].to_string(), Some(h.list.commits[o.at].hash.clone())),
         },
     };
     hui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -635,65 +1351,95 @@ pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, wrap: &mut bool, env: &mut
         }
         let font = if icon.is_empty() { FontId::monospace(11.5) } else { FontId::proportional(12.0) };
         let g = crate::listing::elided(ui, &label, font, room.min(260.0), pal.text);
-        let (r, _) = ui.allocate_exact_size(vec2(g.size().x + iw + 20.0, 22.0), Sense::hover());
-        ui.painter().rect_filled(r, CornerRadius::same(11), pal.accent.gamma_multiply(0.22));
+        let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + iw + 20.0, 22.0), if hash.is_some() { Sense::click() } else { Sense::hover() });
+        let lit = hash.is_some() && resp.hovered();
+        ui.painter().rect_filled(r, CornerRadius::same(11), pal.accent.gamma_multiply(if lit { 0.36 } else { 0.22 }));
         crate::theme::paint_lucide(ui.painter(), Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), Vec2::splat(12.0)), icon, pal.text);
         ui.painter().galley(pos2(r.left() + 10.0 + iw, r.center().y - g.size().y / 2.0), g, pal.text);
+        if let Some(full) = hash {
+            crate::ui::note_control(ui, r, "copy hash");
+            if resp.on_hover_text("Copy the full hash").clicked() {
+                ui.ctx().copy_text(full.clone());
+                env.actions.push(Action::Toast(format!("Copied {full}")));
+            }
+        }
     });
     let body = Rect::from_min_max(pos2(rect.left(), hdr.bottom() + 1.0), rect.max);
     let mut bui = ui.new_child(UiBuilder::new().max_rect(body).id_salt(("git", env.panel_id)));
     bui.set_clip_rect(body.intersect(ui.clip_rect()));
-    let fs = env.cfg.font_size;
-    let dim = |ui: &Ui, msg: &str| {
-        ui.painter().text(body.center(), Align2::CENTER_CENTER, msg, FontId::proportional(fs), pal.text_dim);
-    };
-    match h.open.as_ref().map(|o| o.diff.as_ref().map(|d| &d.text)) {
-        None if h.commits.is_empty() => dim(&bui, if h.done { "No commits yet" } else { "Loading…" }),
+    match h.open.as_ref().map(|o| o.diff.is_some()) {
         None => graph(&mut bui, body, h, env),
-        Some(None) => commit(&mut bui, body, h, env),
-        Some(Some(None)) => dim(&bui, "Loading…"),
-        Some(Some(Some((l, _, _)))) if l.is_empty() => dim(&bui, "No text changes"),
-        Some(Some(Some((lines, spans, cut)))) => {
-            if !*wrap {
-                h.wrapped = None;
-            }
-            let wrapped = if *wrap { Some(&mut h.wrapped) } else { None };
-            crate::inspector::text_view(&mut bui, body, lines, *cut, spans.as_deref(), false, wrapped, env.cfg.inspector_font_size, &pal, true)
-        }
+        Some(false) => commit(&mut bui, body, h, *wrap, env),
+        Some(true) => whole(&mut bui, body, h, *wrap, env),
     }
     true
+}
+
+fn dim(ui: &Ui, at: Rect, msg: &str, fs: f32, pal: &Palette) {
+    ui.painter().text(at.center(), Align2::CENTER_CENTER, msg, FontId::proportional(fs), pal.text_dim);
 }
 
 fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
     let pal = *env.pal;
     let fs = env.cfg.font_size;
+    // One file's history: what it is, and the way back to every commit.
+    let mut body = body;
+    if let Some(path) = h.list.path.clone() {
+        let bar = Rect::from_min_size(body.min, vec2(body.width(), (fs + 14.0).round()));
+        body.min.y = bar.bottom();
+        let p = ui.painter();
+        p.rect_filled(bar, CornerRadius::ZERO, pal.alt);
+        p.line_segment([bar.left_bottom(), bar.right_bottom()], Stroke::new(1.0, pal.border));
+        crate::theme::paint_lucide(p, Rect::from_center_size(pos2(bar.left() + 16.0, bar.center().y), Vec2::splat(12.0)), "file-text", pal.text_dim);
+        let (dir, name) = path.rsplit_once('/').unwrap_or(("", &path));
+        let end = bar.right() - 38.0;
+        let g = crate::listing::elided(ui, name, FontId::proportional(fs - 0.5), end - bar.left() - 30.0, pal.text);
+        let dx = bar.left() + 30.0 + g.size().x + 10.0;
+        p.galley(pos2(bar.left() + 30.0, bar.center().y - g.size().y / 2.0), g, pal.text);
+        if !dir.is_empty() && end - dx > 30.0 {
+            let g = crate::listing::elided(ui, dir, FontId::proportional(fs - 2.0), end - dx, pal.text_dim);
+            p.galley(pos2(dx, bar.center().y - g.size().y / 2.0), g, pal.text_dim);
+        }
+        let mut cui = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(pos2(bar.right() - 32.0, bar.top()), bar.max)).layout(Layout::left_to_right(Align::Center)));
+        if crate::ui::glyph_button_as(&mut cui, Glyph::Close, "Show all commits (Esc)", true, &pal, "show all commits").clicked() {
+            h.show_all();
+            return;
+        }
+    }
+    if h.list.commits.is_empty() {
+        let msg = match (h.list.done, h.list.path.is_some()) {
+            (false, _) => "Loading…",
+            (true, true) => "No commits changed this file",
+            (true, false) => "No commits yet",
+        };
+        dim(ui, body, msg, fs, &pal);
+        return;
+    }
     let (font, small, tag) = (FontId::proportional(fs), FontId::proportional(fs - 1.5), FontId::proportional((fs - 2.5).max(8.5)));
     let row_h = ((fs * 1.35 + (fs - 1.5) * 1.35) + 7.0 * env.cfg.spacing).round();
     let step = (fs + 1.0).round();
     let dot = (step * 0.27).max(3.0);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-    let n = h.commits.len() + usize::from(!h.done);
+    let l = &mut h.list;
+    let n = l.commits.len() + usize::from(!l.done);
     let anim = env.cfg.animations;
     let mut open = None;
     let mut inner = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(4.0, 4.0))));
-    ScrollArea::vertical().auto_shrink([false, false]).id_salt("git_graph").show_viewport(&mut inner, |ui, vp| {
+    ScrollArea::vertical().auto_shrink([false, false]).id_salt(("git_graph", l.path.is_some())).show_viewport(&mut inner, |ui, vp| {
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), n as f32 * row_h), Sense::hover());
         if std::mem::take(&mut h.reveal) {
-            ui.scroll_to_rect(Rect::from_min_size(pos2(r.left(), r.top() + h.sel as f32 * row_h), vec2(r.width(), row_h)), None);
+            ui.scroll_to_rect(Rect::from_min_size(pos2(r.left(), r.top() + l.sel as f32 * row_h), vec2(r.width(), row_h)), None);
         }
         let first = (vp.min.y / row_h).floor().max(0.0) as usize;
         let last = ((vp.max.y / row_h).ceil() as usize + 1).min(n);
-        if !h.done && last + 100 > h.commits.len() && !h.asked {
-            if let Some(f) = &h.feed {
-                f.ask();
-                h.asked = true;
-            }
+        if last + 100 > l.commits.len() {
+            l.ask();
         }
         let gx = r.left() + 8.0 + step / 2.0;
         let x = |l: u16| gx + (l as usize).min(LANES) as f32 * step;
         // The text starts after the widest row on screen, easing there as rows scroll by,
         // so a busy stretch far down never pushes the quiet ones aside.
-        let wide = h.rows[first.min(h.rows.len())..last.min(h.rows.len())].iter().flat_map(|r| r.pass.iter().chain(&r.outs).chain(&r.ins).chain([&r.col])).max().map_or(1, |&l| (l as usize + 1).min(LANES + 1));
+        let wide = l.rows[first.min(l.rows.len())..last.min(l.rows.len())].iter().flat_map(|r| r.pass.iter().chain(&r.outs).chain(&r.ins).chain([&r.col])).max().map_or(1, |&l| (l as usize + 1).min(LANES + 1));
         let wide = ui.ctx().animate_value_with_time(ui.id().with("gitw"), wide as f32, if anim { 0.18 } else { 0.0 });
         let tx = gx + (wide - 1.0) * step + step / 2.0 + 8.0;
         let fold = pal.text_dim.gamma_multiply(0.4);
@@ -707,20 +1453,20 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
         };
         for i in first..last {
             let rr = Rect::from_min_size(pos2(r.left(), r.top() + i as f32 * row_h), vec2(r.width(), row_h));
-            if i >= h.commits.len() {
+            if i >= l.commits.len() {
                 crate::ui::spinner(&p, pos2(tx + 6.0, rr.center().y), 5.0, pal.accent, ui.input(|i| i.time));
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
                 continue;
             }
             let resp = ui.interact(rr, ui.id().with(("gitrow", i)), Sense::click());
-            let under = if i == h.sel && h.keyed { pal.row_hover } else if resp.hovered() { pal.hover } else { pal.bg };
+            let under = if i == l.sel && h.keyed { pal.row_hover } else if resp.hovered() { pal.hover } else { pal.bg };
             if under != pal.bg {
                 p.rect_filled(rr.shrink2(vec2(2.0, 1.0)), CornerRadius::same(5), under);
             }
             if resp.clicked() {
                 open = Some(i);
             }
-            let (c, row) = (&h.commits[i], &h.rows[i]);
+            let (c, row) = (&l.commits[i], &l.rows[i]);
             let (top, cy, bot) = (rr.top(), rr.center().y, rr.bottom());
             let mut folded = false;
             for &l in &row.pass {
@@ -777,13 +1523,18 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
             }
             let g = if px > tx { crate::listing::elided(ui, &c.subject, font.clone(), tx + w - px - 2.0, pal.text) } else { g };
             p.galley(pos2(px + if px > tx { 2.0 } else { 0.0 }, y0), g.clone(), pal.text);
-            // Meta line: short hash, author, when.
-            let mut job = LayoutJob::default();
-            job.append(&c.hash[..7], 0.0, TextFormat { font_id: FontId::monospace(small.size - 0.5), color: pal.text_dim.gamma_multiply(0.8), valign: Align::Center, ..Default::default() });
-            job.append(&format!("  {}  ·  {}", c.author, ago(c.time, now)), 0.0, TextFormat { font_id: small.clone(), color: pal.text_dim, valign: Align::Center, ..Default::default() });
-            job.wrap = TextWrapping { max_width: w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-            let mg = ui.fonts_mut(|f| f.layout_job(job));
-            p.galley(pos2(tx, y0 + g.size().y + 1.0), mg, pal.text_dim);
+            // Meta line: short hash, the author after a dot of their colour, when.
+            let my = y0 + g.size().y + 1.0;
+            let hg = p.layout_no_wrap(c.hash[..7].to_string(), FontId::monospace(small.size - 0.5), pal.text_dim.gamma_multiply(0.8));
+            let hw = hg.size().x;
+            let mh = small.size * 1.3;
+            p.galley(pos2(tx, my + (mh - hg.size().y) / 2.0), hg, pal.text_dim);
+            let ax = tx + hw + 10.0;
+            if tx + w - ax > 30.0 {
+                p.circle_filled(pos2(ax + 3.0, my + mh / 2.0), 3.0, author_color(&pal, &c.email, &c.author));
+                let ag = crate::listing::elided(ui, &format!("{}  ·  {}", c.author, ago(c.time, now)), small.clone(), tx + w - ax - 10.0, pal.text_dim);
+                p.galley(pos2(ax + 10.0, my + (mh - ag.size().y) / 2.0), ag, pal.text_dim);
+            }
         }
     });
     if let Some(i) = open {
@@ -791,17 +1542,32 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
     }
 }
 
-fn commit(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
+/// What a click in the file list does, once the list is drawn.
+enum Act {
+    Hash(String),
+    Toggle(usize),
+    /// A file in the whole panel; true when a double click got there.
+    Large(usize, bool),
+    Menu(usize, Pos2),
+    Tree(bool),
+}
+
+fn commit(ui: &mut Ui, body: Rect, h: &mut History, wrap: bool, env: &mut Env) {
     let pal = *env.pal;
-    let fs = env.cfg.font_size;
-    let keyed = h.keyed;
+    let (fs, sp) = (env.cfg.font_size, env.cfg.spacing);
+    let (keyed, tree) = (h.keyed, h.tree);
+    let root = h.root.clone();
     let Some(o) = h.open.as_mut() else { return };
-    let c = &h.commits[o.at];
+    let commits = &h.list.commits;
+    let c = &commits[o.at];
+    let lane = lane_color(&pal, h.list.rows[o.at].col as usize);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
     let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(c.time.max(0) as u64);
     let mut inner = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(6.0, 4.0))));
-    let mut pick = None;
-    ScrollArea::vertical().auto_shrink([false, false]).id_salt(("git_commit", o.at)).show(&mut inner, |ui| {
+    let mut act = None;
+    let reveal = std::mem::take(&mut o.reveal);
+    let ctx = ui.ctx().clone();
+    ScrollArea::vertical().auto_shrink([false, false]).id_salt(("git_commit", c.hash.as_str())).show(&mut inner, |ui| {
         ui.add_space(6.0);
         egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0)).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
@@ -814,23 +1580,57 @@ fn commit(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
                     if r.right() - px < 40.0 {
                         break;
                     }
-                    px += pill(ui, ui.painter(), pos2(px, r.center().y), name, remote, &tag, kind, lane_color(&pal, h.rows[o.at].col as usize), &pal, r.right() - px) + 4.0;
+                    px += pill(ui, ui.painter(), pos2(px, r.center().y), name, remote, &tag, kind, lane, &pal, r.right() - px) + 4.0;
                 }
             }
-            let meta = format!("{}  ·  {}  ·  {}", c.author, ago(c.time, now), crate::fsx::fmt_time(Some(when)));
-            ui.add(egui::Label::new(egui::RichText::new(meta).size(fs - 1.5).color(pal.text_dim)).wrap());
+            // The author: initials in their colour, then their name over when.
+            ui.add_space(2.0);
+            let d = (fs * 2.3).round();
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), d), Sense::hover());
+            avatar(ui.painter(), pos2(r.left() + d / 2.0, r.center().y), d, &c.author, author_color(&pal, &c.email, &c.author));
+            let (x, w) = (r.left() + d + 9.0, r.right() - r.left() - d - 9.0);
+            if w > 20.0 {
+                let a = crate::listing::elided(ui, &c.author, FontId::proportional(fs - 0.5), w, pal.text);
+                let t = crate::listing::elided(ui, &format!("{}  ·  {}", ago(c.time, now), crate::fsx::fmt_time(Some(when))), FontId::proportional(fs - 2.0), w, pal.text_dim);
+                let y = r.center().y - (a.size().y + t.size().y) / 2.0;
+                let ah = a.size().y;
+                ui.painter().galley(pos2(x, y), a, pal.text);
+                ui.painter().galley(pos2(x, y + ah), t, pal.text_dim);
+            }
             if let Some((msg, _)) = o.info.as_ref().filter(|i| !i.0.is_empty()) {
                 ui.add_space(2.0);
                 ui.add(egui::Label::new(egui::RichText::new(msg).size(fs - 0.5).color(pal.text_dim)).wrap());
+            }
+            // Parents, each a link to its commit.
+            if !c.parents.is_empty() {
+                ui.add_space(2.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.label(egui::RichText::new(if c.parents.len() > 1 { "Parents" } else { "Parent" }).size(fs - 2.0).color(pal.text_dim));
+                    for p in &c.parents {
+                        let g = ui.painter().layout_no_wrap(p[..p.len().min(7)].to_string(), FontId::monospace(fs - 2.5), pal.accent);
+                        let (r, resp) = ui.allocate_exact_size(g.size() + vec2(0.0, 2.0), Sense::click());
+                        crate::ui::note_control(ui, r, "parent link");
+                        if resp.hovered() {
+                            ui.painter().line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0, pal.accent));
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        ui.painter().galley(r.min + vec2(0.0, 1.0), g, pal.accent);
+                        let tip = commits.iter().find(|x| x.hash == *p).map_or_else(|| "Open this commit".to_string(), |x| x.subject.clone());
+                        if resp.on_hover_text(tip).clicked() {
+                            act = Some(Act::Hash(p.clone()));
+                        }
+                    }
+                });
             }
         });
         ui.add_space(8.0);
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
         ui.painter().line_segment([r.left_center(), r.right_center()], Stroke::new(1.0, pal.border));
-        ui.add_space(4.0);
         let files = match &o.info {
             Some((_, f)) if !f.is_empty() => f,
             i => {
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new(if i.is_some() { "No files changed" } else { "Loading…" }).size(fs - 0.5).color(pal.text_dim));
@@ -838,34 +1638,348 @@ fn commit(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
                 return;
             }
         };
-        let row_h = (fs + 8.0).round();
-        let (font, small) = (FontId::proportional(fs - 0.5), FontId::proportional(fs - 2.0));
-        for (i, f) in files.iter().enumerate() {
-            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
-            let on = i == o.sel && keyed;
+        // The summary: how many files and lines, and the list or folder switch.
+        let mono = FontId::monospace((fs - 2.5).max(8.0));
+        let small = FontId::proportional(fs - 1.5);
+        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), (fs + 14.0).round()), Sense::hover());
+        let fmt = |f: &FontId, c: Color32| TextFormat { font_id: f.clone(), color: c, valign: Align::Center, ..Default::default() };
+        let toggle = !o.nodes.is_empty();
+        let end = r.right() - 8.0 - if toggle { 64.0 } else { 0.0 };
+        let mut x = r.left() + 8.0;
+        let parts = [(summary(files.len()), &small, pal.text_dim, true), (format!("+{}", o.totals.0), &mono, crate::gitstatus::GREEN, o.totals.0 > 0), (format!("−{}", o.totals.1), &mono, pal.danger, o.totals.1 > 0)];
+        for (k, (t, f, c, shown)) in parts.into_iter().enumerate() {
+            if !shown || end - x < 24.0 {
+                continue;
+            }
+            let g = crate::listing::elided(ui, &t, f.clone(), end - x, c);
+            let w = g.size().x;
+            ui.painter().galley(pos2(x, r.center().y - g.size().y / 2.0), g, c);
+            x += w + if k == 0 { 10.0 } else { 6.0 };
+        }
+        if toggle {
+            let mut tui = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(pos2(r.right() - 62.0, r.top()), r.max)).layout(Layout::left_to_right(Align::Center)));
+            crate::inspector::seg_frame(&mut tui, &pal, |ui| {
+                if crate::inspector::seg_button(ui, !tree, "Show as a list", &pal, |p, r, c| crate::theme::paint_glyph(p, r, Glyph::List, c)) && tree {
+                    act = Some(Act::Tree(false));
+                }
+                if crate::inspector::seg_button(ui, tree, "Group by folder", &pal, |p, r, c| crate::theme::paint_glyph(p, r, Glyph::ListTree, c)) && !tree {
+                    act = Some(Act::Tree(true));
+                }
+            });
+        }
+        // The files. Each row's height is known before it is drawn, so only the rows on
+        // screen are drawn and only their pictures read.
+        let row_h = (fs + 4.0 + 4.0 * sp).round();
+        let code = env.cfg.inspector_font_size;
+        let (line_h, cw) = ui.fonts_mut(|f| (f.row_height(&FontId::monospace(code)) + 1.0, f.glyph_width(&mono, '0')));
+        let pic_small = (fs * 4.6).round();
+        let pic_big = (fs * 15.0).round().min(body.height() * 0.6).max(pic_small);
+        let cap = (body.height() * 0.62).max(line_h * 8.0);
+        let block = |x: &Inline| match &x.text {
+            Some((l, _, cut)) if !l.is_empty() => {
+                let rows = x.wrapped.as_ref().filter(|_| wrap).map_or(l.len(), |w| w.rows.len()) + usize::from(*cut);
+                (rows as f32 * line_h + 16.0).min(cap)
+            }
+            _ => row_h,
+        };
+        let extra = |o: &Open, f: usize| -> f32 {
+            let open = o.inline.iter().find(|x| x.file == f);
+            match (o.picture[f], open) {
+                (true, Some(_)) => pic_big + 8.0,
+                (true, None) => pic_small + 8.0,
+                (false, Some(x)) => block(x) + 8.0,
+                (false, None) => 0.0,
+            }
+        };
+        let heights: Vec<f32> = o.items.iter().map(|&(it, _)| row_h + if let Item::File(f) = it { extra(o, f) } else { 0.0 }).collect();
+        let total: f32 = heights.iter().sum();
+        let (all, _) = ui.allocate_exact_size(vec2(ui.available_width(), total + 10.0), Sense::hover());
+        let clip = ui.clip_rect();
+        let badge = (fs + 2.0).round();
+        // The listing's icons: 16 points, 7 before the name. A file's letter sits under
+        // its folder's icon.
+        let (icon, gap) = (16.0, 7.0);
+        let indent = badge + 6.0;
+        let show_counts = all.width() > 230.0;
+        let show_bar = all.width() > 300.0;
+        let digits = |n: u32| n.to_string().len() as f32;
+        let add_w = if o.widest.0 > 0 { (digits(o.widest.0) + 1.0) * cw } else { 0.0 };
+        let del_w = if o.widest.1 > 0 { (digits(o.widest.1) + 1.0) * cw } else { 0.0 };
+        let bw = (fs * 0.45).round().max(4.0);
+        let bar_w = 5.0 * bw + 8.0;
+        let font = FontId::proportional(fs - 0.5);
+        let mut y = all.top();
+        for k in 0..o.items.len() {
+            let (it, depth) = o.items[k];
+            let r = Rect::from_min_size(pos2(all.left(), y), vec2(all.width(), heights[k]));
+            y += heights[k];
+            let row = Rect::from_min_size(r.min, vec2(r.width(), row_h));
+            if reveal && k == o.sel {
+                ui.scroll_to_rect(row.expand2(vec2(0.0, 6.0)), None);
+            }
+            if r.bottom() < clip.top() || r.top() > clip.bottom() {
+                continue;
+            }
+            let id = ui.id().with(("gitfile", k, it));
+            let resp = ui.interact(row, id, Sense::click());
+            let on = k == o.sel && keyed;
             if on || resp.hovered() {
-                ui.painter().rect_filled(r, CornerRadius::same(4), if on { pal.row_hover } else { pal.hover });
+                ui.painter().rect_filled(row, CornerRadius::same(4), if on { pal.row_hover } else { pal.hover });
             }
+            let x0 = row.left() + 6.0 + depth as f32 * indent;
             if resp.clicked() {
-                pick = Some(i);
+                o.sel = k;
+                act = Some(Act::Toggle(k));
             }
-            ui.painter().circle_filled(pos2(r.left() + 10.0, r.center().y), 3.5, status_color(f.status, &pal));
-            let (dir, name) = f.path.rsplit_once('/').unwrap_or(("", &f.path));
-            let g = crate::listing::elided(ui, name, font.clone(), r.width() - 30.0, pal.text);
-            let nx = r.left() + 20.0 + g.size().x;
-            ui.painter().galley(pos2(r.left() + 20.0, r.center().y - g.size().y / 2.0), g, pal.text);
-            let hint = match &f.from {
-                Some(from) => format!("from {from}"),
-                None => dir.to_string(),
+            let f = match it {
+                Item::Dir(n) => {
+                    let Node::Dir { name, path, files: count, .. } = &o.nodes[n] else { continue };
+                    let folded = o.folded.contains(&n);
+                    crate::theme::paint_glyph(ui.painter(), Rect::from_center_size(pos2(x0 + badge / 2.0, row.center().y), Vec2::splat(13.0)), if folded { Glyph::ChevronRight } else { Glyph::ChevronDown }, pal.text_dim);
+                    let ir = Rect::from_min_size(pos2(x0 + badge + 6.0, row.center().y - icon / 2.0), Vec2::splat(icon));
+                    crate::icons::folder(ui.painter(), ir, &root.join(path));
+                    let nx = ir.right() + gap;
+                    let g = crate::listing::elided(ui, name, font.clone(), (row.right() - nx - 40.0).max(8.0), pal.text);
+                    let cx = nx + g.size().x + 8.0;
+                    ui.painter().galley(pos2(nx, row.center().y - g.size().y / 2.0), g, pal.text);
+                    ui.painter().text(pos2(cx, row.center().y), Align2::LEFT_CENTER, count.to_string(), small.clone(), pal.text_dim);
+                    continue;
+                }
+                Item::File(f) => f,
             };
-            if r.right() - nx > 40.0 && !hint.is_empty() {
-                let g = crate::listing::elided(ui, &hint, small.clone(), r.right() - nx - 14.0, pal.text_dim);
-                ui.painter().galley(pos2(nx + 8.0, r.center().y - g.size().y / 2.0), g, pal.text_dim);
+            let ch = &files[f];
+            // A quick third click (counted as a triple by egui) is still a double.
+            if resp.double_clicked() || resp.triple_clicked() {
+                act = Some(Act::Large(f, true));
+            }
+            if resp.secondary_clicked() {
+                o.sel = k;
+                act = Some(Act::Menu(f, ui.ctx().pointer_interact_pos().unwrap_or(row.center())));
+            }
+            // The status letter in a tinted square, with what it means on hover.
+            let sc = status_color(ch.status, &pal);
+            let br = Rect::from_center_size(pos2(x0 + badge / 2.0, row.center().y), Vec2::splat(badge));
+            ui.painter().rect_filled(br, CornerRadius::same(4), sc.gamma_multiply(0.16));
+            ui.painter().text(br.center(), Align2::CENTER_CENTER, (ch.status as char).to_string(), FontId::monospace((fs - 3.0).max(8.0)), sc);
+            ui.interact(br, id.with("tip"), Sense::hover()).on_hover_text(status_tip(ch));
+            // Right side: the open-large button on hover, then the counts and the blocks.
+            let expanded = o.expanded(f);
+            let mut right = row.right() - 6.0;
+            let ob = Rect::from_center_size(pos2(right - 10.0, row.center().y), Vec2::splat(20.0));
+            right -= 26.0;
+            if resp.hovered() || expanded || ui.rect_contains_pointer(ob) {
+                let b = ui.interact(ob, id.with("large"), Sense::click());
+                crate::ui::note_control(ui, ob, "open large");
+                if b.hovered() {
+                    ui.painter().rect_filled(ob, CornerRadius::same(4), pal.row_hover);
+                }
+                crate::theme::paint_glyph(ui.painter(), Rect::from_center_size(ob.center(), Vec2::splat(12.0)), Glyph::Maximize, if b.hovered() { pal.text } else { pal.text_dim });
+                if b.on_hover_text("Open large").clicked() {
+                    act = Some(Act::Large(f, false));
+                }
+            }
+            match ch.lines {
+                Some((a, d)) if show_counts => {
+                    if show_bar {
+                        let (g, rd) = blocks(a, d);
+                        for b in 0..5 {
+                            let bx = right - bar_w + b as f32 * (bw + 2.0);
+                            let c = if b < g { crate::gitstatus::GREEN } else if b < g + rd { pal.danger } else { pal.border };
+                            ui.painter().rect_filled(Rect::from_min_size(pos2(bx, row.center().y - bw / 2.0), Vec2::splat(bw)), CornerRadius::same(1), c);
+                        }
+                        right -= bar_w + 8.0;
+                    }
+                    if d > 0 {
+                        ui.painter().text(pos2(right, row.center().y), Align2::RIGHT_CENTER, format!("−{d}"), mono.clone(), pal.danger);
+                    }
+                    right -= del_w + if del_w > 0.0 { 6.0 } else { 0.0 };
+                    if a > 0 {
+                        ui.painter().text(pos2(right, row.center().y), Align2::RIGHT_CENTER, format!("+{a}"), mono.clone(), crate::gitstatus::GREEN);
+                    }
+                    right -= add_w;
+                }
+                None if show_counts => {
+                    let g = ui.painter().layout_no_wrap("binary".into(), small.clone(), pal.text_dim);
+                    right -= g.size().x;
+                    ui.painter().galley(pos2(right, row.center().y - g.size().y / 2.0), g, pal.text_dim);
+                }
+                _ => {}
+            }
+            // The name: struck through when deleted, "old → new" when renamed, the folder
+            // after it in the flat list.
+            let (dir, name) = ch.path.rsplit_once('/').unwrap_or(("", &ch.path));
+            let mut job = LayoutJob::default();
+            let nf = |c: Color32, strike: bool| TextFormat { font_id: font.clone(), color: c, strikethrough: if strike { Stroke::new(1.0, c) } else { Stroke::NONE }, valign: Align::Center, ..Default::default() };
+            if let Some(from) = &ch.from {
+                let (fdir, fname) = from.rsplit_once('/').unwrap_or(("", from));
+                job.append(if fdir == dir { fname } else { from }, 0.0, nf(pal.text_dim, false));
+                job.append("→", 6.0, nf(pal.text_dim, false));
+                job.append(name, 6.0, nf(pal.text, false));
+            } else {
+                job.append(name, 0.0, if ch.status == b'D' { nf(pal.text_dim, true) } else { nf(pal.text, false) });
+            }
+            // The file's icon (the new name's for a rename), faded with a deleted name.
+            let ir = Rect::from_min_size(pos2(x0 + badge + 6.0, row.center().y - icon / 2.0), Vec2::splat(icon));
+            let mut ip = ui.painter().clone();
+            if ch.status == b'D' {
+                ip.multiply_opacity(0.45);
+            }
+            crate::icons::file(&ip, ir, name);
+            let nx = ir.right() + gap;
+            job.wrap = TextWrapping { max_width: (right - 10.0 - nx).max(8.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+            let g = ui.fonts_mut(|f| f.layout_job(job));
+            let dx = nx + g.size().x + 10.0;
+            ui.painter().galley(pos2(nx, row.center().y - g.size().y / 2.0), g, pal.text);
+            if !(tree && !o.nodes.is_empty()) && !dir.is_empty() && right - 10.0 - dx > 30.0 {
+                let g = crate::listing::elided(ui, dir, small.clone(), right - 10.0 - dx, pal.text_dim);
+                ui.painter().galley(pos2(dx, row.center().y - g.size().y / 2.0), g, pal.text_dim);
+            }
+            // Under the row: a picture's two versions, or the open diff.
+            let under = Rect::from_min_max(pos2(nx, row.bottom() + 2.0), pos2(r.right() - 6.0, r.bottom() - 6.0));
+            if o.picture[f] {
+                let c = &commits[o.at];
+                pair(ui, under, &mut o.pics, ch, f, &ctx, &root, &c.hash, &c.parents, 512, &pal);
+            } else if let Some(x) = o.inline.iter_mut().find(|x| x.file == f) {
+                let b = Rect::from_min_max(pos2(row.left() + 4.0, under.top()), pos2(row.right() - 4.0, under.bottom()));
+                match &x.text {
+                    None => crate::ui::spinner(ui.painter(), pos2(nx + 6.0, b.top() + row_h / 2.0), 5.0, pal.accent, ui.input(|i| i.time)),
+                    Some((l, _, _)) if l.is_empty() => {
+                        ui.painter().text(pos2(nx, b.top() + row_h / 2.0), Align2::LEFT_CENTER, "No text changes", small.clone(), pal.text_dim);
+                    }
+                    Some((lines, spans, cut)) => {
+                        ui.painter().rect_filled(b, CornerRadius::same(6), pal.alt);
+                        let mut cui = ui.new_child(UiBuilder::new().max_rect(b).id_salt(("inline", f)));
+                        cui.set_clip_rect(b.intersect(clip));
+                        if !wrap {
+                            x.wrapped = None;
+                        }
+                        let wrapped = if wrap { Some(&mut x.wrapped) } else { None };
+                        crate::inspector::text_view(&mut cui, b, lines, *cut, spans.as_deref(), false, wrapped, code, &pal, true);
+                    }
+                }
+                if x.text.is_none() {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+                }
             }
         }
     });
-    if let Some(i) = pick {
-        o.sel = i;
-        o.diff = Some(Diff { file: i, text: None, job: None });
+    match act {
+        Some(Act::Hash(x)) => h.open_hash(x),
+        Some(Act::Tree(t)) => {
+            h.tree = t;
+            if let Some(o) = h.open.as_mut() {
+                o.rebuild(t);
+            }
+        }
+        Some(Act::Menu(f, pos)) => env.actions.push(Action::Open(crate::popups::Popup::git_file(env.panel_id, f, pos))),
+        Some(Act::Toggle(k)) => {
+            if let Some(o) = h.open.as_mut() {
+                o.toggle(k, tree);
+            }
+        }
+        Some(Act::Large(f, double)) => {
+            if let Some(o) = h.open.as_mut() {
+                // A double click's first click opened or closed the diff under the row:
+                // leave it open, as the first click meant.
+                if double && !o.expanded(f) {
+                    o.inline.push(Inline { file: f, text: None, job: None, wrapped: None });
+                }
+                h.wrapped = None;
+                o.diff = Some(Diff::new(f, false));
+            }
+        }
+        None => {}
+    }
+}
+
+/// A changed picture's old and new versions side by side (one of them when it was added
+/// or deleted), each read once it is on screen.
+#[allow(clippy::too_many_arguments)]
+fn pair(ui: &Ui, area: Rect, pics: &mut Vec<Pic>, ch: &Change, f: usize, ctx: &egui::Context, root: &Path, hash: &str, parents: &[String], px: u32, pal: &Palette) {
+    let (old, new) = (ch.status != b'A' && !parents.is_empty(), ch.status != b'D');
+    let gap = 26.0;
+    let both = old && new;
+    let sw = ((area.width() - gap) / 2.0).min(area.height() * 2.4).max(8.0);
+    let left = Rect::from_min_size(area.min, vec2(sw, area.height()));
+    let right = left.translate(vec2(sw + gap, 0.0));
+    if both {
+        crate::theme::paint_glyph(ui.painter(), Rect::from_center_size(pos2(left.right() + gap / 2.0, left.center().y), Vec2::splat(13.0)), Glyph::Forward, pal.text_dim);
+    }
+    let sides = [(old, true, left), (new, false, if both { right } else { left })];
+    for (shown, is_old, s) in sides {
+        if !shown || !ui.is_rect_visible(s) {
+            continue;
+        }
+        ui.painter().rect_stroke(s, CornerRadius::same(5), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+        let k = want_pic(pics, ctx, root, hash, parents, ch, f, is_old, px);
+        let p = &pics[k];
+        let tip = if is_old { "Before" } else { "After" };
+        match &p.tex {
+            Some((tex, dims)) => {
+                let [w, hh] = tex.size();
+                let a = s.shrink(4.0);
+                let k = (a.width() / w.max(1) as f32).min(a.height() / hh.max(1) as f32).min(2.0);
+                let ir = Rect::from_center_size(a.center(), vec2(w as f32 * k, hh as f32 * k));
+                crate::inspector::checkerboard(ui.painter(), ir, pal);
+                // Gone after this commit: shown faded.
+                let tint = if is_old && !new { Color32::WHITE.gamma_multiply(0.5) } else { Color32::WHITE };
+                ui.painter().image(tex.id(), ir, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), tint);
+                ui.interact(s, ui.id().with(("pic", f, is_old, px)), Sense::hover()).on_hover_text(format!("{tip}  ·  {} × {}", dims[0], dims[1]));
+            }
+            None if p.failed => {
+                ui.painter().text(s.center(), Align2::CENTER_CENTER, "Can't show", FontId::proportional(11.5), pal.text_dim);
+            }
+            None => {
+                crate::ui::spinner(ui.painter(), s.center(), 5.0, pal.accent, ui.input(|i| i.time));
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+            }
+        }
+    }
+}
+
+/// One file in the whole panel: its diff, its two versions when it is a picture, or the
+/// file as of the commit.
+fn whole(ui: &mut Ui, body: Rect, h: &mut History, wrap: bool, env: &mut Env) {
+    let pal = *env.pal;
+    let fs = env.cfg.font_size;
+    let root = h.root.clone();
+    let Some(o) = h.open.as_mut() else { return };
+    let Some((f, blob)) = o.diff.as_ref().map(|d| (d.file, d.blob)) else { return };
+    if o.info.is_none() {
+        return dim(ui, body, "Loading…", fs, &pal);
+    }
+    if !blob && o.picture[f] {
+        let c = &h.list.commits[o.at];
+        let ctx = ui.ctx().clone();
+        let a = body.shrink(16.0);
+        let hh = (a.width() / 2.0).min(a.height());
+        let area = Rect::from_center_size(a.center(), vec2(a.width(), hh));
+        let Some((_, files)) = &o.info else { return };
+        return pair(ui, area, &mut o.pics, &files[f], f, &ctx, &root, &c.hash, &c.parents, 1600, &pal);
+    }
+    let Some(d) = o.diff.as_mut() else { return };
+    match &d.text {
+        None => dim(ui, body, "Loading…", fs, &pal),
+        Some(View::Lines(l, ..)) if l.is_empty() => dim(ui, body, if blob { "Empty file" } else { "No text changes" }, fs, &pal),
+        Some(View::Lines(lines, spans, cut, is_diff)) => {
+            if !wrap {
+                h.wrapped = None;
+            }
+            let wrapped = if wrap { Some(&mut h.wrapped) } else { None };
+            crate::inspector::text_view(ui, body, lines, *cut, spans.as_deref(), !*is_diff, wrapped, env.cfg.inspector_font_size, &pal, *is_diff)
+        }
+        Some(View::Pic(tex, dims)) => {
+            let a = body.shrink(12.0);
+            let [w, hh] = tex.size();
+            let k = (a.width() / w.max(1) as f32).min(a.height() / hh.max(1) as f32).min(4.0);
+            let ir = Rect::from_center_size(a.center(), vec2(w as f32 * k, hh as f32 * k));
+            crate::inspector::checkerboard(ui.painter(), ir, &pal);
+            ui.painter().image(tex.id(), ir, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+            let g = ui.painter().layout_no_wrap(format!("{} × {}", dims[0], dims[1]), FontId::proportional(11.5), pal.text_dim);
+            let r = Rect::from_min_size(pos2(body.right() - g.size().x - 18.0, body.bottom() - 24.0), g.size() + vec2(10.0, 6.0));
+            ui.painter().rect_filled(r, CornerRadius::same(4), pal.raised.gamma_multiply(0.9));
+            ui.painter().galley(r.min + vec2(5.0, 3.0), g, pal.text_dim);
+        }
+        Some(View::Msg(m)) => dim(ui, body, m, fs, &pal),
     }
 }

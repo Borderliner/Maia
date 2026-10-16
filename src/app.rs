@@ -1103,9 +1103,8 @@ impl App {
         for (n, ev) in events.iter().enumerate() {
             // An open history takes the keys that move through it, open and go back.
             if let Event::Key { key, pressed: true, modifiers, .. } = ev {
-                let nav = matches!(key, Key::ArrowUp | Key::ArrowDown | Key::PageUp | Key::PageDown | Key::Home | Key::End | Key::Enter | Key::Escape);
-                if let Some(p) = self.panels.get_mut(&self.active).filter(|_| nav && !text_focus && !modifiers.ctrl && !modifiers.alt) {
-                    if let Some(h) = p.inspector.as_mut().and_then(|i| i.git.as_mut()) {
+                if let Some(p) = self.panels.get_mut(&self.active).filter(|_| !text_focus && !modifiers.ctrl && !modifiers.alt) {
+                    if let Some(h) = p.inspector.as_mut().and_then(|i| i.git.as_mut()).filter(|h| h.takes(*key)) {
                         if !h.key(*key) {
                             crate::inspector::close_history(p);
                         }

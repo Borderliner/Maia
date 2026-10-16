@@ -308,20 +308,28 @@ fn read_text(p: &Path) -> Content {
     }
     let truncated = buf.len() > limit;
     buf.truncate(limit);
-    let sniff = &buf[..buf.len().min(8192)];
-    if sniff.contains(&0) || std::str::from_utf8(sniff).is_err() && sniff.iter().filter(|b| **b < 9).count() > 4 {
+    let Some(lines) = text_lines(&buf) else {
         buf.truncate(4096);
         return Content::Binary(buf);
-    }
-    let s = String::from_utf8_lossy(&buf);
-    // Normalize CRLF and lone CR.
-    let s = s.replace("\r\n", "\n").replace('\r', "\n");
-    let lines: Vec<String> = s.lines().map(|l| if l.len() > 2000 { format!("{}…", &l[..l.floor_char_boundary(2000)]) } else { l.replace('\t', "    ") }).collect();
+    };
     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let lang = crate::syntax::lang_for(&name);
     let prose = lang.is_none_or(crate::syntax::is_markdown);
     let spans = lang.map(|lang| crate::syntax::highlight(lang, &lines, 20_000));
     Content::Text { lines, truncated, spans, prose }
+}
+
+/// Text as preview lines (tabs as spaces, very long lines cut), or None when it looks
+/// binary.
+pub(crate) fn text_lines(buf: &[u8]) -> Option<Vec<String>> {
+    let sniff = &buf[..buf.len().min(8192)];
+    if sniff.contains(&0) || std::str::from_utf8(sniff).is_err() && sniff.iter().filter(|b| **b < 9).count() > 4 {
+        return None;
+    }
+    let s = String::from_utf8_lossy(buf);
+    // Normalize CRLF and lone CR.
+    let s = s.replace("\r\n", "\n").replace('\r', "\n");
+    Some(s.lines().map(|l| if l.len() > 2000 { format!("{}…", &l[..l.floor_char_boundary(2000)]) } else { l.replace('\t', "    ") }).collect())
 }
 
 /// One icon button of a toolbar segment; `paint` draws the icon in the given color.
@@ -716,7 +724,7 @@ pub fn close_history(panel: &mut Panel) {
     }
 }
 
-fn checkerboard(p: &egui::Painter, r: Rect, pal: &theme::Palette) {
+pub(crate) fn checkerboard(p: &egui::Painter, r: Rect, pal: &theme::Palette) {
     let s = 10.0;
     let (a, b) = if pal.dark { (Color32::from_gray(48), Color32::from_gray(64)) } else { (Color32::from_gray(225), Color32::from_gray(245)) };
     p.rect_filled(r, CornerRadius::ZERO, a);
