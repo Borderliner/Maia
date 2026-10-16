@@ -212,6 +212,9 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             kids.push(Item { id: "other_app".into(), label: "Other application…".into(), act: Act::OtherApp, children: vec![] });
             items.push(Item::sub("open_with_menu", "Open with", kids));
         }
+        if any_file || single {
+            items.push(Item::cmd(Cmd::OpenInEditor));
+        }
         items.push(Item::cmd(Cmd::OpenInNewTab));
         items.push(Item::cmd(Cmd::OpenInRightSplit));
         items.push(Item::cmd(Cmd::OpenInBottomSplit));

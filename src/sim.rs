@@ -361,6 +361,58 @@ exit $rc
     d
 }
 
+/// A project to develop in, under `home/Code/app`: a git repository with Rust and
+/// JavaScript sources holding a word to find and TODO comments, manifests with tasks,
+/// output and packages its .gitignore leaves out, a hidden and a binary file, and build
+/// folders of several kinds.
+pub fn dev_fixture(home: &Path) -> PathBuf {
+    let p = home.join("Code/app");
+    let _ = std::fs::remove_dir_all(&p);
+    let w = |f: &str, s: &str| {
+        let f = p.join(f);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, s).unwrap();
+    };
+    w(".gitignore", "target/\nnode_modules/\ndist/\n*.log\n");
+    w("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+    w("src/main.rs", "use std::io;\n\n// TODO: read the config before the window opens\nfn main() {\n    let needle = find_needle();\n    println!(\"{needle}\");\n}\n\nfn find_needle() -> &'static str {\n    // FIXME(ana): the Needle is hard-coded\n    \"needle\"\n}\n");
+    w("src/lib.rs", "pub fn haystack() -> Vec<u8> {\n    // HACK: a needle in a haystack\n    vec![]\n}\n");
+    w("src/many.rs", &(0..300).map(|i| format!("fn needle_{i}() {{}}\n")).collect::<String>());
+    w("src/bin/tool.rs", "fn main() {}\n");
+    w("examples/demo.rs", "fn main() {}\n");
+    w("web/package.json", r#"{"name":"web","scripts":{"dev":"vite","build":"vite build","lint":"eslint ."}}"#);
+    w("web/pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+    w("web/src/app.js", "// XXX remove the needle shim\nexport const needle = 1;\n");
+    w("web/node_modules/left-pad/index.js", "module.exports = 'needle';\n");
+    w("web/dist/app.js", "const needle = 1;\n");
+    w("Makefile", "all: build\n\n# Build the release\nbuild:\n\tcargo build --release\n");
+    w("justfile", "# Run the tests\ntest:\n    cargo test\n");
+    w("target/CACHEDIR.TAG", "Signature: 8a477f597d28d172789f06886806bc55\n");
+    w("target/debug/app.d", &format!("needle {}\n", "x".repeat(20_000)));
+    w("notes.log", "needle in a log\n");
+    w(".secret", "needle hidden\n");
+    w("py/pyproject.toml", "[project]\nname = \"tool\"\n");
+    w("py/.venv/pyvenv.cfg", "home = /usr/bin\n");
+    w("py/.venv/lib/site.py", &"s".repeat(4000));
+    w("py/pkg/__pycache__/m.cpython-313.pyc", "pyc");
+    std::fs::write(p.join("logo.bin"), b"\x89\x00\x00needle\x00").unwrap();
+    let _ = std::process::Command::new("git").args(["init", "-q"]).current_dir(&p).status();
+    p
+}
+
+/// Stand-ins for editors (never run: test builds record what they would start).
+pub fn fake_editors(name: &str) -> PathBuf {
+    let d = root().join("editors").join(name);
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    for e in ["code", "zed", "nvim"] {
+        std::fs::write(d.join(e), "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(d.join(e), std::fs::Permissions::from_mode(0o755));
+    }
+    d
+}
+
 /// Real media for preview/thumbnail tests, made with ffmpeg inside the sandbox: a video,
 /// an MP3 with cover art, a hand-written one-page PDF, an SVG, a PNG and a corrupt video.
 pub fn media_fixture(name: &str) -> PathBuf {
@@ -932,7 +984,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(110) {
+    match rng.below(111) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1149,6 +1201,19 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                     4 => click_control_at(s, "reset option"),
                     5 => click_control_at(s, rng.pick(&["switch", "choice", "titles only"])),
                     _ => s.act("key Escape"),
+                }
+            }
+        }
+        110 => {
+            // Open In Editor, from its key, the palette and the file's menu.
+            match rng.below(3) {
+                0 => s.act("key F4"),
+                1 => s.cmd(Cmd::OpenInEditor),
+                _ => {
+                    let (x, y) = p(rng);
+                    s.act(&format!("click {x:.0} {y:.0} right"));
+                    s.act("text editor");
+                    s.act("key Enter");
                 }
             }
         }
@@ -2036,6 +2101,10 @@ mod journeys {
         let new_tab = s.app.cfg.new_tab.clone();
         click_in_row(&mut s, "choice", "New tab shows");
         assert!(s.app.cfg.new_tab != new_tab, "new tab changed");
+        // The section's last rows, under the Developer group, are scrolled to.
+        let popup = crate::ui::POPUPS.with(|p| p.borrow().first().copied()).unwrap_or_else(|| s.fail("Options drawn"));
+        s.act(&format!("scroll {:.0} {:.0} -20", popup.center().x + 100.0, popup.center().y));
+        s.idle(2);
         assert!(s.texts.iter().any(|(_, t)| t == "Install"), "the install button is in its row");
         // The ends wrap.
         s.act("key ctrl+PageDown");
@@ -4789,6 +4858,95 @@ mod journeys {
         report("admin", &s);
     }
 
+    fn launched() -> Vec<String> {
+        crate::mime::LAUNCHED.lock().unwrap().clone()
+    }
+
+    fn some_text(s: &Sim, want: &str) -> bool {
+        s.texts.iter().any(|(_, t)| t == want)
+    }
+
+    /// A photograph once the popup's opening fade is over.
+    fn shot_still(s: &mut Sim, name: &str) {
+        s.idle(12);
+        s.shot(name);
+    }
+
+    /// Open In Editor: Auto picks the installed editor, Options names another (a terminal
+    /// one runs in the terminal), the file's menu and F4 open the selection, a folder
+    /// opens as a folder, $EDITOR counts when nothing is set.
+    #[test]
+    fn open_in_editor() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("editor");
+        let app = dev_fixture(&home);
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake_editors("editor")));
+        crate::editor::TEST_ENV.with(|e| e.borrow_mut().clear());
+        let mut s = Sim::new(&app.join("src"), vec2(1280.0, 800.0));
+        select_name(&mut s, "main.rs");
+        let main = app.join("src/main.rs");
+        let n = launched().len();
+        s.act("key F4");
+        let l = launched();
+        assert!(l.len() == n + 1 && l[n].contains("editors/editor/code") && l[n].contains(&format!("{:?}", main.display().to_string())) && !l[n].contains("-g"), "VS Code, no line: {:?}", l.last());
+        assert!(toast_is(&s, "Opened main.rs in VS Code"));
+        // Options: Startup & system, Developer.
+        s.act("key ctrl+Comma");
+        s.act("text editor");
+        s.idle(3);
+        assert!(some_text(&s, "Auto: VS Code"), "the field says what Auto comes to");
+        shot_still(&mut s, "options-editor");
+        click_control(&mut s, "editor field");
+        s.act("text nvim");
+        s.act("key Enter");
+        s.act("key Escape");
+        assert_eq!(s.app.cfg.editor, "nvim");
+        s.app.popup = Popup::options_at(crate::popups::Section::System);
+        s.idle(4);
+        assert!(some_text(&s, "Developer") && some_text(&s, "nvim"), "the Developer group in Startup & system");
+        shot_still(&mut s, "options-developer");
+        s.act("key Escape");
+        let n = launched().len();
+        s.act("key F4");
+        let l = launched();
+        assert!(l.len() == n + 1 && l[n].contains("editors/editor/nvim") && !l[n].contains("\"sh\""), "nvim in the terminal: {:?}", l.last());
+        // The menu's item, with Zed.
+        s.app.cfg.editor = "zed".into();
+        let row = row_text(&s, "main.rs");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        s.click_text("Open In Editor");
+        assert!(launched().last().is_some_and(|l| l.contains("editors/editor/zed")), "{:?}", launched().last());
+        // A folder opens as a folder.
+        s.app.cfg.editor = "code".into();
+        s.cmd(Up);
+        s.settle();
+        select_name(&mut s, "src");
+        s.act("key F4");
+        assert!(launched().last().is_some_and(|l| l.ends_with(&format!("{:?}]", app.join("src").display().to_string())) || l.contains(&format!("{:?}", app.join("src").display().to_string()))), "{:?}", launched().last());
+        // Nothing set: $EDITOR comes first.
+        s.app.cfg.editor.clear();
+        crate::editor::TEST_ENV.with(|e| e.borrow_mut().push(("EDITOR".into(), "hx".into())));
+        s.act("key F4");
+        assert!(launched().last().is_some_and(|l| l.contains("editors/editor/hx")), "{:?}", launched().last());
+        crate::editor::TEST_ENV.with(|e| e.borrow_mut().clear());
+        // Without any editor, a message instead.
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(root().join("no-tools")));
+        s.act("key F4");
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0.starts_with("No editor found")), "{:?}", s.app.toast);
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        look(&mut s, "after the editor");
+        report("editor", &s);
+    }
+
+    /// Where the file list (not the preview beside it) shows `label`.
+    fn row_text(s: &Sim, label: &str) -> Rect {
+        let list = s.app.panels[&s.app.active].list_rect;
+        s.texts.iter().find(|(r, t)| t == label && list.contains(r.center())).map(|x| x.0).unwrap_or_else(|| s.fail(&format!("{label:?} not in the list")))
+    }
+
     /// Every surface photographed for a person to look at (MAIA_SIM_SHOTS): the window,
     /// each view, the inspector's previews, the history, popups and menus, in a dark and
     /// a light theme and two of the newer ones, at a normal and a small window. Without
@@ -5157,12 +5315,15 @@ mod journeys {
             crate::tests::git_fixture(&home.join("Code/repo"));
             // And a small project whose commits change files of every kind, pictures too.
             crate::tests::commit_view_fixture(&home.join("Code/project"));
+            // And a project to develop in.
+            dev_fixture(&home);
             let _ = std::process::Command::new("git").args(["remote", "add", "origin", "https://github.com/octo-org/project.git"]).current_dir(home.join("Code/project")).status();
             // Fake drives, network places and pkexec to use at random (never the real tools).
             let drv = fake_drives(&format!("monkey{seed}"));
             let net = fake_network(&format!("monkey{seed}"));
             let adm = fake_pkexec(&format!("monkey{seed}"));
-            for (dir, f) in [(&net, "gio"), (&net, "phones"), (&adm, "pkexec")] {
+            let eds = fake_editors(&format!("monkey{seed}"));
+            for (dir, f) in [(&net, "gio"), (&net, "phones"), (&adm, "pkexec"), (&eds, "code"), (&eds, "nvim")] {
                 let _ = std::fs::copy(dir.join(f), drv.join(f));
             }
             for sub in ["gvfs", "netmounts"] {

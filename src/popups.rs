@@ -1237,6 +1237,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::CloseRightTabs | Cmd::MoveTabRight => p.active + 1 < p.tabs.len(),
         Cmd::CloseLeftTabs | Cmd::MoveTabLeft => p.active > 0,
         Cmd::TabNewOrRecent | Cmd::ToggleFlatten | Cmd::OpenTerminal => !tab::is_computer(&t.path),
+        Cmd::OpenInEditor => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::OpenTabInWindow => p.tabs.len() > 0,
         Cmd::GroupDeleted | Cmd::GroupOriginal => crate::trashcan::is_trash_files(&t.path),
         Cmd::GroupFree | Cmd::GroupFs | Cmd::GroupFull => tab::is_computer(&t.path),
@@ -1724,6 +1725,7 @@ pub(crate) enum Opt {
     Updates,
     ResetAll,
     Install,
+    Editor,
 }
 
 /// The pages of Options, in the order of its left column.
@@ -1857,6 +1859,7 @@ pub(crate) const OPTS: &[(Opt, Section, &str, &str, &str)] = &[
     (Opt::DefaultFm, Section::System, "System", "Default file manager", "Open folders from other apps in Maia."),
     (Opt::SingleInstance, Section::System, "System", "Reuse the open window", "Other apps and new launches open tabs here."),
     (Opt::AssetCache, Section::System, "System", "Asset cache size", "Memory for thumbnails and previews."),
+    (Opt::Editor, Section::System, "Developer", "Editor", "Empty finds one; a command can use {file} and {line}."),
     (Opt::Updates, Section::System, "Updates", "Check for updates", "Asks GitHub for a newer Maia, only when you check."),
     (Opt::ConfigFile, Section::System, "Settings", "Config file", "Every option as text, in your editor."),
     (Opt::ResetAll, Section::System, "Settings", "Reset to defaults", "Every option and hotkey; asks first."),
@@ -2107,6 +2110,7 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
         Opt::Startup => f!(startup),
         Opt::NewTab => f!(new_tab),
         Opt::GitPictures => f!(github_pictures),
+        Opt::Editor => f!(editor),
     }
 }
 
@@ -2183,6 +2187,13 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         Opt::Meaning => toggle(ui, &mut c.semantic_search, &pal),
         Opt::MeaningPictures => toggle(ui, &mut c.semantic_pictures, &pal),
         Opt::GitPictures => toggle(ui, &mut c.github_pictures, &pal),
+        Opt::Editor => {
+            // Empty is Auto: the hint says what that comes to here.
+            let hint = crate::editor::auto_label().map_or("Auto".to_string(), |l| format!("Auto: {l}"));
+            let r = ui.add(egui::TextEdit::singleline(&mut c.editor).hint_text(hint).desired_width(150.0).margin(egui::Margin::symmetric(5, 2)));
+            crate::ui::note_control(ui, r.rect, "editor field");
+            r.lost_focus()
+        }
         Opt::MeaningFolders => ui.add(egui::TextEdit::singleline(&mut c.semantic_folders).hint_text("~/Documents").desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).lost_focus(),
         Opt::DefaultFm => false,
         Opt::Updates => {

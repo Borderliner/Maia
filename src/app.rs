@@ -1642,6 +1642,18 @@ impl App {
             }
             Cmd::FocusFilter => self.panel().focus_filter = true,
             Cmd::ContentSearch => crate::contentsearch::toggle(self.panel()),
+            Cmd::OpenInEditor => {
+                let mut paths = self.tab().selected_paths();
+                if paths.is_empty() {
+                    paths = self.tab().target_entries().iter().map(|e| e.path.clone()).collect();
+                }
+                if paths.is_empty() && !tab::is_computer(&self.panel().path()) {
+                    paths = vec![self.panel().path()];
+                }
+                for p in paths.into_iter().take(20) {
+                    self.open_in_editor(&p, None);
+                }
+            }
             Cmd::ChooseTheme => self.popup = Popup::Themes,
             Cmd::CheckUpdates => {
                 self.updater.check(&ctx);
@@ -2126,6 +2138,15 @@ impl App {
             self.ud.push_recent(old);
             self.ud_dirty = true;
             self.refresh_recents();
+        }
+    }
+
+    /// Open `path` in the editor chosen in Options, at `line` when one is known.
+    pub fn open_in_editor(&mut self, path: &Path, line: Option<u32>) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
+        match crate::editor::open_at(&self.cfg.editor, path, line) {
+            Ok(label) => self.toast(format!("Opened {} in {label}", line.map_or(name.clone(), |l| format!("{name}:{l}")))),
+            Err(e) => self.toast(e),
         }
     }
 

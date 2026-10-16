@@ -38,6 +38,14 @@ impl Tools {
         }
     }
 
+    /// The program to run for `name`: the system's (found on PATH when run), or a fake.
+    pub fn path_of(&self, name: &str) -> PathBuf {
+        match &self.dir {
+            Some(d) => d.join(name),
+            None => PathBuf::from(name),
+        }
+    }
+
     pub fn cmd(&self, name: &str) -> Command {
         match &self.dir {
             Some(d) => Command::new(d.join(name)),

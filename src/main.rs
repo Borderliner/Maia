@@ -12,6 +12,7 @@ mod compare;
 mod contentsearch;
 mod config;
 mod drives;
+mod editor;
 mod ctxmenu;
 mod fsx;
 mod fuzzy;

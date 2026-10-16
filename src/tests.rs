@@ -3152,8 +3152,9 @@ fn every_option_has_one_section() {
         Opt::CharKey => 40, Opt::MiddleClick => 41, Opt::InspectorLayout => 42, Opt::Startup => 43, Opt::NewTab => 44,
         Opt::GitPictures => 45, Opt::DefaultFm => 46, Opt::SingleInstance => 47, Opt::Meaning => 48, Opt::MeaningFolders => 49,
         Opt::MeaningPictures => 50, Opt::ConfigFile => 51, Opt::ResetAll => 52, Opt::Install => 53, Opt::LineSpacing => 54, Opt::Updates => 55,
+        Opt::Editor => 56,
     };
-    let mut seen = vec![0; 56];
+    let mut seen = vec![0; 57];
     for o in OPTS {
         seen[index(o.0)] += 1;
     }
@@ -3371,4 +3372,58 @@ fn a_broken_link_is_not_executable() {
     let good = crate::fsx::Entry::from_path(&d.join("good")).unwrap();
     assert!(good.is_link && !good.is_broken_link());
     let _ = std::fs::remove_dir_all(&d);
+}
+
+// ------------------------------------------------------------------ developer tools
+
+/// Every editor gets the line its own way; Auto takes $VISUAL, then $EDITOR, then the
+/// first installed; a command with {file} and {line} is filled in; terminal editors are
+/// marked to run in a terminal.
+#[test]
+fn editor_command_lines() {
+    use crate::editor::{command, resolve};
+    let none = |_: &str| false;
+    let line = |setting: &str| {
+        let c = resolve(setting, None, None, &none).unwrap();
+        (command(&c, "/p/main.rs", Some(42)).join(" "), c.terminal)
+    };
+    for (ed, want, term) in [
+        ("code", "code -g /p/main.rs:42", false),
+        ("codium", "codium -g /p/main.rs:42", false),
+        ("cursor", "cursor -g /p/main.rs:42", false),
+        ("zed", "zed /p/main.rs:42", false),
+        ("zeditor", "zeditor /p/main.rs:42", false),
+        ("subl", "subl /p/main.rs:42", false),
+        ("idea", "idea --line 42 /p/main.rs", false),
+        ("clion", "clion --line 42 /p/main.rs", false),
+        ("kate", "kate --line 42 /p/main.rs", false),
+        ("gedit", "gedit +42 /p/main.rs", false),
+        ("emacs", "emacs +42 /p/main.rs", false),
+        ("nvim", "nvim +42 /p/main.rs", true),
+        ("vim", "vim +42 /p/main.rs", true),
+        ("hx", "hx /p/main.rs:42", true),
+        ("helix", "helix /p/main.rs:42", true),
+        ("nano", "nano +42 /p/main.rs", true),
+        ("micro", "micro +42 /p/main.rs", true),
+        ("kak", "kak +42 /p/main.rs", true),
+        ("/opt/bin/code --new-window", "/opt/bin/code --new-window -g /p/main.rs:42", false),
+        ("flatpak run org.x.Ed --line={line} {file}", "flatpak run org.x.Ed --line=42 /p/main.rs", false),
+        ("myedit", "myedit /p/main.rs", false),
+    ] {
+        assert_eq!(line(ed), (want.to_string(), term), "{ed}");
+    }
+    let c = resolve("code", None, None, &none).unwrap();
+    assert_eq!(command(&c, "/p/dir", None), vec!["code", "/p/dir"], "without a line, just the path");
+    // Auto: the environment first, an unknown $EDITOR in a terminal; then what is installed,
+    // windowed editors before terminal ones.
+    let has = |b: &str| matches!(b, "nvim" | "zeditor" | "micro");
+    assert_eq!(resolve("", Some("hx"), Some("nano"), &has).unwrap().label, "Helix");
+    assert_eq!(resolve("", None, Some("nano"), &has).unwrap().label, "nano");
+    let odd = resolve("", None, Some("ed -p x"), &has).unwrap();
+    assert!(odd.terminal && command(&odd, "/f", Some(3)) == vec!["ed", "-p", "x", "/f"]);
+    let auto = resolve("", None, None, &has).unwrap();
+    assert_eq!((auto.label.as_str(), command(&auto, "/f", Some(3)).join(" ")), ("Zed", "zeditor /f:3".to_string()));
+    assert_eq!(resolve("", None, None, &|b: &str| b == "nvim").unwrap().label, "Neovim");
+    assert!(resolve("", None, None, &none).is_none());
+    assert!(resolve("  ", None, None, &none).is_none(), "spaces are empty");
 }

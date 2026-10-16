@@ -181,6 +181,8 @@ pub struct Config {
     pub new_tab: NewTabShows,
     /// Authors' GitHub pictures in the history. Off: GitHub is never contacted.
     pub github_pictures: bool,
+    /// The editor files open in at a line; empty finds one ($VISUAL, $EDITOR, installed).
+    pub editor: String,
     pub cross_filesystems: bool,
     // Hotkeys: command id -> bindings (overrides defaults when present).
     pub hotkeys: BTreeMap<String, Vec<String>>,
@@ -243,6 +245,7 @@ impl Default for Config {
             startup: Startup::LastSession,
             new_tab: NewTabShows::Current,
             github_pictures: false,
+            editor: String::new(),
             cross_filesystems: false,
             hotkeys: BTreeMap::new(),
             custom_actions: vec![CustomAction {

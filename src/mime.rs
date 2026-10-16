@@ -515,6 +515,28 @@ pub fn open_terminal(dir: &Path) -> Result<(), String> {
     spawn_detached(c)
 }
 
+/// `argv` started in the user's terminal, in `dir`. Each terminal takes the folder and
+/// the program its own way; the rest take `-e` and the folder they are started in.
+pub fn run_in_terminal(dir: &Path, argv: &[String]) -> Result<(), String> {
+    let t = terminal_argv();
+    let mut c = Command::new(&t[0]);
+    c.args(&t[1..]).current_dir(dir);
+    let name = Path::new(&t[0]).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let at = |flag: &str| format!("{flag}={}", dir.display());
+    match name.as_str() {
+        "kitty" => c.arg("--directory").arg(dir).args(argv),
+        "foot" => c.arg(at("--working-directory")).args(argv),
+        "wezterm" => c.args(["start", "--cwd"]).arg(dir).arg("--").args(argv),
+        "gnome-terminal" | "kgx" => c.arg(at("--working-directory")).arg("--").args(argv),
+        "xfce4-terminal" => c.arg(at("--working-directory")).arg("-x").args(argv),
+        "konsole" => c.arg("--workdir").arg(dir).arg("-e").args(argv),
+        "alacritty" => c.arg("--working-directory").arg(dir).arg("-e").args(argv),
+        "ghostty" => c.arg(at("--working-directory")).arg("-e").args(argv),
+        _ => c.arg("-e").args(argv),
+    };
+    spawn_detached(c)
+}
+
 /// Run an executable with arguments, detached (used for drops onto scripts).
 pub fn run_with(exe: &Path, args: &[PathBuf]) -> Result<(), String> {
     let mut c = Command::new(exe);
