@@ -545,8 +545,11 @@ impl App {
         let plus_w = 28.0;
         // Tabs share what's left after the + button and the gaps between items.
         let gap = ui.spacing().item_spacing.x;
-        let per = ((max_w - plus_w - gap * n as f32) / n.max(1) as f32).clamp(56.0, 220.0);
+        // A point of slack per tab: placing them rounds to pixels, and a strip filled to
+        // the exact width lost its + to the rounding (at other font sizes and Spacings).
+        let per = ((max_w - plus_w - (gap + 1.0) * n as f32) / n.max(1) as f32).clamp(56.0, 220.0);
         let strip_start = ui.cursor().min;
+        let col_x = self.shown_rects.get(&panel_id).map(|r| r.x_range());
         let dragging_tab = matches!(self.drag, Some(Drag::Tab { .. }));
         let dragging_files = matches!(self.drag, Some(Drag::Files { .. }));
         let pointer = ui.ctx().pointer_hover_pos();
@@ -594,10 +597,17 @@ impl App {
                 if rad > 0 {
                     let f = rad as f32;
                     let strip = pal.chrome;
+                    // The feet stay over their own panel: a first tab sits closer to the
+                    // panel's edge than a foot is wide, and the strip's colour drawn past it
+                    // left a bump on the divider.
+                    let feet = match col_x {
+                        Some(xr) => ui.painter().with_clip_rect(Rect::from_x_y_ranges(xr, ui.clip_rect().y_range()).intersect(ui.clip_rect())),
+                        None => ui.painter().clone(),
+                    };
                     for (x, dir) in [(full.left(), -1.0f32), (full.right(), 1.0)] {
                         let foot = Rect::from_min_max(pos2(x.min(x + dir * f), full.bottom() - f), pos2(x.max(x + dir * f), full.bottom()));
-                        ui.painter().rect_filled(foot, CornerRadius::ZERO, fill);
-                        ui.painter().circle_filled(pos2(x + dir * f, full.bottom() - f), f, strip);
+                        feet.rect_filled(foot, CornerRadius::ZERO, fill);
+                        feet.circle_filled(pos2(x + dir * f, full.bottom() - f), f, strip);
                     }
                 }
             } else {
