@@ -141,6 +141,9 @@ pub struct App {
     pw_asked: Option<PathBuf>,
     /// The tag cache's generation last seen.
     tags_gen: u64,
+    /// Search by meaning, while it is switched on, and the folders it was started for.
+    pub semantic: Option<crate::semantic::Engine>,
+    semantic_for: Option<String>,
     /// Network places being mounted.
     net_jobs: Vec<NetJob>,
     /// How the Connect dialog's last attempt ended: (address, Ok or the reason).
@@ -224,6 +227,8 @@ impl App {
             pw_asks: Default::default(),
             pw_asked: None,
             tags_gen: 0,
+            semantic: None,
+            semantic_for: None,
             net_jobs: vec![],
             dialog_result: None,
             cfg,
@@ -800,6 +805,12 @@ impl App {
             self.toast(n);
         }
         self.pump_passwords();
+        // Search by meaning runs only while switched on, for the folders now chosen.
+        let want = self.cfg.semantic_search.then(|| self.cfg.semantic_folders.clone());
+        if want != self.semantic_for {
+            self.semantic = want.as_deref().map(|f| crate::semantic::Engine::start(crate::semantic::folders(f), ctx));
+            self.semantic_for = want;
+        }
         let thumbs_landed = self.thumbs.pump(ctx);
         let stats_changed = self.stats.pump();
         let changed_dirs = self.watch.poll();
@@ -1616,6 +1627,12 @@ impl App {
             }
             Cmd::FocusFilter => self.panel().focus_filter = true,
             Cmd::ContentSearch => crate::contentsearch::toggle(self.panel()),
+            Cmd::MeaningSearch => {
+                if let Some(e) = &self.semantic {
+                    e.poke();
+                }
+                self.popup = Popup::meaning();
+            }
             Cmd::ComparePanels | Cmd::SelectDifferences | Cmd::SyncPanels => crate::compare::run(self, cmd),
             Cmd::TypesFilter => self.popup = Popup::types(self.active),
             Cmd::ToggleHidden => {

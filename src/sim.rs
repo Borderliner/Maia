@@ -2960,6 +2960,74 @@ mod journeys {
         s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_ref()).map(|h| h.state())
     }
 
+    /// Search by meaning, start to finish, against a stand-in Ollama: off by default (the
+    /// window explains and offers to turn it on), the model fetched only on a click, files
+    /// read, a vague question answered with the right file and its passage, Enter opening
+    /// it, and switching it off in Options stopping everything.
+    #[test]
+    fn search_by_meaning() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("meaning");
+        let docs = home.join("Documents");
+        std::fs::write(docs.join("letter from the bank.txt"), "Dear customer, your tax refund has been paid into your account.").unwrap();
+        std::fs::write(docs.join("summer plans.md"), "Two weeks at the beach, a flight on Friday and a hotel by the sea.").unwrap();
+        std::fs::write(docs.join("Taxes/pasta.txt"), "Pasta with tomato sauce: boil, stir and eat.").unwrap();
+        let (addr, model, _) = crate::tests::fake_ollama(false);
+        *crate::ollama::TEST_HOST.lock().unwrap() = Some(addr);
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                *crate::ollama::TEST_HOST.lock().unwrap() = None;
+            }
+        }
+        let _reset = Reset;
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        assert!(!s.app.cfg.semantic_search && s.app.semantic.is_none(), "off by default: nothing running");
+        s.app.cfg.semantic_folders = docs.display().to_string();
+        s.act("key ctrl+k");
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t == "Search by meaning"));
+        look(&mut s, "meaning off");
+        s.click_text("Turn on");
+        wait_until(&mut s, "asks for the model", 10, |s| s.texts.iter().any(|(_, t)| t == "Download, about 300 MB"));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!model.load(std::sync::atomic::Ordering::Relaxed), "nothing fetched before the click");
+        look(&mut s, "meaning needs the model");
+        s.click_text("Download, about 300 MB");
+        wait_until(&mut s, "files read", 20, |s| matches!(s.app.semantic.as_ref().map(|e| e.phase()), Some(crate::semantic::Phase::Ready)));
+        s.idle(2);
+        let n = s.app.semantic.as_ref().map_or(0, |e| e.index().files());
+        assert!(n >= 3, "the fixture's text files and ours: {n}");
+        assert!(s.texts.iter().any(|(_, t)| *t == format!("{n} files read")));
+        // A vague question, none of its words in the file.
+        click_control(&mut s, "meaning field");
+        s.act("text money back from the government");
+        wait_until(&mut s, "answer", 10, |s| matches!(&s.app.popup, Popup::Meaning(st) if !st.hits.is_empty()));
+        s.idle(3);
+        match &s.app.popup {
+            Popup::Meaning(st) => assert_eq!(st.hits[0].path, docs.join("letter from the bank.txt")),
+            _ => s.fail("window closed"),
+        }
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with("Dear customer, your tax refund")), "the passage under the name");
+        look(&mut s, "meaning results");
+        s.act("key Enter");
+        s.settle();
+        assert!(!s.popup_open());
+        assert_eq!(s.tab().path, docs, "opened in its folder");
+        assert_eq!(s.tab().cursor_path().as_deref(), Some(docs.join("letter from the bank.txt").as_path()), "with the file selected");
+        // Off again from Options: the engine goes.
+        s.act("key ctrl+comma");
+        s.act("text search by meaning");
+        s.idle(2);
+        s.act("key Enter");
+        s.idle(3);
+        s.act("key Escape");
+        assert!(!s.app.cfg.semantic_search && s.app.semantic.is_none(), "switched off: nothing running");
+        report("meaning", &s);
+    }
+
     /// A clone two commits ahead of its remote and one behind: the status bar's branch
     /// chip says so, and the history shows the remote branch with a cloud and a branch in
     /// step with its remote as one pill.

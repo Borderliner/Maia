@@ -38,6 +38,7 @@ These are optional. Maia works without them and uses them when they are there:
 | `gio` (GVFS) | network places (smb, sftp, ftp, WebDAV) and phones over MTP |
 | `pkexec` (polkit) | retrying a refused copy, move, delete or rename as administrator |
 | `git` | change marks on files in git repositories, and their commit history |
+| `ollama` | search by meaning, if you turn it on (it fetches a ~300 MB model only when you ask) |
 | `ffmpeg`, `ffprobe`, `ffplay` | video and audio previews and thumbnails |
 | `pdfinfo`, `pdftoppm` (poppler) | PDF pages in the inspector |
 | `udisksctl` (udisks2), `lsblk` | mounting, unmounting and ejecting drives |
@@ -76,6 +77,10 @@ or `ftp://` address into Go To) opens network shares, which then stay in the
 sidebar's Network section. Right-click files for Tags to give them colour labels or
 named tags (kept on the files, where KDE's file managers see them too). In a git
 repository, the branch name in the status bar opens its commit history.
+
+Search by meaning (Ctrl+K) finds files by what they are about rather than their exact
+words. It is off until you turn it on in Options, and then reads only the folders you
+list there, using a small model running on your computer through Ollama.
 
 Settings live in `~/.config/maia/config.json`, bookmarks and layouts in
 `~/.local/share/maia/userdata.json`.

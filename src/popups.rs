@@ -171,6 +171,20 @@ pub enum Popup {
     DropMenu { paths: Vec<PathBuf>, dest: PathBuf, pos: Pos2 },
     Connect(ConnectState),
     ArchivePassword(PasswordState),
+    Meaning(MeaningState),
+}
+
+/// The Search by Meaning window: a question, and the passages closest to it in meaning.
+pub struct MeaningState {
+    pub query: String,
+    focus: bool,
+    sel: usize,
+    pub hits: Vec<crate::semantic::Hit>,
+    /// The question the hits answer, and the search running for a newer one.
+    asked: String,
+    job: Option<std::sync::mpsc::Receiver<(String, Result<Vec<crate::semantic::Hit>, String>)>>,
+    error: Option<String>,
+    typed: Instant,
 }
 
 /// What runs again once an archive's password is given.
@@ -224,6 +238,7 @@ impl Popup {
             Popup::RunExec { .. } => "RunExec",
             Popup::Connect(..) => "Connect",
             Popup::ArchivePassword(..) => "ArchivePassword",
+            Popup::Meaning(..) => "Meaning",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -262,6 +277,9 @@ impl Popup {
     }
     pub fn layouts(delete: bool) -> Popup {
         Popup::Layouts { delete }
+    }
+    pub fn meaning() -> Popup {
+        Popup::Meaning(MeaningState { query: String::new(), focus: true, sel: 0, hits: vec![], asked: String::new(), job: None, error: None, typed: Instant::now() })
     }
     pub fn prompt(title: &str, text: String, on_ok: Box<dyn FnOnce(&mut App, String)>) -> Popup {
         Popup::Prompt { title: title.into(), text, on_ok: Some(on_ok) }
@@ -617,6 +635,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::RunExec { path } => run_exec(app, ctx, path),
         Popup::Connect(st) => connect(app, ctx, st),
         Popup::ArchivePassword(st) => archive_password(app, ctx, st),
+        Popup::Meaning(st) => meaning(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -1533,6 +1552,8 @@ enum Opt {
     NewTab,
     DefaultFm,
     SingleInstance,
+    Meaning,
+    MeaningFolders,
 }
 
 const OPTS: &[(Opt, &str, &str, &str)] = &[
@@ -1582,6 +1603,8 @@ const OPTS: &[(Opt, &str, &str, &str)] = &[
     (Opt::NewTab, "Inspector & startup", "New tab shows", "Folder opened by a new tab."),
     (Opt::DefaultFm, "System", "Default file manager", "Open folders from other apps in Maia."),
     (Opt::SingleInstance, "System", "Reuse the open window", "Folders from other apps and new launches open as tabs here."),
+    (Opt::Meaning, "Search", "Search by meaning", "Find files by what they are about, with a local model through Ollama."),
+    (Opt::MeaningFolders, "Search", "Folders to search by meaning", "Separated by commas; ~ is your home folder."),
 ];
 
 /// Choice control: a box showing the value and a chevron; click steps
@@ -1663,6 +1686,8 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
         // Lives in the desktop's settings, not Maia's: nothing to reset.
         Opt::DefaultFm => true,
         Opt::SingleInstance => f!(single_instance),
+        Opt::Meaning => f!(semantic_search),
+        Opt::MeaningFolders => f!(semantic_folders),
         Opt::Font => f!(font_family),
         Opt::InspectorFontSize => f!(inspector_font_size),
         Opt::RectButtons => f!(rect_buttons),
@@ -1791,6 +1816,8 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         Opt::SelectionBoxes => toggle(ui, &mut c.selection_boxes, &pal),
         Opt::SystemIcons => toggle(ui, &mut c.system_icons, &pal),
         Opt::SingleInstance => toggle(ui, &mut c.single_instance, &pal),
+        Opt::Meaning => toggle(ui, &mut c.semantic_search, &pal),
+        Opt::MeaningFolders => ui.add(egui::TextEdit::singleline(&mut c.semantic_folders).hint_text("~/Documents").desired_width(150.0)).lost_focus(),
         Opt::DefaultFm => false,
         Opt::InspectorFont => {
             let r = ui.add(egui::TextEdit::singleline(&mut c.inspector_font).hint_text("monospace").desired_width(150.0));
@@ -2474,6 +2501,162 @@ fn archive_password(app: &mut App, ctx: &egui::Context, st: &mut PasswordState) 
         return false;
     }
     !cancel
+}
+
+/// Search by meaning: the setup step the engine is at, or the question and its matches.
+fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
+    use crate::semantic::Phase;
+    let pal = app.pal;
+    let k = take_keys(ctx);
+    if k.esc {
+        return false;
+    }
+    let phase = app.semantic.as_ref().map(|e| e.phase());
+    let index = app.semantic.as_ref().map(|e| e.index());
+    let searchable = index.as_ref().is_some_and(|i| i.passages() > 0) && matches!(phase, Some(Phase::Ready | Phase::Indexing(..)));
+    // A search for what was typed, once typing pauses; the newest question wins.
+    if let Some(rx) = &st.job {
+        if let Ok((q, r)) = rx.try_recv() {
+            st.job = None;
+            if q == st.query.trim() {
+                match r {
+                    Ok(h) => {
+                        st.hits = h;
+                        st.error = None;
+                    }
+                    Err(e) => st.error = Some(e),
+                }
+                st.sel = 0;
+            }
+        }
+    }
+    let q = st.query.trim().to_string();
+    if q.is_empty() {
+        st.hits.clear();
+        st.asked.clear();
+    } else if searchable && q != st.asked && st.job.is_none() && st.typed.elapsed().as_millis() >= 200 {
+        st.asked = q.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (idx, c, asked) = (index.clone().unwrap_or_default(), ctx.clone(), q.clone());
+        std::thread::spawn(move || {
+            let r = crate::semantic::search(&idx, &asked, 30);
+            let _ = tx.send((asked, r));
+            c.request_repaint();
+        });
+        st.job = Some(rx);
+    }
+    if st.job.is_some() || (!q.is_empty() && q != st.asked) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+    step(&mut st.sel, st.hits.len(), &k, |_| false);
+    let mut open: Option<PathBuf> = if k.enter { st.hits.get(st.sel).map(|h| h.path.clone()) } else { None };
+    let mut turn_on = false;
+    let (mut download, mut retry) = (false, false);
+    let fs = app.cfg.font_size;
+    centered(ctx, "meaning", 640.0, &pal, |ui| {
+        if phase.is_none() {
+            ui.label(egui::RichText::new("Search by meaning").strong());
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("Finds files by what they are about, not their exact words, using a small model on this computer through Ollama. It is off; turning it on downloads nothing until you ask.").color(pal.text_dim));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.add(egui::Button::new(egui::RichText::new("Turn on").color(Color32::WHITE)).fill(pal.accent)).clicked() {
+                    turn_on = true;
+                }
+            });
+            return;
+        }
+        let r = search_field(ui, &mut st.query, "Describe what you are looking for…", &mut st.focus, &pal, Glyph::Search);
+        crate::ui::note_control(ui, r.rect, "meaning field");
+        if r.changed() {
+            st.typed = Instant::now();
+        }
+        ui.add_space(2.0);
+        // Where the engine is: a line of status, and a button when there is a step to take.
+        let dim = |ui: &mut Ui, s: &str| {
+            ui.label(egui::RichText::new(s).size(fs - 1.5).color(pal.text_dim));
+        };
+        match phase.clone().unwrap_or(Phase::Checking) {
+            Phase::Checking => dim(ui, "Looking for Ollama…"),
+            Phase::NotRunning => {
+                dim(ui, "Ollama isn't running. Install it (on Arch: pacman -S ollama) and start it, then try again.");
+                retry = ui.button("Try again").clicked();
+            }
+            Phase::NoModel => {
+                dim(ui, "The model (EmbeddingGemma) isn't downloaded yet.");
+                download = ui.add(egui::Button::new(egui::RichText::new("Download, about 300 MB").color(Color32::WHITE)).fill(pal.accent)).clicked();
+            }
+            Phase::Downloading(done, all) => {
+                let f = if all > 0 { done as f32 / all as f32 } else { 0.0 };
+                ui.add(egui::ProgressBar::new(f).desired_height(5.0).fill(pal.accent));
+                dim(ui, &format!("Downloading the model… {} of {}", fsx::fmt_size(done), fsx::fmt_size(all)));
+            }
+            Phase::Indexing(n, all) => dim(ui, &format!("Reading your files… {n} of {all}")),
+            Phase::Ready => dim(ui, &format!("{} files read", index.as_ref().map_or(0, |i| i.files()))),
+            Phase::Failed(e) => {
+                ui.label(egui::RichText::new(e).color(pal.danger));
+                retry = ui.button("Try again").clicked();
+            }
+        }
+        if let Some(e) = &st.error {
+            ui.label(egui::RichText::new(e).color(pal.danger));
+        }
+        if !st.hits.is_empty() {
+            ui.add_space(4.0);
+        }
+        egui::ScrollArea::vertical().max_height(420.0).auto_shrink([false, true]).show(ui, |ui| {
+            for (i, h) in st.hits.iter().enumerate() {
+                let name = h.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let home = crate::fsx::home();
+                let folder = h.path.parent().map(|p| match p.strip_prefix(&home) {
+                    Ok(rest) => format!("~/{}", rest.display()),
+                    Err(_) => p.display().to_string(),
+                }).unwrap_or_default();
+                let row_h = fs * 2.9 + 10.0;
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                if i == st.sel {
+                    ui.painter().rect_filled(r, CornerRadius::same(6), pal.selected);
+                } else if resp.hovered() {
+                    ui.painter().rect_filled(r, CornerRadius::same(6), pal.hover);
+                }
+                let mut job = egui::text::LayoutJob::default();
+                job.append(&name, 0.0, egui::TextFormat { font_id: FontId::proportional(fs), color: pal.text, ..Default::default() });
+                job.append(&format!("  {folder}"), 0.0, egui::TextFormat { font_id: FontId::proportional(fs - 1.5), color: pal.text_dim, ..Default::default() });
+                job.wrap = egui::text::TextWrapping { max_width: r.width() - 20.0, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+                let g = ui.fonts_mut(|f| f.layout_job(job));
+                ui.painter().galley(pos2(r.left() + 10.0, r.top() + 5.0), g, pal.text);
+                let p = crate::listing::elided(ui, &h.passage, FontId::proportional(fs - 1.5), r.width() - 20.0, pal.text_dim);
+                ui.painter().galley(pos2(r.left() + 10.0, r.bottom() - 5.0 - p.size().y), p, pal.text_dim);
+                if i == st.sel && (k.up || k.down) {
+                    ui.scroll_to_rect(r, None);
+                }
+                if resp.clicked() {
+                    open = Some(h.path.clone());
+                }
+            }
+            if st.hits.is_empty() && !q.is_empty() && st.job.is_none() && q == st.asked && st.error.is_none() {
+                ui.label(egui::RichText::new("Nothing close to that yet").color(pal.text_dim));
+            }
+        });
+    });
+    if turn_on {
+        app.cfg.semantic_search = true;
+        app.set_config_changed();
+    }
+    if let Some(e) = &app.semantic {
+        if download {
+            e.download();
+        }
+        if retry {
+            e.poke();
+        }
+    }
+    if let Some(path) = open {
+        // Its folder, with the file selected.
+        app.actions.push(Action::Navigate { panel: app.active, path });
+        return false;
+    }
+    true
 }
 
 fn confirm(app: &mut App, ctx: &egui::Context, msg: &str, ok_label: &str, on_ok: &mut Option<Box<dyn FnOnce(&mut App)>>) -> bool {
@@ -3499,6 +3682,7 @@ fn opt_flip(c: &mut crate::config::Config, o: Opt) -> bool {
         Opt::DblClickParent => &mut c.dblclick_bg_parent,
         Opt::ReverseScroll => &mut c.reverse_scroll,
         Opt::SingleInstance => &mut c.single_instance,
+        Opt::Meaning => &mut c.semantic_search,
         _ => return false,
     };
     *b = !*b;

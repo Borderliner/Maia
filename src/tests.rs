@@ -2301,3 +2301,204 @@ fn ahead_behind_and_branch_labels_from_real_remotes() {
     assert_eq!(on("theirs"), vec![(RefKind::Remote, "origin/main".into(), None)]);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A stand-in for Ollama on a local port, speaking its HTTP API: /api/tags, a chunked
+/// /api/pull with progress, and /api/embed. Its "model" puts words about one topic in
+/// the same direction (money, holidays, cooking, pets, meetings), so a question finds a
+/// file about the same thing without sharing its words. Returns its address, whether the
+/// model is "downloaded", and how many texts it has embedded.
+pub(crate) fn fake_ollama(has_model: bool) -> (String, std::sync::Arc<std::sync::atomic::AtomicBool>, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let model = std::sync::Arc::new(AtomicBool::new(has_model));
+    let embedded = std::sync::Arc::new(AtomicUsize::new(0));
+    let (m, n) = (model.clone(), embedded.clone());
+    const TOPICS: &[&[&str]] = &[
+        &["invoice", "bill", "receipt", "payment", "tax", "taxes", "refund", "bank", "money", "government", "owe", "paid"],
+        &["holiday", "vacation", "trip", "beach", "travel", "flight", "hotel", "sea", "sand", "summer"],
+        &["recipe", "cooking", "pasta", "dinner", "bake", "kitchen", "soup", "eat", "food", "sauce"],
+        &["dog", "cat", "pet", "puppy", "vet", "animal", "walk", "leash"],
+        &["meeting", "agenda", "minutes", "schedule", "calendar", "standup", "monday"],
+    ];
+    let vector = |text: &str| -> Vec<f32> {
+        let body = text.rsplit_once(" | query: ").or_else(|| text.rsplit_once(" | text: ")).map_or(text, |(_, b)| b);
+        let mut v = vec![0.0f32; 768];
+        for w in body.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase) {
+            match TOPICS.iter().position(|t| t.contains(&w.as_str())) {
+                Some(t) => v[t] += 3.0,
+                None => {
+                    let h = w.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32);
+                    v[32 + (h as usize % 700)] += 0.4;
+                }
+            }
+        }
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+        v.iter().map(|x| x / norm).collect()
+    };
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut line = String::new();
+            if r.read_line(&mut line).is_err() {
+                continue;
+            }
+            let (method, path) = { let mut p = line.split_whitespace(); (p.next().unwrap_or("").to_string(), p.next().unwrap_or("").to_string()) };
+            let mut len = 0usize;
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).unwrap_or(0) == 0 || h.trim().is_empty() {
+                    break;
+                }
+                if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; len];
+            let _ = r.read_exact(&mut body);
+            let mut s = s;
+            let reply = |s: &mut std::net::TcpStream, code: &str, json: String| {
+                let _ = write!(s, "HTTP/1.1 {code}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}", json.len());
+            };
+            match (method.as_str(), path.as_str()) {
+                ("GET", "/api/tags") => {
+                    let models = if m.load(Relaxed) { r#"[{"name":"embeddinggemma:latest","size":621875424}]"# } else { "[]" };
+                    reply(&mut s, "200 OK", format!(r#"{{"models":{models}}}"#));
+                }
+                ("POST", "/api/pull") => {
+                    // Streamed as Ollama streams it: chunked, one JSON object per line.
+                    let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+                    let mut lines = vec![r#"{"status":"pulling manifest"}"#.to_string()];
+                    lines.extend((1..=4).map(|k| format!(r#"{{"status":"pulling","digest":"sha256:ab","total":300000000,"completed":{}}}"#, k * 75_000_000)));
+                    lines.push(r#"{"status":"success"}"#.into());
+                    for l in lines {
+                        let chunk = format!("{l}\n");
+                        let _ = write!(s, "{:x}\r\n{chunk}\r\n", chunk.len());
+                        let _ = s.flush();
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    let _ = write!(s, "0\r\n\r\n");
+                    m.store(true, Relaxed);
+                }
+                ("POST", "/api/embed") if m.load(Relaxed) => {
+                    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                    let inputs: Vec<String> = v["input"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+                    n.fetch_add(inputs.len(), Relaxed);
+                    let embs: Vec<Vec<f32>> = inputs.iter().map(|t| vector(t)).collect();
+                    reply(&mut s, "200 OK", serde_json::json!({ "model": "embeddinggemma", "embeddings": embs }).to_string());
+                }
+                ("POST", "/api/embed") => reply(&mut s, "404 Not Found", r#"{"error":"model \"embeddinggemma\" not found, try pulling it first"}"#.into()),
+                _ => reply(&mut s, "404 Not Found", r#"{"error":"not found"}"#.into()),
+            }
+        }
+    });
+    (addr, model, embedded)
+}
+
+#[test]
+fn search_by_meaning_through_ollama() {
+    use crate::ollama::{self, Status};
+    use crate::semantic::{self, Engine, Phase};
+    use std::sync::atomic::Ordering::Relaxed;
+    let set_host = |h: &str| *ollama::TEST_HOST.lock().unwrap() = Some(h.to_string());
+    // Nothing listening: not running, said plainly and quickly.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
+    set_host(&closed);
+    let t0 = Instant::now();
+    assert_eq!(ollama::status(), Status::NotRunning);
+    assert!(t0.elapsed() < Duration::from_secs(2));
+    assert_eq!(ollama::embed(&["x".into()]).err().as_deref(), Some("Ollama isn't running"));
+    // Running without the model: asked to fetch it, which streams progress.
+    let (addr, _model, embedded) = fake_ollama(false);
+    set_host(&addr);
+    assert_eq!(ollama::status(), Status::NoModel);
+    assert!(ollama::embed(&["x".into()]).err().unwrap().contains("not found"));
+    let mut seen = vec![];
+    ollama::pull(|d, a| seen.push((d, a)), &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(seen.last(), Some(&(300_000_000, 300_000_000)));
+    assert_eq!(seen.len(), 4, "every progress line, through the chunked stream");
+    assert_eq!(ollama::status(), Status::Ready);
+    let e = ollama::embed(&["task: search result | query: a bill".into(), "title: none | text: a beach".into()]).unwrap();
+    assert_eq!(e.len(), 2);
+    for v in &e {
+        assert_eq!(v.len(), ollama::DIMS);
+        assert!((v.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-3, "length 1 after cutting to {}", ollama::DIMS);
+    }
+    // Passages: the whole text covered, each about a passage long, on character edges.
+    let text = [include_str!("../LICENSE"), "日本語のテキスト。".repeat(300).as_str()].concat();
+    let ps = semantic::cut(&text);
+    assert!(ps.len() > 20);
+    let mut reach = 0;
+    for &(a, n) in &ps {
+        assert!(text.is_char_boundary(a as usize) && text.is_char_boundary((a + n) as usize));
+        assert!(n as usize <= 1200 + 4);
+        assert!(a as usize <= reach, "a gap before {a}");
+        reach = reach.max((a + n) as usize);
+    }
+    assert!(reach + 20 >= text.len() || ps.len() == 120, "covered to {reach} of {}", text.len());
+    // A folder of files; the engine reads them and finds them by meaning.
+    let d = tmpdir("meaning");
+    touch(&d.join("letter from the bank.txt"), "Dear customer, your tax refund has been paid into your account. Keep this receipt.");
+    touch(&d.join("summer.md"), "# Plans\n\nTwo weeks at the beach, flight on Friday, hotel near the sea.");
+    touch(&d.join("Notes/dinner.txt"), "Pasta with tomato sauce: boil, stir, eat. A kitchen classic.");
+    touch(&d.join("node_modules/skip.txt"), "invoice invoice invoice");
+    touch(&d.join(".hidden/skip.txt"), "invoice invoice invoice");
+    touch(&d.join("photo.png"), "not text");
+    let _ = std::fs::remove_file(std::env::temp_dir().join("maia/meaning.idx"));
+    let ctx = egui::Context::default();
+    let engine = Engine::start(vec![d.clone()], &ctx);
+    let t0 = Instant::now();
+    while engine.phase() != Phase::Ready {
+        assert!(t0.elapsed() < Duration::from_secs(20), "stuck at {:?}", engine.phase());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let idx = engine.index();
+    assert_eq!(idx.files(), 3, "text files only; hidden and build folders skipped");
+    let best = |e: &Engine, q: &str| semantic::search(&e.index(), q, 3).unwrap().first().map(|h| h.path.file_name().unwrap().to_string_lossy().into_owned());
+    assert_eq!(best(&engine, "money back from the government").as_deref(), Some("letter from the bank.txt"), "no word in common, same topic");
+    assert_eq!(best(&engine, "travel in summer").as_deref(), Some("summer.md"));
+    assert_eq!(best(&engine, "what to cook tonight").as_deref(), Some("dinner.txt"));
+    let hit = &semantic::search(&engine.index(), "food", 1).unwrap()[0];
+    assert!(hit.passage.starts_with("Pasta with tomato sauce"), "the passage shown: {:?}", hit.passage);
+    // Saved, and on the next start only changed files are read again.
+    let before = embedded.load(Relaxed);
+    drop(engine);
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(semantic::load(&std::env::temp_dir().join("maia/meaning.idx")).files(), 3, "saved to the cache");
+    std::thread::sleep(Duration::from_secs(1));
+    touch(&d.join("summer.md"), "# Plans\n\nWe changed our mind: a puppy instead of a trip. The dog needs a vet.");
+    std::fs::remove_file(d.join("Notes/dinner.txt")).unwrap();
+    let engine = Engine::start(vec![d.clone()], &ctx);
+    let t0 = Instant::now();
+    while engine.phase() != Phase::Ready {
+        assert!(t0.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(embedded.load(Relaxed) - before, 1, "only the changed file was read again");
+    assert_eq!(engine.index().files(), 2, "the deleted file is gone from the index");
+    assert_eq!(best(&engine, "my pet").as_deref(), Some("summer.md"));
+    drop(engine);
+    // Without the model the engine waits for the user's say-so, then fetches it.
+    let (addr2, model2, _) = fake_ollama(false);
+    set_host(&addr2);
+    let engine = Engine::start(vec![d.clone()], &ctx);
+    let t0 = Instant::now();
+    while engine.phase() != Phase::NoModel {
+        assert!(t0.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!model2.load(Relaxed), "nothing downloaded without asking");
+    engine.download();
+    let t0 = Instant::now();
+    while engine.phase() != Phase::Ready {
+        assert!(t0.elapsed() < Duration::from_secs(20), "{:?}", engine.phase());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(model2.load(Relaxed));
+    drop(engine);
+    *ollama::TEST_HOST.lock().unwrap() = None;
+    assert_eq!(semantic::folders(" ~/Documents , /srv/notes,, "), vec![crate::fsx::home().join("Documents"), PathBuf::from("/srv/notes")]);
+    let _ = std::fs::remove_dir_all(&d);
+}

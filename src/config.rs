@@ -161,6 +161,10 @@ pub struct Config {
     pub open_folders_new_tab: bool,
     /// Folders opened from other apps or a second launch go to the open window as tabs.
     pub single_instance: bool,
+    /// Search by meaning (a local model through Ollama). Off: nothing runs or is stored.
+    pub semantic_search: bool,
+    /// The folders it reads, comma-separated ("~" is home).
+    pub semantic_folders: String,
     pub dblclick_bg_parent: bool,
     pub reverse_scroll: bool,
     pub char_key_action: CharKeyAction,
@@ -218,6 +222,8 @@ impl Default for Config {
             single_click_folders_only: false,
             open_folders_new_tab: false,
             single_instance: true,
+            semantic_search: false,
+            semantic_folders: "~/Documents".into(),
             dblclick_bg_parent: false,
             reverse_scroll: false,
             char_key_action: CharKeyAction::TriggerHotkey,
