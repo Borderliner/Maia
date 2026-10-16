@@ -2703,7 +2703,7 @@ fn search_by_meaning_through_ollama() {
     let mut reach = 0;
     for &(a, n) in &ps {
         assert!(text.is_char_boundary(a as usize) && text.is_char_boundary((a + n) as usize));
-        assert!(n as usize <= 1200 + 4);
+        assert!(n as usize <= 1800 + 4);
         assert!(a as usize <= reach, "a gap before {a}");
         reach = reach.max((a + n) as usize);
     }
@@ -2777,12 +2777,13 @@ fn search_by_meaning_through_ollama() {
     }
     assert_eq!(engine.index().files(), 3, "text only");
     drop(engine);
-    // Code by its opening; minified bundles and lock files not at all. On battery a new
-    // picture waits for the charger while text is still read.
-    let body = (0..400).map(|k| format!("    // Step {k}: fetch the lyrics for the playing song and keep them in memory\n")).collect::<String>();
+    // Code, data and vendored folders are left out: only writing is read. On battery a
+    // new picture waits for the charger while that is still read.
+    let body = (0..40).map(|k| format!("    // Step {k}: fetch the lyrics for the playing song and keep them in memory\n")).collect::<String>();
     touch(&d.join("lyrics.py"), &body);
-    touch(&d.join("bundle.js"), &format!("var a=function(){{return 'lyrics for the playing song and more words here'}};{}", "x=1;".repeat(400)));
     touch(&d.join("package-lock.json"), "{ \"name\": \"lyrics for the playing song and more words\" }");
+    touch(&d.join("vendor/README.md"), "Lyrics for the playing song, fetched from a service and kept in memory for later.");
+    touch(&d.join("song notes.md"), "Lyrics for the playing song, fetched from a service and kept in memory for later.");
     captioned_png(&d.join("IMG_0413.png"), "a puppy playing in the sand");
     semantic::TEST_BATTERY.store(true, Relaxed);
     let before = embedded.load(Relaxed);
@@ -2792,7 +2793,7 @@ fn search_by_meaning_through_ollama() {
         assert!(t0.elapsed() < Duration::from_secs(20));
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(embedded.load(Relaxed) - before, 1, "one passage of the code file, nothing else");
+    assert_eq!(embedded.load(Relaxed) - before, 1, "the note only: no code, data or vendored files");
     assert_eq!(engine.waiting(), 4, "pictures wait (the run with pictures off left them all out)");
     assert_eq!(engine.index().files(), 4, "the text is read meanwhile");
     semantic::TEST_BATTERY.store(false, Relaxed);
@@ -2829,6 +2830,17 @@ fn search_by_meaning_through_ollama() {
 }
 
 #[test]
+fn machine_named_pictures_told_from_photos() {
+    use crate::semantic::machine_named;
+    for n in ["frame_0042.png", "clip-000123.jpg", "000017.png", "3f9a1c0e-7b2d-4c1a.webp", "out.0001.png", "shot 004.png"] {
+        assert!(machine_named(Path::new(n)), "{n}");
+    }
+    for n in ["IMG_1234.jpg", "PXL_20260912_101500.jpg", "DSC0042.JPG", "Screenshot_2026-10-15.png", "wallhaven-lygxjl.png", "Akeno.png", "17.png", "beach day.png"] {
+        assert!(!machine_named(Path::new(n)), "{n}");
+    }
+}
+
+#[test]
 fn names_found_anywhere_under_home() {
     let d = tmpdir("names");
     for f in ["Notes/Read Me.md", "Notes/readme-old.txt", "Code/maia/README.md", "Code/maia/src/main.rs", "Code/maia/node_modules/readme.md", ".hidden/readme.md", "Photos/Été à Paris.jpg"] {
@@ -2852,3 +2864,4 @@ fn names_found_anywhere_under_home() {
     assert!(find("").is_empty() && find("nothing like it").is_empty());
     let _ = std::fs::remove_dir_all(&d);
 }
+

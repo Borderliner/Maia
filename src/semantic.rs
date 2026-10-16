@@ -14,9 +14,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::ollama::{self, DIMS};
 
-/// Passages are about this many characters, overlapping a little so a sentence cut at
-/// one edge is whole in the next.
-const PASSAGE: usize = 1200;
+/// Passages are about this many characters (some 450 of the model's tokens), overlapping
+/// a little so a sentence cut at one edge is whole in the next.
+const PASSAGE: usize = 1800;
 const OVERLAP: usize = 200;
 /// Enough for a long document; a log or data dump past this is not what one searches.
 const MAX_PASSAGES: usize = 120;
@@ -37,27 +37,43 @@ const MAX_IMAGE: u64 = 40 << 20;
 /// shrunk to 512 under 2 s) and what it makes of a picture is as good at this size.
 const IMAGE_SIDE: u32 = 512;
 /// Smaller than this on its longest side: an icon, cursor or button, not a picture.
-const MIN_PICTURE: u32 = 200;
-/// A folder with this many pictures, nearly all numbered, holds frames cut from a video
-/// or an animation: thousands of near-copies, skipped.
+const MIN_PICTURE: u32 = 256;
+/// A folder with this many pictures, nearly all named by a program ("frame_0042",
+/// "3f9a1c0e…", not a camera's "IMG_1234"), holds frames cut from a video or a dataset:
+/// thousands of near-copies, skipped.
 const FRAME_RUN: usize = 40;
 
 pub fn is_picture(p: &Path) -> bool {
     p.extension().is_some_and(|e| IMAGE_EXTS.contains(&e.to_string_lossy().to_ascii_lowercase().as_str()))
 }
 
-const TEXT_EXTS: &[&str] = &[
-    "txt", "md", "markdown", "rst", "org", "tex", "adoc", "rtf", "csv", "tsv", "log", "rs", "py", "js", "ts", "tsx", "jsx", "go", "c", "h", "cc", "cpp", "hpp", "java", "kt", "swift", "rb",
-    "php", "cs", "lua", "sh", "fish", "zsh", "toml", "yaml", "yml", "ini", "conf", "html", "htm", "css", "scss", "sql", "json", "xml", "el", "vim", "nix", "zig", "dart", "scala", "r", "jl",
+/// Writing meant to be read (and PDFs). Code, data, settings and logs are left out: an
+/// editor searches them better, and their thousands of files drown what people look for.
+const DOC_EXTS: &[&str] = &["txt", "text", "md", "markdown", "rst", "org", "tex", "adoc", "rtf", "html", "htm"];
+
+/// Folders of other people's or a program's files, not walked into: packages, vendored
+/// and built code, run logs.
+const SKIP_DIRS: &[&str] = &[
+    "node_modules", "bower_components", "target", "__pycache__", "venv", "site-packages", "build", "dist", "out", "vendor", "vendored", "third_party", "third-party", "thirdparty",
+    "3rdparty", "external", "deps", "coverage", "htmlcov", "generated", "__generated__", "wandb", "mlruns", "lightning_logs", "Pods", "DerivedData",
 ];
 
-/// Writing meant to be read, searched through to its end. Everything else (code, data,
-/// settings, logs) by its opening only: what the file is, which is what one asks for,
-/// at a fraction of the work.
-const PROSE_EXTS: &[&str] = &["txt", "md", "markdown", "rst", "org", "tex", "adoc", "rtf", "html", "htm", "pdf"];
+/// What a file is, for the kinds a question can ask for ("a photo of…", "the pdf about…").
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Picture,
+    Pdf,
+    Doc,
+}
 
-fn prose(p: &Path) -> bool {
-    p.extension().is_some_and(|e| PROSE_EXTS.contains(&e.to_string_lossy().to_ascii_lowercase().as_str()))
+fn kind(p: &Path) -> Kind {
+    if is_picture(p) {
+        Kind::Picture
+    } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
+        Kind::Pdf
+    } else {
+        Kind::Doc
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -74,6 +90,7 @@ pub enum Phase {
     Failed(String),
 }
 
+#[derive(Clone)]
 struct FileRec {
     path: PathBuf,
     mtime: i64,
@@ -84,12 +101,23 @@ struct FileRec {
     previews: Vec<String>,
     /// First passage's fingerprint index in `Index::vecs` (DIMS bytes each).
     first: usize,
+    /// Every word in the text, once, lowercase and space-separated: for the question's
+    /// own words, wherever in a long text they are.
+    words: String,
 }
 
 #[derive(Default)]
 pub struct Index {
     files: Vec<FileRec>,
     vecs: Vec<i8>,
+    /// Each fingerprint's length (as stored bytes), worked out on the first search.
+    lens: std::sync::OnceLock<Vec<f32>>,
+}
+
+impl Index {
+    fn lens(&self) -> &[f32] {
+        self.lens.get_or_init(|| self.vecs.chunks(DIMS).map(|v| (v.iter().map(|&x| x as i32 * x as i32).sum::<i32>() as f32).sqrt().max(1.0)).collect())
+    }
 }
 
 impl Index {
@@ -107,6 +135,8 @@ pub struct Hit {
     pub score: f32,
     /// The passage that matched, on one line.
     pub passage: String,
+    /// Close to the best match; the rest trail far behind it.
+    pub strong: bool,
 }
 
 struct Shared {
@@ -241,8 +271,12 @@ type Done = (Vec<usize>, Vec<Option<Vec<i8>>>);
 /// a question never queues behind a batch of files.
 static SEARCHING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// A fingerprint as signed bytes, scaled so its largest number is ±127: every byte's
+/// range is used (scaling a whole fingerprint changes no cosine, which `search` takes
+/// with each one's own length).
 fn q8(e: &[f32]) -> Vec<i8> {
-    e.iter().map(|x| (x * 127.0).round().clamp(-127.0, 127.0) as i8).collect()
+    let top = e.iter().fold(0f32, |m, x| m.max(x.abs())).max(1e-9);
+    e.iter().map(|x| (x / top * 127.0).round().clamp(-127.0, 127.0) as i8).collect()
 }
 
 fn embed_job(rows: Vec<usize>, inputs: Vec<serde_json::Value>) -> Result<Done, String> {
@@ -356,7 +390,7 @@ fn update(folders: &[PathBuf], pictures: bool, shared: &Mutex<Shared>, stop: &At
                         copies.entry((path.file_name().map(|n| n.to_os_string()).unwrap_or_default(), size)).or_insert(first);
                     }
                     next.vecs.extend_from_slice(&old.vecs[f.first * DIMS..(f.first + f.passages.len()) * DIMS]);
-                    next.files.push(FileRec { path, mtime, size, passages: f.passages.clone(), previews: f.previews.clone(), first });
+                    next.files.push(FileRec { path, mtime, size, first, ..(*f).clone() });
                 } else if is_picture(&path) {
                     // A picture: one fingerprint for how it looks. A copy of one already
                     // read (same name and size, as in a package unpacked twice) shares it.
@@ -379,7 +413,7 @@ fn update(folders: &[PathBuf], pictures: bool, shared: &Mutex<Shared>, stop: &At
                             row
                         }
                     };
-                    next.files.push(FileRec { path, mtime, size, passages: vec![(0, 0)], previews: vec![String::new()], first });
+                    next.files.push(FileRec { path, mtime, size, passages: vec![(0, 0)], previews: vec![String::new()], first, words: String::new() });
                     changed = true;
                     if pics.rows.len() >= PICTURE_BATCH {
                         send(&mut pics, &mut inflight)?;
@@ -387,15 +421,11 @@ fn update(folders: &[PathBuf], pictures: bool, shared: &Mutex<Shared>, stop: &At
                 } else {
                     let Some(text) = read(&path, size) else { continue };
                     // Number dumps, logs of values and tables of figures say nothing a meaning can find.
-                    let whole = prose(&path);
-                    let mut passages: Vec<(u32, u32)> = cut(if whole { &text } else { &text[..text.floor_char_boundary(PASSAGE * 3)] }).into_iter().filter(|&(a, n)| wordy(&text[a as usize..(a + n) as usize])).collect();
-                    if !whole {
-                        passages.truncate(1);
-                    }
+                    let passages: Vec<(u32, u32)> = cut(&text).into_iter().filter(|&(a, n)| wordy(&text[a as usize..(a + n) as usize])).collect();
                     if passages.is_empty() {
                         continue;
                     }
-                    let title = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let title = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     let first = next.vecs.len() / DIMS;
                     next.vecs.resize((first + passages.len()) * DIMS, 0);
                     for (j, &(a, n)) in passages.iter().enumerate() {
@@ -406,7 +436,7 @@ fn update(folders: &[PathBuf], pictures: bool, shared: &Mutex<Shared>, stop: &At
                         }
                     }
                     let previews = passages.iter().map(|&(a, n)| preview(&text[a as usize..(a + n) as usize])).collect();
-                    next.files.push(FileRec { path, mtime, size, passages, previews, first });
+                    next.files.push(FileRec { path, mtime, size, passages, previews, first, words: vocabulary(&text) });
                     changed = true;
                 }
                 // Searchable (and saved) as it grows, a few times a minute at most.
@@ -435,19 +465,20 @@ fn update(folders: &[PathBuf], pictures: bool, shared: &Mutex<Shared>, stop: &At
 /// Make `next` the index searches use, and save it; files whose fingerprint couldn't be
 /// made are left out.
 fn publish(shared: &Mutex<Shared>, next: &Index, failed: &std::collections::HashSet<usize>, ctx: &egui::Context) {
-    let files = next.files.iter().filter(|f| !failed.contains(&f.first)).map(|f| FileRec { path: f.path.clone(), mtime: f.mtime, size: f.size, passages: f.passages.clone(), previews: f.previews.clone(), first: f.first }).collect();
-    let copy = Index { files, vecs: next.vecs.clone() };
+    let files = next.files.iter().filter(|f| !failed.contains(&f.first)).cloned().collect();
+    let copy = Index { files, vecs: next.vecs.clone(), ..Default::default() };
     let _ = save(&index_path(), &copy);
     shared.lock().unwrap_or_else(|e| e.into_inner()).index = Arc::new(copy);
     ctx.request_repaint();
 }
 
 /// Folders whose pictures belong to software (icons, cursors, app resources), not to
-/// the person: their text is still read, their pictures not.
+/// the person: their documents are still read, their pictures not.
 const SOFTWARE: &[&str] = &["icons", "cursors", "squashfs-root", "app.asar.unpacked", "site-packages", "emoji", "flags", "sprites", "pkg"];
 
-/// Files worth reading under `dir`: text and PDFs, outside hidden and build folders, and
-/// with `pictures` the pictures that are someone's (not icons, not video frames).
+/// Files worth reading under `dir`: documents and PDFs, outside hidden, package and build
+/// folders, and with `pictures` the pictures that are someone's (not icons, not video
+/// frames or datasets).
 fn walk(dir: &Path, pictures: bool, out: &mut Vec<(PathBuf, i64, u64)>, stop: &AtomicBool) {
     let mut todo = vec![(dir.to_path_buf(), pictures)];
     while let Some((d, pictures)) = todo.pop() {
@@ -464,18 +495,23 @@ fn walk(dir: &Path, pictures: bool, out: &mut Vec<(PathBuf, i64, u64)>, stop: &A
             }
             let Ok(ft) = e.file_type() else { continue };
             if ft.is_dir() {
-                if !matches!(name.as_ref(), "node_modules" | "target" | "__pycache__" | "venv" | "build" | "dist") {
+                if !SKIP_DIRS.contains(&name.as_ref()) {
                     todo.push((e.path(), pictures && !SOFTWARE.contains(&name.to_ascii_lowercase().as_str())));
                 }
             } else if ft.is_file() {
-                // Generated: lock files and minified bundles.
-                if matches!(name.as_ref(), "package-lock.json" | "pnpm-lock.yaml" | "composer.lock") || name.contains(".min.") {
+                // Text files that are a build's or a package's, not writing.
+                let lower = name.to_ascii_lowercase();
+                if matches!(lower.as_str(), "cmakelists.txt" | "requirements.txt" | "requirements-dev.txt" | "constraints.txt" | "robots.txt" | "copying" | "notice" | "notice.txt" | "third_party_notices.txt")
+                    || lower.starts_with("license")
+                    || lower.starts_with("licence")
+                    || lower.contains(".min.")
+                {
                     continue;
                 }
                 let ext = name.rsplit_once('.').map(|(_, x)| x.to_ascii_lowercase()).unwrap_or_default();
                 let pdf = ext == "pdf";
                 let picture = pictures && IMAGE_EXTS.contains(&ext.as_str());
-                if !pdf && !picture && !TEXT_EXTS.contains(&ext.as_str()) {
+                if !pdf && !picture && !DOC_EXTS.contains(&ext.as_str()) {
                     continue;
                 }
                 let Ok(m) = e.metadata() else { continue };
@@ -490,10 +526,10 @@ fn walk(dir: &Path, pictures: bool, out: &mut Vec<(PathBuf, i64, u64)>, stop: &A
                 out.push((e.path(), m.mtime(), m.len()));
             }
         }
-        // Frames of a video: many pictures here, nearly all numbered.
+        // Frames of a video or a dataset: many pictures here, nearly all named by a program.
         let here = &out[start..];
         let pics = here.iter().filter(|(p, ..)| is_picture(p)).count();
-        if pics >= FRAME_RUN && here.iter().filter(|(p, ..)| is_picture(p) && numbered(p)).count() * 5 >= pics * 4 {
+        if pics >= FRAME_RUN && here.iter().filter(|(p, ..)| is_picture(p) && machine_named(p)).count() * 10 >= pics * 7 {
             let mut k = start;
             while k < out.len() {
                 if is_picture(&out[k].0) { out.swap_remove(k); } else { k += 1; }
@@ -516,10 +552,33 @@ fn on_battery() -> bool {
     })
 }
 
-/// "IMG_0042.png", "frame-0001.jpg", "17.png": a number of two or more digits in the name.
-fn numbered(p: &Path) -> bool {
-    let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    stem.as_bytes().windows(2).any(|w| w[0].is_ascii_digit() && w[1].is_ascii_digit())
+/// A name a program gave: "frame_0042", "clip-000123", "17", "3f9a1c0e-7b2d"; not a
+/// camera's or phone's ("IMG_1234", "PXL_2026…", "DSC0042"), which are someone's photos.
+pub fn machine_named(p: &Path) -> bool {
+    const CAMERA: &[&str] = &["img", "dsc", "pxl", "mvimg", "vid", "gopr", "dji", "photo", "whatsapp", "screenshot", "signal"];
+    let stem = p.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if CAMERA.iter().any(|c| stem.starts_with(c)) {
+        return false;
+    }
+    let b = stem.as_bytes();
+    // Hex: "3f9a1c0e", "3f9a1c0e-7b2d-…".
+    let hex = b.iter().take_while(|c| c.is_ascii_hexdigit()).count();
+    if hex >= 8 && stem.split(['-', '_']).all(|part| part.len() >= 4 && part.bytes().all(|c| c.is_ascii_hexdigit())) {
+        return true;
+    }
+    // A few letters, maybe a separator, then three or more digits (and more numbers).
+    let letters = b.iter().take_while(|c| c.is_ascii_lowercase()).count();
+    if letters > 16 {
+        return false;
+    }
+    let mut rest = &b[letters..];
+    if let Some((&c, r)) = rest.split_first() {
+        if matches!(c, b'-' | b'_' | b'.' | b' ') {
+            rest = r;
+        }
+    }
+    let digits = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+    digits >= 3 && rest[digits..].split(|c| matches!(c, b'-' | b'_' | b'.')).skip(1).all(|n| !n.is_empty() && n.iter().all(u8::is_ascii_digit)) && (digits == rest.len() || matches!(rest[digits], b'-' | b'_' | b'.'))
 }
 
 /// A picture as the model takes it: decoded, shrunk to IMAGE_SIDE and written as PNG.
@@ -549,8 +608,9 @@ fn read(path: &Path, size: u64) -> Option<String> {
     if bytes.len() as u64 > MAX_TEXT || head.contains(&0) {
         return None;
     }
-    // Minified or generated code: lines thousands of characters long.
-    if !prose(path) && head.split(|&b| b == b'\n').any(|l| l.len() > 1000) {
+    // A web page a program wrote: lines thousands of characters long.
+    let html = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"));
+    if html && head.split(|&b| b == b'\n').any(|l| l.len() > 1000) {
         return None;
     }
     Some(String::from_utf8_lossy(&bytes).into_owned())
@@ -582,9 +642,20 @@ pub fn cut(text: &str) -> Vec<(u32, u32)> {
     out
 }
 
-/// The best passages for `query`, one per file, best first. Meaning ranks; a question's
-/// own words found in a file's name or in the passage add to it, so names, codes and
-/// rare words still count as typed.
+/// How far a passage must stand out from everything else for this question to count as
+/// a match by meaning, in standard deviations.
+const STANDS_OUT: f32 = 2.0;
+
+/// The files that answer `query`, best first, each with the passage that does.
+///
+/// Meaning: every passage's cosine with the question, put on this question's own scale:
+/// less the average of its kind (pictures and text sit at different levels for the same
+/// question), in standard deviations of all of them. Only what stands out counts, which
+/// also lets a search find nothing. Words: the question's own words in a file's name,
+/// folders and text rescue what a meaning can't hold exactly (names, codes, numbers).
+/// A file counts if it stands out or holds half the words; its score is how far it
+/// stands out, plus more the more of the words it holds, plus one when it is the kind
+/// asked for. Results under half the best one's score are marked weak.
 pub fn search(index: &Index, query: &str, limit: usize) -> Result<Vec<Hit>, String> {
     struct Asking;
     impl Drop for Asking {
@@ -596,54 +667,80 @@ pub fn search(index: &Index, query: &str, limit: usize) -> Result<Vec<Hit>, Stri
     let asking = Asking;
     let q = ollama::embed(&[format!("task: search result | query: {query}")])?.pop().unwrap_or_default();
     drop(asking);
-    let q8: Vec<i32> = q.iter().map(|x| (x * 127.0).round() as i32).collect();
+    let q8: Vec<i32> = q8(&q).into_iter().map(i32::from).collect();
+    let qn = (q8.iter().map(|x| x * x).sum::<i32>() as f32).sqrt().max(1.0);
+    let row = |r: usize| &index.vecs[r * DIMS..(r + 1) * DIMS];
+    let lens = index.lens();
+    let cos = |r: usize| row(r).iter().zip(&q8).map(|(&a, &b)| a as i32 * b).sum::<i32>() as f32 / (lens[r] * qn);
+    // Every passage's cosine, and the scale: each kind's average, then the spread.
+    let files = &index.files;
+    let scores: Vec<Vec<f32>> = files.iter().map(|f| (0..f.passages.len()).map(|p| cos(f.first + p)).collect()).collect();
+    let (mut sum, mut n) = ([0f64; 2], [0usize; 2]);
+    for (f, sc) in files.iter().zip(&scores) {
+        let m = is_picture(&f.path) as usize;
+        sum[m] += sc.iter().map(|&x| x as f64).sum::<f64>();
+        n[m] += sc.len();
+    }
+    let all = (sum[0] + sum[1]) / (n[0] + n[1]).max(1) as f64;
+    // A kind with few passages takes the average of all.
+    let mean = [0, 1].map(|m| if n[m] >= 20 { sum[m] / n[m] as f64 } else { all });
+    let centred = |f: &FileRec, x: f32| x as f64 - mean[is_picture(&f.path) as usize];
+    let count = (n[0] + n[1]).max(1) as f64;
+    let mid = files.iter().zip(&scores).map(|(f, sc)| sc.iter().map(|&x| centred(f, x)).sum::<f64>()).sum::<f64>() / count;
+    let spread = (files.iter().zip(&scores).map(|(f, sc)| sc.iter().map(|&x| (centred(f, x) - mid).powi(2)).sum::<f64>()).sum::<f64>() / count).sqrt().max(0.02);
+    let z = |f: &FileRec, x: f32| ((centred(f, x) - mid) / spread) as f32;
+    // Among n passages one can stand out by √(n−1) deviations at most: a small collection
+    // asks for less.
+    let gate = STANDS_OUT.min(0.5 * (count as f32 - 1.0).max(0.0).sqrt());
+    // The question's words, and the kinds it asks for.
     let words = terms(query);
-    let cos = |f: &FileRec, p: usize| -> f32 {
-        let v = &index.vecs[(f.first + p) * DIMS..(f.first + p + 1) * DIMS];
-        v.iter().zip(&q8).map(|(&a, &b)| a as i32 * b).sum::<i32>() as f32 / (127.0 * 127.0)
-    };
-    let found = |hay: &str| -> usize {
-        let hay = hay.to_lowercase();
-        words.iter().filter(|w| hay.contains(w.as_str())).count()
-    };
-    // Every file by its closest passage and its name; then the leaders looked at closely,
-    // their passages weighed with the question's words too.
-    let mut files: Vec<(f32, usize)> = index
-        .files
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| !f.passages.is_empty())
-        .map(|(fi, f)| {
-            let best = (0..f.passages.len()).map(|p| cos(f, p)).fold(f32::MIN, f32::max);
-            let name = f.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            (best + 0.08 * found(&name).min(3) as f32, fi)
-        })
-        .collect();
-    files.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let mut hits: Vec<(f32, usize, usize)> = files
-        .iter()
-        .take(limit.max(60))
-        .map(|&(_, fi)| {
-            let f = &index.files[fi];
-            let name = f.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let named = 0.08 * found(&name).min(3) as f32;
-            let (s, p) = (0..f.passages.len())
-                .map(|p| (cos(f, p) + 0.03 * f.previews.get(p).map_or(0, |t| found(t)).min(4) as f32, p))
-                .fold((f32::MIN, 0), |a, b| if b.0 > a.0 { b } else { a });
-            (s + named, fi, p)
-        })
-        .collect();
-    hits.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let lookup = !words.is_empty() && words.iter().all(|w| w.chars().any(|c| c.is_numeric()) && (w.chars().any(char::is_alphabetic) || w.chars().count() >= 4));
+    let (meaning_weight, words_weight) = if lookup { (0.5, 4.0) } else { (1.0, 2.0) };
+    let asked = kinds_asked(query);
+    let home = crate::fsx::home();
+    let mut found: Vec<(f32, usize, usize)> = vec![];
+    for (fi, (f, sc)) in files.iter().zip(&scores).enumerate() {
+        let Some((best, bp)) = sc.iter().enumerate().map(|(p, &x)| (z(f, x), p)).max_by(|a, b| a.0.total_cmp(&b.0)) else { continue };
+        // Words: in the name and folders (below the home folder), and in the passages.
+        let (mut held, mut wp, mut wp_held) = (0usize, None, 0usize);
+        if !words.is_empty() {
+            let place = f.path.strip_prefix(&home).unwrap_or(&f.path).to_string_lossy().to_lowercase();
+            let lower: Vec<String> = f.previews.iter().map(|t| t.to_lowercase()).collect();
+            for w in &words {
+                if has_word(&place, w) || has_word(&f.words, w) {
+                    held += 1;
+                }
+            }
+            for (p, t) in lower.iter().enumerate() {
+                let k = words.iter().filter(|w| has_word(t, w)).count();
+                if k > wp_held {
+                    (wp, wp_held) = (Some(p), k);
+                }
+            }
+        }
+        let coverage = if words.is_empty() { 0.0 } else { held as f32 / words.len() as f32 };
+        if best < gate && coverage < 0.5 {
+            continue;
+        }
+        let mut score = meaning_weight * best.max(0.0) + words_weight * coverage.powf(1.5);
+        if asked.contains(&kind(&f.path)) {
+            score += 1.0;
+        }
+        // Shown: the passage that stands out, else the one with the words.
+        let p = if best >= gate { bp } else { wp.unwrap_or(bp) };
+        found.push((score, fi, p));
+    }
+    found.sort_by(|a, b| b.0.total_cmp(&a.0));
     // The same picture saved in several places (or near copies of it) shown once: the
     // best placed one stands for the rest.
-    let look = |fi: usize| &index.vecs[index.files[fi].first * DIMS..(index.files[fi].first + 1) * DIMS];
+    let look = |fi: usize| row(files[fi].first);
     let alike = |a: &[i8], b: &[i8]| {
         let dot = |x: &[i8], y: &[i8]| x.iter().zip(y).map(|(&p, &q)| p as i32 * q as i32).sum::<i32>() as f32;
         dot(a, b) >= 0.99 * (dot(a, a) * dot(b, b)).sqrt()
     };
     let mut shown: Vec<usize> = vec![];
-    hits.retain(|&(_, fi, _)| {
-        if !is_picture(&index.files[fi].path) {
+    found.retain(|&(_, fi, _)| {
+        if !is_picture(&files[fi].path) {
             return true;
         }
         if shown.iter().any(|&o| alike(look(o), look(fi))) {
@@ -652,10 +749,55 @@ pub fn search(index: &Index, query: &str, limit: usize) -> Result<Vec<Hit>, Stri
         shown.push(fi);
         true
     });
-    Ok(hits.into_iter().take(limit).map(|(score, fi, p)| {
-        let f = &index.files[fi];
-        Hit { path: f.path.clone(), score, passage: f.previews.get(p).cloned().unwrap_or_default() }
+    let top = found.first().map_or(0.0, |h| h.0);
+    Ok(found.into_iter().take(limit).map(|(score, fi, p)| {
+        let f = &files[fi];
+        Hit { path: f.path.clone(), score, passage: f.previews.get(p).cloned().unwrap_or_default(), strong: score >= top * 0.5 }
     }).collect())
+}
+
+/// Whether `word` (lowercase) is in `hay` (lowercase) as a word of its own, or the start
+/// of one with an ending ("dog" in "dogs", "plan" in "planned"); not inside another
+/// ("cat" in "category"). Two-letter words count only whole.
+fn has_word(hay: &str, word: &str) -> bool {
+    const ENDINGS: &[&str] = &["s", "es", "ed", "d", "ing", "er", "ers", "ly", "'s"];
+    let b = hay.as_bytes();
+    let mut from = 0;
+    while let Some(i) = hay[from..].find(word) {
+        let at = from + i;
+        let end = at + word.len();
+        let starts = at == 0 || !hay[..at].chars().next_back().is_some_and(char::is_alphanumeric);
+        if starts {
+            let rest = &hay[end..];
+            let tail = rest.find(|c: char| !c.is_alphanumeric() && c != '\'').unwrap_or(rest.len());
+            if tail == 0 || (word.chars().count() >= 3 && ENDINGS.contains(&&rest[..tail])) {
+                return true;
+            }
+        }
+        from = hay.ceil_char_boundary(at + 1).min(b.len());
+        if from >= hay.len() {
+            break;
+        }
+    }
+    false
+}
+
+/// The kinds of file a question names ("a photo of…", "…in a pdf", "my notes on…"): a
+/// nudge for them, not a filter.
+fn kinds_asked(query: &str) -> Vec<Kind> {
+    let mut out = vec![];
+    for w in query.split(|c: char| !c.is_alphanumeric()).map(str::to_lowercase) {
+        let k = match w.as_str() {
+            "photo" | "photos" | "picture" | "pictures" | "pic" | "pics" | "image" | "images" | "screenshot" | "screenshots" | "wallpaper" | "wallpapers" | "drawing" | "selfie" => Kind::Picture,
+            "pdf" | "pdfs" | "paper" | "papers" => Kind::Pdf,
+            "document" | "documents" | "doc" | "docs" | "note" | "notes" | "notebook" | "essay" | "report" | "readme" => Kind::Doc,
+            _ => continue,
+        };
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    }
+    out
 }
 
 /// A passage's opening words on one line.
@@ -684,20 +826,46 @@ pub fn wordy(s: &str) -> bool {
             letters += 1;
         }
     }
-    let words = s.split_whitespace().filter(|w| w.chars().filter(|c| c.is_alphabetic()).count() >= 3).count();
-    letters * 2 >= visible && words >= 6
+    // Real writing uses many different words; a log or a table repeats a few ("frame",
+    // "pts", "scene_score" a thousand times).
+    let words: Vec<String> = s.split(|c: char| !c.is_alphabetic()).filter(|w| w.chars().count() >= 3).map(str::to_lowercase).collect();
+    let mut distinct: Vec<&str> = words.iter().map(String::as_str).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    letters * 2 >= visible && distinct.len() >= 6 && distinct.len() * 4 >= words.len()
 }
 
-/// The words of a question that are worth matching as written: lowercase, three letters
-/// or more, without the small words every question has.
+/// Every word of `text` once, lowercase, space-separated (at most a few thousand).
+fn vocabulary(text: &str) -> String {
+    let mut words: Vec<String> = text.split(|c: char| !c.is_alphanumeric()).filter(|w| (2..=40).contains(&w.chars().count())).map(str::to_lowercase).collect();
+    words.sort_unstable();
+    words.dedup();
+    words.truncate(6000);
+    words.join(" ")
+}
+
+/// The words of a question that are worth matching as written: lowercase, two letters
+/// or more, without the small words every question has or the words that say what kind
+/// of file is wanted ("photo", "pdf"), which describe it rather than what is in it.
 pub fn terms(query: &str) -> Vec<String> {
-    const SKIP: &[&str] = &["the", "and", "for", "with", "from", "that", "this", "what", "how", "are", "was", "about", "into", "where", "when", "which", "file", "files", "some", "any", "find", "about", "there", "have", "has", "had", "its", "our", "your", "their", "was", "were", "who", "why", "can", "not", "but", "all"];
-    let mut v: Vec<String> = query.split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 3).map(str::to_lowercase).filter(|w| !SKIP.contains(&w.as_str())).collect();
-    v.dedup();
+    const SKIP: &[&str] = &[
+        "a", "an", "the", "of", "in", "on", "at", "to", "for", "with", "and", "or", "my", "me", "that", "this", "these", "those", "from", "about", "where", "what", "which", "who",
+        "when", "how", "why", "is", "was", "are", "were", "be", "it", "its", "some", "any", "find", "show", "file", "files", "photo", "photos", "picture", "pictures", "pic", "pics",
+        "image", "images", "screenshot", "screenshots", "pdf", "pdfs", "document", "documents", "doc", "docs", "there", "have", "has", "had", "our", "your", "their", "can", "not",
+        "but", "all", "i", "we", "you",
+    ];
+    let mut v: Vec<String> = vec![];
+    for w in query.split(|c: char| !c.is_alphanumeric()).map(str::to_lowercase) {
+        if w.chars().count() >= 2 && !SKIP.contains(&w.as_str()) && !v.contains(&w) {
+            v.push(w);
+        }
+    }
     v
 }
 
-const MAGIC: &[u8; 8] = b"MAIAMNG4";
+/// Changed whenever what goes into an index changes (5: the full 768 numbers, scaled per
+/// fingerprint; documents only): an older index is read again from the start.
+const MAGIC: &[u8; 8] = b"MAIAMNG5";
 
 fn save(path: &Path, idx: &Index) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
@@ -717,7 +885,7 @@ fn save(path: &Path, idx: &Index) -> std::io::Result<()> {
             b.extend_from_slice(&n.to_le_bytes());
         }
         b.extend(idx.vecs[f.first * DIMS..(f.first + f.passages.len()) * DIMS].iter().map(|&v| v as u8));
-        for s in &f.previews {
+        for s in f.previews.iter().chain([&f.words]) {
             b.extend_from_slice(&(s.len() as u32).to_le_bytes());
             b.extend_from_slice(s.as_bytes());
         }
@@ -763,7 +931,9 @@ pub fn load(path: &Path) -> Index {
                 let l = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
                 previews.push(String::from_utf8_lossy(take(l)?).into_owned());
             }
-            idx.files.push(FileRec { path, mtime, size, passages, previews, first });
+            let l = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+            let words = String::from_utf8_lossy(take(l)?).into_owned();
+            idx.files.push(FileRec { path, mtime, size, passages, previews, first, words });
         }
         Some(idx)
     };

@@ -9,9 +9,9 @@ use std::time::Duration;
 /// Google's EmbeddingGemma 2 (Google's own build, from Hugging Face): one meaning space
 /// for text and pictures, multilingual, made for search on one's own files.
 pub const MODEL: &str = "hf.co/ggml-org/embeddinggemma-2-GGUF:Q8_0";
-/// Fingerprint length: what Ollama returns for this build (Matryoshka: the first numbers
-/// carry the most, so a longer answer is cut to this).
-pub const DIMS: usize = 512;
+/// Fingerprint length: all the numbers this build gives (Matryoshka would let them be cut
+/// shorter, at some cost to how well they tell things apart).
+pub const DIMS: usize = 768;
 
 /// CPU threads Ollama may use for this (it otherwise takes every core).
 const THREADS: usize = 4;

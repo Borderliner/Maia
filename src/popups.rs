@@ -195,6 +195,8 @@ pub struct MeaningState {
     named_for: (String, usize),
     /// Rows' file details, for their icons.
     entries: std::collections::HashMap<PathBuf, Option<fsx::Entry>>,
+    /// The weaker meaning matches shown too (for this question).
+    show_weak: bool,
 }
 
 /// What runs again once an archive's password is given.
@@ -290,7 +292,7 @@ impl Popup {
         Popup::Layouts { delete }
     }
     pub fn meaning() -> Popup {
-        Popup::Meaning(MeaningState { query: String::new(), focus: true, sel: 0, hits: vec![], asked: String::new(), job: None, error: None, typed: Instant::now(), names: None, named: vec![], named_for: (String::new(), 0), entries: Default::default() })
+        Popup::Meaning(MeaningState { query: String::new(), focus: true, sel: 0, hits: vec![], asked: String::new(), job: None, error: None, typed: Instant::now(), names: None, named: vec![], named_for: (String::new(), 0), entries: Default::default(), show_weak: false })
     }
     pub fn prompt(title: &str, text: String, on_ok: Box<dyn FnOnce(&mut App, String)>) -> Popup {
         Popup::Prompt { title: title.into(), text, on_ok: Some(on_ok) }
@@ -2632,7 +2634,13 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
         is_dir: bool,
         passage: Option<&'a str>,
     }
+    if q != st.asked {
+        st.show_weak = false;
+    }
     let meant: Vec<&crate::semantic::Hit> = if q == st.asked { st.hits.iter().filter(|h| !st.named.iter().any(|(p, _)| p == &h.path)).collect() } else { vec![] };
+    // Matches far behind the best one wait under a link.
+    let weak = meant.iter().filter(|h| !h.strong).count();
+    let meant: Vec<&crate::semantic::Hit> = meant.into_iter().filter(|h| h.strong || st.show_weak).collect();
     let few = if meant.is_empty() { st.named.len() } else { st.named.len().min(5) };
     let rows: Vec<Row> = st.named[..few].iter().map(|(p, d)| Row { path: p, is_dir: *d, passage: None }).chain(meant.iter().map(|h| Row { path: &h.path, is_dir: false, passage: Some(&h.passage) })).collect();
     step(&mut st.sel, rows.len(), &k, |_| false);
@@ -2655,6 +2663,7 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
     }
     let entries = &st.entries;
     let walking = names.walking();
+    let mut more = false;
     centered(ctx, "meaning", 760.0, &pal, |ui| {
         let hint = if phase.is_some() { "Search by name, or describe what you are looking for…" } else { "Search files and folders by name…" };
         let r = search_field(ui, &mut st.query, hint, &mut st.focus, &pal, Glyph::Search);
@@ -2797,11 +2806,20 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
                     open = Some(row.path.to_path_buf());
                 }
             }
+            if weak > 0 && !st.show_weak {
+                let b = ui.add(egui::Button::new(egui::RichText::new(format!("Show {weak} weaker {}", if weak == 1 { "match" } else { "matches" })).size(small).color(pal.accent)).frame(false));
+                crate::ui::note_control(ui, b.rect, "weaker matches");
+                more = b.clicked();
+            }
             if rows.is_empty() && !q.is_empty() && !walking && st.job.is_none() && (!searchable || q == st.asked) && st.error.is_none() {
-                ui.label(egui::RichText::new("Nothing by that name").color(pal.text_dim));
+                let text = if searchable { "Nothing by that name, and nothing that stands out by meaning" } else { "Nothing by that name" };
+                ui.label(egui::RichText::new(text).color(pal.text_dim));
             }
         });
     });
+    if more {
+        st.show_weak = true;
+    }
     if turn_on {
         app.cfg.semantic_search = true;
         app.set_config_changed();

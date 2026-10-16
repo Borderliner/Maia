@@ -3117,6 +3117,10 @@ mod journeys {
         std::fs::write(docs.join("summer plans.md"), "Two weeks at the beach, a flight on Friday and a hotel by the sea.").unwrap();
         std::fs::write(docs.join("Taxes/pasta.txt"), "Pasta with tomato sauce: boil, stir and eat.").unwrap();
         crate::tests::captioned_png(&docs.join("IMG_0412.png"), "a puppy playing in the sand");
+        std::fs::create_dir_all(docs.join("Receipts")).unwrap();
+        for k in 1..=8 {
+            std::fs::write(docs.join(format!("Receipts/quittance {k}.txt")), "12.50 4.99 3.00").unwrap();
+        }
         let (addr, model, _) = crate::tests::fake_ollama(false);
         *crate::ollama::TEST_HOST.lock().unwrap() = Some(addr);
         struct Reset;
@@ -3178,16 +3182,27 @@ mod journeys {
             _ => s.fail("window closed"),
         }
         assert!(s.texts.iter().any(|(_, t)| t.starts_with("Dear customer, your tax refund")), "the passage under the name");
-        // Several results show at once, each row whole (not squeezed into the window's
-        // first, empty size).
-        let shown = match &s.app.popup {
-            Popup::Meaning(st) => st.hits.iter().filter(|h| {
-                let name = h.path.file_name().unwrap().to_string_lossy().into_owned();
-                s.texts.iter().any(|(r, t)| t.starts_with(&name) && r.height() > 8.0 && r.top() > 0.0 && r.bottom() < s.size.y)
-            }).count(),
-            _ => 0,
-        };
+        // Only what stands out: the vague question's one clear answer, the rest folded
+        // away (or not there at all).
+        match &s.app.popup {
+            Popup::Meaning(st) => assert!(st.hits.iter().filter(|h| h.strong).count() <= 2, "a short list: {:?}", st.hits.iter().map(|h| (&h.path, h.strong)).collect::<Vec<_>>()),
+            _ => s.fail("window closed"),
+        }
+        // Many results show at once, each row whole (not squeezed into the window's first,
+        // empty size).
+        s.act("key ctrl+a");
+        s.act("text quittance");
+        wait_until(&mut s, "receipts by name", 5, |s| matches!(&s.app.popup, Popup::Meaning(st) if st.named.len() >= 8));
+        s.idle(3);
+        let shown = (1..=8).filter(|k| {
+            let name = format!("quittance {k}.txt");
+            s.texts.iter().any(|(r, t)| *t == name && r.height() > 8.0 && r.top() > 0.0 && r.bottom() < s.size.y)
+        }).count();
         assert!(shown >= 4, "only {shown} results on screen");
+        s.act("key ctrl+a");
+        s.act("text money back from the government");
+        wait_until(&mut s, "answer again", 10, |s| matches!(&s.app.popup, Popup::Meaning(st) if st.hits.first().is_some_and(|h| h.path.ends_with("letter from the bank.txt"))));
+        s.idle(3);
         look(&mut s, "meaning results");
         // A picture, by what it shows.
         s.act("key ctrl+a");

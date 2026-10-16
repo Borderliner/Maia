@@ -1642,7 +1642,6 @@ fn commit(ui: &mut Ui, body: Rect, h: &mut History, wrap: bool, env: &mut Env) {
         let mono = FontId::monospace((fs - 2.5).max(8.0));
         let small = FontId::proportional(fs - 1.5);
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), (fs + 14.0).round()), Sense::hover());
-        let fmt = |f: &FontId, c: Color32| TextFormat { font_id: f.clone(), color: c, valign: Align::Center, ..Default::default() };
         let toggle = !o.nodes.is_empty();
         let end = r.right() - 8.0 - if toggle { 64.0 } else { 0.0 };
         let mut x = r.left() + 8.0;

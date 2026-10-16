@@ -81,10 +81,12 @@ shows its files with their diffs, and right-clicking a file shows the commits th
 changed it.
 
 Ctrl+K finds files and folders anywhere in your home folder by name, as you type.
-With search by meaning turned on, it also finds files by what they are about rather
-than their exact words, and pictures by what they show. That is off until you turn it
-on in Options, and then reads only the folders you list there, using a small model
-running on your computer through Ollama. The first read of a large folder takes a
+With search by meaning turned on, it also finds documents, PDFs and pictures by what
+they are about or show ("a dog on the beach", "the lease clause about pets"), and words
+you type that are in a file's name or text count too. Only what clearly stands out is
+listed, weaker matches folded under it. That is off until you turn it on in Options,
+and then reads only the folders you list there (not code or data files), using a small
+model running on your computer through Ollama. The first read of a large folder takes a
 while; after that only new and changed files are read. With a graphics card and
 `ollama-vulkan` installed it is several times faster. Pictures wait while a laptop runs
 on its battery.
