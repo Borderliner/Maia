@@ -916,7 +916,7 @@ impl App {
         let mut new_renames = vec![];
         for p in self.panels.values_mut() {
             for t in &mut p.tabs {
-                if t.dirty {
+                if t.dirty || t.built_tree != t.tree_active() {
                     t.rebuild(&ctxv);
                 } else if t.stream_dirty {
                     match t.rebuild_due() {

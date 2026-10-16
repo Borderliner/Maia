@@ -311,6 +311,19 @@ fn tab_listing_sort_filter_flatten() {
     t.toggle_expand(&d.join("zdir/deep"));
     pump(&mut t, &stats);
     assert!(t.view.iter().any(|&i| t.entries[i as usize].name == "needle.rs" && t.entries[i as usize].depth == 2));
+    // The status bar counts the folder's own items: unfolded rows are not shown "of" it.
+    let (vf, tf, vfi, tfi) = t.counts;
+    assert!(vf <= tf && vfi <= tfi, "shown {vf}/{tf} folders, {vfi}/{tfi} files");
+    // Zooming out of the tree (which does not mark the tab dirty) asks for new rows, and
+    // they leave the unfolded folders' children out.
+    t.settings.zoom = 0.0;
+    assert!(t.built_tree != t.tree_active(), "the frame loop rebuilds when the tree comes or goes");
+    pump(&mut t, &stats);
+    assert!(!t.view.iter().any(|&i| t.entries[i as usize].depth > 0), "Details shows no tree rows");
+    t.settings.zoom = 0.1;
+    assert!(t.built_tree != t.tree_active());
+    pump(&mut t, &stats);
+    assert!(t.view.iter().any(|&i| t.entries[i as usize].depth == 2), "back in the tree, the folders are still open");
     // Filtering in Tree view keeps the hierarchy: the match stays under its folders,
     // which are kept as dimmed context because they don't match themselves.
     t.filter = "needle".into();

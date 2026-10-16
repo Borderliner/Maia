@@ -82,6 +82,9 @@ pub struct Tab {
     pub free_view: Option<ViewSettings>,
     pub filter: String,
     last_filter: String,
+    /// Whether the rows were last built as a tree: zoom moves in and out of the tree view
+    /// without marking the tab dirty, and unfolded folders' rows must come and go with it.
+    pub built_tree: bool,
     pub flatten: bool,
     pub walk: Option<Walk>,
     pub loading: Option<Receiver<Listing>>,
@@ -182,6 +185,7 @@ impl Tab {
             free_view: None,
             filter: String::new(),
             last_filter: String::new(),
+            built_tree: false,
             flatten: false,
             walk: None,
             loading: None,
@@ -851,6 +855,7 @@ impl Tab {
     fn rebuild_inner(&mut self, c: &ViewCtx, content: Option<&crate::contentsearch::Hits>) {
         self.dirty = false;
         self.stream_dirty = false;
+        self.built_tree = self.tree_active();
         let walking = self.walk.as_ref().map(|w| !w.done.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(false);
         let fq = crate::query::parse(&self.filter, std::time::SystemTime::now());
         let q = fuzzy::Query::new(if content.is_some() { "" } else { &fq.name });
@@ -1164,9 +1169,15 @@ impl Tab {
             }
         }
         self.build_rows(top, &kids, c.stats);
+        // Shown out of the folder's own items, as the totals count them: unfolded tree
+        // rows are not in the totals (a folder of 1 showed "3/1" with two kids open).
         let (mut vf, mut vfi) = (0, 0);
         for &i in &self.view {
-            if self.entries[i as usize].is_dir { vf += 1 } else { vfi += 1 }
+            let e = &self.entries[i as usize];
+            if e.depth > 0 {
+                continue;
+            }
+            if e.is_dir { vf += 1 } else { vfi += 1 }
         }
         self.counts = (vf, tf, vfi, tfi);
         self.last_filter = self.filter.clone();
