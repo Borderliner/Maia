@@ -521,7 +521,7 @@ pub fn lane_color(pal: &Palette, lane: usize) -> Color32 {
     let a = hue(pal.accent);
     let hues: Vec<Color32> = HUES.iter().map(|&h| Color32::from_rgb((h >> 16) as u8, (h >> 8) as u8, h as u8)).filter(|&c| ((hue(c) - a + 1.5).rem_euclid(1.0) - 0.5).abs() > 0.07).collect();
     let c = hues[(lane - 1) % hues.len()];
-    let (to, t) = if pal.dark { (pal.text_dim, 0.18) } else { (pal.text, 0.38) };
+    let (to, t) = if pal.dark { (pal.text_dim, 0.18) } else { (pal.text, 0.25) };
     c.lerp_to_gamma(to, t)
 }
 
