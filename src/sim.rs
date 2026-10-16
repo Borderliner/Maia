@@ -641,9 +641,10 @@ impl Sim {
         let screen = Rect::from_min_size(Pos2::ZERO, self.size).expand(2.0);
         let mut texts: Vec<(Rect, String)> = vec![];
         for cs in shapes {
-            // Empty text has no bounds (egui reports NaN for an empty galley).
+            // Text with nothing visible (empty, or only spaces, as a file can be named)
+            // has no bounds: egui reports NaN for it.
             if let epaint::Shape::Text(t) = &cs.shape {
-                if t.galley.text().is_empty() {
+                if t.galley.text().trim().is_empty() {
                     continue;
                 }
             }
