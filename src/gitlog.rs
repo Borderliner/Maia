@@ -6,7 +6,7 @@
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use egui::epaint::CubicBezierShape;
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
@@ -245,75 +245,125 @@ pub fn ago(t: i64, now: i64) -> String {
     format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
-fn spawn<T: Send + 'static>(ctx: &egui::Context, f: impl FnOnce() -> T + Send + 'static) -> Receiver<T> {
-    let (tx, rx) = channel();
-    let ctx = ctx.clone();
+/// A worker's answer, once it has one.
+type Slot<T> = Arc<Mutex<Option<T>>>;
+
+fn spawn<T: Send + 'static>(ctx: &egui::Context, f: impl FnOnce() -> T + Send + 'static) -> Slot<T> {
+    let (slot, ctx) = (Slot::default(), ctx.clone());
+    let theirs = Arc::clone(&slot);
     std::thread::spawn(move || {
-        let _ = tx.send(f());
+        let v = f();
+        if let Ok(mut s) = theirs.lock() {
+            *s = Some(v);
+        }
         ctx.request_repaint();
     });
-    rx
+    slot
 }
 
-/// The running `git log`: a page is read each time one is asked for. Dropping it ends
-/// the reader, which kills git.
-struct Feed {
-    want: Sender<()>,
-    got: Receiver<Vec<Commit>>,
-    /// git's pid while it runs (0 once the reader has taken it back to reap it).
-    pid: std::sync::Arc<std::sync::atomic::AtomicU32>,
+fn take<T>(slot: &Option<Slot<T>>) -> Option<T> {
+    slot.as_ref()?.lock().ok()?.take()
+}
+
+/// Between the view and the reader of the running `git log`.
+#[derive(Default)]
+struct Pages {
+    /// The view wants another page.
+    want: bool,
+    got: Vec<Commit>,
+    /// git has nothing more (or could not run).
+    end: bool,
+    /// The view is gone: stop, and kill git.
+    closed: bool,
+    /// git's pid while the reader has not yet reaped it.
+    pid: u32,
+}
+
+struct Feed(Arc<(Mutex<Pages>, Condvar)>);
+
+fn lock(m: &Mutex<Pages>) -> MutexGuard<'_, Pages> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl Feed {
+    fn lock(&self) -> MutexGuard<'_, Pages> {
+        lock(&self.0.0)
+    }
+    fn ask(&self) {
+        self.lock().want = true;
+        self.0.1.notify_one();
+    }
 }
 
 impl Drop for Feed {
     /// A long walk (a huge repository without a commit-graph) stops with its history.
     fn drop(&mut self) {
-        let p = self.pid.swap(0, std::sync::atomic::Ordering::SeqCst);
-        if p != 0 {
-            unsafe { libc::kill(p as i32, libc::SIGKILL) };
+        let mut p = self.lock();
+        p.closed = true;
+        if p.pid != 0 {
+            unsafe { libc::kill(p.pid as i32, libc::SIGKILL) };
         }
+        drop(p);
+        self.0.1.notify_one();
     }
 }
 
 fn feed(root: PathBuf, ctx: &egui::Context) -> Feed {
-    let (want, asks) = channel::<()>();
-    let (tx, got) = channel();
-    let ctx = ctx.clone();
-    let pid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let theirs = pid.clone();
+    let f = Feed(Arc::default());
+    let (sh, ctx) = (Arc::clone(&f.0), ctx.clone());
     std::thread::spawn(move || {
-        let Ok(mut child) = git(&root).args(log_args()).stdout(Stdio::piped()).spawn() else { return };
-        theirs.store(child.id(), std::sync::atomic::Ordering::SeqCst);
+        let (m, cv) = &*sh;
+        let Ok(mut child) = git(&root).args(log_args()).stdout(Stdio::piped()).spawn() else {
+            lock(m).end = true;
+            ctx.request_repaint();
+            return;
+        };
+        lock(m).pid = child.id();
         if let Some(out) = child.stdout.take() {
             let mut r = BufReader::new(out);
-            while asks.recv().is_ok() {
-                let page = read_page(&mut r, PAGE);
-                let end = page.len() < PAGE;
-                if tx.send(page).is_err() || end {
+            loop {
+                let mut p = lock(m);
+                while !p.want && !p.closed {
+                    p = cv.wait(p).unwrap_or_else(|e| e.into_inner());
+                }
+                if p.closed {
                     break;
                 }
+                p.want = false;
+                drop(p);
+                let page = read_page(&mut r, PAGE);
+                let mut p = lock(m);
+                p.end = page.len() < PAGE;
+                p.got.extend(page);
                 ctx.request_repaint();
+                if p.end || p.closed {
+                    break;
+                }
             }
         }
-        theirs.store(0, std::sync::atomic::Ordering::SeqCst);
+        // Reaped only after the pid is cleared, so the view never signals a reused one.
+        let mut p = lock(m);
+        p.pid = 0;
+        p.end = true;
+        drop(p);
         let _ = child.kill();
         let _ = child.wait();
-        ctx.request_repaint();
     });
-    Feed { want, got, pid }
+    f
 }
 
 struct Open {
     at: usize,
     sel: usize,
     info: Option<(String, Vec<Change>)>,
-    job: Option<Receiver<(String, Vec<Change>)>>,
+    job: Option<Slot<(String, Vec<Change>)>>,
     diff: Option<Diff>,
 }
 
 struct Diff {
     file: usize,
     text: Option<(Vec<String>, Option<Spans>, bool)>,
-    job: Option<Receiver<(Vec<String>, Option<Spans>, bool)>>,
+    job: Option<Slot<(Vec<String>, Option<Spans>, bool)>>,
 }
 
 pub struct History {
@@ -341,8 +391,15 @@ impl History {
         let o = self.open.as_ref();
         (self.commits.len(), self.done, o.map(|o| o.at), o.and_then(|o| o.info.as_ref()).map(|i| i.1.len()), o.and_then(|o| o.diff.as_ref()?.text.as_ref()).map(|t| t.0.len()))
     }
-    pub fn rows(&self) -> &[Row] {
-        &self.rows
+    /// The running git (0 when none).
+    pub fn git_pid(&self) -> u32 {
+        self.feed.as_ref().map_or(0, |f| f.lock().pid)
+    }
+    pub fn more(&mut self, ctx: &egui::Context) {
+        self.poll(ctx);
+        if let Some(f) = &self.feed {
+            f.ask();
+        }
     }
 }
 
@@ -358,33 +415,31 @@ impl History {
     }
 
     /// Take in what the workers finished, and start what is wanted.
-    fn poll(&mut self, ctx: &egui::Context) {
+    pub(crate) fn poll(&mut self, ctx: &egui::Context) {
         // The first page is asked for here, the next ones as the graph nears its end.
         let f = self.feed.get_or_insert_with(|| feed(self.root.clone(), ctx));
         if self.commits.is_empty() && !self.asked && !self.done {
-            self.asked = f.want.send(()).is_ok();
-            self.done = !self.asked;
+            f.ask();
+            self.asked = true;
         }
-        match f.got.try_recv() {
-            Ok(page) => {
-                self.asked = false;
-                self.done = page.len() < PAGE;
-                for c in page {
-                    self.rows.push(self.lanes.place(&c));
-                    self.commits.push(c);
-                }
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.done = true,
-            Err(_) => {}
+        let mut p = f.lock();
+        let page = std::mem::take(&mut p.got);
+        self.done = p.end;
+        drop(p);
+        if !page.is_empty() || self.done {
+            self.asked = false;
         }
-        let root = self.root.clone();
+        for c in page {
+            self.rows.push(self.lanes.place(&c));
+            self.commits.push(c);
+        }
         if let Some(o) = &mut self.open {
-            let c = &self.commits[o.at];
+            let (c, root) = (&self.commits[o.at], self.root.clone());
             if o.info.is_none() && o.job.is_none() {
                 let (root, hash, parents) = (root.clone(), c.hash.clone(), c.parents.clone());
                 o.job = Some(spawn(ctx, move || changes(&root, &hash, &parents)));
             }
-            if let Some(r) = o.job.as_ref().and_then(|j| j.try_recv().ok()) {
+            if let Some(r) = take(&o.job) {
                 o.info = Some(r);
                 o.job = None;
             }
@@ -393,7 +448,7 @@ impl History {
                     let (hash, parents, ch) = (c.hash.clone(), c.parents.clone(), files[d.file].clone());
                     d.job = Some(spawn(ctx, move || diff(&root, &hash, &parents, &ch)));
                 }
-                if let Some(r) = d.job.as_ref().and_then(|j| j.try_recv().ok()) {
+                if let Some(r) = take(&d.job) {
                     d.text = Some(r);
                     d.job = None;
                 }
@@ -580,7 +635,10 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
         let first = (vp.min.y / row_h).floor().max(0.0) as usize;
         let last = ((vp.max.y / row_h).ceil() as usize + 1).min(n);
         if !h.done && last + 100 > h.commits.len() && !h.asked {
-            h.asked = h.feed.as_ref().is_some_and(|f| f.want.send(()).is_ok());
+            if let Some(f) = &h.feed {
+                f.ask();
+                h.asked = true;
+            }
         }
         let gx = r.left() + 8.0 + step / 2.0;
         let x = |l: u16| gx + (l as usize).min(LANES) as f32 * step;

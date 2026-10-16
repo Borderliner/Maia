@@ -2185,3 +2185,42 @@ fn git_history_pages_and_wide_merges() {
     assert_eq!((ch[0].status, ch[0].path.as_str(), ch[0].from.as_deref()), (b'R', "new name.txt", Some("old name.txt")));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The history's git runs a page ahead of nothing: after the first page it waits on its
+/// pipe until asked, and closing the history kills it.
+#[test]
+fn git_history_reads_on_demand_and_stops() {
+    use crate::gitlog::{History, PAGE};
+    if !crate::media::have("git") {
+        eprintln!("git not installed: skipped");
+        return;
+    }
+    let d = tmpdir("gitlog-feed");
+    git_history_fixture(&d, 700);
+    let ctx = egui::Context::default();
+    let mut h = History::new(d.clone(), "main".into(), false);
+    let wait = |h: &mut History, n: usize| {
+        let t0 = Instant::now();
+        while h.state().0 < n && t0.elapsed() < Duration::from_secs(10) {
+            h.poll(&ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        h.state().0
+    };
+    assert_eq!(wait(&mut h, PAGE), PAGE);
+    std::thread::sleep(Duration::from_millis(300));
+    h.poll(&ctx);
+    assert_eq!(h.state().0, PAGE, "nothing more read until asked");
+    let pid = h.git_pid();
+    assert!(pid != 0 && std::path::Path::new(&format!("/proc/{pid}")).exists(), "git waits on its pipe");
+    h.more(&ctx);
+    assert_eq!(wait(&mut h, 2 * PAGE), 2 * PAGE);
+    drop(h);
+    let t0 = Instant::now();
+    let gone = || std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |s| s.split_whitespace().nth(2) == Some("Z"));
+    while !gone() && t0.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(gone(), "git is stopped with its history");
+    let _ = std::fs::remove_dir_all(&d);
+}
