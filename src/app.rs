@@ -1642,6 +1642,10 @@ impl App {
             }
             Cmd::FocusFilter => self.panel().focus_filter = true,
             Cmd::ContentSearch => crate::contentsearch::toggle(self.panel()),
+            Cmd::CodeSearch | Cmd::FindTodos => match crate::devtools::target_dir(self) {
+                Some(d) => self.popup = crate::devtools::code_search(&ctx, d, cmd == Cmd::FindTodos),
+                None => self.toast("Search Code needs a folder"),
+            },
             Cmd::OpenInEditor => {
                 let mut paths = self.tab().selected_paths();
                 if paths.is_empty() {
@@ -1650,8 +1654,10 @@ impl App {
                 if paths.is_empty() && !tab::is_computer(&self.panel().path()) {
                     paths = vec![self.panel().path()];
                 }
+                let hint = self.panel().line_hint.clone();
                 for p in paths.into_iter().take(20) {
-                    self.open_in_editor(&p, None);
+                    let line = hint.as_ref().filter(|h| h.0 == p).map(|h| h.1);
+                    self.open_in_editor(&p, line);
                 }
             }
             Cmd::ChooseTheme => self.popup = Popup::Themes,
@@ -1848,6 +1854,20 @@ impl App {
                 let s = paths.iter().map(|p| crate::project::relative(p, &root)).collect::<Vec<_>>().join("\n");
                 ctx.copy_text(s.clone());
                 self.toast(format!("Copied {}", if paths.len() == 1 { s } else { format!("{} paths", paths.len()) }));
+            }
+            Cmd::CopyPathLine => {
+                // Only the file a search showed a line of has one.
+                let hint = self.panel().line_hint.clone();
+                let here: Vec<PathBuf> = self.tab().target_entries().iter().map(|e| e.path.clone()).collect();
+                match hint.filter(|h| here.contains(&h.0)) {
+                    Some((p, line)) => {
+                        let root = crate::project::root(p.parent().unwrap_or(&p));
+                        let s = crate::project::with_line(&crate::project::relative(&p, &root), line);
+                        ctx.copy_text(s.clone());
+                        self.toast(format!("Copied {s}"));
+                    }
+                    None => self.toast("No line is known for that: find it with Search Code first"),
+                }
             }
             Cmd::CopyPath | Cmd::CopyPathRaw | Cmd::CopyName => {
                 let mut paths = self.tab().selected_paths();
@@ -2161,6 +2181,18 @@ impl App {
             Ok(label) => self.toast(format!("Opened {} in {label}", line.map_or(name.clone(), |l| format!("{name}:{l}")))),
             Err(e) => self.toast(e),
         }
+    }
+
+    /// Show `path` selected in its folder with the preview open at `line`, marked.
+    pub fn show_at_line(&mut self, path: PathBuf, line: u32) {
+        let id = self.active;
+        if let Some(p) = self.panels.get_mut(&id) {
+            let ins = p.inspector.get_or_insert_with(Inspector::default);
+            ins.git = None;
+            ins.goto = Some((path.clone(), line, true));
+            p.line_hint = Some((path.clone(), line));
+        }
+        self.actions.push(Action::Navigate { panel: id, path });
     }
 
     pub fn navigate(&mut self, panel: u64, path: PathBuf) {

@@ -171,6 +171,8 @@ commands! {
     FocusFilter, "focus_filter", View, "Focus Filter", "Put the cursor in the filter box.", ["Ctrl+F"];
     MeaningSearch, "search_meaning", View, "Search Everywhere", "Find files and folders in your home folder by name, and by what they are about with search by meaning on.", ["Ctrl+K"];
     ContentSearch, "search_contents", View, "Search File Contents", "Switch the filter between file names and the text inside files.", ["Ctrl+Shift+F"];
+    CodeSearch, "search_code", View, "Search Code", "Find text in this project's files, by word, case or regular expression.", ["Ctrl+Alt+F"];
+    FindTodos, "find_todos", View, "Find TODOs", "List every TODO, FIXME, HACK and XXX comment in this project.", [];
     TypesFilter, "types_filter", View, "Filter By Type", "Choose which file types are shown.", ["Alt+T"];
     ToggleHidden, "toggle_hidden", View, "Toggle Hidden Files", "Show or hide dotfiles.", ["Ctrl+H"];
     ToggleSystem, "toggle_system", View, "Toggle System Files", "Show or hide backup files and special files (sockets, devices).", [];
@@ -231,6 +233,7 @@ commands! {
     CopyPathRaw, "copy_path_raw", Files, "Copy As Path (Raw)", "Copy full paths without any quoting.", [];
     CopyName, "copy_name", Files, "Copy Name", "Copy just the file names.", [];
     CopyPathRelative, "copy_path_relative", Files, "Copy Relative Path", "Copy paths written from the top of the project.", [];
+    CopyPathLine, "copy_path_line", Files, "Copy Path With Line", "Copy path:line for the line a search showed in this file.", [];
     Trash, "trash", Files, "Move To Trash", "Move the selection to the trash.", ["Delete"];
     DeletePermanent, "delete_permanent", Files, "Delete Permanently", "Delete the selection without using the trash (asks first).", ["Shift+Delete"];
     Rename, "rename", Files, "Rename", "Rename in place; with several items selected, edit all names at once.", ["F2"];

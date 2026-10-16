@@ -20,6 +20,8 @@ pub struct Panel {
     pub list_rect: Rect,
     /// Where the inspector was drawn last frame (None: closed).
     pub inspector_rect: Option<Rect>,
+    /// A file and the line a search showed in it (for Copy Path With Line).
+    pub line_hint: Option<(PathBuf, u32)>,
 }
 
 impl Panel {
@@ -35,6 +37,7 @@ impl Panel {
             rect: Rect::NOTHING,
             list_rect: Rect::NOTHING,
             inspector_rect: None,
+            line_hint: None,
         }
     }
     pub fn tab(&self) -> &Tab {

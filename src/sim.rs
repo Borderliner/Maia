@@ -984,7 +984,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(112) {
+    match rng.below(113) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1226,6 +1226,26 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.act(&format!("click {x:.0} {y:.0} right"));
                 s.act("text relative");
                 s.act("key Enter");
+            }
+        }
+        112 => {
+            // Search Code: a word or an expression, a switch or two, then a key.
+            s.act("key ctrl+alt+f");
+            if matches!(s.app.popup, Popup::CodeSearch(_)) {
+                s.act(&format!("text {}", rng.pick(&["needle", "fn", "TODO", "a(", r"[a-z]+_\d", "zzz", "ü", "Needle"])));
+                for _ in 0..rng.below(4) {
+                    click_control_at(s, rng.pick(&["match case", "whole word", "regex", "code todo", "code all files", "code scope folder", "code scope project", "code files"]));
+                }
+                if rng.below(3) == 0 {
+                    s.act(&format!("text {}", rng.pick(&["rust", "*.js", "!src/", "x"])));
+                }
+                s.idle(rng.below(20) + 1);
+                for _ in 0..1 + rng.below(3) {
+                    s.act(&format!("key {}", rng.pick(&["Down", "Up", "PageDown", "Enter", "ctrl+Enter", "ctrl+shift+c", "Tab", "alt+c", "alt+t", "Escape"])));
+                }
+            }
+            if rng.below(3) == 0 {
+                s.cmd(*rng.pick(&[Cmd::CopyPathLine, Cmd::FindTodos]));
             }
         }
         97 => {
@@ -4869,6 +4889,23 @@ mod journeys {
         report("admin", &s);
     }
 
+    fn code(s: &Sim) -> &crate::devtools::CodeState {
+        match &s.app.popup {
+            Popup::CodeSearch(st) => st,
+            _ => s.fail("Search Code is not open"),
+        }
+    }
+
+    fn code_files(s: &Sim) -> Vec<String> {
+        code(s).results.iter().map(|f| f.rel.clone()).collect()
+    }
+
+    /// Wait for the query as typed to have been searched to the end.
+    fn code_settled(s: &mut Sim, what: &str) {
+        wait_until(s, what, 20, |s| code(s).settled());
+        s.idle(2);
+    }
+
     fn launched() -> Vec<String> {
         crate::mime::LAUNCHED.lock().unwrap().clone()
     }
@@ -4881,6 +4918,181 @@ mod journeys {
     fn shot_still(s: &mut Sim, name: &str) {
         s.idle(12);
         s.shot(name);
+    }
+
+    /// Search Code from inside a project: the word found from the project's top in path
+    /// order, lines with their neighbours, ignored, hidden and binary files left out
+    /// until asked for; case, whole words, an expression (and a broken one), the file
+    /// filter, this folder only, the TODO list with its counts; a line opened in the
+    /// editor, copied as path:line, shown in Maia with the preview at that line; at
+    /// three window sizes.
+    #[test]
+    fn search_code_and_todos() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("codesearch");
+        let app = dev_fixture(&home);
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake_editors("codesearch")));
+        crate::editor::TEST_ENV.with(|e| e.borrow_mut().clear());
+        let mut s = Sim::new(&app.join("src"), vec2(1280.0, 800.0));
+        s.act("key ctrl+alt+f");
+        assert!(matches!(s.app.popup, Popup::CodeSearch(_)), "Ctrl+Alt+F opens Search Code");
+        s.act("text needle");
+        code_settled(&mut s, "needle");
+        assert_eq!(code_files(&s), ["src/lib.rs", "src/main.rs", "src/many.rs", "web/src/app.js"], "from the top, in path order, without ignored, hidden or binary files");
+        assert_eq!(code(&s).root.as_deref(), Some(app.as_path()));
+        let lines = |s: &Sim, f: &str| code(s).results.iter().find(|x| x.rel == f).map(|x| x.hits.iter().map(|h| h.line).collect::<Vec<_>>()).unwrap_or_default();
+        assert_eq!(lines(&s, "src/main.rs"), vec![5, 6, 9, 10, 11]);
+        let many = code(&s).results.iter().find(|f| f.rel == "src/many.rs").unwrap();
+        assert_eq!((many.hits.len(), many.total), (crate::codesearch::PER_FILE, 300));
+        assert!(some_text(&s, "let needle = find_needle();"), "the line is shown");
+        assert!(some_text(&s, "fn main() {"), "with the line before it");
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with("In ~/codesearch/Code/app · 308 lines in 4 files")), "the status says where and how much: {:?}", s.texts.iter().filter(|t| t.1.starts_with("In ")).collect::<Vec<_>>());
+        shot_still(&mut s, "code-search");
+        // The rest of a long file is counted at its end.
+        for _ in 0..60 {
+            if some_text(&s, "200 more lines in this file") {
+                break;
+            }
+            s.act("scroll 640 420 -20");
+        }
+        assert!(some_text(&s, "200 more lines in this file"));
+        shot_still(&mut s, "code-search-scrolled");
+        // Enter opens the selected line in the editor and keeps the list.
+        s.act("key Down");
+        assert_eq!(code(&s).selected().map(|(f, h)| (f.rel.clone(), h.line)), Some(("src/main.rs".to_string(), 5)));
+        let n = launched().len();
+        s.act("key Enter");
+        let l = launched();
+        assert!(l.len() == n + 1 && l[n].contains("editors/codesearch/code") && l[n].contains("\"-g\"") && l[n].contains("src/main.rs:5\""), "VS Code at the line: {:?}", l.last());
+        assert!(matches!(s.app.popup, Popup::CodeSearch(_)), "the list stays");
+        assert!(toast_is(&s, "Opened main.rs:5 in VS Code"), "{:?}", s.app.toast);
+        s.act("key ctrl+shift+c");
+        assert_eq!(s.copied.last().map(String::as_str), Some("src/main.rs:5"));
+        // Page Down goes on through lines far below, keeping the selection in view.
+        for _ in 0..5 {
+            s.act("key PageDown");
+        }
+        // The list scrolls there smoothly: let it arrive.
+        s.idle(30);
+        let (f, h) = code(&s).selected().map(|(f, h)| (f.rel.clone(), h.text.clone())).unwrap();
+        assert_eq!((f.as_str(), h.as_str()), ("src/many.rs", "fn needle_45() {}"));
+        assert!(s.texts.iter().any(|(r, t)| *t == h && r.max.y < s.size.y), "the selected line is in view");
+        for _ in 0..5 {
+            s.act("key PageUp");
+        }
+        // Whole words: needle_0 and find_needle are other words.
+        click_control(&mut s, "whole word");
+        code_settled(&mut s, "whole word");
+        assert_eq!(code_files(&s), ["src/lib.rs", "src/main.rs", "web/src/app.js"]);
+        assert_eq!(lines(&s, "src/main.rs"), vec![5, 6, 10, 11]);
+        click_control(&mut s, "whole word");
+        // An expression, then a broken one.
+        click_control(&mut s, "regex");
+        s.act("key ctrl+a");
+        s.act(r"text needle_\d+\(");
+        code_settled(&mut s, "expression");
+        assert_eq!(code_files(&s), ["src/many.rs"]);
+        s.act("text (");
+        wait_until(&mut s, "the expression's error", 5, |s| code(s).error.is_some());
+        s.idle(2);
+        let err = code(&s).error.clone().unwrap();
+        assert!(some_text(&s, &err), "the error is shown: {err}");
+        assert!(code(&s).results.is_empty());
+        shot_still(&mut s, "code-search-error");
+        click_control(&mut s, "regex");
+        // Match case.
+        s.act("key ctrl+a");
+        s.act("text Needle");
+        click_control(&mut s, "match case");
+        code_settled(&mut s, "match case");
+        assert_eq!((code_files(&s), lines(&s, "src/main.rs")), (vec!["src/main.rs".to_string()], vec![10]));
+        click_control(&mut s, "match case");
+        // File types.
+        s.act("key ctrl+a");
+        s.act("text needle");
+        s.act("key Tab");
+        s.act("text js");
+        code_settled(&mut s, "only js");
+        assert_eq!(code_files(&s), ["web/src/app.js"]);
+        s.act("key ctrl+a");
+        s.act("key Backspace");
+        // This folder only.
+        click_control(&mut s, "code scope folder");
+        code_settled(&mut s, "this folder");
+        assert_eq!(code_files(&s), ["lib.rs", "main.rs", "many.rs"]);
+        click_control(&mut s, "code scope project");
+        // Everything, ignored and hidden and binary files included.
+        click_control(&mut s, "code all files");
+        code_settled(&mut s, "all files");
+        let all = code_files(&s);
+        for f in [".secret", "logo.bin", "notes.log", "target/debug/app.d", "web/dist/app.js", "web/node_modules/left-pad/index.js"] {
+            assert!(all.contains(&f.to_string()), "{f} with All files: {all:?}");
+        }
+        assert!(code(&s).results.iter().any(|f| f.rel == "logo.bin" && f.binary));
+        let long = &code(&s).results.iter().find(|f| f.rel == "target/debug/app.d").unwrap().hits[0];
+        assert!(long.cut.1 && long.text.len() <= 240, "a 20,000 character line is cut");
+        shot_still(&mut s, "code-search-all");
+        click_control(&mut s, "code all files");
+        // The TODO list, counted by tag.
+        click_control(&mut s, "code todo");
+        s.act("key ctrl+a");
+        s.act("key Backspace");
+        code_settled(&mut s, "TODOs");
+        assert_eq!(code_files(&s), ["src/lib.rs", "src/main.rs", "web/src/app.js"]);
+        assert_eq!(lines(&s, "src/main.rs"), vec![3, 10]);
+        assert!(s.texts.iter().any(|(_, t)| t.ends_with("1 TODO · 1 FIXME · 1 HACK · 1 XXX in 3 files")), "counts in the status");
+        shot_still(&mut s, "todo-finder");
+        // A file folds away and back.
+        s.click_text("src/main.rs");
+        assert!(!some_text(&s, "// TODO: read the config before the window opens"), "folded");
+        s.click_text("src/main.rs");
+        assert!(some_text(&s, "// TODO: read the config before the window opens"));
+        for (w, h) in [(640.0, 480.0), (520.0, 340.0), (1280.0, 800.0)] {
+            s.resize(w, h);
+            s.idle(3);
+            shot_still(&mut s, &format!("todo-finder-{w}x{h}"));
+        }
+        // Ctrl+click shows the line in Maia: the file selected, its preview at the line.
+        let r = s.text_rect("// TODO: read the config before the window opens");
+        s.act(&format!("click {:.0} {:.0} ctrl", r.center().x, r.center().y));
+        assert!(!s.popup_open(), "Show in Maia closes the search");
+        s.settle();
+        let main = app.join("src/main.rs");
+        assert_eq!(s.tab().path, app.join("src"));
+        assert_eq!(s.tab().cursor.map(|c| s.tab().entries[c as usize].path.clone()), Some(main.clone()));
+        wait_until(&mut s, "the preview at the line", 10, |s| inspector(s).goto.as_ref().is_some_and(|g| g.0 == main && g.1 == 3 && !g.2));
+        look(&mut s, "shown in Maia");
+        shot_still(&mut s, "show-in-maia");
+        // The file's path with that line, and from the project's top.
+        palette_run(&mut s, "Copy Path With Line");
+        assert_eq!(s.copied.last().map(String::as_str), Some("src/main.rs:3"));
+        palette_run(&mut s, "Copy Relative Path");
+        assert_eq!(s.copied.last().map(String::as_str), Some("src/main.rs"));
+        let row = row_text(&s, "main.rs");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.act("text path with line");
+        s.act("key Enter");
+        assert_eq!(s.copied.last().map(String::as_str), Some("src/main.rs:3"), "from the file's menu too");
+        // F4 opens it at that line.
+        let n = launched().len();
+        s.act("key F4");
+        assert!(launched().get(n).is_some_and(|l| l.contains("src/main.rs:3\"")), "{:?}", launched().last());
+        // Find TODOs from the palette opens the list straight away.
+        palette_run(&mut s, "Find TODOs");
+        assert!(code(&s).q.todo);
+        code_settled(&mut s, "TODOs again");
+        assert_eq!(code_files(&s).len(), 3);
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        // And Search Code comes back as it was left.
+        s.act("key ctrl+alt+f");
+        assert!(!code(&s).q.todo && code(&s).project);
+        s.act("key Escape");
+        look(&mut s, "after Search Code");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        report("search code", &s);
     }
 
     /// Open In Editor: Auto picks the installed editor, Options names another (a terminal
@@ -4991,6 +5203,8 @@ mod journeys {
         if git {
             crate::tests::commit_view_fixture(&home.join("Code/project"));
         }
+        // A project to develop in.
+        dev_fixture(&home);
         let drv = fake_drives("audit");
         let net = fake_network("audit");
         for f in ["gio", "phones"] {
@@ -5212,6 +5426,18 @@ mod journeys {
             s.cmd(ToggleInspector);
             s.settle();
         }
+        // The developer popups, over a project.
+        let app = home.join("Code/app");
+        go(&mut s, &app.join("src"));
+        s.act("key ctrl+alt+f");
+        s.act("text needle");
+        wait_until(&mut s, "code search", 20, |s| matches!(&s.app.popup, Popup::CodeSearch(c) if c.settled()));
+        shot_open(&mut s, "search-code");
+        close(&mut s);
+        s.cmd(FindTodos);
+        wait_until(&mut s, "todos", 20, |s| matches!(&s.app.popup, Popup::CodeSearch(c) if c.settled()));
+        shot_open(&mut s, "find-todos");
+        close(&mut s);
         // Popups and menus.
         go(&mut s, &docs);
         select_path(&mut s, &docs.join("notes.txt"));

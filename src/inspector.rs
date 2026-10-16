@@ -88,6 +88,8 @@ pub struct Inspector {
     locked: bool,
     /// The commit history, shown instead of the preview while open.
     pub git: Option<Box<crate::gitlog::History>>,
+    /// A line (from 1) to show marked in this file's text, and whether to scroll to it.
+    pub goto: Option<(PathBuf, u32, bool)>,
 }
 
 /// Test-only views of the preview state (simulations check behaviour, not pixels).
@@ -156,6 +158,7 @@ impl Default for Inspector {
             extracting: None,
             locked: false,
             git: None,
+            goto: None,
         }
     }
 }
@@ -613,7 +616,9 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         Content::Text { lines, truncated, spans, prose } => {
             let wrap = if *prose { ins.wrap_prose } else { ins.wrap_code };
             let wrapped = if wrap { Some(&mut ins.wrapped) } else { None };
-            text_view(&mut bui, body, lines, *truncated, spans.as_deref(), ins.line_numbers, wrapped, env.cfg.inspector_font_size + ins.text_size, &pal, false, env.cfg.preview_line_spacing);
+            let here = ins.current.as_ref().map(|c| &c.0);
+            let mark = ins.goto.as_mut().filter(|g| Some(&g.0) == here && g.1 > 0).map(|g| (g.1 as usize - 1, &mut g.2));
+            text_view_at(&mut bui, body, lines, *truncated, spans.as_deref(), ins.line_numbers, wrapped, env.cfg.inspector_font_size + ins.text_size, &pal, false, env.cfg.preview_line_spacing, mark);
         }
         Content::Binary(bytes) => {
             let mut lines = vec!["Binary file: first 4 KB shown as hex".to_string(), String::new()];
@@ -1099,6 +1104,13 @@ pub(crate) fn row_height(ui: &Ui, size: f32, spacing: f32) -> f32 {
 }
 
 pub(crate) fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bool, spans: Option<&[Vec<(usize, usize, crate::syntax::Kind)>]>, numbers: bool, wrapped: Option<&mut Option<Wrapped>>, size: f32, pal: &theme::Palette, diff: bool, spacing: f32) {
+    text_view_at(ui, body, lines, truncated, spans, numbers, wrapped, size, pal, diff, spacing, None);
+}
+
+/// `text_view` with one line (from 0) marked; the view scrolls to it once while the flag
+/// is set, and clears it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn text_view_at(ui: &mut Ui, body: Rect, lines: &[String], truncated: bool, spans: Option<&[Vec<(usize, usize, crate::syntax::Kind)>]>, numbers: bool, wrapped: Option<&mut Option<Wrapped>>, size: f32, pal: &theme::Palette, diff: bool, spacing: f32, mark: Option<(usize, &mut bool)>) {
     let font = FontId::monospace(size);
     let (line_h, cw) = ui.fonts_mut(|f| (f.row_height(&font), f.glyph_width(&font, 'M')));
     let row_h = row_height(ui, size, spacing);
@@ -1128,7 +1140,17 @@ pub(crate) fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bo
     };
     let total = rows.map_or(lines.len(), |r| r.len());
     let n = total + if truncated { 1 } else { 0 };
-    let area = if rows.is_some() { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
+    let mut area = if rows.is_some() { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
+    let mut marked = None;
+    if let Some((line, scroll)) = mark {
+        if *scroll {
+            *scroll = false;
+            let row = rows.map_or(line, |r| r.partition_point(|x| (x.0 as usize) < line));
+            // A third of the way down, with what leads up to it above.
+            area = area.vertical_scroll_offset((row as f32 * row_h - inner.max_rect().height() / 3.0).max(0.0));
+        }
+        marked = Some(line);
+    }
     area.auto_shrink([false, false]).id_salt("insp_text").show_viewport(&mut inner, |ui, vp| {
         let w = if rows.is_some() { vp.width() } else { (2000.0 * size * 0.62).min(lines.iter().map(|l| l.len()).max().unwrap_or(0) as f32 * size * 0.62 + gutter + 20.0).max(vp.width()) };
         let (r, _) = ui.allocate_exact_size(vec2(w, n as f32 * row_h + 8.0), Sense::hover());
@@ -1152,6 +1174,9 @@ pub(crate) fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bo
                 None => (i, 0, lines[i].len()),
             };
             let line = &lines[li];
+            if marked == Some(li) {
+                p.rect_filled(Rect::from_min_size(pos2(r.left(), top), vec2(r.width(), row_h)), CornerRadius::ZERO, pal.accent.gamma_multiply(0.18));
+            }
             if numbers && a == 0 {
                 p.text(pos2(r.left() + gutter - 10.0, y), Align2::RIGHT_TOP, (li + 1).to_string(), font.clone(), pal.text_dim.gamma_multiply(0.7));
             }

@@ -3374,7 +3374,265 @@ fn a_broken_link_is_not_executable() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// How long Search Code takes over a big tree (MAIA_BENCH_DIR, else /usr/include), warm,
+/// for plain text, whole words and expressions that match little, so all of it is read.
+#[test]
+#[ignore]
+fn code_search_speed() {
+    use crate::codesearch::{Query, Search};
+    let dir = PathBuf::from(std::env::var("MAIA_BENCH_DIR").unwrap_or_else(|_| "/usr/include".into()));
+    let ctx = egui::Context::default();
+    let qs = [
+        ("plain", Query { text: "xyzzy_frob".into(), ..Default::default() }),
+        ("plain, match case", Query { text: "XYZZY_FROB".into(), case: true, ..Default::default() }),
+        ("whole word", Query { text: "frobnicate".into(), word: true, ..Default::default() }),
+        ("regex literal", Query { text: "xyzzy_frob".into(), regex: true, ..Default::default() }),
+        ("regex class", Query { text: r"struct\s+xyzzy_\w+".into(), regex: true, ..Default::default() }),
+        ("regex alternation", Query { text: "xyzzy|plugh|frobozz".into(), regex: true, case: true, ..Default::default() }),
+        ("regex with no literal", Query { text: "[A-Z][a-z]+_[0-9]{3}x".into(), regex: true, case: true, ..Default::default() }),
+        ("todo", Query { todo: true, ..Default::default() }),
+    ];
+    for round in 0..2 {
+        for (label, q) in &qs {
+            let t = Instant::now();
+            let s = Search::start(dir.clone(), false, q, &ctx).unwrap();
+            let r = s.wait();
+            if round == 1 {
+                eprintln!("{label}: {:.0} ms, {} files with matches", t.elapsed().as_secs_f64() * 1000.0, r.len());
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------ developer tools
+
+/// Run a search to the end and give back (rel path, line numbers) per file.
+fn code_hits(dir: &Path, q: &crate::codesearch::Query) -> Vec<(String, Vec<u32>)> {
+    let ctx = egui::Context::default();
+    let s = crate::codesearch::Search::start(dir.to_path_buf(), false, q, &ctx).unwrap();
+    s.wait().into_iter().map(|f| (f.rel, f.hits.iter().map(|h| h.line).collect())).collect()
+}
+
+fn cq(text: &str) -> crate::codesearch::Query {
+    crate::codesearch::Query { text: text.into(), ..Default::default() }
+}
+
+/// Plain text ignores case unless asked, whole words need a boundary on both sides, an
+/// expression finds what it describes, letters outside ASCII fold too, and a broken
+/// expression says what is wrong instead of searching.
+#[test]
+fn code_search_modes() {
+    use crate::codesearch::{Matcher, hits_in};
+    let text = "let Needle = 1;\nneedles(x);\n  NEEDLE_2 // needle\nnöt here\nÄrger und ärger\n";
+    let lines = |m: &Matcher| -> Vec<u32> {
+        let (mut low, mut sp) = (vec![], vec![]);
+        hits_in(text, m, None, 100, &mut low, &mut sp).0.iter().map(|h| h.line).collect()
+    };
+    assert_eq!(lines(&Matcher::new("needle", false, false, false).unwrap()), vec![1, 2, 3]);
+    assert_eq!(lines(&Matcher::new("Needle", true, false, false).unwrap()), vec![1]);
+    assert_eq!(lines(&Matcher::new("needle", false, true, false).unwrap()), vec![1, 3], "needles and NEEDLE_2 are other words");
+    assert_eq!(lines(&Matcher::new("needle", true, true, false).unwrap()), vec![3]);
+    assert_eq!(lines(&Matcher::new(r"needles?\(", false, false, true).unwrap()), vec![2]);
+    assert_eq!(lines(&Matcher::new(r"^\s*NEEDLE_\d", true, false, true).unwrap()), vec![3], "^ starts each line");
+    assert_eq!(lines(&Matcher::new("ärger", false, false, false).unwrap()), vec![5]);
+    let (mut low, mut sp) = (vec![], vec![]);
+    let (h, _) = hits_in(text, &Matcher::new("ärger", false, false, false).unwrap(), None, 100, &mut low, &mut sp);
+    assert_eq!(h[0].spans.len(), 2, "both cases of Ä are found: {:?}", h[0]);
+    assert_eq!(lines(&Matcher::new("nöt", false, false, false).unwrap()), vec![4]);
+    // Several matches on a line are one hit with a span each, on the line as shown.
+    let (h, total) = hits_in(text, &Matcher::new("needle", false, false, false).unwrap(), None, 100, &mut low, &mut sp);
+    assert_eq!(total, 3);
+    let third = &h[2];
+    assert_eq!(third.text, "NEEDLE_2 // needle", "indentation is left off");
+    assert_eq!(third.spans.iter().map(|&(a, b)| &third.text[a..b]).collect::<Vec<_>>(), vec!["NEEDLE", "needle"]);
+    let err = Matcher::new("needle(", false, false, true).err().unwrap();
+    assert!(!err.is_empty() && !err.contains('\n'), "{err:?}");
+    assert!(Matcher::new("", false, false, false).is_err());
+}
+
+/// The literal text an expression needs, for passing over files without it: the longest
+/// plain run, one per top-level branch, never a character a quantifier may leave out.
+#[test]
+fn code_search_expression_prefilter() {
+    use crate::codesearch::required_literals as req;
+    let one = |p: &str| req(p).map(|v| v.join("|"));
+    assert_eq!(one("needle").as_deref(), Some("needle"));
+    assert_eq!(one(r"struct\s+Foo\w*").as_deref(), Some("struct"));
+    assert_eq!(one(r"fn \w+_parse\(").as_deref(), Some("_parse("));
+    assert_eq!(one("colou?r").as_deref(), Some("colo"), "u? may be missing");
+    assert_eq!(one("abc|defg").as_deref(), Some("abc|defg"));
+    assert_eq!(one(r"(get|set)Value").as_deref(), Some("Value"), "inside a group nothing is certain");
+    assert_eq!(one(r"\d{4}-\d{2}"), None, "nothing literal to look for");
+    assert_eq!(one("ab|[a-z]+"), None, "a branch without a literal");
+    assert_eq!(one(r"a\.b\.c").as_deref(), Some("a.b.c"));
+    assert_eq!(one("x{2}yzw").as_deref(), Some("yzw"), "a counted character is left out");
+    assert_eq!(one("x{2}yz"), None, "two characters are too few to look for");
+    // The prefilter never changes what is found.
+    let text = "Colour and color\nset_value getValue setValue\n2026-10-16\n";
+    for pat in ["colou?r", r"(get|set)Value", r"\d{4}-\d{2}", "Colour|setV"] {
+        let m = crate::codesearch::Matcher::new(pat, false, false, true).unwrap();
+        let re = regex_lite::Regex::new(&format!("(?mi){pat}")).unwrap();
+        let (mut low, mut sp) = (vec![], vec![]);
+        m.find(text, &mut low, &mut sp);
+        let want: Vec<(usize, usize)> = re.find_iter(text).map(|m| (m.start(), m.end())).collect();
+        assert_eq!(sp, want, "{pat}");
+    }
+}
+
+/// gitignore rules as git reads them: names anywhere, slashes anchor, a trailing slash
+/// means folders only, `**` crosses folders, `!` takes a file back, the last rule wins.
+#[test]
+fn gitignore_rules() {
+    use crate::codesearch::{decide, parse_gitignore, wildmatch};
+    assert!(wildmatch(b"*.rs", b"main.rs") && !wildmatch(b"*.rs", b"src/main.rs"));
+    assert!(wildmatch(b"src/**/*.rs", b"src/a/b/main.rs") && wildmatch(b"src/**/*.rs", b"src/main.rs"));
+    assert!(wildmatch(b"**/build", b"x/y/build") && wildmatch(b"**/build", b"build"));
+    assert!(wildmatch(b"docs/**", b"docs/a/b") && !wildmatch(b"docs/**", b"docsx/a"));
+    assert!(wildmatch(b"f[a-c]?.txt", b"fbz.txt") && !wildmatch(b"f[!a-c]?.txt", b"fbz.txt"));
+    assert!(wildmatch(b"\\*lit", b"*lit") && !wildmatch(b"\\*lit", b"xlit"));
+    let rules = parse_gitignore("# comment\n\ntarget/\n*.log\n!keep.log\n/build\ndocs/**/*.tmp\n\\#hash\ntrailing   \n**/node_modules\nsrc/gen/\n");
+    let ig = |p: &str, dir: bool| decide(&rules, p, dir);
+    assert_eq!(ig("target", true), Some(true));
+    assert_eq!(ig("a/b/target", true), Some(true), "a name without a slash matches at any depth");
+    assert_eq!(ig("target", false), None, "target/ is for folders only");
+    assert_eq!(ig("x/debug.log", false), Some(true));
+    assert_eq!(ig("x/keep.log", false), Some(false), "taken back by !");
+    assert_eq!(ig("build", true), Some(true));
+    assert_eq!(ig("sub/build", true), None, "/build is anchored to its folder");
+    assert_eq!(ig("docs/a/b/x.tmp", false), Some(true));
+    assert_eq!(ig("#hash", false), Some(true));
+    assert_eq!(ig("trailing", false), Some(true), "trailing spaces are dropped");
+    assert_eq!(ig("deep/er/node_modules", true), Some(true));
+    assert_eq!(ig("src/gen", true), Some(true));
+    assert_eq!(ig("other/src/gen", true), None, "a slash inside anchors it");
+    assert_eq!(ig("main.rs", false), None);
+}
+
+/// A real project walked as Search Code walks it: its .gitignores (nested ones win, and
+/// the repository's exclude file counts), hidden and binary files left out by default,
+/// all of them searched with All files; the file filter by type and glob.
+#[test]
+fn code_search_walk_skips_ignored_hidden_and_binary() {
+    use crate::codesearch::Query;
+    let d = tmpdir("codewalk");
+    std::fs::create_dir_all(d.join(".git/info")).unwrap();
+    touch(&d.join(".git/info/exclude"), "secret.txt\n");
+    touch(&d.join(".gitignore"), "target/\n*.log\n");
+    touch(&d.join("src/main.rs"), "fn main() {\n    let needle = 1;\n}\n");
+    touch(&d.join("src/lib.rs"), "// needle in lib\n");
+    touch(&d.join("src/.gitignore"), "gen.rs\n!keep.log\n");
+    touch(&d.join("src/gen.rs"), "needle generated\n");
+    touch(&d.join("src/keep.log"), "needle kept\n");
+    touch(&d.join("notes.log"), "needle in a log\n");
+    touch(&d.join("target/debug/out.rs"), "needle built\n");
+    touch(&d.join(".hidden/h.rs"), "needle hidden\n");
+    touch(&d.join("secret.txt"), "needle excluded\n");
+    touch(&d.join("docs/guide.md"), "the needle, in prose\n");
+    std::fs::write(d.join("blob.bin"), b"\x00\x01needle\x02").unwrap();
+    let files = |q: &Query| code_hits(&d, q).into_iter().map(|f| f.0).collect::<Vec<_>>();
+    assert_eq!(files(&cq("needle")), vec!["docs/guide.md", "src/keep.log", "src/lib.rs", "src/main.rs"], "in path order");
+    let all = Query { all: true, ..cq("needle") };
+    let got = files(&all);
+    for f in ["notes.log", "target/debug/out.rs", ".hidden/h.rs", "secret.txt", "src/gen.rs", "blob.bin"] {
+        assert!(got.contains(&f.to_string()), "All files reaches {f}: {got:?}");
+    }
+    let ctx = egui::Context::default();
+    let bin = crate::codesearch::Search::start(d.clone(), false, &all, &ctx).unwrap().wait().into_iter().find(|f| f.rel == "blob.bin").unwrap();
+    assert!(bin.binary && bin.hits.is_empty() && bin.total == 1, "a binary file is listed without lines");
+    assert_eq!(files(&Query { files: "rust".into(), ..cq("needle") }), vec!["src/lib.rs", "src/main.rs"]);
+    assert_eq!(files(&Query { files: "!*.rs, !docs/".into(), ..cq("needle") }), vec!["src/keep.log"]);
+    assert_eq!(files(&Query { files: "src/**".into(), ..cq("needle") }), vec!["src/keep.log", "src/lib.rs", "src/main.rs"]);
+    assert_eq!(files(&Query { files: ".md".into(), ..cq("needle") }), vec!["docs/guide.md"]);
+    // From a folder inside the repository the .gitignores above it still apply.
+    let ctx = egui::Context::default();
+    let sub: Vec<String> = crate::codesearch::Search::start(d.join("src"), false, &cq("needle"), &ctx).unwrap().wait().into_iter().map(|f| f.rel).collect();
+    assert_eq!(sub, vec!["keep.log", "lib.rs", "main.rs"]);
+    // And Project scope searches from the repository's top.
+    let top = crate::codesearch::Search::start(d.join("src"), true, &cq("needle"), &ctx).unwrap();
+    let root = loop {
+        if let Some(r) = top.root() {
+            break r;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert_eq!(root, d);
+    assert_eq!(top.wait().len(), 4);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Each hit carries its neighbours, without indentation; a long line is cut around the
+/// match with the spans moved to match; Windows line ends are dropped.
+#[test]
+fn code_search_context_lines() {
+    use crate::codesearch::{Matcher, hits_in};
+    let long = format!("{}needle{}", "x".repeat(300), "y".repeat(300));
+    let text = format!("first\r\n\tbefore it\r\n    the needle here\r\n\r\nend\n{long}\nlast\n");
+    let (mut low, mut sp) = (vec![], vec![]);
+    let (h, _) = hits_in(&text, &Matcher::new("needle", false, false, false).unwrap(), None, 100, &mut low, &mut sp);
+    assert_eq!(h.len(), 2);
+    assert_eq!((h[0].line, h[0].text.as_str(), h[0].before.as_deref(), h[0].after.as_deref()), (3, "the needle here", Some("before it"), None), "an empty neighbour is not shown");
+    assert_eq!(&h[0].text[h[0].spans[0].0..h[0].spans[0].1], "needle");
+    let l = &h[1];
+    assert_eq!(l.line, 6);
+    assert!(l.cut.0 && l.cut.1 && l.text.len() <= 240, "cut on both sides: {} bytes", l.text.len());
+    assert_eq!(&l.text[l.spans[0].0..l.spans[0].1], "needle", "the span follows the cut");
+    assert_eq!((l.before.as_deref(), l.after.as_deref()), (Some("end"), Some("last")));
+    // The first line has nothing before it.
+    let (h, _) = hits_in("needle\nnext\n", &Matcher::new("needle", false, false, false).unwrap(), None, 100, &mut low, &mut sp);
+    assert_eq!((h[0].before.as_deref(), h[0].after.as_deref()), (None, Some("next")));
+}
+
+/// A search stops at MAX_MATCHES lines and says so; a file shows PER_FILE lines and
+/// counts the rest.
+#[test]
+fn code_search_result_cap() {
+    use crate::codesearch::{MAX_MATCHES, PER_FILE, Search};
+    let d = tmpdir("codecap");
+    touch(&d.join("big.txt"), &"needle\n".repeat(PER_FILE + 50));
+    let ctx = egui::Context::default();
+    let one = Search::start(d.clone(), false, &cq("needle"), &ctx).unwrap().wait();
+    assert_eq!((one[0].hits.len(), one[0].total), (PER_FILE, PER_FILE + 50));
+    for i in 0..(MAX_MATCHES / 40 + 10) {
+        touch(&d.join(format!("many/f{i:04}.txt")), &"a needle\n".repeat(40));
+    }
+    let s = Search::start(d.clone(), false, &cq("needle"), &ctx).unwrap();
+    while !s.done() {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(s.capped(), "the cap was reached");
+    let shown: usize = s.take().iter().map(|f| f.hits.len()).sum();
+    assert!(shown <= MAX_MATCHES && shown > MAX_MATCHES - 200, "{shown} lines kept");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// TODO, FIXME, HACK and XXX in capitals and as words, whatever the comment style; an
+/// owner in brackets and the colon are not part of what it says. The TODO finder counts
+/// each and narrows by the query.
+#[test]
+fn todo_parsing_and_finder() {
+    use crate::codesearch::{Query, todo_tag};
+    assert_eq!(todo_tag("// TODO: fix the cap"), Some((0, "fix the cap")));
+    assert_eq!(todo_tag("# FIXME(ana) - wrong on Mondays"), Some((1, "wrong on Mondays")));
+    assert_eq!(todo_tag("/* HACK: until 2.0 */"), Some((2, "until 2.0")));
+    assert_eq!(todo_tag("<!-- XXX remove -->"), Some((3, "remove")));
+    assert_eq!(todo_tag("let x = 1; // FIXME TODO both"), Some((1, "TODO both")), "the first tag on the line");
+    assert_eq!(todo_tag("TODOS and xTODO and todo"), None, "only whole words in capitals");
+    let d = tmpdir("todos");
+    touch(&d.join("a.rs"), "// TODO: one\nfn x() {} // FIXME: two\n// todo: not this\n// TODOS: nor this\n");
+    touch(&d.join("b.py"), "# HACK: three\n# XXX four about the cache\n# TODO cache too\n");
+    let ctx = egui::Context::default();
+    let got = crate::codesearch::Search::start(d.clone(), false, &Query { todo: true, ..Default::default() }, &ctx).unwrap().wait();
+    let lines: Vec<(String, Vec<u32>)> = got.iter().map(|f| (f.rel.clone(), f.hits.iter().map(|h| h.line).collect())).collect();
+    assert_eq!(lines, vec![("a.rs".to_string(), vec![1, 2]), ("b.py".to_string(), vec![1, 2, 3])]);
+    let tags = got.iter().fold([0u32; 4], |mut a, f| {
+        a.iter_mut().zip(f.tags).for_each(|(x, y)| *x += y);
+        a
+    });
+    assert_eq!(tags, [2, 1, 1, 1]);
+    let narrowed = code_hits(&d, &Query { todo: true, text: "cache".into(), ..Default::default() });
+    assert_eq!(narrowed, vec![("b.py".to_string(), vec![2, 3])]);
+    let _ = std::fs::remove_dir_all(&d);
+}
 
 /// Every editor gets the line its own way; Auto takes $VISUAL, then $EDITOR, then the
 /// first installed; a command with {file} and {line} is filled in; terminal editors are

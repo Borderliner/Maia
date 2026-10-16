@@ -3,6 +3,7 @@
 mod admin;
 mod app;
 mod checksum;
+mod codesearch;
 mod archive;
 mod avatars;
 mod update;
@@ -11,6 +12,7 @@ mod commands;
 mod compare;
 mod contentsearch;
 mod config;
+mod devtools;
 mod drives;
 mod editor;
 mod ctxmenu;

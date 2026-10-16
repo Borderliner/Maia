@@ -245,7 +245,12 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         if single && all_dirs {
             items.push(Item::labeled(Cmd::Paste, "Paste Into Folder"));
         }
-        items.push(Item::sub("copy_as", "Copy as", vec![Item::cmd(Cmd::CopyPath), Item::cmd(Cmd::CopyPathRaw), Item::cmd(Cmd::CopyName), Item::cmd(Cmd::CopyPathRelative)]));
+        let mut copy = vec![Item::cmd(Cmd::CopyPath), Item::cmd(Cmd::CopyPathRaw), Item::cmd(Cmd::CopyName), Item::cmd(Cmd::CopyPathRelative)];
+        // path:line, for the file a search showed a line of.
+        if p.line_hint.as_ref().is_some_and(|h| ents.iter().any(|e| e.0 == h.0)) {
+            copy.push(Item::cmd(Cmd::CopyPathLine));
+        }
+        items.push(Item::sub("copy_as", "Copy as", copy));
         items.push(Item::sep());
         items.push(Item::labeled(Cmd::Rename, if single { "Rename" } else { "Rename All (inline)" }));
         items.push(Item::cmd(Cmd::Duplicate));

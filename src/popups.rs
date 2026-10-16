@@ -185,6 +185,7 @@ pub enum Popup {
     Meaning(MeaningState),
     /// The theme picker: every theme as a small window, with its code colours.
     Themes,
+    CodeSearch(Box<crate::devtools::CodeState>),
 }
 
 /// The Search by Meaning window: a question, and the passages closest to it in meaning.
@@ -263,6 +264,7 @@ impl Popup {
             Popup::ArchivePassword(..) => "ArchivePassword",
             Popup::Meaning(..) => "Meaning",
             Popup::Themes => "Themes",
+            Popup::CodeSearch(..) => "CodeSearch",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -385,23 +387,23 @@ fn subdirs(dir: &Path) -> Vec<PathBuf> {
 // ------------------------------------------------------------------ helpers
 
 /// Consume navigation keys for list popups.
-struct Keys {
-    up: bool,
-    down: bool,
-    enter: bool,
-    ctrl_enter: bool,
-    tab: bool,
-    esc: bool,
+pub(crate) struct Keys {
+    pub up: bool,
+    pub down: bool,
+    pub enter: bool,
+    pub ctrl_enter: bool,
+    pub tab: bool,
+    pub esc: bool,
     left: bool,
     right: bool,
     alt_left: bool,
     alt_right: bool,
     backspace: bool,
-    page_up: bool,
-    page_down: bool,
+    pub page_up: bool,
+    pub page_down: bool,
 }
 
-fn take_keys(ctx: &egui::Context) -> Keys {
+pub(crate) fn take_keys(ctx: &egui::Context) -> Keys {
     ctx.input_mut(|i| Keys {
         up: i.consume_key(Modifiers::NONE, Key::ArrowUp),
         down: i.consume_key(Modifiers::NONE, Key::ArrowDown),
@@ -419,7 +421,7 @@ fn take_keys(ctx: &egui::Context) -> Keys {
     })
 }
 
-fn step(sel: &mut usize, n: usize, k: &Keys, skip: impl Fn(usize) -> bool) {
+pub(crate) fn step(sel: &mut usize, n: usize, k: &Keys, skip: impl Fn(usize) -> bool) {
     if n == 0 {
         *sel = 0;
         return;
@@ -468,7 +470,7 @@ fn popup_frame(pal: &Palette) -> egui::Frame {
 }
 
 /// A path with the home folder written as ~.
-fn home_short(p: &Path) -> String {
+pub(crate) fn home_short(p: &Path) -> String {
     match p.strip_prefix(fsx::home()) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
         Ok(rest) => format!("~/{}", rest.display()),
@@ -477,7 +479,7 @@ fn home_short(p: &Path) -> String {
 }
 
 /// A dialog's title, with an optional dim line under it.
-fn dialog_title(ui: &mut Ui, title: &str, sub: Option<&str>, pal: &Palette) {
+pub(crate) fn dialog_title(ui: &mut Ui, title: &str, sub: Option<&str>, pal: &Palette) {
     let fs = ui.style().text_styles.get(&egui::TextStyle::Body).map_or(13.0, |f| f.size);
     ui.add(egui::Label::new(egui::RichText::new(title).strong().size(fs + 1.5).color(pal.text)).wrap());
     if let Some(sub) = sub {
@@ -493,7 +495,7 @@ fn group_label(ui: &mut Ui, text: &str, pal: &Palette) {
 }
 
 /// A quiet card holding a group of rows inside a dialog.
-fn card<R>(ui: &mut Ui, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> R {
+pub(crate) fn card<R>(ui: &mut Ui, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> R {
     egui::Frame::NONE
         .fill(pal.card())
         .stroke(Stroke::new(1.0, pal.card_line()))
@@ -522,7 +524,7 @@ fn field_row(ui: &mut Ui, key_w: f32, key: &str, pal: &Palette, value: impl FnOn
 }
 
 /// A dialog's buttons, on the right; the first given is the rightmost (the main one).
-fn dialog_buttons(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+pub(crate) fn dialog_buttons(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     ui.add_space(12.0);
     // In a row of its own first: laid out right to left straight in the dialog, the
     // buttons would centre on all the height left below them.
@@ -535,13 +537,13 @@ fn dialog_buttons(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 }
 
 /// The main button of a dialog, in the accent.
-fn primary_button(ui: &mut Ui, label: &str, enabled: bool, pal: &Palette) -> egui::Response {
+pub(crate) fn primary_button(ui: &mut Ui, label: &str, enabled: bool, pal: &Palette) -> egui::Response {
     ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(label).color(Color32::WHITE)).fill(pal.accent).min_size(vec2(72.0, 0.0)))
 }
 
 /// A dialog's other buttons: a quiet fill and outline, so they read as buttons and not
 /// as text beside the accent one.
-fn plain_button(ui: &mut Ui, label: &str, pal: &Palette) -> egui::Response {
+pub(crate) fn plain_button(ui: &mut Ui, label: &str, pal: &Palette) -> egui::Response {
     ui.add(egui::Button::new(label).fill(pal.card()).stroke(Stroke::new(1.0, pal.card_line())).min_size(vec2(72.0, 0.0)))
 }
 
@@ -553,12 +555,12 @@ fn popup_top(screen: Rect) -> f32 {
 
 /// A popup's list, as tall as `max` but leaving `chrome` (its search field, hints and
 /// margins) room in the window: in a short one the list shrank off the bottom.
-fn fit_list(ctx: &egui::Context, max: f32, chrome: f32) -> f32 {
+pub(crate) fn fit_list(ctx: &egui::Context, max: f32, chrome: f32) -> f32 {
     let s = ctx.content_rect();
     max.min(s.height() - popup_top(s) - 12.0 - chrome).max(96.0)
 }
 
-fn centered<R>(ctx: &egui::Context, id: &str, width: f32, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
+pub(crate) fn centered<R>(ctx: &egui::Context, id: &str, width: f32, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
     let screen = ctx.content_rect();
     let w = width.min(screen.width() - 24.0);
     let top = popup_top(screen);
@@ -604,11 +606,11 @@ fn anchored<R>(ctx: &egui::Context, id: &str, pos: Pos2, width: f32, pal: &Palet
     (r.inner, r.response.rect)
 }
 
-fn clicked_outside(ctx: &egui::Context, rect: Rect) -> bool {
+pub(crate) fn clicked_outside(ctx: &egui::Context, rect: Rect) -> bool {
     ctx.input(|i| i.pointer.any_pressed()) && ctx.pointer_interact_pos().map(|p| !rect.contains(p)).unwrap_or(false)
 }
 
-fn search_field(ui: &mut Ui, text: &mut String, hint: &str, focus: &mut bool, pal: &Palette, glyph: Glyph) -> egui::Response {
+pub(crate) fn search_field(ui: &mut Ui, text: &mut String, hint: &str, focus: &mut bool, pal: &Palette, glyph: Glyph) -> egui::Response {
     let resp = ui
         .horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(20.0, 22.0), Sense::hover());
@@ -626,7 +628,7 @@ fn search_field(ui: &mut Ui, text: &mut String, hint: &str, focus: &mut bool, pa
     resp
 }
 
-fn hints(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette) {
+pub(crate) fn hints(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette) {
     // A rule between the list and the keys, as under the search field: a row scrolled
     // half out of view ran straight into them.
     ui.add_space(2.0);
@@ -699,7 +701,7 @@ fn menu_item(ui: &mut Ui, label: &str, chip: Option<String>, pal: &Palette) -> b
 
 /// A group's name inside a menu: small and dim, in line with the items' text below it,
 /// with room above it so it reads as the start of a group.
-fn menu_heading(ui: &mut Ui, text: &str, pal: &Palette) {
+pub(crate) fn menu_heading(ui: &mut Ui, text: &str, pal: &Palette) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
     ui.painter().text(pos2(r.left() + 10.0, r.bottom() - 4.0), Align2::LEFT_BOTTOM, text, FontId::proportional(11.5), pal.text_dim);
 }
@@ -791,6 +793,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::ArchivePassword(st) => archive_password(app, ctx, st),
         Popup::Meaning(st) => meaning(app, ctx, st),
         Popup::Themes => themes(app, ctx),
+        Popup::CodeSearch(st) => crate::devtools::code_search_popup(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -1239,6 +1242,8 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::TabNewOrRecent | Cmd::ToggleFlatten | Cmd::OpenTerminal => !tab::is_computer(&t.path),
         Cmd::OpenInEditor => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::CopyPathRelative => !tab::is_computer(&t.path) && t.archive.is_none(),
+        Cmd::CodeSearch | Cmd::FindTodos => !tab::is_computer(&t.path) && t.archive.is_none(),
+        Cmd::CopyPathLine => p.line_hint.as_ref().is_some_and(|h| t.target_entries().iter().any(|e| e.path == h.0)),
         Cmd::OpenTabInWindow => p.tabs.len() > 0,
         Cmd::GroupDeleted | Cmd::GroupOriginal => crate::trashcan::is_trash_files(&t.path),
         Cmd::GroupFree | Cmd::GroupFs | Cmd::GroupFull => tab::is_computer(&t.path),
