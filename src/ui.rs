@@ -303,6 +303,7 @@ impl App {
             let mut growing = std::collections::HashSet::new();
             // Ease each panel's rectangle toward its layout slot. A new panel grows out of
             // the edge it was split from; panels that remain slide to their new size.
+            let targets = leaves.clone();
             if self.cfg.animations {
                 let dt = ctx.input(|i| i.stable_dt).min(0.05);
                 let k = (dt * 20.0).min(1.0);
@@ -335,7 +336,14 @@ impl App {
                     }
                     *target = shown;
                 }
-                if moving {
+                // Two motions at once (a split while a resize still eases) can carry one
+                // panel over another: then show the final layout rather than a pile-up.
+                let overlap = leaves.iter().enumerate().any(|(i, (_, a))| leaves[i + 1..].iter().any(|(_, b)| a.shrink(1.0).intersects(b.shrink(1.0))));
+                if overlap {
+                    leaves = targets;
+                    growing.clear();
+                    self.shown_rects = leaves.iter().copied().collect();
+                } else if moving {
                     ctx.request_repaint();
                 }
             } else {
