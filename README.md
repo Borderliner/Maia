@@ -1,7 +1,7 @@
 # Maia
 
 A fast, keyboard-first file manager for Linux, written in Rust with egui. One binary
-under 3 MB, drawn on the GPU, with split panels, tabs, live filtering, previews and
+of about 3 MB, drawn on the GPU, with split panels, tabs, live filtering, previews and
 background file operations.
 
 ![Maia](docs/maia.png)
@@ -26,7 +26,7 @@ launcher entry and binary again (your settings stay).
 While Maia is open, opening a folder from another app or the terminal shows it as
 a new tab in that window. `maia --window PATH` always opens a window of its own.
 
-`./build-dist.sh` makes the smallest build (about 3 MB instead of 4.6). It needs a
+`./build-dist.sh` makes the smallest build (about 3.1 MB instead of 4.8). It needs a
 nightly toolchain with `rust-src` and the `lld` linker.
 
 These are optional. Maia works without them and uses them when they are there:
