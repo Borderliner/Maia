@@ -96,7 +96,7 @@ pub struct App {
     pub save_session: bool,
     pub jump_buf: (String, Instant),
     pub undo: Vec<UndoEntry>,
-    pub theme_applied: (theme::ThemeName, f32, f32, bool),
+    pub theme_applied: (theme::ThemeName, f32, f32, bool, bool),
     pub ctx: egui::Context,
     pub fresh: bool,
     /// Set to close the window at the end of the frame.
@@ -170,7 +170,10 @@ impl App {
         crate::mime::preload();
         let cfg = config::load_config();
         let ud = config::load_userdata();
-        let pal = theme::palette(cfg.theme);
+        let mut pal = theme::palette(cfg.theme);
+        if !cfg.syntax_theme {
+            pal.syntax = theme::Syntax::classic(pal.dark);
+        }
         theme::apply(&ctx, &pal, cfg.font_size, cfg.spacing, cfg.animations);
         let session: Session = config::load_json(&config::session_path());
         let mut app = App {
@@ -203,7 +206,7 @@ impl App {
             save_session: paths.is_empty(),
             jump_buf: (String::new(), Instant::now()),
             undo: vec![],
-            theme_applied: (cfg.theme, cfg.font_size, cfg.spacing, cfg.animations),
+            theme_applied: (cfg.theme, cfg.font_size, cfg.spacing, cfg.animations, cfg.syntax_theme),
             ctx: ctx.clone(),
             fresh: true,
             quit: false,
@@ -764,7 +767,7 @@ impl App {
             crate::ui::POPUPS.with(|c| c.borrow_mut().clear());
         }
         self.heal();
-        let t = (self.preview_theme.unwrap_or(self.cfg.theme), self.cfg.font_size, self.cfg.spacing, self.cfg.animations);
+        let t = (self.preview_theme.unwrap_or(self.cfg.theme), self.cfg.font_size, self.cfg.spacing, self.cfg.animations, self.cfg.syntax_theme);
         self.preview_theme = None;
         crate::icons::set_enabled(self.cfg.system_icons);
         // One wheel notch scrolls three rows (eased out by egui over ~100 ms).
@@ -780,6 +783,9 @@ impl App {
         self.thumbs.budget_bytes = (self.cfg.asset_cache_mb.max(32) as usize) << 20;
         if t != self.theme_applied {
             self.pal = theme::palette(t.0);
+            if !t.4 {
+                self.pal.syntax = theme::Syntax::classic(self.pal.dark);
+            }
             theme::apply(&ctx, &self.pal, self.cfg.font_size, self.cfg.spacing, self.cfg.animations);
             self.theme_applied = t;
         }
@@ -1627,6 +1633,7 @@ impl App {
             }
             Cmd::FocusFilter => self.panel().focus_filter = true,
             Cmd::ContentSearch => crate::contentsearch::toggle(self.panel()),
+            Cmd::ChooseTheme => self.popup = Popup::Themes,
             Cmd::MeaningSearch => {
                 if let Some(e) = &self.semantic {
                     e.poke();

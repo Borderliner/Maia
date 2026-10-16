@@ -1031,18 +1031,17 @@ fn media_view(ui: &mut Ui, body: Rect, e: &Entry, v: &mut MediaView, env: &mut E
     }
 }
 
-/// Highlight colours that read on the theme's background (light or dark).
-fn syntax_color(k: crate::syntax::Kind, pal: &theme::Palette) -> Color32 {
+/// Highlight colours: the theme's own, or the classic set (`theme::Syntax`).
+pub(crate) fn syntax_color(k: crate::syntax::Kind, pal: &theme::Palette) -> Color32 {
     use crate::syntax::Kind;
-    let dark = pal.bg.r() as u32 + pal.bg.g() as u32 + pal.bg.b() as u32 <= 384;
-    let pick = |d: (u8, u8, u8), l: (u8, u8, u8)| if dark { Color32::from_rgb(d.0, d.1, d.2) } else { Color32::from_rgb(l.0, l.1, l.2) };
+    let s = &pal.syntax;
     match k {
         Kind::Plain => pal.text,
-        Kind::Keyword => pick((0xc6, 0x92, 0xf2), (0x7a, 0x2e, 0xb8)),
-        Kind::Type => pick((0x5e, 0xc4, 0xd8), (0x0b, 0x6e, 0x8a)),
-        Kind::Str => pick((0x9c, 0xcf, 0x7a), (0x3a, 0x7d, 0x1e)),
-        Kind::Comment => pal.text_dim.gamma_multiply(0.85),
-        Kind::Number => pick((0xf0, 0xa0, 0x6a), (0xb0, 0x52, 0x10)),
+        Kind::Keyword => s.keyword,
+        Kind::Type => s.kind,
+        Kind::Str => s.string,
+        Kind::Comment => s.comment,
+        Kind::Number => s.number,
     }
 }
 

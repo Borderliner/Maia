@@ -115,6 +115,8 @@ pub struct Config {
     // Appearance
     pub theme: ThemeName,
     pub follow_system_theme: bool,
+    /// Highlighted code in the theme's own colours (else the same set for every theme).
+    pub syntax_theme: bool,
     pub round_corners: bool,
     pub rect_buttons: bool,
     /// UI font family (empty = the system UI font).
@@ -187,6 +189,7 @@ impl Default for Config {
             version: CONFIG_VERSION,
             theme: ThemeName::default(),
             follow_system_theme: false,
+            syntax_theme: true,
             round_corners: true,
             rect_buttons: false,
             font_family: String::new(),

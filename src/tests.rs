@@ -2865,3 +2865,36 @@ fn names_found_anywhere_under_home() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+
+/// Every theme reads well: its text on its list, and its code colours (the theme's own and
+/// the classic set) on the preview's background, by the usual contrast measure.
+#[test]
+fn themes_and_their_code_colours_are_readable() {
+    use crate::theme::{Syntax, ThemeName, palette};
+    fn lum(c: egui::Color32) -> f32 {
+        let f = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+    }
+    let contrast = |a: egui::Color32, b: egui::Color32| {
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    };
+    let mut seen = std::collections::HashSet::new();
+    for t in ThemeName::ALL {
+        assert!(seen.insert(t.label()), "names differ");
+        let p = palette(t);
+        assert_eq!(p.dark, !t.is_light(), "{}", t.label());
+        assert!(contrast(p.text, p.panel) >= 7.0, "{}: text {:.1}", t.label(), contrast(p.text, p.panel));
+        assert!(contrast(p.text_dim, p.panel) >= 3.0, "{}: dim text {:.1}", t.label(), contrast(p.text_dim, p.panel));
+        for s in [p.syntax, Syntax::classic(p.dark)] {
+            for (what, c, min) in [("keyword", s.keyword, 3.0), ("type", s.kind, 3.0), ("string", s.string, 3.0), ("number", s.number, 3.0), ("comment", s.comment, 2.0)] {
+                assert!(contrast(c, p.panel) >= min, "{}: {what} {:.2}", t.label(), contrast(c, p.panel));
+            }
+        }
+    }
+    assert_eq!(palette(ThemeName::TokyoNight).syntax, Syntax::of(ThemeName::TokyoNight));
+    assert_ne!(Syntax::of(ThemeName::Gruvbox), Syntax::of(ThemeName::Mocha), "each its own");
+}

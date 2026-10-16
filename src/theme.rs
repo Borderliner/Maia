@@ -14,10 +14,26 @@ pub enum ThemeName {
     #[serde(alias = "Light")]
     Paper,
     Linen,
+    /// Well-loved editor themes, in their published colours.
+    Mocha,
+    TokyoNight,
+    Gruvbox,
+    Latte,
 }
 
 impl ThemeName {
-    pub const ALL: [ThemeName; 6] = [ThemeName::Midnight, ThemeName::Graphite, ThemeName::Lagoon, ThemeName::Navy, ThemeName::Paper, ThemeName::Linen];
+    pub const ALL: [ThemeName; 10] = [
+        ThemeName::Midnight,
+        ThemeName::Graphite,
+        ThemeName::Lagoon,
+        ThemeName::Navy,
+        ThemeName::Mocha,
+        ThemeName::TokyoNight,
+        ThemeName::Gruvbox,
+        ThemeName::Paper,
+        ThemeName::Linen,
+        ThemeName::Latte,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             ThemeName::Midnight => "Midnight",
@@ -26,10 +42,70 @@ impl ThemeName {
             ThemeName::Navy => "Navy",
             ThemeName::Paper => "Paper",
             ThemeName::Linen => "Linen",
+            ThemeName::Mocha => "Catppuccin Mocha",
+            ThemeName::TokyoNight => "Tokyo Night",
+            ThemeName::Gruvbox => "Gruvbox",
+            ThemeName::Latte => "Catppuccin Latte",
+        }
+    }
+    /// A line about the theme, under its name in the theme picker.
+    pub fn blurb(self) -> &'static str {
+        match self {
+            ThemeName::Midnight => "Graphite with teal",
+            ThemeName::Graphite => "Grey with amber",
+            ThemeName::Lagoon => "Deep teal",
+            ThemeName::Navy => "Dark blue",
+            ThemeName::Paper => "Clean white",
+            ThemeName::Linen => "Warm off-white",
+            ThemeName::Mocha => "Pastels on dark",
+            ThemeName::TokyoNight => "City lights at night",
+            ThemeName::Gruvbox => "Warm and retro",
+            ThemeName::Latte => "Pastels on light",
         }
     }
     pub fn is_light(self) -> bool {
-        matches!(self, ThemeName::Paper | ThemeName::Linen)
+        matches!(self, ThemeName::Paper | ThemeName::Linen | ThemeName::Latte)
+    }
+}
+
+/// Colours for highlighted code: keywords, types, strings, comments, numbers.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Syntax {
+    pub keyword: Color32,
+    pub kind: Color32,
+    pub string: Color32,
+    pub comment: Color32,
+    pub number: Color32,
+}
+
+impl Syntax {
+    /// The same colours whatever the theme (only light and dark differ).
+    pub fn classic(dark: bool) -> Syntax {
+        let c = Color32::from_rgb;
+        if dark {
+            Syntax { keyword: c(0xc6, 0x92, 0xf2), kind: c(0x5e, 0xc4, 0xd8), string: c(0x9c, 0xcf, 0x7a), comment: c(0x7b, 0x7e, 0x85), number: c(0xf0, 0xa0, 0x6a) }
+        } else {
+            Syntax { keyword: c(0x7a, 0x2e, 0xb8), kind: c(0x0b, 0x6e, 0x8a), string: c(0x3a, 0x7d, 0x1e), comment: c(0x7d, 0x83, 0x8c), number: c(0xb0, 0x52, 0x10) }
+        }
+    }
+
+    /// The theme's own: built from its accent and colours, so code fits the window.
+    pub fn of(t: ThemeName) -> Syntax {
+        let c = Color32::from_rgb;
+        let (keyword, kind, string, comment, number) = match t {
+            ThemeName::Midnight => (c(0x5f, 0xb3, 0xe8), c(0x4f, 0xd1, 0xc5), c(0x9f, 0xd3, 0x8a), c(0x6f, 0x73, 0x7a), c(0xf2, 0xa6, 0x6c)),
+            ThemeName::Graphite => (c(0xf0, 0xa0, 0x40), c(0xe2, 0xc5, 0x8a), c(0xa9, 0xc9, 0x7c), c(0x7a, 0x7a, 0x7e), c(0xc7, 0x9b, 0xec)),
+            ThemeName::Lagoon => (c(0x3e, 0xd0, 0xc8), c(0x8c, 0xc8, 0xff), c(0xc3, 0xe8, 0x8d), c(0x6a, 0x82, 0x85), c(0xf7, 0xb4, 0x6b)),
+            ThemeName::Navy => (c(0x7a, 0xa2, 0xff), c(0x64, 0xd2, 0xff), c(0xa6, 0xda, 0x95), c(0x6a, 0x75, 0x96), c(0xf5, 0xa9, 0x7f)),
+            ThemeName::Paper => (c(0x1f, 0x5f, 0xd6), c(0x0e, 0x7c, 0x86), c(0x2f, 0x7d, 0x32), c(0x86, 0x8d, 0x98), c(0xb4, 0x53, 0x09)),
+            ThemeName::Linen => (c(0x1b, 0x6c, 0xa8), c(0x8a, 0x5a, 0x00), c(0x4f, 0x7a, 0x12), c(0x8f, 0x84, 0x74), c(0xb3, 0x47, 0x1b)),
+            ThemeName::Mocha => (c(0xcb, 0xa6, 0xf7), c(0xf9, 0xe2, 0xaf), c(0xa6, 0xe3, 0xa1), c(0x7f, 0x84, 0x9c), c(0xfa, 0xb3, 0x87)),
+            ThemeName::TokyoNight => (c(0xbb, 0x9a, 0xf7), c(0x2a, 0xc3, 0xde), c(0x9e, 0xce, 0x6a), c(0x56, 0x5f, 0x89), c(0xff, 0x9e, 0x64)),
+            ThemeName::Gruvbox => (c(0xfb, 0x49, 0x34), c(0xfa, 0xbd, 0x2f), c(0xb8, 0xbb, 0x26), c(0x92, 0x83, 0x74), c(0xd3, 0x86, 0x9b)),
+            // Its yellow, green and peach a shade deeper, to read on its light base.
+            ThemeName::Latte => (c(0x88, 0x39, 0xef), c(0xb6, 0x74, 0x17), c(0x3c, 0x96, 0x28), c(0x8c, 0x8f, 0xa1), c(0xdf, 0x57, 0x09)),
+        };
+        Syntax { keyword, kind, string, comment, number }
     }
 }
 
@@ -54,6 +130,8 @@ pub struct Palette {
     pub alt: Color32,
     /// Hovered list rows: a tint of the selection color.
     pub row_hover: Color32,
+    /// Highlighted code (the theme's own, or the classic set: `Syntax`).
+    pub syntax: Syntax,
 }
 
 pub fn palette(t: ThemeName) -> Palette {
@@ -69,6 +147,7 @@ pub fn palette(t: ThemeName) -> Palette {
         p.alt = mix(p.panel, p.text, if p.dark { 0.035 } else { 0.03 });
     }
     p.row_hover = mix(p.panel, p.selected, if p.dark { 0.35 } else { 0.22 });
+    p.syntax = Syntax::of(t);
     p
 }
 
@@ -93,6 +172,7 @@ fn base_palette(t: ThemeName) -> Palette {
             chrome: z,
             alt: z,
             row_hover: z,
+            syntax: Syntax::classic(true),
         },
         ThemeName::Graphite => Palette {
             dark: true,
@@ -111,6 +191,7 @@ fn base_palette(t: ThemeName) -> Palette {
             chrome: z,
             alt: z,
             row_hover: z,
+            syntax: Syntax::classic(true),
         },
         ThemeName::Lagoon => Palette {
             dark: true,
@@ -129,6 +210,7 @@ fn base_palette(t: ThemeName) -> Palette {
             chrome: z,
             alt: z,
             row_hover: z,
+            syntax: Syntax::classic(true),
         },
         ThemeName::Navy => Palette {
             dark: true,
@@ -147,6 +229,7 @@ fn base_palette(t: ThemeName) -> Palette {
             chrome: z,
             alt: z,
             row_hover: z,
+            syntax: Syntax::classic(true),
         },
         ThemeName::Paper => Palette {
             dark: false,
@@ -165,6 +248,7 @@ fn base_palette(t: ThemeName) -> Palette {
             chrome: z,
             alt: z,
             row_hover: z,
+            syntax: Syntax::classic(true),
         },
         ThemeName::Linen => Palette {
             dark: false,
@@ -183,6 +267,83 @@ fn base_palette(t: ThemeName) -> Palette {
             chrome: z,
             alt: z,
             row_hover: z,
+            syntax: Syntax::classic(true),
+        },
+        ThemeName::Mocha => Palette {
+            dark: true,
+            bg: c(0x18, 0x18, 0x25),
+            panel: c(0x1e, 0x1e, 0x2e),
+            sidebar: c(0x18, 0x18, 0x25),
+            raised: c(0x26, 0x26, 0x38),
+            hover: c(0x31, 0x32, 0x44),
+            selected: c(0x3e, 0x3a, 0x5e),
+            cursor: c(0x4d, 0x47, 0x75),
+            accent: c(0xcb, 0xa6, 0xf7),
+            text: c(0xcd, 0xd6, 0xf4),
+            text_dim: c(0x93, 0x99, 0xb2),
+            border: c(0x31, 0x32, 0x44),
+            danger: c(0xf3, 0x8b, 0xa8),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+        },
+        ThemeName::TokyoNight => Palette {
+            dark: true,
+            bg: c(0x16, 0x16, 0x1e),
+            panel: c(0x1a, 0x1b, 0x26),
+            sidebar: c(0x16, 0x16, 0x1e),
+            raised: c(0x24, 0x28, 0x3b),
+            hover: c(0x29, 0x2e, 0x42),
+            selected: c(0x28, 0x34, 0x57),
+            cursor: c(0x36, 0x4a, 0x82),
+            accent: c(0x7a, 0xa2, 0xf7),
+            text: c(0xc0, 0xca, 0xf5),
+            text_dim: c(0x78, 0x7c, 0x99),
+            border: c(0x29, 0x2e, 0x42),
+            danger: c(0xf7, 0x76, 0x8e),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+        },
+        ThemeName::Gruvbox => Palette {
+            dark: true,
+            bg: c(0x1d, 0x20, 0x21),
+            panel: c(0x28, 0x28, 0x28),
+            sidebar: c(0x1d, 0x20, 0x21),
+            raised: c(0x32, 0x30, 0x2f),
+            hover: c(0x3c, 0x38, 0x36),
+            selected: c(0x50, 0x49, 0x45),
+            cursor: c(0x66, 0x5c, 0x54),
+            accent: c(0xd7, 0x99, 0x21),
+            text: c(0xeb, 0xdb, 0xb2),
+            text_dim: c(0xa8, 0x99, 0x84),
+            border: c(0x3c, 0x38, 0x36),
+            danger: c(0xfb, 0x49, 0x34),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+        },
+        ThemeName::Latte => Palette {
+            dark: false,
+            bg: c(0xe6, 0xe9, 0xef),
+            panel: c(0xef, 0xf1, 0xf5),
+            sidebar: c(0xe6, 0xe9, 0xef),
+            raised: c(0xdc, 0xe0, 0xe8),
+            hover: c(0xe1, 0xe4, 0xed),
+            selected: c(0xdd, 0xd3, 0xf6),
+            cursor: c(0xcc, 0xbd, 0xf2),
+            accent: c(0x88, 0x39, 0xef),
+            text: c(0x4c, 0x4f, 0x69),
+            text_dim: c(0x6c, 0x6f, 0x85),
+            border: c(0xcc, 0xd0, 0xda),
+            danger: c(0xd2, 0x0f, 0x39),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(false),
         },
     }
 }

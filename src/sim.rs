@@ -3102,6 +3102,82 @@ mod journeys {
         s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_ref()).map(|h| h.state())
     }
 
+    /// The theme picker: from Options, every theme on screen as a small window with its
+    /// name; hovering one shows it on the whole window, a click keeps it, and code takes
+    /// its colours (or the classic set with "Code colors follow the theme" off).
+    #[test]
+    fn theme_picker() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("themes");
+        std::fs::write(home.join("Documents/main.rs"), "// demo\nfn main() {\n    let x: u32 = 42;\n    println!(\"{x}\");\n}\n").unwrap();
+        let mut s = Sim::new(&home.join("Documents"), vec2(1280.0, 800.0));
+        use crate::theme::{Syntax, ThemeName};
+        assert_eq!(s.app.pal.syntax, Syntax::of(ThemeName::Midnight), "code in the theme's colours by default");
+        s.act("key ctrl+Comma");
+        s.settle();
+        s.act("text color scheme");
+        s.idle(3);
+        // Every control fits its row, with descriptions and without (titles only).
+        for compact in [false, true] {
+            s.app.cfg.compact_lists = compact;
+            s.act("key ctrl+a");
+            s.act("key Backspace");
+            s.idle(3);
+            s.shot(if compact { "options-compact" } else { "options" });
+            let rows = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == "choose theme").map(|(_, r, _)| *r).collect::<Vec<_>>());
+            let h = if compact { 26.0 } else { 36.0 };
+            assert!(rows.iter().all(|r| r.height() <= h), "the theme row's button fits a {h}-point row: {rows:?}");
+        }
+        s.app.cfg.compact_lists = false;
+        s.act("text color scheme");
+        s.idle(3);
+        click_control(&mut s, "choose theme");
+        s.settle();
+        assert!(matches!(s.app.popup, Popup::Themes), "the picker opened");
+        for t in ThemeName::ALL {
+            let r = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == t.label()).map(|(_, r, _)| *r));
+            let r = r.unwrap_or_else(|| s.fail(&format!("{} not on screen", t.label())));
+            assert!(r.top() >= 0.0 && r.bottom() <= s.size.y && r.left() >= 0.0 && r.right() <= s.size.x, "{} whole on screen: {r:?}", t.label());
+            assert!(s.texts.iter().any(|(_, x)| x == t.label()), "{} named", t.label());
+        }
+        look(&mut s, "theme picker");
+        s.shot("theme-picker");
+        // Hovering shows a theme on the whole window, without choosing it.
+        let r = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "Gruvbox").map(|(_, r, _)| *r)).unwrap();
+        s.act(&format!("move {:.0} {:.0}", r.center().x, r.center().y));
+        s.idle(3);
+        assert_eq!(s.app.pal.panel, crate::theme::palette(ThemeName::Gruvbox).panel, "previewed while hovered");
+        assert_eq!(s.app.cfg.theme, ThemeName::Midnight, "not chosen by a hover");
+        click_control(&mut s, "Tokyo Night");
+        s.idle(3);
+        assert_eq!(s.app.cfg.theme, ThemeName::TokyoNight);
+        s.act("move 5 5");
+        s.idle(3);
+        assert_eq!(s.app.pal.syntax, Syntax::of(ThemeName::TokyoNight), "code takes the theme's colours");
+        s.shot("theme-picker-tokyo");
+        // The code colours' switch, in the picker.
+        s.app.cfg.syntax_theme = false;
+        s.idle(3);
+        assert_eq!(s.app.pal.syntax, Syntax::classic(true), "the classic set when off");
+        s.app.cfg.syntax_theme = true;
+        click_control(&mut s, "themes done");
+        s.settle();
+        assert!(matches!(s.app.popup, Popup::Options(_)), "back to Options");
+        s.act("key Escape");
+        s.settle();
+        // A light one, and code drawn in its colours.
+        s.app.cfg.theme = ThemeName::Latte;
+        s.cmd(ToggleInspector);
+        select_path(&mut s, &home.join("Documents/main.rs"));
+        wait_until(&mut s, "highlighted code", 10, |s| inspector(s).text_spans().is_some_and(|n| n >= 6));
+        look(&mut s, "code in a light theme");
+        s.shot("code-latte");
+        assert_eq!(s.app.pal.syntax, Syntax::of(ThemeName::Latte));
+        report("themes", &s);
+    }
+
     /// Search by meaning, start to finish, against a stand-in Ollama: off by default (the
     /// window explains and offers to turn it on), the model fetched only on a click, files
     /// read, a vague question answered with the right file and its passage, Enter opening

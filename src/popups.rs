@@ -174,6 +174,8 @@ pub enum Popup {
     Connect(ConnectState),
     ArchivePassword(PasswordState),
     Meaning(MeaningState),
+    /// The theme picker: every theme as a small window, with its code colours.
+    Themes,
 }
 
 /// The Search by Meaning window: a question, and the passages closest to it in meaning.
@@ -251,6 +253,7 @@ impl Popup {
             Popup::Connect(..) => "Connect",
             Popup::ArchivePassword(..) => "ArchivePassword",
             Popup::Meaning(..) => "Meaning",
+            Popup::Themes => "Themes",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -652,6 +655,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::Connect(st) => connect(app, ctx, st),
         Popup::ArchivePassword(st) => archive_password(app, ctx, st),
         Popup::Meaning(st) => meaning(app, ctx, st),
+        Popup::Themes => themes(app, ctx),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -1529,6 +1533,7 @@ enum Opt {
     RectButtons,
     AssetCache,
     FollowSystem,
+    SyntaxTheme,
     Round,
     FontSize,
     Spacing,
@@ -1575,7 +1580,8 @@ enum Opt {
 }
 
 const OPTS: &[(Opt, &str, &str, &str)] = &[
-    (Opt::Theme, "Appearance", "Color scheme", "Overall colors of the window."),
+    (Opt::Theme, "Appearance", "Color scheme", "Overall colors of the window. Choose shows every theme side by side."),
+    (Opt::SyntaxTheme, "Appearance", "Code colors follow the theme", "Highlighted code in previews and diffs takes the theme's own colors; off uses the same set for every theme."),
     (Opt::Font, "Appearance", "Font", "UI font family; empty uses the system font."),
     (Opt::FollowSystem, "Appearance", "Follow system light/dark", "Switch to the light scheme when the desktop is light."),
     (Opt::Round, "Appearance", "Round corners", "Rounded panels, buttons and selections."),
@@ -1713,6 +1719,7 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
         Opt::RectButtons => f!(rect_buttons),
         Opt::AssetCache => f!(asset_cache_mb),
         Opt::FollowSystem => f!(follow_system_theme),
+        Opt::SyntaxTheme => f!(syntax_theme),
         Opt::Round => f!(round_corners),
         Opt::FontSize => f!(font_size),
         Opt::Spacing => f!(spacing),
@@ -1757,15 +1764,10 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
 fn option_control(ui: &mut Ui, app: &mut App, o: Opt) -> bool {
     let pal = app.pal;
     let layouts: Vec<String> = app.ud.layouts.keys().cloned().collect();
-    let mut app_preview = None;
-    let changed = option_control_inner(ui, app, o, &pal, &layouts, &mut app_preview);
-    if app_preview.is_some() {
-        app.preview_theme = app_preview;
-    }
-    changed
+    option_control_inner(ui, app, o, &pal, &layouts)
 }
 
-fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layouts: &[String], app_preview: &mut Option<ThemeName>) -> bool {
+fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layouts: &[String]) -> bool {
     let pal = *pal;
     if o == Opt::DefaultFm {
         let mut on = app.default_fm() == Some(true);
@@ -1776,43 +1778,35 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
     }
     let c = &mut app.cfg;
     match o {
-        Opt::Font => ui.add(egui::TextEdit::singleline(&mut c.font_family).hint_text("System font").desired_width(150.0)).lost_focus(),
+        Opt::Font => ui.add(egui::TextEdit::singleline(&mut c.font_family).hint_text("System font").desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).lost_focus(),
         Opt::InspectorFontSize => stepper(ui, &mut c.inspector_font_size, 0.5, 8.0, 28.0, &pal),
         Opt::RectButtons => toggle(ui, &mut c.rect_buttons, &pal),
         Opt::AssetCache => ui.add(egui::Slider::new(&mut c.asset_cache_mb, 32..=2048).suffix(" MB").logarithmic(true)).changed(),
         Opt::Theme => {
-            let mut changed = false;
+            // The theme as a small swatch and its name; the picker shows them all.
+            let t = c.theme;
+            let p = theme::palette(t);
+            let mut open = false;
+            // The row's controls run right to left: the button at the edge, then the name
+            // and its swatch.
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                for t in ThemeName::ALL {
-                    let p = theme::palette(t);
-                    // Cell with room for the selection ring around the swatch.
-                    let (cell, resp) = ui.allocate_exact_size(vec2(30.0, 26.0), Sense::click());
-                    if resp.hovered() {
-                        *app_preview = Some(t);
-                    }
-                    let r = Rect::from_center_size(cell.center(), vec2(24.0, 18.0));
-                    // The theme's own window: panel color, its border, its accent bar centred
-                    // near the bottom (equal margins on both sides).
-                    ui.painter().rect_filled(r, CornerRadius::same(5), p.panel);
-                    ui.painter().rect_stroke(r, CornerRadius::same(5), Stroke::new(1.0, p.border), StrokeKind::Inside);
-                    let bar = Rect::from_center_size(pos2(r.center().x, r.bottom() - 5.0), vec2(r.width() - 10.0, 3.0));
-                    ui.painter().rect_filled(bar, CornerRadius::same(2), p.accent);
-                    // Selected: a ring outside the swatch with a small gap; hover: a faint one.
-                    if c.theme == t {
-                        ui.painter().rect_stroke(r.expand(2.5), CornerRadius::same(7), Stroke::new(1.5, pal.accent), StrokeKind::Middle);
-                    } else if resp.hovered() {
-                        ui.painter().rect_stroke(r.expand(2.5), CornerRadius::same(7), Stroke::new(1.0, pal.text_dim.gamma_multiply(0.6)), StrokeKind::Middle);
-                    }
-                    if resp.on_hover_text(t.label()).clicked() {
-                        c.theme = t;
-                        changed = true;
-                    }
-                }
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let b = ui.button("Choose…");
+                crate::ui::note_control(ui, b.rect, "choose theme");
+                open = b.clicked();
+                ui.label(egui::RichText::new(t.label()).size(12.5));
+                let (r, _) = ui.allocate_exact_size(vec2(22.0, 16.0), Sense::hover());
+                ui.painter().rect_filled(r, CornerRadius::same(5), p.panel);
+                ui.painter().rect_stroke(r, CornerRadius::same(5), Stroke::new(1.0, p.border), StrokeKind::Inside);
+                ui.painter().rect_filled(Rect::from_center_size(pos2(r.center().x, r.bottom() - 5.0), vec2(r.width() - 10.0, 3.0)), CornerRadius::same(2), p.accent);
             });
-            changed
+            if open {
+                app.popup = Popup::Themes;
+            }
+            false
         }
         Opt::FollowSystem => toggle(ui, &mut c.follow_system_theme, &pal),
+        Opt::SyntaxTheme => toggle(ui, &mut c.syntax_theme, &pal),
         Opt::Round => toggle(ui, &mut c.round_corners, &pal),
         Opt::FontSize => stepper(ui, &mut c.font_size, 0.5, 9.0, 24.0, &pal),
         Opt::Spacing => ui.add(egui::Slider::new(&mut c.spacing, 0.8..=1.6).step_by(0.05)).changed(),
@@ -1838,16 +1832,16 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         Opt::SingleInstance => toggle(ui, &mut c.single_instance, &pal),
         Opt::Meaning => toggle(ui, &mut c.semantic_search, &pal),
         Opt::MeaningPictures => toggle(ui, &mut c.semantic_pictures, &pal),
-        Opt::MeaningFolders => ui.add(egui::TextEdit::singleline(&mut c.semantic_folders).hint_text("~/Documents").desired_width(150.0)).lost_focus(),
+        Opt::MeaningFolders => ui.add(egui::TextEdit::singleline(&mut c.semantic_folders).hint_text("~/Documents").desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).lost_focus(),
         Opt::DefaultFm => false,
         Opt::InspectorFont => {
-            let r = ui.add(egui::TextEdit::singleline(&mut c.inspector_font).hint_text("monospace").desired_width(150.0));
+            let r = ui.add(egui::TextEdit::singleline(&mut c.inspector_font).hint_text("monospace").desired_width(150.0).margin(egui::Margin::symmetric(5, 2)));
             r.changed()
         }
         Opt::Thumbnails => choice(ui, "thumbs", &mut c.thumbnails, &[(ThumbMode::LocalDisks, "Local disks"), (ThumbMode::AllDrives, "All drives"), (ThumbMode::Never, "Never")]),
         Opt::ThumbFill => toggle(ui, &mut c.thumb_fill, &pal),
         Opt::ScrollBeyond => toggle(ui, &mut c.scroll_beyond, &pal),
-        Opt::DateFormat => ui.add(egui::TextEdit::singleline(&mut c.date_format).desired_width(150.0)).changed(),
+        Opt::DateFormat => ui.add(egui::TextEdit::singleline(&mut c.date_format).desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).changed(),
         Opt::ActOnPress => toggle(ui, &mut c.act_on_press, &pal),
         Opt::SingleClick => toggle(ui, &mut c.single_click, &pal),
         Opt::SingleClickFolders => toggle(ui, &mut c.single_click_folders_only, &pal),
@@ -1975,8 +1969,21 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
                     ui.painter().text(pos2(r.left() + 10.0 + indent, r.top() + 11.0), Align2::LEFT_CENTER, *title, FontId::proportional(12.5), tc);
                     ui.painter().text(pos2(r.left() + 10.0 + indent, r.top() + 25.0), Align2::LEFT_CENTER, *desc, FontId::proportional(10.5), pal.text_dim.gamma_multiply(if inert { 0.6 } else { 1.0 }));
                 }
-                let ctrl_rect = Rect::from_min_max(pos2(r.right() - 230.0, r.top() + 4.0), pos2(r.right() - 8.0, r.bottom() - 4.0));
+                let pad = if compact { 2.0 } else { 4.0 };
+                let ctrl_rect = Rect::from_min_max(pos2(r.right() - 230.0, r.top() + pad), pos2(r.right() - 8.0, r.bottom() - pad));
                 let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(ctrl_rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
+                // Controls at the popup's own size, as its titles are: at the window's font
+                // size they would overflow the rows.
+                {
+                    use egui::{FontId, TextStyle};
+                    let st = cui.style_mut();
+                    for (t, size) in [(TextStyle::Body, 12.5), (TextStyle::Button, 12.5), (TextStyle::Monospace, 12.0), (TextStyle::Small, 11.0)] {
+                        let font = if t == TextStyle::Monospace { FontId::monospace(size) } else { FontId::proportional(size) };
+                        st.text_styles.insert(t, font);
+                    }
+                    st.spacing.interact_size.y = ctrl_rect.height().min(22.0);
+                    st.spacing.button_padding = vec2(7.0, 1.0);
+                }
                 if inert {
                     cui.disable();
                 }
@@ -2838,6 +2845,150 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
         return false;
     }
     true
+}
+
+/// The theme picker: dark and light themes as small windows of their own colours, each
+/// with a line of code in its code colours. Hovering one shows it on the whole window,
+/// a click keeps it; Done (or Escape) goes back to Options.
+fn themes(app: &mut App, ctx: &egui::Context) -> bool {
+    let pal = app.pal;
+    let k = take_keys(ctx);
+    let mut done = k.esc || k.enter;
+    let fs = app.cfg.font_size;
+    let (mut picked, mut hovered) = (None, None);
+    let current = app.cfg.theme;
+    let mut syntax = app.cfg.syntax_theme;
+    centered(ctx, "themes", 780.0, &pal, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Themes").size(fs + 2.0).strong());
+        });
+        ui.add_space(6.0);
+        // The cards scroll when the window is short; the switch and Done stay in view.
+        // (It claims the height its cards need: the window keeps its first size otherwise.)
+        let w = ui.available_width();
+        let cols = ((w + 12.0) / 170.0).floor().clamp(2.0, 4.0);
+        let cw = ((w - 12.0 * (cols - 1.0)) / cols).floor();
+        let card_h = (cw * 0.42).clamp(96.0, 132.0).round() + 10.0 + fs * 1.35 + (fs - 2.0) * 1.35 + 8.0 + 10.0;
+        let rows = (7.0 / cols).ceil() + (3.0 / cols).ceil();
+        let need = rows * card_h + 2.0 * (fs * 1.6);
+        let max_h = (ctx.content_rect().height() - 230.0).max(200.0);
+        egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(need.min(max_h)).auto_shrink([false, true]).show(ui, |ui| {
+            for (title, light) in [("Dark", false), ("Light", true)] {
+                ui.label(egui::RichText::new(title).size(fs - 1.5).color(pal.text_dim));
+                ui.add_space(2.0);
+                let list: Vec<ThemeName> = ThemeName::ALL.into_iter().filter(|t| t.is_light() == light).collect();
+                let w = ui.available_width();
+                let cols = ((w + 12.0) / 170.0).floor().clamp(2.0, 4.0) as usize;
+                let cw = ((w - 12.0 * (cols as f32 - 1.0)) / cols as f32).floor();
+                let preview_h = (cw * 0.42).clamp(96.0, 132.0).round();
+                let ch = preview_h + 10.0 + fs * 1.35 + (fs - 2.0) * 1.35 + 8.0;
+                for row in list.chunks(cols) {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 12.0;
+                        for &t in row {
+                            let (r, resp) = ui.allocate_exact_size(vec2(cw, ch), Sense::click());
+                            crate::ui::note_control(ui, r, t.label());
+                            let preview = Rect::from_min_size(r.min, vec2(cw, preview_h));
+                            theme_card(ui.painter(), preview, theme::palette(t), fs);
+                            // Chosen: a ring in the window's accent; hovered: a faint one.
+                            if t == current {
+                                ui.painter().rect_stroke(preview.expand(3.0), CornerRadius::same(11), Stroke::new(2.0, pal.accent), StrokeKind::Middle);
+                            } else if resp.hovered() {
+                                ui.painter().rect_stroke(preview.expand(3.0), CornerRadius::same(11), Stroke::new(1.0, pal.text_dim.gamma_multiply(0.7)), StrokeKind::Middle);
+                            }
+                            // Name and line, each cut to the card's width.
+                            let y = preview.bottom() + 9.0;
+                            for (k, (text, size, color)) in [(t.label(), fs, pal.text), (t.blurb(), fs - 2.0, pal.text_dim)].into_iter().enumerate() {
+                                let mut job = egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat { font_id: FontId::proportional(size), color, ..Default::default() });
+                                job.wrap = egui::text::TextWrapping { max_width: cw - 4.0, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+                                let g = ui.fonts_mut(|f| f.layout_job(job));
+                                ui.painter().galley(pos2(r.left() + 2.0, y + k as f32 * fs * 1.35), g, color);
+                            }
+                            if resp.hovered() {
+                                hovered = Some(t);
+                            }
+                            if resp.clicked() {
+                                picked = Some(t);
+                            }
+                        }
+                    });
+                    ui.add_space(10.0);
+                }
+            }
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            let r = toggle(ui, &mut syntax, &pal);
+            let _ = r;
+            ui.label(egui::RichText::new("Code colors follow the theme").size(fs - 0.5));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let b = ui.add(egui::Button::new(egui::RichText::new("Done").color(Color32::WHITE)).fill(pal.accent));
+                crate::ui::note_control(ui, b.rect, "themes done");
+                if b.clicked() {
+                    done = true;
+                }
+            });
+        });
+    });
+    if hovered.is_some() && picked.is_none() {
+        app.preview_theme = hovered;
+    }
+    if let Some(t) = picked {
+        app.cfg.theme = t;
+        app.set_config_changed();
+    }
+    if syntax != app.cfg.syntax_theme {
+        app.cfg.syntax_theme = syntax;
+        app.set_config_changed();
+    }
+    if done {
+        app.popup = Popup::options();
+        return false;
+    }
+    true
+}
+
+/// A theme as a small window: its sidebar, title strip, three rows (one selected), an
+/// accent button, and two lines of code in its code colours.
+fn theme_card(painter: &egui::Painter, r: Rect, p: Palette, fs: f32) {
+    let round = CornerRadius::same(8);
+    painter.rect_filled(r, round, p.panel);
+    let side = Rect::from_min_max(r.min, pos2(r.left() + (r.width() * 0.28).round(), r.bottom()));
+    painter.rect_filled(side, CornerRadius { nw: 8, sw: 8, ne: 0, se: 0 }, p.sidebar);
+    let bar = |x: f32, y: f32, w: f32, c: Color32| painter.rect_filled(Rect::from_min_size(pos2(x, y), vec2(w, 4.0)), CornerRadius::same(2), c);
+    for (k, w) in [0.62f32, 0.48, 0.55].into_iter().enumerate() {
+        bar(side.left() + 7.0, side.top() + 12.0 + k as f32 * 11.0, (side.width() - 14.0) * w, p.text_dim.gamma_multiply(0.7));
+    }
+    let main = Rect::from_min_max(pos2(side.right(), r.top()), r.max);
+    painter.rect_filled(Rect::from_min_size(main.min, vec2(main.width(), 9.0)), CornerRadius { nw: 0, ne: 8, sw: 0, se: 0 }, p.chrome);
+    // As many rows as fit above the code, the second one selected.
+    let size = (fs - 4.5).clamp(8.0, 11.0);
+    let code_top = main.bottom() - 8.0 - 2.0 * size * 1.35;
+    let mut k = 0;
+    while main.top() + 14.0 + k as f32 * 11.0 + 8.0 <= code_top - 4.0 {
+        let y = main.top() + 14.0 + k as f32 * 11.0;
+        let row = Rect::from_min_size(pos2(main.left() + 5.0, y - 3.0), vec2(main.width() - 10.0, 10.0));
+        if k == 1 {
+            painter.rect_filled(row, CornerRadius::same(3), p.selected);
+        }
+        bar(row.left() + 5.0, y, row.width() * [0.55, 0.42, 0.62, 0.36, 0.5][k % 5], if k == 1 { p.text } else { p.text.gamma_multiply(0.85) });
+        k += 1;
+    }
+    let pill = Rect::from_min_size(pos2(main.right() - 26.0, main.top() + 13.0), vec2(18.0, 7.0));
+    painter.rect_filled(pill, CornerRadius::same(4), p.accent);
+    // Code, in the theme's code colours.
+    let s = p.syntax;
+    let lines: [&[(&str, Color32)]; 2] = [&[("fn", s.keyword), (" add", p.text), ("(n: ", p.text), ("u32", s.kind), (")", p.text)], &[("\"sum\"", s.string), (" + ", p.text), ("42", s.number), (" // ok", s.comment)]];
+    for (k, line) in lines.iter().enumerate() {
+        let mut job = egui::text::LayoutJob::default();
+        for (t, c) in line.iter() {
+            job.append(t, 0.0, egui::TextFormat { font_id: FontId::monospace(size), color: *c, ..Default::default() });
+        }
+        job.wrap = egui::text::TextWrapping { max_width: main.width() - 12.0, max_rows: 1, break_anywhere: true, overflow_character: None };
+        let g = painter.ctx().fonts_mut(|f| f.layout_job(job));
+        painter.galley(pos2(main.left() + 8.0, main.bottom() - 8.0 - (2 - k) as f32 * (size * 1.35)), g, p.text);
+    }
+    painter.rect_stroke(r, round, Stroke::new(1.0, p.border), StrokeKind::Inside);
 }
 
 fn confirm(app: &mut App, ctx: &egui::Context, msg: &str, ok_label: &str, on_ok: &mut Option<Box<dyn FnOnce(&mut App)>>) -> bool {
@@ -3897,6 +4048,7 @@ fn opt_flip(c: &mut crate::config::Config, o: Opt) -> bool {
     let b: &mut bool = match o {
         Opt::RectButtons => &mut c.rect_buttons,
         Opt::FollowSystem => &mut c.follow_system_theme,
+        Opt::SyntaxTheme => &mut c.syntax_theme,
         Opt::Round => &mut c.round_corners,
         Opt::Animations => &mut c.animations,
         Opt::Tooltips => &mut c.tooltips,
