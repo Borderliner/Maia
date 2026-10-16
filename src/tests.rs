@@ -3349,3 +3349,13 @@ fn time_left_reads_as_minutes_and_hours() {
     assert_eq!(time_left(3725.0), "1 h 2 min");
     assert_eq!(time_left(-3.0), "0s");
 }
+
+#[test]
+fn an_svg_says_its_own_size() {
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48" viewBox="0 0 64 48"><rect width="64" height="48"/></svg>"#;
+    assert_eq!(crate::svg::size(svg), Some([64, 48]));
+    let vb = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 150"/>"#;
+    assert_eq!(crate::svg::size(vb), Some([300, 150]), "the viewBox when there is no size");
+    let (w, h, _) = crate::svg::render(svg, 2048).unwrap();
+    assert_eq!((w, h), (2048, 1536), "drawn larger than it says it is");
+}

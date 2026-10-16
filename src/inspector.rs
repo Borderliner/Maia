@@ -761,7 +761,9 @@ fn image_view(ui: &mut Ui, body: Rect, e: &Entry, ins: &mut Inspector, env: &mut
     let tex = l.tex.id();
     let dims = l.dims;
     let base = match ins.fit {
-        Fit::Fit => (area.width() / ow).min(area.height() / oh).min(1.0 / ppp * 8.0).max(0.0001),
+        // A drawing scales without losing anything: it fills the preview however small
+        // it says it is. A picture stops at 8 pixels for one.
+        Fit::Fit => (area.width() / ow).min(area.height() / oh).min(if e.ext() == "svg" { f32::INFINITY } else { 1.0 / ppp * 8.0 }).max(0.0001),
         Fit::Fill => (area.width() / ow).max(area.height() / oh),
         Fit::Actual => 1.0 / ppp,
     };

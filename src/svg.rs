@@ -1738,11 +1738,8 @@ fn collect_ids<'a>(n: &'a Node, out: &mut HashMap<String, &'a Node>, css: &mut S
     }
 }
 
-/// Render an SVG document so its larger side is `px` pixels. Returns (width, height,
-/// premultiplied RGBA8).
-pub fn render(data: &[u8], px: u32) -> Option<(u32, u32, Vec<u8>)> {
-    let text = std::str::from_utf8(data).ok()?;
-    let root = parse_xml(text)?;
+/// A document's own size (its width and height, else its viewBox's) and its viewBox.
+fn view_size(root: &Node) -> (f32, f32, Option<Vec<f32>>) {
     let num = |k: &str| root.attr(k).filter(|v| !v.trim_end().ends_with('%')).map(length);
     let vb: Option<Vec<f32>> = root.attr("viewBox").map(numbers).filter(|v| v.len() == 4 && v[2] > 0.0 && v[3] > 0.0);
     let (vw, vh) = match (&vb, num("width"), num("height")) {
@@ -1750,6 +1747,21 @@ pub fn render(data: &[u8], px: u32) -> Option<(u32, u32, Vec<u8>)> {
         (Some(v), _, _) => (v[2], v[3]),
         _ => (16.0, 16.0),
     };
+    (vw, vh, vb)
+}
+
+/// The size an SVG document says it is, in pixels (not the size it is drawn at).
+pub fn size(data: &[u8]) -> Option<[u32; 2]> {
+    let (w, h, _) = view_size(&parse_xml(std::str::from_utf8(data).ok()?)?);
+    Some([(w.round() as u32).max(1), (h.round() as u32).max(1)])
+}
+
+/// Render an SVG document so its larger side is `px` pixels. Returns (width, height,
+/// premultiplied RGBA8).
+pub fn render(data: &[u8], px: u32) -> Option<(u32, u32, Vec<u8>)> {
+    let text = std::str::from_utf8(data).ok()?;
+    let root = parse_xml(text)?;
+    let (vw, vh, vb) = view_size(&root);
     let s = px as f32 / vw.max(vh);
     let (w, h) = (((vw * s).round() as usize).clamp(1, 4096), ((vh * s).round() as usize).clamp(1, 4096));
     let mut m = Mat::scale(s, s);

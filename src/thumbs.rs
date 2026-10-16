@@ -256,5 +256,7 @@ fn svg_thumb(path: &Path, px: u32) -> Option<(crate::imgdec::Rgba, [u32; 2])> {
             }
         }
     }
-    Some((crate::imgdec::Rgba { w, h, px: px_data }, [w, h]))
+    // Its dimensions are the document's own (64 × 48), not the drawing's (2048 × 1536).
+    let dims = crate::svg::size(&data).unwrap_or([w, h]);
+    Some((crate::imgdec::Rgba { w, h, px: px_data }, dims))
 }
