@@ -356,10 +356,12 @@ pub(crate) fn seg_button(ui: &mut Ui, on: bool, tip: &'static str, pal: &theme::
     resp.on_hover_text(tip).clicked()
 }
 
-/// Dashed rounded outline around a group of toolbar buttons.
+/// A quiet rounded segment behind a group of toolbar buttons, as Options draws its groups.
 pub(crate) fn seg_frame(ui: &mut Ui, pal: &theme::Palette, add: impl FnOnce(&mut Ui)) {
     // The buttons go straight into the toolbar row, so they centre on it like the close
-    // button does; the outline is a fixed 24 px around that centre (buttons are 20 high).
+    // button does; the segment is a fixed 24 px around that centre (buttons are 20 high),
+    // painted under them once their width is known.
+    let bg = ui.painter().add(egui::Shape::Noop);
     let x0 = ui.cursor().min.x;
     let gap = ui.spacing().item_spacing.x;
     ui.spacing_mut().item_spacing.x = 1.0;
@@ -369,13 +371,8 @@ pub(crate) fn seg_frame(ui: &mut Ui, pal: &theme::Palette, add: impl FnOnce(&mut
     ui.spacing_mut().item_spacing.x = gap;
     let cy = ui.max_rect().center().y;
     let r = Rect::from_min_max(pos2(x0, cy - 12.0), pos2(ui.cursor().min.x, cy + 12.0));
-    let st = Stroke::new(1.0, pal.border);
-    let dash = |a: egui::Pos2, b: egui::Pos2| ui.painter().extend(egui::Shape::dashed_line(&[a, b], st, 3.0, 2.0));
-    let k = 4.0;
-    dash(pos2(r.left() + k, r.top()), pos2(r.right() - k, r.top()));
-    dash(pos2(r.left() + k, r.bottom()), pos2(r.right() - k, r.bottom()));
-    dash(pos2(r.left(), r.top() + k), pos2(r.left(), r.bottom() - k));
-    dash(pos2(r.right(), r.top() + k), pos2(r.right(), r.bottom() - k));
+    ui.painter().set(bg, egui::Shape::rect_filled(r, CornerRadius::same(6), pal.card()));
+    ui.painter().rect_stroke(r, CornerRadius::same(6), egui::Stroke::new(1.0, pal.card_line()), egui::StrokeKind::Inside);
     ui.add_space(6.0);
 }
 
