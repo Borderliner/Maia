@@ -3461,39 +3461,111 @@ mod journeys {
         click_control(&mut s, "choose theme");
         s.settle();
         assert!(matches!(s.app.popup, Popup::Themes), "the picker opened");
-        // Every theme can be seen: in view, or scrolled to (the switch and Done stay put).
-        let card = |s: &Sim, name: &str| crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == name).map(|(_, r, _)| *r));
-        let done = card(&s, "themes done").unwrap_or_else(|| s.fail("no Done"));
-        let top = s.texts.iter().find(|(_, x)| x == "Themes").map(|(r, _)| r.bottom()).unwrap_or_else(|| s.fail("no title"));
-        let full_h = card(&s, ThemeName::ALL[0].label()).map_or(0.0, |r| r.height());
-        for t in ThemeName::ALL {
-            // In view: its name drawn (the list clips what is scrolled out) above Done.
-            let named = |s: &Sim| s.texts.iter().any(|(tr, x)| x == t.label() && tr.top() >= top && tr.bottom() <= done.top());
-            for _ in 0..120 {
-                let r = card(&s, t.label()).unwrap_or_else(|| s.fail(&format!("{} not drawn", t.label())));
-                if named(&s) && r.top() >= top {
-                    break;
-                }
-                // Cut off at the list's top edge (its outline clipped there): up; else down.
-                let clipped_top = r.height() < full_h - 1.0 && r.top() <= top + 40.0;
-                // Small steps: one wheel notch moves the list by several rows.
-                let dy = if r.top() < top || clipped_top { 6 } else { -6 };
-                s.act(&format!("scroll {:.0} {:.0} {dy}", done.center().x - 200.0, (top + done.top()) / 2.0));
-                s.idle(2);
-            }
-            let r = card(&s, t.label()).unwrap();
-            assert!(named(&s) && r.top() >= top && r.left() >= 0.0 && r.right() <= s.size.x, "{} in view: {r:?}", t.label());
-        }
-        s.act(&format!("scroll {:.0} {:.0} 2000", done.center().x - 200.0, (top + done.top()) / 2.0));
+        // Every theme can be seen, its name whole: in view, or scrolled to (the search,
+        // the switch and Done stay put).
+        theme_cards_reachable(&mut s, "a normal window");
+        let ctl = |s: &Sim, name: &str| crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == name).map(|(_, r, _)| *r));
+        let shown = |s: &Sim| ThemeName::ALL.iter().filter(|t| ctl(s, t.label()).is_some()).count();
+        let done = ctl(&s, "themes done").unwrap_or_else(|| s.fail("no Done"));
+        s.act(&format!("scroll {:.0} {:.0} 2000", done.center().x - 200.0, done.top() - 120.0));
         s.idle(2);
         look(&mut s, "theme picker");
         s.shot("theme-picker");
-        // Hovering shows a theme on the whole window, without choosing it.
-        let r = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "Gruvbox").map(|(_, r, _)| *r)).unwrap();
+        // Hovering shows a theme on the whole window, without choosing it; leaving puts
+        // the chosen one back. (Typed first: at larger font sizes it is scrolled away.)
+        s.act("text gruvbox");
+        s.idle(3);
+        let r = ctl(&s, "Gruvbox").unwrap_or_else(|| s.fail("no Gruvbox"));
         s.act(&format!("move {:.0} {:.0}", r.center().x, r.center().y));
         s.idle(3);
         assert_eq!(s.app.pal.panel, crate::theme::palette(ThemeName::Gruvbox).panel, "previewed while hovered");
         assert_eq!(s.app.cfg.theme, ThemeName::Midnight, "not chosen by a hover");
+        s.act(&format!("move {:.0} {:.0}", done.left() - 300.0, done.center().y));
+        s.idle(3);
+        assert_eq!(s.app.pal.panel, crate::theme::palette(ThemeName::Midnight).panel, "the chosen theme is back");
+        // Typing searches, by name or by its line.
+        s.act("key ctrl+a");
+        s.act("text tokyo");
+        s.idle(3);
+        let tokyo = ThemeName::ALL.iter().filter(|t| t.label().contains("Tokyo")).count();
+        assert_eq!(shown(&s), tokyo, "the Tokyo themes only");
+        assert!(ctl(&s, "Tokyo Night").is_some());
+        assert!(s.texts.iter().any(|(_, t)| t == "Dark · 1"), "the group says how many it shows");
+        s.act("key ctrl+a");
+        s.act("text warm and retro");
+        s.idle(3);
+        assert!(ctl(&s, "Gruvbox").is_some(), "found by its line");
+        s.act("key ctrl+a");
+        s.act("text zzzz");
+        s.idle(3);
+        assert!(shown(&s) == 0 && s.texts.iter().any(|(_, t)| t == "No theme matches"));
+        s.act("key ctrl+a");
+        s.act("key Backspace");
+        s.idle(3);
+        assert_eq!(shown(&s), ThemeName::ALL.len());
+        // The filter: light ones only, dark ones only, then all.
+        let light = ThemeName::ALL.iter().filter(|t| t.is_light()).count();
+        click_control(&mut s, "light themes");
+        s.idle(3);
+        assert!(ThemeName::ALL.iter().all(|t| ctl(&s, t.label()).is_some() == t.is_light()), "only light themes");
+        assert!(s.texts.iter().any(|(_, t)| *t == format!("Light · {light}")));
+        theme_cards_reachable(&mut s, "light themes");
+        click_control(&mut s, "dark themes");
+        s.idle(3);
+        assert!(ThemeName::ALL.iter().all(|t| ctl(&s, t.label()).is_some() == !t.is_light()), "only dark themes");
+        // The arrows walk the cards and show each on the window; Enter keeps one.
+        let order: Vec<ThemeName> = ThemeName::ALL.into_iter().filter(|t| !t.is_light()).collect();
+        s.act("move -50 -50");
+        s.act("key Home");
+        s.idle(2);
+        assert_eq!(s.app.pal.panel, crate::theme::palette(order[0]).panel, "Home: the first card");
+        s.act("key ArrowRight");
+        s.idle(2);
+        assert_eq!(s.app.pal.panel, crate::theme::palette(order[1]).panel, "Right: the next card, previewed");
+        assert_eq!(s.app.cfg.theme, ThemeName::Midnight, "not chosen by the arrows");
+        let y = |s: &Sim, t: ThemeName| ctl(s, t.label()).map_or(0.0, |r| r.center().y);
+        s.act("key ArrowDown");
+        s.idle(2);
+        let below = order.iter().copied().find(|t| crate::theme::palette(*t).panel == s.app.pal.panel).unwrap_or_else(|| s.fail("Down previews a dark theme"));
+        assert!(y(&s, below) > y(&s, order[1]) + 1.0, "Down: a card in the row below");
+        s.act("key End");
+        s.idle(2);
+        assert_eq!(s.app.pal.panel, crate::theme::palette(*order.last().unwrap()).panel, "End: the last card");
+        // Esc goes back to Options with the chosen theme as it was.
+        s.act("key Escape");
+        s.idle(3);
+        assert!(matches!(s.app.popup, Popup::Options(_)), "Esc goes back");
+        assert_eq!(s.app.pal.panel, crate::theme::palette(ThemeName::Midnight).panel, "nothing chosen");
+        // Opened again, the filter is as it was left; the arrows and Enter choose.
+        s.act("text color scheme");
+        s.idle(3);
+        click_control(&mut s, "choose theme");
+        s.settle();
+        assert!(ThemeName::ALL.iter().all(|t| ctl(&s, t.label()).is_some() == !t.is_light()), "the filter is kept for the session");
+        s.act("key ArrowRight");
+        s.act("key Enter");
+        s.idle(3);
+        let after = order[order.iter().position(|t| *t == ThemeName::Midnight).unwrap() + 1];
+        assert_eq!(s.app.cfg.theme, after, "Enter keeps the focused theme");
+        assert!(matches!(s.app.popup, Popup::Options(_)), "and goes back");
+        s.app.cfg.theme = ThemeName::Midnight;
+        s.act("text color scheme");
+        s.idle(3);
+        click_control(&mut s, "choose theme");
+        s.settle();
+        click_control(&mut s, "all themes");
+        s.idle(3);
+        // A small window: the grid narrows, every name still whole.
+        s.resize(520.0, 340.0);
+        s.idle(3);
+        theme_cards_reachable(&mut s, "a small window");
+        look(&mut s, "theme picker, small");
+        s.shot("theme-picker-small");
+        s.resize(1280.0, 800.0);
+        s.idle(3);
+        // Found by typing (it may be scrolled out of view), then a click keeps it.
+        s.act("text tokyo night");
+        s.idle(3);
         click_control(&mut s, "Tokyo Night");
         s.idle(3);
         assert_eq!(s.app.cfg.theme, ThemeName::TokyoNight);
@@ -3533,6 +3605,36 @@ mod journeys {
         s.idle(2);
         s.shot("code-line-spacing");
         report("themes", &s);
+    }
+
+    /// Every card the picker shows can be brought into view, between the search and
+    /// Done, with its name whole (not cut with "…") and inside the window.
+    fn theme_cards_reachable(s: &mut Sim, what: &str) {
+        let ctl = |s: &Sim, name: &str| crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == name).map(|(_, r, _)| *r));
+        let top = ctl(s, "theme search").map(|r| r.bottom()).unwrap_or_else(|| s.fail("no search"));
+        let done = ctl(s, "themes done").unwrap_or_else(|| s.fail("no Done"));
+        let shown: Vec<crate::theme::ThemeName> = crate::theme::ThemeName::ALL.into_iter().filter(|t| ctl(s, t.label()).is_some()).collect();
+        assert!(!shown.is_empty(), "{what}: cards drawn");
+        let full_h = ctl(s, shown[0].label()).map_or(0.0, |r| r.height());
+        let mid = pos2(done.center().x - 150.0, (top + done.top()) / 2.0);
+        for t in shown {
+            let named = |s: &Sim| s.texts.iter().any(|(tr, x)| x == t.label() && tr.top() >= top && tr.bottom() <= done.top() && tr.right() <= s.size.x);
+            // The whole card in view: below the search, above the footer's rule.
+            let whole = |r: Rect| r.top() >= top - 1.0 && r.bottom() <= done.top() - 12.0 && r.height() >= full_h - 1.0;
+            for _ in 0..200 {
+                let r = ctl(s, t.label()).unwrap_or_else(|| s.fail(&format!("{what}: {} not drawn", t.label())));
+                if named(s) && whole(r) {
+                    break;
+                }
+                // Half a notch at a time, let settle: a card about as tall as the list
+                // is otherwise stepped over back and forth.
+                let dy = if r.top() < top + 1.0 || r.height() < full_h - 1.0 && r.top() <= top + 40.0 { 0.5 } else { -0.5 };
+                s.act(&format!("scroll {:.0} {:.0} {dy}", mid.x, mid.y));
+                s.idle(8);
+            }
+            let r = ctl(s, t.label()).unwrap();
+            assert!(named(s) && whole(r) && r.left() >= 0.0 && r.right() <= s.size.x, "{what}: {} in view, its name whole: {r:?}", t.label());
+        }
     }
 
     /// Search by meaning, start to finish, against a stand-in Ollama: off by default (the

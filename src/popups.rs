@@ -3424,92 +3424,298 @@ fn meaning(app: &mut App, ctx: &egui::Context, st: &mut MeaningState) -> bool {
     true
 }
 
-/// The theme picker: dark and light themes as small windows of their own colours, each
-/// with a line of code in its code colours. Hovering one shows it on the whole window,
-/// a click keeps it; Done (or Escape) goes back to Options.
+/// The theme picker's state for this run of Maia, kept in egui's memory (the popup has
+/// none of its own): the search and the focused card for one opening, the All, Dark or
+/// Light filter for the session.
+#[derive(Clone, Default)]
+struct ThemesState {
+    query: String,
+    /// 0 All, 1 Dark, 2 Light.
+    filter: u8,
+    focus: Option<ThemeName>,
+    /// The arrows have been used: the focus ring shows and the focused theme previews.
+    keyed: bool,
+    scroll_to_focus: bool,
+    search_focus: bool,
+    search_id: Option<Id>,
+    /// Where each card was drawn last frame, for Up and Down across rows.
+    cards: Vec<(ThemeName, Pos2)>,
+    /// The pass this was last drawn in: a gap means the picker was opened again.
+    pass: u64,
+}
+
+/// The theme picker: every theme as a small window in a card, searchable and filtered to
+/// the dark or light ones. Hovering a card, or reaching it with the arrows, shows that
+/// theme on the whole window; a click or Enter keeps it, Esc goes back to Options with
+/// the chosen one restored.
 fn themes(app: &mut App, ctx: &egui::Context) -> bool {
     let pal = app.pal;
-    let k = take_keys(ctx);
-    let mut done = k.esc || k.enter;
     let fs = app.cfg.font_size;
-    let (mut picked, mut hovered) = (None, None);
+    let sid = Id::new("themes state");
+    let mut st: ThemesState = ctx.data_mut(|d| d.get_temp(sid)).unwrap_or_default();
+    let pass = ctx.cumulative_pass_nr();
     let current = app.cfg.theme;
-    let mut syntax = app.cfg.syntax_theme;
-    centered(ctx, "themes", 780.0, &pal, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Themes").size(fs + 2.0).strong());
+    let fresh = st.pass + 1 < pass || st.pass == 0;
+    if fresh {
+        // Opened again: a fresh search, the chosen theme focused, the filter kept.
+        st = ThemesState { filter: st.filter, focus: Some(current), search_focus: true, scroll_to_focus: true, ..Default::default() };
+    }
+    st.pass = pass;
+    // Keys: the search keeps typing; arrows, Home and End move across the cards.
+    let focused = ctx.memory(|m| m.focused());
+    let in_search = focused.is_some() && focused == st.search_id;
+    let other_field = focused.is_some_and(|f| !in_search && egui::TextEdit::load_state(ctx, f).is_some());
+    let (left, right, up, down, home, end, enter, esc) = ctx.input_mut(|i| {
+        let mut k = |key| !other_field && i.consume_key(Modifiers::NONE, key);
+        (k(Key::ArrowLeft), k(Key::ArrowRight), k(Key::ArrowUp), k(Key::ArrowDown), k(Key::Home), k(Key::End), k(Key::Enter), i.consume_key(Modifiers::NONE, Key::Escape))
+    });
+    if !in_search && !other_field {
+        let typed = ctx.input_mut(|i| {
+            let mut t = String::new();
+            i.events.retain(|e| match e {
+                Event::Text(x) => {
+                    t.push_str(x);
+                    false
+                }
+                _ => true,
+            });
+            t
         });
-        ui.add_space(6.0);
-        // The cards scroll when the window is short; the switch and Done stay in view.
-        // (It claims the height its cards need: the window keeps its first size otherwise.)
-        let w = ui.available_width();
-        let cols = ((w + 12.0) / 170.0).floor().clamp(2.0, 4.0);
-        let cw = ((w - 12.0 * (cols - 1.0)) / cols).floor();
-        let card_h = (cw * 0.42).clamp(96.0, 132.0).round() + 10.0 + fs * 1.35 + (fs - 2.0) * 1.35 + 8.0 + 10.0;
-        let light = ThemeName::ALL.iter().filter(|t| t.is_light()).count() as f32;
-        let rows = ((ThemeName::ALL.len() as f32 - light) / cols).ceil() + (light / cols).ceil();
-        let need = rows * card_h + 2.0 * (fs * 1.6);
-        let max_h = (ctx.content_rect().height() - 230.0).max(200.0);
-        egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(need.min(max_h)).auto_shrink([false, true]).show(ui, |ui| {
-            for (title, light) in [("Dark", false), ("Light", true)] {
-                ui.label(egui::RichText::new(title).size(fs - 1.5).color(pal.text_dim));
-                ui.add_space(2.0);
-                let list: Vec<ThemeName> = ThemeName::ALL.into_iter().filter(|t| t.is_light() == light).collect();
-                let w = ui.available_width();
-                let cols = ((w + 12.0) / 170.0).floor().clamp(2.0, 4.0) as usize;
-                let cw = ((w - 12.0 * (cols as f32 - 1.0)) / cols as f32).floor();
-                let preview_h = (cw * 0.42).clamp(96.0, 132.0).round();
-                let ch = preview_h + 10.0 + fs * 1.35 + (fs - 2.0) * 1.35 + 8.0;
-                for row in list.chunks(cols) {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 12.0;
-                        for &t in row {
-                            let (r, resp) = ui.allocate_exact_size(vec2(cw, ch), Sense::click());
-                            crate::ui::note_control(ui, r, t.label());
-                            let preview = Rect::from_min_size(r.min, vec2(cw, preview_h));
-                            theme_card(ui.painter(), preview, theme::palette(t), fs);
-                            // Chosen: a ring in the window's accent; hovered: a faint one.
-                            if t == current {
-                                ui.painter().rect_stroke(preview.expand(3.0), CornerRadius::same(11), Stroke::new(2.0, pal.accent), StrokeKind::Middle);
-                            } else if resp.hovered() {
-                                ui.painter().rect_stroke(preview.expand(3.0), CornerRadius::same(11), Stroke::new(1.0, pal.text_dim.gamma_multiply(0.7)), StrokeKind::Middle);
-                            }
-                            // Name and line, each cut to the card's width.
-                            let y = preview.bottom() + 9.0;
-                            for (k, (text, size, color)) in [(t.label(), fs, pal.text), (t.blurb(), fs - 2.0, pal.text_dim)].into_iter().enumerate() {
-                                let mut job = egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat { font_id: FontId::proportional(size), color, ..Default::default() });
-                                job.wrap = egui::text::TextWrapping { max_width: cw - 4.0, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-                                let g = ui.fonts_mut(|f| f.layout_job(job));
-                                ui.painter().galley(pos2(r.left() + 2.0, y + k as f32 * fs * 1.35), g, color);
-                            }
-                            if resp.hovered() {
-                                hovered = Some(t);
-                            }
-                            if resp.clicked() {
-                                picked = Some(t);
-                            }
-                        }
-                    });
-                    ui.add_space(10.0);
+        if !typed.is_empty() {
+            st.query.push_str(&typed);
+            st.search_focus = true;
+        }
+    }
+    let q = fuzzy::Query::new(&st.query);
+    // A name matches loosely, as names do elsewhere; its line by whole words (letters
+    // scattered through a sentence matched almost anything).
+    let words: Vec<String> = st.query.to_lowercase().split_whitespace().map(String::from).collect();
+    let matches = |t: ThemeName| {
+        let line = format!("{} {}", t.label(), t.blurb()).to_lowercase();
+        q.is_empty() || fuzzy::score(&q, &t.label().to_lowercase()).is_some() || words.iter().all(|w| line.contains(w.as_str()))
+    };
+    let groups: Vec<(&str, Vec<ThemeName>)> = [("Dark", false), ("Light", true)]
+        .into_iter()
+        .filter(|(_, light)| st.filter == 0 || (st.filter == 2) == *light)
+        .map(|(name, light)| (name, ThemeName::ALL.into_iter().filter(|t| t.is_light() == light && matches(*t)).collect::<Vec<_>>()))
+        .filter(|(_, v)| !v.is_empty())
+        .collect();
+    let order: Vec<ThemeName> = groups.iter().flat_map(|g| g.1.iter().copied()).collect();
+    if st.focus.is_none_or(|f| !order.contains(&f)) {
+        st.focus = order.iter().copied().find(|&t| t == current).or_else(|| order.first().copied());
+    }
+    let at = st.focus.and_then(|f| order.iter().position(|&t| t == f));
+    let mut moved = None;
+    if let Some(i) = at {
+        if left && i > 0 {
+            moved = Some(order[i - 1]);
+        }
+        if right && i + 1 < order.len() {
+            moved = Some(order[i + 1]);
+        }
+        if home {
+            moved = order.first().copied();
+        }
+        if end {
+            moved = order.last().copied();
+        }
+        if up || down {
+            // The nearest card in the row above or below, by its centre.
+            let here = st.cards.iter().find(|c| Some(c.0) == st.focus).map(|c| c.1);
+            if let Some(h) = here {
+                let row_y = st.cards.iter().map(|c| c.1.y).filter(|&y| if down { y > h.y + 1.0 } else { y < h.y - 1.0 }).fold(None, |best: Option<f32>, y| Some(best.map_or(y, |b| if down { b.min(y) } else { b.max(y) })));
+                if let Some(y) = row_y {
+                    moved = st.cards.iter().filter(|c| (c.1.y - y).abs() < 1.0).min_by(|a, b| (a.1.x - h.x).abs().total_cmp(&(b.1.x - h.x).abs())).map(|c| c.0);
                 }
             }
-        });
-        ui.separator();
-        ui.horizontal(|ui| {
-            let r = toggle(ui, &mut syntax, &pal);
-            let _ = r;
-            ui.label(egui::RichText::new("Code colors follow the theme").size(fs - 0.5));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let b = ui.add(egui::Button::new(egui::RichText::new("Done").color(Color32::WHITE)).fill(pal.accent));
+        }
+    }
+    if let Some(t) = moved {
+        st.focus = Some(t);
+        st.keyed = true;
+        st.scroll_to_focus = true;
+    }
+    let mut done = esc;
+    let mut picked = if enter { st.focus } else { None };
+    if picked.is_some() {
+        done = true;
+    }
+    let mut hovered = None;
+    let mut syntax = app.cfg.syntax_theme;
+    let mut cards = vec![];
+    // Options' size: a fixed window that shrinks with a small one.
+    let screen = ctx.content_rect();
+    let w = 860f32.min(screen.width() - 24.0).round();
+    let h = 600f32.min(screen.height() - 24.0).round();
+    let pos = pos2((screen.center().x - w / 2.0).round(), (screen.top() + ((screen.height() - h) / 2.0).clamp(12.0, 70.0)).round());
+    note_layer(Id::new("themes"));
+    let area = egui::Area::new(Id::new("themes")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+        popup_frame(&pal).show(ui, |ui| {
+            let (_, inner) = ui.allocate_space(vec2(w - 16.0, h - 16.0));
+            let top_down = egui::Layout::top_down(egui::Align::Min);
+            // Header: the close button and the filter from the right; the search takes
+            // what is left.
+            let mut head = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(top_down));
+            head.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                if crate::ui::glyph_button(ui, Glyph::Close, "Back to Options (Esc)", true, &pal).clicked() {
+                    done = true;
+                }
+                ui.add_space(4.0);
+                let mut seg = |ui: &mut Ui| {
+                    for (k, label, id) in [(0u8, "All", "all themes"), (1, "Dark", "dark themes"), (2, "Light", "light themes")] {
+                        let g = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(12.0), pal.text);
+                        let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 18.0, 20.0), Sense::click());
+                        crate::ui::note_control(ui, r, id);
+                        let on = st.filter == k;
+                        if on {
+                            ui.painter().rect_filled(r, CornerRadius::same(4), pal.accent.gamma_multiply(0.85));
+                        } else if resp.hovered() {
+                            ui.painter().rect_filled(r, CornerRadius::same(4), pal.hover);
+                        }
+                        let c = if on { Color32::WHITE } else { pal.text_dim };
+                        ui.painter().text(r.center(), Align2::CENTER_CENTER, label, FontId::proportional(12.0), c);
+                        if resp.clicked() {
+                            st.filter = k;
+                            st.scroll_to_focus = true;
+                        }
+                    }
+                };
+                // Laid out left to right in a slot of its measured width (in a right-to-left
+                // row the cursor's left edge is infinite), centred on the search row.
+                let seg_w = ["All", "Dark", "Light"].iter().map(|l| ui.painter().layout_no_wrap(l.to_string(), FontId::proportional(12.0), pal.text).size().x + 18.0 + 1.0).sum::<f32>() + 4.0 + 6.0;
+                let (slot, _) = ui.allocate_exact_size(vec2(seg_w, 26.0), Sense::hover());
+                let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(slot).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                crate::inspector::seg_frame(&mut sui, &pal, |ui| seg(ui));
+                let fw = (ui.available_width() - 4.0).floor();
+                ui.allocate_ui_with_layout(vec2(fw, 0.0), top_down, |ui| {
+                    ui.set_width(fw);
+                    let r = search_field(ui, &mut st.query, "Search themes…", &mut st.search_focus, &pal, Glyph::Search);
+                    crate::ui::note_control(ui, r.rect, "theme search");
+                    st.search_id = Some(r.id);
+                    // Typed while the search had not the keyboard: the cursor after it.
+                    if r.gained_focus() {
+                        if let Some(mut s) = egui::TextEdit::load_state(ui.ctx(), r.id) {
+                            s.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(st.query.chars().count()))));
+                            s.store(ui.ctx(), r.id);
+                        }
+                    }
+                });
+            });
+            // Footer: the code colours' switch on the left, Done on the right.
+            let foot = Rect::from_min_max(pos2(inner.left(), inner.bottom() - (fs * 1.4 + 10.0).max(28.0).round()), inner.max);
+            ui.painter().line_segment([pos2(inner.left(), foot.top() - 6.5), pos2(inner.right(), foot.top() - 6.5)], Stroke::new(1.0, pal.border));
+            let mut fui = ui.new_child(egui::UiBuilder::new().max_rect(foot).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            fui.spacing_mut().item_spacing.x = 10.0;
+            fui.add_space(4.0);
+            let sw = toggle(&mut fui, &mut syntax, &pal);
+            let _ = sw;
+            let lr = fui.label(egui::RichText::new("Code colors follow the theme").size(fs - 0.5).color(pal.text));
+            if lr.interact(Sense::click()).clicked() {
+                syntax = !syntax;
+            }
+            fui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let b = primary_button(ui, "Done", true, &pal);
                 crate::ui::note_control(ui, b.rect, "themes done");
                 if b.clicked() {
                     done = true;
                 }
             });
+            // The cards, in a grid that follows the width.
+            let body = Rect::from_min_max(pos2(inner.left(), head.min_rect().bottom().round() + 4.0), pos2(inner.right(), foot.top() - 14.0));
+            let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(top_down));
+            let gap = 12.0;
+            let pad = 6.0;
+            let name_font = FontId::proportional(fs);
+            let blurb_font = FontId::proportional(fs - 2.0);
+            // Wide enough for the longest name: names are never cut.
+            let longest = ThemeName::ALL.iter().map(|t| bui.painter().layout_no_wrap(t.label().to_string(), name_font.clone(), pal.text).size().x).fold(0.0, f32::max);
+            let avail = body.width() - 10.0;
+            // (and the chosen one's check beside it).
+            let min_w = (longest + 2.0 * pad + 8.0 + 24.0).max(150.0);
+            let most = (((avail + gap) / (min_w + gap)).floor() as usize).clamp(2, 5);
+            // Of the column counts that fit, the one that leaves the fewest gaps in the
+            // groups' last rows (the larger on a tie).
+            let cols = (2..=most).rev().min_by_key(|&c| groups.iter().map(|g| (c - g.1.len() % c) % c).sum::<usize>()).unwrap_or(2);
+            let cw = ((avail - gap * (cols as f32 - 1.0)) / cols as f32).floor();
+            // Shorter in a short window, so more than one row shows.
+            let preview_h = (cw * 0.52).clamp(64.0, 118.0).min(((body.height() - 90.0) * 0.6).max(64.0)).round();
+            let name_h = (fs * 1.35).round();
+            let blurb_h = ((fs - 2.0) * 1.35).round();
+            let card_h = pad + preview_h + 8.0 + 4.0 + 8.0 + name_h + blurb_h + pad + 4.0;
+            egui::ScrollArea::vertical().id_salt("theme cards").max_height(body.height()).auto_shrink([false, false]).show(&mut bui, |ui| {
+                ui.spacing_mut().item_spacing = vec2(gap, gap);
+                if groups.is_empty() {
+                    ui.add_space(28.0);
+                    ui.vertical_centered(|ui| ui.label(egui::RichText::new("No theme matches").size(12.5).color(pal.text_dim)));
+                }
+                for (name, list) in &groups {
+                    let (hr, _) = ui.allocate_exact_size(vec2(avail, 18.0), Sense::hover());
+                    ui.painter().text(pos2(hr.left() + 4.0, hr.center().y), Align2::LEFT_CENTER, format!("{name} · {}", list.len()), FontId::proportional(11.5), pal.text_dim);
+                    for row in list.chunks(cols) {
+                        ui.horizontal(|ui| {
+                            for &t in row {
+                                let (r, resp) = ui.allocate_exact_size(vec2(cw, card_h), Sense::click());
+                                crate::ui::note_control(ui, r, t.label());
+                                cards.push((t, r.center()));
+                                let chosen = t == current;
+                                let focus = st.keyed && st.focus == Some(t);
+                                let hov = resp.hovered();
+                                if focus && std::mem::take(&mut st.scroll_to_focus) {
+                                    ui.scroll_to_rect(r.expand(gap / 2.0), None);
+                                }
+                                let p = theme::palette(t);
+                                ui.painter().rect(r, CornerRadius::same(12), if hov { pal.hover } else { pal.card() }, Stroke::new(1.0, if hov { pal.text_dim.gamma_multiply(0.5) } else { pal.card_line() }), StrokeKind::Inside);
+                                let preview = Rect::from_min_size(r.min + vec2(pad, pad), vec2(cw - 2.0 * pad, preview_h));
+                                theme_card(ui.painter(), preview, p, fs, 6);
+                                // Its colours: the accent, then the five code colours.
+                                let s = p.syntax;
+                                let sw = [p.accent, s.keyword, s.kind, s.string, s.number, s.comment];
+                                let strip = Rect::from_min_size(pos2(preview.left(), preview.bottom() + 8.0), vec2(preview.width(), 4.0));
+                                let seg_w = (strip.width() - 3.0 * (sw.len() as f32 - 1.0)) / sw.len() as f32;
+                                for (k, c) in sw.iter().enumerate() {
+                                    ui.painter().rect_filled(Rect::from_min_size(pos2(strip.left() + k as f32 * (seg_w + 3.0), strip.top()), vec2(seg_w, strip.height())), CornerRadius::same(2), *c);
+                                }
+                                // The name, then its line, dim.
+                                let ty = strip.bottom() + 8.0;
+                                for (k, (text, font, color)) in [(t.label(), &name_font, pal.text), (t.blurb(), &blurb_font, pal.text_dim)].into_iter().enumerate() {
+                                    let g = crate::listing::elided(ui, text, font.clone(), preview.width() - if chosen && k == 0 { 22.0 } else { 0.0 }, color);
+                                    ui.painter().galley(pos2(preview.left(), ty + if k == 0 { 0.0 } else { name_h }), g, color);
+                                }
+                                // Chosen: an accent ring and a check badge; focused from the
+                                // keyboard: a ring in the text colour.
+                                if chosen {
+                                    ui.painter().rect_stroke(r, CornerRadius::same(12), Stroke::new(2.0, pal.accent), StrokeKind::Inside);
+                                    let c = pos2(preview.right() - 8.0, ty + name_h / 2.0);
+                                    ui.painter().circle_filled(c, 8.0, pal.accent);
+                                    ui.painter().add(egui::Shape::line(vec![c + vec2(-3.5, 0.2), c + vec2(-1.0, 2.7), c + vec2(3.7, -2.3)], Stroke::new(1.6, Color32::WHITE)));
+                                }
+                                if focus {
+                                    ui.painter().rect_stroke(r.expand(3.0), CornerRadius::same(15), Stroke::new(1.5, pal.text.gamma_multiply(0.8)), StrokeKind::Inside);
+                                }
+                                if hov {
+                                    hovered = Some(t);
+                                }
+                                if resp.clicked() {
+                                    picked = Some(t);
+                                    st.focus = Some(t);
+                                }
+                            }
+                        });
+                    }
+                    ui.add_space(6.0);
+                }
+            });
         });
     });
-    if hovered.is_some() && picked.is_none() {
-        app.preview_theme = hovered;
+    crate::ui::note_popup(area.response.rect);
+    st.cards = cards;
+    // A hovered card, or one reached with the arrows, shows on the whole window until the
+    // pointer or the focus leaves it; then the chosen theme is back.
+    let preview = hovered.or(if st.keyed { st.focus } else { None });
+    if picked.is_none() {
+        if let Some(t) = preview.filter(|&t| t != current) {
+            app.preview_theme = Some(t);
+        }
     }
     if let Some(t) = picked {
         app.cfg.theme = t;
@@ -3519,7 +3725,10 @@ fn themes(app: &mut App, ctx: &egui::Context) -> bool {
         app.cfg.syntax_theme = syntax;
         app.set_config_changed();
     }
-    if done {
+    // (Not the click that opened it.)
+    let clicked_out = !fresh && clicked_outside(ctx, area.response.rect);
+    ctx.data_mut(|d| d.insert_temp(sid, st));
+    if done || clicked_out {
         app.popup = Popup::options();
         return false;
     }
@@ -3527,18 +3736,18 @@ fn themes(app: &mut App, ctx: &egui::Context) -> bool {
 }
 
 /// A theme as a small window: its sidebar, title strip, three rows (one selected), an
-/// accent button, and two lines of code in its code colours.
-fn theme_card(painter: &egui::Painter, r: Rect, p: Palette, fs: f32) {
-    let round = CornerRadius::same(8);
+/// accent button, and two lines of code in its code colours. `rad` rounds its corners.
+fn theme_card(painter: &egui::Painter, r: Rect, p: Palette, fs: f32, rad: u8) {
+    let round = CornerRadius::same(rad);
     painter.rect_filled(r, round, p.panel);
     let side = Rect::from_min_max(r.min, pos2(r.left() + (r.width() * 0.28).round(), r.bottom()));
-    painter.rect_filled(side, CornerRadius { nw: 8, sw: 8, ne: 0, se: 0 }, p.sidebar);
+    painter.rect_filled(side, CornerRadius { nw: rad, sw: rad, ne: 0, se: 0 }, p.sidebar);
     let bar = |x: f32, y: f32, w: f32, c: Color32| painter.rect_filled(Rect::from_min_size(pos2(x, y), vec2(w, 4.0)), CornerRadius::same(2), c);
     for (k, w) in [0.62f32, 0.48, 0.55].into_iter().enumerate() {
         bar(side.left() + 7.0, side.top() + 12.0 + k as f32 * 11.0, (side.width() - 14.0) * w, p.text_dim.gamma_multiply(0.7));
     }
     let main = Rect::from_min_max(pos2(side.right(), r.top()), r.max);
-    painter.rect_filled(Rect::from_min_size(main.min, vec2(main.width(), 9.0)), CornerRadius { nw: 0, ne: 8, sw: 0, se: 0 }, p.chrome);
+    painter.rect_filled(Rect::from_min_size(main.min, vec2(main.width(), 9.0)), CornerRadius { nw: 0, ne: rad, sw: 0, se: 0 }, p.chrome);
     // As many rows as fit above the code, the second one selected.
     let size = (fs - 4.5).clamp(8.0, 11.0);
     let code_top = main.bottom() - 8.0 - 2.0 * size * 1.35;
