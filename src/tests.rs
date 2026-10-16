@@ -3686,6 +3686,89 @@ fn editor_command_lines() {
     assert!(resolve("  ", None, None, &none).is_none(), "spaces are empty");
 }
 
+/// Tasks from real manifests: scripts in their order with the package manager the
+/// lockfile names, Cargo's commands with each binary and example, Makefile targets and
+/// justfile recipes without the private and special ones, pyproject's script tables,
+/// deno tasks under comments, composer scripts, Taskfile tasks and Go's commands; and the
+/// folders up to the project's top.
+#[test]
+fn task_detection_from_manifests() {
+    use crate::tasks::*;
+    let d = tmpdir("tasks");
+    let names = |g: &Group| g.tasks.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+    touch(&d.join("web/package.json"), r#"{"name":"w","scripts":{"dev":"vite","build":"vite build","test":"vitest run"}}"#);
+    touch(&d.join("web/pnpm-lock.yaml"), "");
+    let g = detect_dir(&d.join("web"));
+    assert_eq!((g[0].source.as_str(), names(&g[0])), ("package.json · pnpm", vec!["dev".to_string(), "build".into(), "test".into()]), "the manifest's order");
+    assert_eq!(g[0].tasks[1].argv, vec!["pnpm", "run", "build"]);
+    assert_eq!(g[0].tasks[1].detail, "vite build");
+    for (lock, pm) in [("yarn.lock", "yarn"), ("bun.lockb", "bun"), ("package-lock.json", "npm")] {
+        let e = tmpdir(&format!("pm-{pm}"));
+        touch(&e.join(lock), "");
+        assert_eq!(package_manager(&e, "{}"), pm);
+        let _ = std::fs::remove_dir_all(&e);
+    }
+    assert_eq!(package_manager(&d, r#"{"packageManager":"yarn@4.1.0"}"#), "yarn", "packageManager wins");
+    assert_eq!(package_manager(&d, "{}"), "npm");
+    touch(&d.join("Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[[bin]]\nname = \"helper\"\npath = \"src/helper.rs\"\n\n[dependencies]\nserde = { version = \"1\", features = [\n  \"derive\",\n] }\n");
+    touch(&d.join("src/main.rs"), "fn main() {}");
+    touch(&d.join("src/bin/extra.rs"), "fn main() {}");
+    touch(&d.join("examples/demo.rs"), "fn main() {}");
+    touch(&d.join("examples/multi/main.rs"), "fn main() {}");
+    let cargo = cargo_tasks(&d, &std::fs::read_to_string(d.join("Cargo.toml")).unwrap());
+    let cn: Vec<&str> = cargo.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(cn, vec!["build", "run app", "run helper", "run extra", "check", "test", "example demo", "example multi"]);
+    assert_eq!(cargo[2].argv, vec!["cargo", "run", "--bin", "helper"]);
+    assert_eq!(cargo[6].argv, vec!["cargo", "run", "--example", "demo"]);
+    let single = tmpdir("cargo1");
+    touch(&single.join("src/main.rs"), "");
+    let one = cargo_tasks(&single, "[package]\nname = \"x\"\n");
+    assert_eq!(one.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), vec!["build", "run", "check", "test"]);
+    assert_eq!(cargo_tasks(&single, "[workspace]\nmembers = [\"a\", \"b\"]\n").len(), 3, "a workspace builds, checks and tests");
+    assert!(cargo_tasks(&single, "[dependencies]\n").is_empty());
+    let _ = std::fs::remove_dir_all(&single);
+    let mk = make_targets("CC := gcc\nVAR = a:b\n.PHONY: all clean\n# Build it all\nall: app lib\n\tgcc x\napp lib: main.o\n%.o: %.c\n\t$(CC) -c $<\nclean: ## remove output\n\trm -f x\ninstall::\n$(OUT): x\n");
+    assert_eq!(mk.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), vec!["all", "app", "lib", "clean", "install"]);
+    assert_eq!((mk[0].detail.as_str(), mk[3].detail.as_str()), ("Build it all", "remove output"));
+    let just = just_recipes("set shell := [\"bash\", \"-c\"]\nalias b := build\nversion := \"1\"\n\n# Build everything\nbuild:\n    cargo build\n\ntest filter='':\n    cargo test {{filter}}\n\n_helper:\n    echo\n\n[private]\nhidden:\n    echo\n\n@deploy env +args: build\n    echo {{env}}\n");
+    assert_eq!(just.iter().map(|t| (t.name.as_str(), t.detail.as_str())).collect::<Vec<_>>(), vec![("build", "Build everything"), ("test", "filter=''"), ("deploy", "env +args")]);
+    assert_eq!(just[0].argv, vec!["just", "build"]);
+    touch(&d.join("py/pyproject.toml"), "[project]\nname = \"p\"\n[project.scripts]\nserve = \"p.app:main\"\n\n[tool.poe.tasks]\nlint = \"ruff check .\"\nfmt = { cmd = \"ruff format\" }\n");
+    touch(&d.join("py/uv.lock"), "");
+    let py = pyproject_scripts(&d.join("py"), &std::fs::read_to_string(d.join("py/pyproject.toml")).unwrap());
+    assert_eq!(py.len(), 2);
+    assert_eq!((py[0].0.as_str(), py[0].1[0].argv.clone()), ("pyproject.toml · uv", vec!["uv".to_string(), "run".into(), "serve".into()]));
+    assert_eq!(py[1].1.iter().map(|t| t.argv.join(" ")).collect::<Vec<_>>(), vec!["poe lint", "poe fmt"]);
+    let deno = deno_tasks("{\n  // dev server\n  \"tasks\": { \"start\": \"deno run -A main.ts\", /* x */ \"url\": \"echo https://x.y\" }\n}");
+    assert_eq!(deno.iter().map(|t| (t.name.as_str(), t.detail.as_str())).collect::<Vec<_>>(), vec![("start", "deno run -A main.ts"), ("url", "echo https://x.y")]);
+    let tf = taskfile_tasks("version: '3'\ntasks:\n  build:\n    desc: Build the app\n    cmds:\n      - go build\n  \"lint\":\n    cmds: [golangci-lint run]\nvars:\n  X: y\n");
+    assert_eq!(tf.iter().map(|t| (t.name.as_str(), t.detail.as_str())).collect::<Vec<_>>(), vec![("build", "Build the app"), ("lint", "")]);
+    touch(&d.join("go/go.mod"), "module x\n");
+    touch(&d.join("go/main.go"), "package main\n");
+    touch(&d.join("go/composer.json"), r#"{"scripts":{"test":"phpunit","cs":["phpcs","phpstan"]}}"#);
+    let go = detect_dir(&d.join("go"));
+    assert_eq!(go.iter().map(|g| g.source.as_str()).collect::<Vec<_>>(), vec!["composer.json", "go.mod"]);
+    assert_eq!(go[0].tasks[1].detail, "phpcs && phpstan");
+    assert_eq!(go[1].tasks.iter().map(|t| t.argv.join(" ")).collect::<Vec<_>>(), vec!["go build ./...", "go run .", "go test ./...", "go vet ./..."]);
+    // From web/src: web's scripts first, then the project's top (a repository).
+    std::fs::create_dir_all(d.join(".git")).unwrap();
+    std::fs::create_dir_all(d.join("web/src")).unwrap();
+    let all = detect(&d.join("web/src"));
+    assert_eq!(all.iter().map(|g| (g.dir.clone(), g.source.clone())).collect::<Vec<_>>(), vec![(d.join("web"), "package.json · pnpm".to_string()), (d.clone(), "Cargo.toml".to_string())]);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A task runs held open in the terminal: its exit status, then the user's shell.
+#[test]
+fn tasks_keep_their_terminal_open() {
+    let v = crate::mime::held(&["npm".into(), "run".into(), "a b".into()]);
+    assert_eq!(&v[..2], &["sh", "-c"]);
+    assert_eq!(&v[3..], &["sh", "npm", "run", "a b"], "the task's words are passed whole, never through the shell");
+    assert!(v[2].starts_with("\"$@\"") && v[2].contains("exec \"${SHELL:-/bin/sh}\""));
+    let out = std::process::Command::new(&v[0]).args(&v[1..3]).arg("sh").args(["printf", "%s|", "a b"]).env("SHELL", "true").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a b|\n[exit 0]\n");
+}
+
 /// Paths written from the project's top: its repository, else its manifest, else the
 /// folder itself; never the home folder or / for a folder inside them.
 #[test]

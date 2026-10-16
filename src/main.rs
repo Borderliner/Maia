@@ -45,6 +45,7 @@ mod single;
 mod svg;
 mod syntax;
 mod tags;
+mod tasks;
 mod stats;
 mod tab;
 #[cfg(any(test, feature = "testkit"))]

@@ -537,6 +537,15 @@ pub fn run_in_terminal(dir: &Path, argv: &[String]) -> Result<(), String> {
     spawn_detached(c)
 }
 
+/// `argv` wrapped so the terminal stays open when it ends: its exit status, then the
+/// user's shell in the same folder, where the output can still be read.
+pub fn held(argv: &[String]) -> Vec<String> {
+    let script = r#""$@"; s=$?; printf '\n[exit %d]\n' "$s"; exec "${SHELL:-/bin/sh}""#;
+    let mut v = vec!["sh".to_string(), "-c".to_string(), script.to_string(), "sh".to_string()];
+    v.extend(argv.iter().cloned());
+    v
+}
+
 /// Run an executable with arguments, detached (used for drops onto scripts).
 pub fn run_with(exe: &Path, args: &[PathBuf]) -> Result<(), String> {
     let mut c = Command::new(exe);

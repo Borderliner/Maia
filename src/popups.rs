@@ -186,6 +186,7 @@ pub enum Popup {
     /// The theme picker: every theme as a small window, with its code colours.
     Themes,
     CodeSearch(Box<crate::devtools::CodeState>),
+    Tasks(crate::devtools::TasksState),
 }
 
 /// The Search by Meaning window: a question, and the passages closest to it in meaning.
@@ -265,6 +266,7 @@ impl Popup {
             Popup::Meaning(..) => "Meaning",
             Popup::Themes => "Themes",
             Popup::CodeSearch(..) => "CodeSearch",
+            Popup::Tasks(..) => "Tasks",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -794,6 +796,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::Meaning(st) => meaning(app, ctx, st),
         Popup::Themes => themes(app, ctx),
         Popup::CodeSearch(st) => crate::devtools::code_search_popup(app, ctx, st),
+        Popup::Tasks(st) => crate::devtools::tasks_popup(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -1243,6 +1246,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::OpenInEditor => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::CopyPathRelative => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::CodeSearch | Cmd::FindTodos => !tab::is_computer(&t.path) && t.archive.is_none(),
+        Cmd::RunTask => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::CopyPathLine => p.line_hint.as_ref().is_some_and(|h| t.target_entries().iter().any(|e| e.path == h.0)),
         Cmd::OpenTabInWindow => p.tabs.len() > 0,
         Cmd::GroupDeleted | Cmd::GroupOriginal => crate::trashcan::is_trash_files(&t.path),

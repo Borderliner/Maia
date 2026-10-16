@@ -1646,6 +1646,10 @@ impl App {
                 Some(d) => self.popup = crate::devtools::code_search(&ctx, d, cmd == Cmd::FindTodos),
                 None => self.toast("Search Code needs a folder"),
             },
+            Cmd::RunTask => match crate::devtools::target_dir(self) {
+                Some(d) => self.popup = crate::devtools::tasks(&ctx, d),
+                None => self.toast("Run Task needs a folder"),
+            },
             Cmd::OpenInEditor => {
                 let mut paths = self.tab().selected_paths();
                 if paths.is_empty() {

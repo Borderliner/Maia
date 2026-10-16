@@ -984,7 +984,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(113) {
+    match rng.below(114) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1246,6 +1246,15 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             }
             if rng.below(3) == 0 {
                 s.cmd(*rng.pick(&[Cmd::CopyPathLine, Cmd::FindTodos]));
+            }
+        }
+        113 => {
+            // Run Task: filter, then run one or leave.
+            s.act("key ctrl+shift+b");
+            s.idle(3);
+            if matches!(s.app.popup, Popup::Tasks(_)) {
+                s.act(&format!("text {}", rng.pick(&["build", "test", "run", "zz", ""])));
+                s.act(&format!("key {}", rng.pick(&["Enter", "Down", "Escape"])));
             }
         }
         97 => {
@@ -5164,6 +5173,65 @@ mod journeys {
         report("editor", &s);
     }
 
+    /// Run Task: the scripts of the package beside the folder, then the project's own
+    /// (Cargo, justfile, Makefile), filtered as typed; Enter runs one in the terminal,
+    /// held open; a folder without manifests says so.
+    #[test]
+    fn run_project_tasks() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("tasks");
+        let app = dev_fixture(&home);
+        let mut s = Sim::new(&app.join("web/src"), vec2(1280.0, 800.0));
+        s.act("key ctrl+shift+b");
+        let groups = |s: &Sim| match &s.app.popup {
+            Popup::Tasks(t) => t.groups.clone(),
+            _ => s.fail("Run Task is not open"),
+        };
+        wait_until(&mut s, "the tasks", 10, |s| groups(s).is_some());
+        s.idle(2);
+        let g = groups(&s).unwrap();
+        let src: Vec<(PathBuf, String)> = g.iter().map(|g| (g.dir.clone(), g.source.clone())).collect();
+        assert_eq!(src, vec![(app.join("web"), "package.json · pnpm".to_string()), (app.clone(), "Cargo.toml".into()), (app.clone(), "justfile".into()), (app.clone(), "Makefile".into())]);
+        assert_eq!(g[1].tasks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), vec!["build", "run app", "run tool", "check", "test", "example demo"]);
+        assert!(some_text(&s, "vite build"), "a script's command beside its name");
+        shot_still(&mut s, "run-task");
+        s.act("text build");
+        s.idle(2);
+        let n = launched().len();
+        s.act("key Enter");
+        let l = launched();
+        assert!(l.len() == n + 1 && l[n].contains("\"pnpm\" \"run\" \"build\"") && l[n].contains("exec"), "pnpm run build, held open: {:?}", l.last());
+        assert!(!s.popup_open());
+        assert!(toast_is(&s, "Running pnpm run build in the terminal"), "{:?}", s.app.toast);
+        s.act("key ctrl+shift+b");
+        wait_until(&mut s, "the tasks again", 10, |s| groups(s).is_some());
+        s.act("text justfile");
+        s.idle(2);
+        s.act("key Enter");
+        assert!(launched().last().is_some_and(|l| l.contains("\"just\" \"test\"")), "{:?}", launched().last());
+        for (w, h) in [(640.0, 480.0), (520.0, 340.0)] {
+            s.resize(w, h);
+            s.act("key ctrl+shift+b");
+            wait_until(&mut s, "tasks small", 10, |s| groups(s).is_some());
+            s.idle(2);
+            shot_still(&mut s, &format!("run-task-{w}x{h}"));
+            s.act("key Escape");
+        }
+        s.resize(1280.0, 800.0);
+        go(&mut s, &home.join("Documents"));
+        s.act("key ctrl+shift+b");
+        wait_until(&mut s, "no tasks", 10, |s| groups(s).is_some());
+        s.idle(2);
+        assert!(groups(&s).unwrap().is_empty());
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with("No tasks here")));
+        shot_still(&mut s, "run-task-none");
+        s.act("key Escape");
+        look(&mut s, "after tasks");
+        report("tasks", &s);
+    }
+
     /// Where the file list (not the preview beside it) shows `label`.
     fn row_text(s: &Sim, label: &str) -> Rect {
         let list = s.app.panels[&s.app.active].list_rect;
@@ -5437,6 +5505,10 @@ mod journeys {
         s.cmd(FindTodos);
         wait_until(&mut s, "todos", 20, |s| matches!(&s.app.popup, Popup::CodeSearch(c) if c.settled()));
         shot_open(&mut s, "find-todos");
+        close(&mut s);
+        s.act("key ctrl+shift+b");
+        wait_until(&mut s, "tasks", 10, |s| matches!(&s.app.popup, Popup::Tasks(t) if t.groups.is_some()));
+        shot_open(&mut s, "run-task");
         close(&mut s);
         // Popups and menus.
         go(&mut s, &docs);

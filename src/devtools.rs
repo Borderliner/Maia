@@ -1,8 +1,10 @@
-//! Search Code and its TODO list. What it reads comes from worker threads (`codesearch`);
+//! The developer popups: Search Code with its TODO list, and Run Task. Everything they
+//! read comes from worker threads (`codesearch`, `tasks`);
 //! these only draw what has arrived and act on what is picked.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use egui::{self, Align2, Color32, CornerRadius, Event, FontId, Id, Key, Modifiers, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
@@ -583,6 +585,142 @@ pub fn code_search_popup(app: &mut App, ctx: &egui::Context, st: &mut CodeState)
     }
     if let Some((path, line)) = show {
         app.show_at_line(path, line);
+        return false;
+    }
+    true
+}
+
+// ------------------------------------------------------------------ Run Task
+
+pub struct TasksState {
+    pub start: PathBuf,
+    pub query: String,
+    focus: bool,
+    pub sel: usize,
+    job: Option<mpsc::Receiver<Vec<crate::tasks::Group>>>,
+    pub groups: Option<Vec<crate::tasks::Group>>,
+}
+
+pub fn tasks(ctx: &egui::Context, start: PathBuf) -> Popup {
+    let (tx, rx) = mpsc::channel();
+    let (dir, c) = (start.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(crate::tasks::detect(&dir));
+        c.request_repaint();
+    });
+    Popup::Tasks(TasksState { start, query: String::new(), focus: true, sel: 0, job: Some(rx), groups: None })
+}
+
+/// Run Task: the project's tasks by manifest, filtered as typed; Enter runs one in the
+/// terminal, in its manifest's folder.
+pub fn tasks_popup(app: &mut App, ctx: &egui::Context, st: &mut TasksState) -> bool {
+    let pal = app.pal;
+    let k = pp::take_keys(ctx);
+    if k.esc {
+        return false;
+    }
+    if let Some(rx) = &st.job {
+        if let Ok(g) = rx.try_recv() {
+            st.groups = Some(g);
+            st.job = None;
+        }
+    }
+    enum TRow {
+        Head(usize),
+        Task(usize, usize),
+    }
+    let q = crate::fuzzy::Query::new(&st.query);
+    let groups: &[crate::tasks::Group] = st.groups.as_deref().unwrap_or_default();
+    let mut rows: Vec<TRow> = vec![];
+    for (gi, g) in groups.iter().enumerate() {
+        let hits: Vec<usize> = g.tasks.iter().enumerate().filter(|(_, t)| q.is_empty() || crate::fuzzy::score(&q, &t.name.to_lowercase()).is_some() || crate::fuzzy::score(&q, &format!("{} {}", g.source, t.name).to_lowercase()).is_some()).map(|(i, _)| i).collect();
+        if !hits.is_empty() {
+            rows.push(TRow::Head(gi));
+            rows.extend(hits.into_iter().map(|ti| TRow::Task(gi, ti)));
+        }
+    }
+    pp::step(&mut st.sel, rows.len(), &k, |i| matches!(rows.get(i), Some(TRow::Head(_))));
+    let mut run: Option<(usize, usize)> = match rows.get(st.sel) {
+        Some(TRow::Task(g, t)) if k.enter => Some((*g, *t)),
+        _ => None,
+    };
+    let fs = app.cfg.font_size;
+    let list_max = pp::fit_list(ctx, 460.0, 120.0);
+    let mut reset_sel = false;
+    pp::centered(ctx, "tasks", 640.0, &pal, |ui| {
+        let r = pp::search_field(ui, &mut st.query, "Run a task…", &mut st.focus, &pal, Glyph::Search);
+        crate::ui::note_control(ui, r.rect, "task field");
+        reset_sel = r.changed();
+        let row_h = (fs * 1.35 + 10.0).round();
+        let head_h = (fs * 1.35 + 8.0).round();
+        let rows_h: f32 = rows.iter().map(|r| if matches!(r, TRow::Head(_)) { head_h } else { row_h }).sum();
+        egui::ScrollArea::vertical().max_height(list_max).min_scrolled_height(rows_h.min(list_max)).auto_shrink([false, true]).show(ui, |ui| {
+            for (i, row) in rows.iter().enumerate() {
+                match row {
+                    TRow::Head(gi) => {
+                        let g = &groups[*gi];
+                        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), head_h), Sense::hover());
+                        let mut text = g.source.clone();
+                        if g.dir != st.start {
+                            text.push_str(&format!("  ·  {}", pp::home_short(&g.dir)));
+                        }
+                        let gl = crate::listing::elided(ui, &text, FontId::proportional(fs - 1.5), r.width() - 20.0, pal.text_dim);
+                        ui.painter().galley(pos2(r.left() + 10.0, r.bottom() - 4.0 - gl.size().y), gl, pal.text_dim);
+                    }
+                    TRow::Task(gi, ti) => {
+                        let t = &groups[*gi].tasks[*ti];
+                        let on = i == st.sel;
+                        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                        if on {
+                            ui.painter().rect_filled(r, CornerRadius::same(6), pal.selected);
+                        } else if resp.hovered() {
+                            ui.painter().rect_filled(r, CornerRadius::same(6), pal.hover);
+                        }
+                        if on && (k.up || k.down || k.page_up || k.page_down) {
+                            ui.scroll_to_rect(r, None);
+                        }
+                        let (tc, dc) = if on { (pal.on_sel(), pal.on_sel_dim()) } else { (pal.text, pal.text_dim) };
+                        let name = crate::listing::elided(ui, &t.name, FontId::proportional(fs), r.width() * 0.45, tc);
+                        let nw = name.size().x;
+                        ui.painter().galley(pos2(r.left() + 12.0, r.center().y - name.size().y / 2.0), name, tc);
+                        if !t.detail.is_empty() {
+                            let x = r.left() + 12.0 + nw + 14.0;
+                            // A command in monospace; a recipe's or target's comment as prose.
+                            let prose = matches!(groups[*gi].source.as_str(), "justfile" | "Justfile" | ".justfile" | "Makefile" | "makefile" | "GNUmakefile" | "Taskfile.yml" | "Taskfile.yaml" | "taskfile.yml");
+                            let font = if prose { FontId::proportional(fs - 1.5) } else { FontId::monospace(fs - 2.0) };
+                            let d = crate::listing::elided(ui, &t.detail, font, r.right() - 10.0 - x, dc);
+                            ui.painter().galley(pos2(x, r.center().y - d.size().y / 2.0), d, dc);
+                        }
+                        if resp.clicked() {
+                            run = Some((*gi, *ti));
+                        }
+                    }
+                }
+            }
+            let dim = |ui: &mut Ui, s: &str| {
+                ui.add_space(4.0);
+                ui.add(egui::Label::new(egui::RichText::new(s).color(pal.text_dim)).wrap());
+            };
+            match &st.groups {
+                None => dim(ui, "Reading the project…"),
+                Some(g) if g.is_empty() => dim(ui, "No tasks here: no package.json, Cargo.toml, Makefile, justfile, pyproject.toml or other manifest that has them."),
+                Some(_) if rows.is_empty() => dim(ui, "No task by that name"),
+                _ => {}
+            }
+        });
+        pp::hints(ui, &[("Enter", "run in terminal"), ("Esc", "close")], &pal);
+    });
+    if reset_sel {
+        st.sel = 0;
+    }
+    if let Some((gi, ti)) = run {
+        let (g, t) = (&groups[gi], &groups[gi].tasks[ti]);
+        let res = crate::mime::run_in_terminal(&g.dir, &crate::mime::held(&t.argv));
+        let msg = match res {
+            Ok(()) => format!("Running {} in the terminal", t.argv.join(" ")),
+            Err(e) => format!("Couldn't start a terminal: {e}"),
+        };
+        app.toast(msg);
         return false;
     }
     true
