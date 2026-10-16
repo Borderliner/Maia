@@ -1261,7 +1261,7 @@ impl App {
             }
             if let Some(e) = &error {
                 if ui.available_width() > 24.0 {
-                    ui.add(egui::Label::new(egui::RichText::new(e.as_str()).font(font_small.clone()).color(pal.danger)).truncate());
+                    ui.add(egui::Label::new(egui::RichText::new(fsx::plain_error(e)).font(font_small.clone()).color(pal.danger)).truncate());
                 }
             }
             if !self.seq.is_empty() && ui.available_width() > 24.0 {
@@ -1288,7 +1288,8 @@ impl App {
         let btns = 1.0 + if cont_btn { 1.0 } else { 0.0 } + if t.filter.is_empty() { 0.0 } else { 1.0 } + if types_on { 1.0 } else { 0.0 };
         let edit_rect = Rect::from_min_max(pos2(frame_rect.left() + 22.0, frame_rect.top() + 1.0), pos2(frame_rect.right() - 22.0 * btns - 2.0, frame_rect.bottom() - 1.0));
         let shown = vf + vfi;
-        let hint = format!("Filter {} {}…", fmt_count(shown), if t.flatten || vf == 0 { if shown == 1 { "file" } else { "files" } } else if shown == 1 { "item" } else { "items" });
+        // Files when only files are listed; an empty folder has items, not files.
+        let hint = format!("Filter {} {}…", fmt_count(shown), if shown > 0 && (t.flatten || vf == 0) { if shown == 1 { "file" } else { "files" } } else if shown == 1 { "item" } else { "items" });
         // Short form when the full hint wouldn't fit.
         let hint = if fw < 150.0 { "Filter…".to_string() } else { hint };
         let hint = if t.content.on { if fw < 150.0 { "Find…".into() } else { "Find in files…".into() } } else { hint };
@@ -1586,7 +1587,7 @@ impl App {
                             if j.show_errors {
                                 egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
                                     for e in errs {
-                                        ui.label(egui::RichText::new(e).small());
+                                        ui.label(egui::RichText::new(fsx::plain_error(&e)).small());
                                     }
                                 });
                             }

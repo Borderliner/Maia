@@ -431,6 +431,15 @@ pub fn disk_space(p: &Path) -> Option<(u64, u64)> {
     Some((st.f_blocks as u64 * f, st.f_bavail as u64 * f))
 }
 
+/// An error as a person reads it: std's io errors end in " (os error 13)", which says
+/// nothing more than the words before it.
+pub fn plain_error(e: &str) -> &str {
+    match e.rfind(" (os error ") {
+        Some(i) if e.ends_with(')') && e[i + 11..e.len() - 1].bytes().all(|b| b.is_ascii_digit()) => &e[..i],
+        _ => e,
+    }
+}
+
 pub fn fmt_size(n: u64) -> String {
     const U: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
     if n < 1024 {

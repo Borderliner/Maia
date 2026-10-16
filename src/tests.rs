@@ -3302,6 +3302,18 @@ fn updates_check_compare_and_install() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+#[test]
+fn io_errors_read_without_their_number() {
+    let e = std::fs::read_dir("/proc/self/nonexistent-dir").unwrap_err().to_string();
+    assert!(e.ends_with("(os error 2)"), "std still writes the number: {e}");
+    assert_eq!(crate::fsx::plain_error(&e), "No such file or directory");
+    assert_eq!(crate::fsx::plain_error("Permission denied (os error 13)"), "Permission denied");
+    // Only a trailing number in that form goes.
+    assert_eq!(crate::fsx::plain_error("Wrong password"), "Wrong password");
+    assert_eq!(crate::fsx::plain_error("odd (os error x)"), "odd (os error x)");
+    assert_eq!(crate::fsx::plain_error("(os error 2) first"), "(os error 2) first");
+}
+
 /// Contrast ratio of two colours (WCAG relative luminance).
 fn contrast(a: egui::Color32, b: egui::Color32) -> f32 {
     let lum = |c: egui::Color32| {

@@ -325,7 +325,8 @@ impl App {
     }
 
     pub fn toast(&mut self, s: impl Into<String>) {
-        self.toast = Some((s.into(), Instant::now()));
+        let s: String = s.into();
+        self.toast = Some((fsx::plain_error(&s).to_string(), Instant::now()));
     }
 
     /// Drag and drop with other apps: a drag over the window becomes an ordinary file

@@ -319,7 +319,7 @@ pub fn listing(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
     // Empty states.
     if t.view.is_empty() && !t.is_loading() {
         let msg = if let Some(e) = &t.error {
-            format!("Can't open this folder: {e}")
+            format!("Can't open this folder: {}", fsx::plain_error(e))
         } else if !t.filter.is_empty() || !t.settings.only_types.is_empty() || !t.settings.show_files || !t.settings.show_folders {
             "No matches".into()
         } else if t.hidden_count > 0 {
