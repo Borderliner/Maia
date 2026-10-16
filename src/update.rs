@@ -208,6 +208,25 @@ impl Updater {
     }
 }
 
+/// `maia --update`: the same steps as in Options, waited for, with a line to say how it
+/// went.
+pub fn update_now() -> Result<String, String> {
+    let fetch: Fetch = Arc::new(curl);
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let body = fetch(&format!("https://api.github.com/repos/{REPO}/releases/latest"), None)?;
+    let r = parse_release(&body).ok_or("The latest release has no build for this system")?;
+    let current = env!("CARGO_PKG_VERSION");
+    if !newer(current, &r.version) {
+        return Ok(format!("Maia {current} is the latest"));
+    }
+    let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
+    let probe = dir.join(format!(".maia-write-check-{}", std::process::id()));
+    std::fs::write(&probe, b"").map_err(|_| format!("Can't write to {}: update Maia the way it was installed", dir.display()))?;
+    let _ = std::fs::remove_file(&probe);
+    put_in_place(&r, &exe, &fetch)?;
+    Ok(format!("Updated Maia {current} to {}; start it again to use it", r.version.trim_start_matches('v')))
+}
+
 /// The download, checked, made runnable, and renamed over the program (a rename on the
 /// same filesystem: the running program keeps its old file until it exits).
 fn put_in_place(r: &Release, exe: &Path, fetch: &Fetch) -> Result<(), String> {

@@ -71,6 +71,7 @@ Options:
   --install        Install to ~/.local/bin and add a launcher entry
   --set-default    Make Maia the default file manager (inode/directory)
   --uninstall      Remove the launcher entry and installed binary
+  --update         Update to the latest release on GitHub, if there is a newer one
   --window PATH    Open PATH in a new window
   -h, --help       Show this help
   -V, --version    Show the version
@@ -88,6 +89,16 @@ fn main() {
             }
             "-V" | "--version" => {
                 println!("maia {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
+            "--update" => {
+                match update::update_now() {
+                    Ok(m) => println!("{m}"),
+                    Err(e) => {
+                        eprintln!("maia: {e}");
+                        std::process::exit(1);
+                    }
+                }
                 return;
             }
             "--install" | "--set-default" | "--uninstall" => {
