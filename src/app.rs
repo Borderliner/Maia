@@ -146,6 +146,8 @@ pub struct App {
     semantic_for: Option<String>,
     /// Authors' GitHub pictures for the history (idle while the setting is off).
     pub avatars: crate::avatars::Avatars,
+    /// Updates from the project's releases, when asked.
+    pub updater: crate::update::Updater,
     /// Network places being mounted.
     net_jobs: Vec<NetJob>,
     /// How the Connect dialog's last attempt ended: (address, Ok or the reason).
@@ -235,6 +237,7 @@ impl App {
             semantic: None,
             semantic_for: None,
             avatars: crate::avatars::Avatars::new(),
+            updater: Default::default(),
             net_jobs: vec![],
             dialog_result: None,
             cfg,
@@ -1639,6 +1642,10 @@ impl App {
             Cmd::FocusFilter => self.panel().focus_filter = true,
             Cmd::ContentSearch => crate::contentsearch::toggle(self.panel()),
             Cmd::ChooseTheme => self.popup = Popup::Themes,
+            Cmd::CheckUpdates => {
+                self.updater.check(&ctx);
+                self.popup = Popup::options_at(crate::popups::Section::System);
+            }
             Cmd::MeaningSearch => {
                 if let Some(e) = &self.semantic {
                     e.poke();

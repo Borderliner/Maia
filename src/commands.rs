@@ -259,6 +259,7 @@ commands! {
 
     Palette, "palette", Misc, "Command Palette", "Search every command and assign hotkeys.", ["Ctrl+Shift+P"];
     Options, "options", Misc, "Options", "Change appearance, behavior and defaults.", ["Ctrl+Comma"];
+    CheckUpdates, "check_updates", Misc, "Check for Updates", "Ask GitHub whether a newer Maia is out, and update from Options.", [];
     ChooseTheme, "choose_theme", Misc, "Choose Theme", "See every color theme side by side, with its code colors, and pick one.", [];
     MainMenu, "main_menu", Misc, "Main Menu", "Open the main menu.", ["F10"];
     QuickMenu, "quick_menu", Misc, "Quick Menu", "Your starred commands in a small menu.", [];

@@ -3138,9 +3138,9 @@ fn every_option_has_one_section() {
         Opt::SingleClick => 35, Opt::SingleClickFolders => 36, Opt::OpenFoldersNewTab => 37, Opt::DblClickParent => 38, Opt::ReverseScroll => 39,
         Opt::CharKey => 40, Opt::MiddleClick => 41, Opt::InspectorLayout => 42, Opt::Startup => 43, Opt::NewTab => 44,
         Opt::GitPictures => 45, Opt::DefaultFm => 46, Opt::SingleInstance => 47, Opt::Meaning => 48, Opt::MeaningFolders => 49,
-        Opt::MeaningPictures => 50, Opt::ConfigFile => 51, Opt::ResetAll => 52, Opt::Install => 53, Opt::LineSpacing => 54,
+        Opt::MeaningPictures => 50, Opt::ConfigFile => 51, Opt::ResetAll => 52, Opt::Install => 53, Opt::LineSpacing => 54, Opt::Updates => 55,
     };
-    let mut seen = vec![0; 55];
+    let mut seen = vec![0; 56];
     for o in OPTS {
         seen[index(o.0)] += 1;
     }
@@ -3209,4 +3209,82 @@ fn option_search_spans_sections() {
     assert_eq!(Section::Appearance.step(-1), Section::System, "sections wrap");
     assert_eq!(Section::System.step(1), Section::Appearance);
     assert_eq!(Section::Files.step(1), Section::Mouse);
+}
+
+/// Updates: versions compared as numbers, GitHub's answer read only for this project's
+/// downloads, and an install that checks the download before it replaces anything.
+#[test]
+fn updates_check_compare_and_install() {
+    use crate::update::{Fetch, Release, State, Updater, curl_args, newer, parse_release, parse_sum, version};
+    assert_eq!(version("v1.2.3"), Some((1, 2, 3)));
+    assert_eq!(version("0.10"), Some((0, 10, 0)));
+    assert_eq!(version("2.0.0-beta.1"), Some((2, 0, 0)));
+    assert_eq!(version("one"), None);
+    assert_eq!(version("1.2.3.4"), None);
+    assert!(newer("0.2.0", "v0.10.0"), "numbers, not text");
+    assert!(!newer("0.2.0", "v0.2.0") && !newer("0.3.0", "0.2.9") && !newer("0.2.0", "garbage"));
+    let json = |tag: &str, host: &str| format!(r#"{{"tag_name":"{tag}","body":"Faster search.\n\nNew themes.","assets":[
+        {{"name":"maia-linux-x86_64","browser_download_url":"{host}/yappologistic/Maia/releases/download/{tag}/maia-linux-x86_64"}},
+        {{"name":"maia-linux-x86_64.sha256","browser_download_url":"{host}/yappologistic/Maia/releases/download/{tag}/maia-linux-x86_64.sha256"}}]}}"#);
+    let r = parse_release(json("v9.9.9", "https://github.com").as_bytes()).expect("a release");
+    assert_eq!((r.version.as_str(), r.notes.starts_with("Faster search.")), ("v9.9.9", true));
+    assert!(parse_release(json("v9.9.9", "https://evil.example").as_bytes()).is_none(), "downloads only from the project's releases");
+    assert!(parse_release(br#"{"tag_name":"v9.9.9","assets":[]}"#).is_none(), "no build, no update");
+    let h = "a".repeat(64);
+    assert_eq!(parse_sum(&format!("{h}  maia-linux-x86_64\n")), Some(h.clone()));
+    assert_eq!(parse_sum("not a sum"), None);
+    let args = curl_args("https://api.github.com/repos/x/y/releases/latest", None);
+    assert_eq!(args[0], "-q", "no ~/.curlrc");
+    assert!(args.windows(2).any(|w| w == ["--proto", "=https"]) && args.iter().any(|a| a.starts_with("Accept:")));
+    assert!(args.iter().all(|a| !a.to_lowercase().contains("authorization")), "no credentials");
+    // An install against a stand-in for GitHub: the right bytes replace the program.
+    let d = tmpdir("update");
+    let exe = d.join("maia");
+    std::fs::write(&exe, b"\x7fELF old").unwrap();
+    let build = b"\x7fELF the new build".to_vec();
+    let sum = |b: &[u8]| {
+        let f = d.join("sum-input");
+        std::fs::write(&f, b).unwrap();
+        let out = std::process::Command::new("sha256sum").arg(&f).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap().to_string()
+    };
+    let serve = |bin: Vec<u8>, sum_text: String| -> Fetch {
+        let api = json("v9.9.9", "https://github.com");
+        std::sync::Arc::new(move |url: &str, to: Option<&Path>| {
+            let body = if url.contains("api.github.com") { api.clone().into_bytes() } else if url.ends_with(".sha256") { sum_text.clone().into_bytes() } else { bin.clone() };
+            match to {
+                Some(p) => std::fs::write(p, &body).map(|_| vec![]).map_err(|e| e.to_string()),
+                None => Ok(body),
+            }
+        })
+    };
+    let wait = |u: &Updater| {
+        let t0 = Instant::now();
+        while matches!(u.state(), State::Checking | State::Downloading(_)) {
+            assert!(t0.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        u.state()
+    };
+    let ctx = egui::Context::default();
+    let u = Updater::for_test(serve(build.clone(), format!("{}  maia-linux-x86_64", sum(&build))), exe.clone());
+    u.check(&ctx);
+    let State::Available(r) = wait(&u) else { panic!("{:?}", u.state()) };
+    u.install(r.clone(), &ctx);
+    assert_eq!(wait(&u), State::Ready("v9.9.9".into()));
+    assert_eq!(std::fs::read(&exe).unwrap(), build, "the new build in place");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(&exe).unwrap().permissions().mode() & 0o777, 0o755, "and runnable");
+    // A download that doesn't match its checksum changes nothing, and leaves nothing.
+    std::fs::write(&exe, b"\x7fELF old").unwrap();
+    let u = Updater::for_test(serve(b"\x7fELF tampered".to_vec(), format!("{}  maia-linux-x86_64", sum(&build))), exe.clone());
+    u.install(r.clone(), &ctx);
+    assert!(matches!(wait(&u), State::Failed(e) if e.contains("checksum")));
+    assert_eq!(std::fs::read(&exe).unwrap(), b"\x7fELF old");
+    assert!(std::fs::read_dir(&d).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".maia-update")), "no download left behind");
+    // A program in a folder Maia can't write: said so, nothing fetched.
+    let u = Updater::for_test(serve(build.clone(), String::new()), PathBuf::from("/proc/maia"));
+    u.install(r, &ctx);
+    assert!(matches!(u.state(), State::CantWrite(_)));
+    let _ = std::fs::remove_dir_all(&d);
 }

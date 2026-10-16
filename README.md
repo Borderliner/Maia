@@ -91,6 +91,11 @@ while; after that only new and changed files are read. With a graphics card and
 `ollama-vulkan` installed it is several times faster. Pictures wait while a laptop runs
 on its battery.
 
+Updates come from this repository's releases. In Options, Startup & system, Check for
+updates asks GitHub whether a newer Maia is out; Update downloads it, checks it against
+the release's checksum and puts it in place of the installed one, and Restart opens it.
+Maia never checks on its own. One installed by a package manager is updated there.
+
 Settings live in `~/.config/maia/config.json`, bookmarks and layouts in
 `~/.local/share/maia/userdata.json`.
 

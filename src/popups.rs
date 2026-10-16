@@ -288,6 +288,14 @@ impl Popup {
     pub fn options() -> Popup {
         Popup::Options(OptState { query: String::new(), focus: true, sel: 0, scroll_to_sel: false, section: None, keyed: false, search_id: None, cursor_end: false, top: true })
     }
+    /// Options open at `section`.
+    pub fn options_at(section: Section) -> Popup {
+        let mut p = Popup::options();
+        if let Popup::Options(st) = &mut p {
+            st.section = Some(section);
+        }
+        p
+    }
     pub fn types(panel: u64) -> Popup {
         Popup::Types { panel, query: String::new() }
     }
@@ -1594,6 +1602,7 @@ pub(crate) enum Opt {
     MeaningFolders,
     MeaningPictures,
     ConfigFile,
+    Updates,
     ResetAll,
     Install,
 }
@@ -1729,6 +1738,7 @@ pub(crate) const OPTS: &[(Opt, Section, &str, &str, &str)] = &[
     (Opt::DefaultFm, Section::System, "System", "Default file manager", "Open folders from other apps in Maia."),
     (Opt::SingleInstance, Section::System, "System", "Reuse the open window", "Other apps and new launches open tabs here."),
     (Opt::AssetCache, Section::System, "System", "Asset cache size", "Memory for thumbnails and previews."),
+    (Opt::Updates, Section::System, "Updates", "Check for updates", "Asks GitHub for a newer Maia, only when you check."),
     (Opt::ConfigFile, Section::System, "Settings", "Config file", "Every option as text, in your editor."),
     (Opt::ResetAll, Section::System, "Settings", "Reset to defaults", "Every option and hotkey; asks first."),
     (Opt::Install, Section::System, "Settings", "Install Maia", "Add Maia to the app launcher and ~/.local/bin."),
@@ -1787,6 +1797,64 @@ pub(crate) fn find_options(query: &str) -> Vec<usize> {
     }
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     ranked.into_iter().map(|(_, i)| i).collect()
+}
+
+/// The Updates row: where checking stands, and the step to take (Check, Update, Restart).
+/// Controls run right to left: the button at the edge, its status left of it.
+fn update_control(ui: &mut Ui, app: &mut App, pal: &Palette) {
+    use crate::update::State;
+    let ctx = ui.ctx().clone();
+    let dim = |ui: &mut Ui, s: &str| ui.label(egui::RichText::new(s).size(12.0).color(pal.text_dim));
+    let button = |ui: &mut Ui, label: &str, accent: bool| {
+        let b = if accent { ui.add(egui::Button::new(egui::RichText::new(label).color(Color32::WHITE)).fill(pal.accent)) } else { ui.button(label) };
+        crate::ui::note_control(ui, b.rect, "update button");
+        b
+    };
+    match app.updater.state() {
+        State::Idle => {
+            if button(ui, "Check now", false).clicked() {
+                app.updater.check(&ctx);
+            }
+            dim(ui, concat!("Maia ", env!("CARGO_PKG_VERSION")));
+        }
+        State::Checking => {
+            dim(ui, "Checking…");
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+        State::Latest => {
+            if button(ui, "Check again", false).clicked() {
+                app.updater.check(&ctx);
+            }
+            dim(ui, "Up to date");
+        }
+        State::Available(r) => {
+            let notes: String = r.notes.lines().filter(|l| !l.trim().is_empty()).take(8).collect::<Vec<_>>().join("\n");
+            let b = button(ui, &format!("Update to {}", r.version.trim_start_matches('v')), true);
+            let b = if notes.is_empty() { b } else { b.on_hover_text(notes) };
+            if b.clicked() {
+                app.updater.install(r, &ctx);
+            }
+        }
+        State::Downloading(v) => {
+            dim(ui, &format!("Downloading {}…", v.trim_start_matches('v')));
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+        State::Ready(v) => {
+            if button(ui, "Restart", true).clicked() {
+                app.updater.restart(&ctx);
+            }
+            dim(ui, &format!("{} installed", v.trim_start_matches('v')));
+        }
+        State::Failed(e) => {
+            if button(ui, "Try again", false).clicked() {
+                app.updater.check(&ctx);
+            }
+            dim(ui, "Couldn't update").on_hover_text(e);
+        }
+        State::CantWrite(dir) => {
+            dim(ui, "Update it where you installed it").on_hover_text(format!("Maia can't write to {}: update it the way it was installed (a package manager, say).", dir.display()));
+        }
+    }
 }
 
 /// Choice control: a box showing the value and a chevron; click steps
@@ -1869,7 +1937,7 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
         // Lives in the desktop's settings, not Maia's: nothing to reset.
         Opt::DefaultFm => true,
         // Buttons, not settings.
-        Opt::ConfigFile | Opt::ResetAll | Opt::Install => true,
+        Opt::ConfigFile | Opt::ResetAll | Opt::Install | Opt::Updates => true,
         Opt::SingleInstance => f!(single_instance),
         Opt::Meaning => f!(semantic_search),
         Opt::MeaningFolders => f!(semantic_folders),
@@ -1998,6 +2066,10 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         Opt::GitPictures => toggle(ui, &mut c.github_pictures, &pal),
         Opt::MeaningFolders => ui.add(egui::TextEdit::singleline(&mut c.semantic_folders).hint_text("~/Documents").desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).lost_focus(),
         Opt::DefaultFm => false,
+        Opt::Updates => {
+            update_control(ui, app, &pal);
+            false
+        }
         Opt::ConfigFile | Opt::ResetAll | Opt::Install => {
             let (label, c) = match o {
                 Opt::ConfigFile => ("Open", Cmd::OpenConfig),
@@ -2248,6 +2320,13 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
                     Opt::ConfigFile => cmd = Some(Cmd::OpenConfig),
                     Opt::ResetAll => cmd = Some(Cmd::ResetConfig),
                     Opt::Install => cmd = Some(Cmd::Install),
+                    Opt::Updates => {
+                        if let crate::update::State::Available(r) = app.updater.state() {
+                            app.updater.install(r, ctx);
+                        } else if !matches!(app.updater.state(), crate::update::State::Ready(_)) {
+                            app.updater.check(ctx);
+                        }
+                    }
                     _ => changed |= opt_flip(&mut app.cfg, o),
                 }
             }

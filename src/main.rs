@@ -5,6 +5,7 @@ mod app;
 mod checksum;
 mod archive;
 mod avatars;
+mod update;
 mod clipboard;
 mod commands;
 mod compare;

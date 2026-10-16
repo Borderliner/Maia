@@ -3352,6 +3352,81 @@ mod journeys {
         s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_ref()).map(|h| h.state())
     }
 
+    /// Updates from Options: Check for Updates (the command) opens Startup & system and
+    /// asks; a newer release offers Update, which puts the checked build in place and
+    /// offers Restart. A bad download or a folder Maia can't write says so.
+    #[test]
+    fn update_from_options() {
+        if !sandboxed() {
+            return;
+        }
+        use crate::update::{Fetch, State, Updater};
+        let home = fixture("updates");
+        let bin = root().join("updates-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("maia");
+        std::fs::write(&exe, b"\x7fELF old").unwrap();
+        let build = b"\x7fELF the new build".to_vec();
+        let f = bin.join("sum-input");
+        std::fs::write(&f, &build).unwrap();
+        let sum = String::from_utf8_lossy(&std::process::Command::new("sha256sum").arg(&f).output().unwrap().stdout).split_whitespace().next().unwrap().to_string();
+        let serve = |bin_bytes: Vec<u8>| -> Fetch {
+            let sum = sum.clone();
+            std::sync::Arc::new(move |url: &str, to: Option<&Path>| {
+                let body = if url.contains("api.github.com") {
+                    br#"{"tag_name":"v9.9.9","body":"New themes.","assets":[{"name":"maia-linux-x86_64","browser_download_url":"https://github.com/yappologistic/Maia/releases/download/v9.9.9/maia-linux-x86_64"},{"name":"maia-linux-x86_64.sha256","browser_download_url":"https://github.com/yappologistic/Maia/releases/download/v9.9.9/maia-linux-x86_64.sha256"}]}"#.to_vec()
+                } else if url.ends_with(".sha256") {
+                    format!("{sum}  maia-linux-x86_64").into_bytes()
+                } else {
+                    bin_bytes.clone()
+                };
+                match to {
+                    Some(p) => std::fs::write(p, &body).map(|_| vec![]).map_err(|e| e.to_string()),
+                    None => Ok(body),
+                }
+            })
+        };
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.app.updater = Updater::for_test(serve(build.clone()), exe.clone());
+        s.cmd(CheckUpdates);
+        wait_until(&mut s, "a newer release", 5, |s| matches!(s.app.updater.state(), State::Available(_)));
+        s.idle(3);
+        assert!(matches!(&s.app.popup, Popup::Options(st) if st.section == Some(crate::popups::Section::System)), "Options at Startup & system");
+        assert!(s.texts.iter().any(|(_, t)| t == "Update to 9.9.9"), "the step offered");
+        look(&mut s, "update available");
+        s.shot("update-available");
+        click_control(&mut s, "update button");
+        wait_until(&mut s, "installed", 10, |s| matches!(s.app.updater.state(), State::Ready(_)));
+        s.idle(3);
+        assert_eq!(std::fs::read(&exe).unwrap(), build, "the new build in place");
+        assert!(s.texts.iter().any(|(_, t)| t == "Restart") && s.texts.iter().any(|(_, t)| t == "9.9.9 installed"));
+        look(&mut s, "update installed");
+        s.shot("update-ready");
+        // A tampered download: said so, the program untouched.
+        std::fs::write(&exe, b"\x7fELF old").unwrap();
+        s.app.updater = Updater::for_test(serve(b"\x7fELF tampered".to_vec()), exe.clone());
+        click_control(&mut s, "update button");
+        wait_until(&mut s, "a newer release again", 5, |s| matches!(s.app.updater.state(), State::Available(_)));
+        s.idle(2);
+        click_control(&mut s, "update button");
+        wait_until(&mut s, "a failure", 10, |s| matches!(s.app.updater.state(), State::Failed(_)));
+        s.idle(3);
+        assert!(s.texts.iter().any(|(_, t)| t == "Couldn't update"));
+        assert_eq!(std::fs::read(&exe).unwrap(), b"\x7fELF old");
+        // Installed where Maia can't write.
+        s.app.updater = Updater::for_test(serve(build.clone()), PathBuf::from("/proc/maia"));
+        click_control(&mut s, "update button");
+        wait_until(&mut s, "available", 5, |s| matches!(s.app.updater.state(), State::Available(_)));
+        s.idle(2);
+        click_control(&mut s, "update button");
+        s.idle(3);
+        assert!(matches!(s.app.updater.state(), State::CantWrite(_)));
+        assert!(s.texts.iter().any(|(_, t)| t == "Update it where you installed it"));
+        look(&mut s, "update elsewhere");
+        s.shot("update-cant-write");
+        report("updates", &s);
+    }
+
     /// The theme picker: from Options, every theme on screen as a small window with its
     /// name; hovering one shows it on the whole window, a click keeps it, and code takes
     /// its colours (or the classic set with "Code colors follow the theme" off).
