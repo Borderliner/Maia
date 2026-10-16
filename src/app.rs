@@ -144,6 +144,8 @@ pub struct App {
     /// Search by meaning, while it is switched on, and the folders it was started for.
     pub semantic: Option<crate::semantic::Engine>,
     semantic_for: Option<String>,
+    /// Authors' GitHub pictures for the history (idle while the setting is off).
+    pub avatars: crate::avatars::Avatars,
     /// Network places being mounted.
     net_jobs: Vec<NetJob>,
     /// How the Connect dialog's last attempt ended: (address, Ok or the reason).
@@ -232,6 +234,7 @@ impl App {
             tags_gen: 0,
             semantic: None,
             semantic_for: None,
+            avatars: crate::avatars::Avatars::new(),
             net_jobs: vec![],
             dialog_result: None,
             cfg,
@@ -818,6 +821,8 @@ impl App {
             self.semantic = want.as_ref().map(|_| crate::semantic::Engine::start(folders, pictures, ctx));
             self.semantic_for = want;
         }
+        self.avatars.set_on(self.cfg.github_pictures);
+        self.avatars.pump(ctx);
         let thumbs_landed = self.thumbs.pump(ctx);
         let stats_changed = self.stats.pump();
         let changed_dirs = self.watch.poll();

@@ -1061,6 +1061,13 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.act("key Enter");
             }
         }
+        103 => {
+            // GitHub pictures on or off, from Options (the GET is a stand-in).
+            s.act("key ctrl+Comma");
+            s.act("text show github pictures");
+            s.act("key Enter");
+            s.act("key Escape");
+        }
         102 => {
             // The branch chip in the status bar (the lowest "main" on screen) opens the
             // history; then a walk through it with keys and clicks.
@@ -3852,6 +3859,169 @@ mod journeys {
         report("git history", &s);
     }
 
+    /// "Show GitHub pictures": off by default and asking nothing; switched on, noreply
+    /// authors get theirs straight away and the others once each through the repository
+    /// on github.com, in place of their initials in the header and beside their name in
+    /// the graph. A failed lookup and an author without an account keep their initials.
+    /// Switched off, initials come back and nothing more is asked; on again, the pictures
+    /// come from the cache. GitHub is a stand-in that answers from a table.
+    #[test]
+    fn git_history_github_pictures() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        use crate::avatars::Http;
+        let home = fixture("gitpictures");
+        let repo = home.join("Code/pictures");
+        std::fs::create_dir_all(&repo).unwrap();
+        let g = |args: &[&str], who: &str| {
+            let (name, email) = who.split_once(" <").unwrap_or(("t", "t@t>"));
+            let st = std::process::Command::new("git").args(["-c", &format!("user.name={name}"), "-c", &format!("user.email={}", email.trim_end_matches('>')), "-c", "commit.gpgsign=false"]).args(args).current_dir(&repo).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+            assert!(st.is_ok_and(|st| st.success()), "git {args:?}");
+        };
+        g(&["init", "-q", "-b", "main"], "");
+        let people = [
+            ("Octo Cat <12345+octocat@users.noreply.github.com>", "Add the octo"),
+            ("Mona Lisa <mona@users.noreply.github.com>", "Paint the mona"),
+            ("Ada Lovelace <ada@example.invalid>", "Build the engine"),
+            ("Grace Hopper <grace@example.invalid>", "Find the bug"),
+            ("Linus Tor <linus@example.invalid>", "Write the kernel"),
+        ];
+        for (k, (who, msg)) in people.iter().enumerate() {
+            std::fs::write(repo.join(format!("file{k}.txt")), msg).unwrap();
+            g(&["add", "."], who);
+            g(&["commit", "-qm", msg], who);
+        }
+        g(&["remote", "add", "origin", "git@github.com:octo-org/pictures.git"], "");
+        let sha = |msg: &str| {
+            let out = std::process::Command::new("git").args(["log", "--format=%H", "--grep", msg]).current_dir(&repo).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let api = |msg: &str| format!("api.github.com/repos/octo-org/pictures/commits?sha={}&per_page=1", sha(msg));
+        let png = |seed| crate::tests::png_bytes(160, 160, seed);
+        let table = vec![
+            ("avatars.githubusercontent.com/u/12345?s=96".to_string(), Http::Ok(png(3))),
+            ("avatars.githubusercontent.com/mona?s=96".to_string(), Http::Ok(png(6))),
+            (api("Build the engine"), Http::Ok(format!(r#"[{{"sha":"{}","author":{{"avatar_url":"https://avatars.githubusercontent.com/u/4242?v=4"}}}}]"#, sha("Build the engine")).into_bytes())),
+            ("avatars.githubusercontent.com/u/4242?v=4&s=96".to_string(), Http::Ok(png(9))),
+            (api("Find the bug"), Http::Status(500)),
+            (api("Write the kernel"), Http::Ok(format!(r#"[{{"sha":"{}","author":null}}]"#, sha("Write the kernel")).into_bytes())),
+        ];
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mut s = Sim::new(&repo, vec2(1280.0, 800.0));
+        s.app.avatars.dir = root().join("xdg/cache/maia-sim-avatars");
+        s.app.avatars.set_get(crate::avatars::fake_get(table, log.clone()));
+        assert!(!s.app.cfg.github_pictures, "off by default");
+        let emails: Vec<&str> = people.iter().map(|(w, _)| w.split_once('<').unwrap().1.trim_end_matches('>')).collect();
+        let states = |s: &Sim| emails.iter().map(|e| s.app.avatars.state(e)).collect::<Vec<_>>();
+        let in_insp = |s: &Sim, t: &str| {
+            let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("inspector shown"));
+            s.texts.iter().any(|(r, x)| x == t && ir.contains(r.center()))
+        };
+        wait_until(&mut s, "branch read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
+        s.idle(2);
+        s.click_text("main");
+        wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 5));
+        look(&mut s, "graph, pictures off");
+        click_in_inspector(&mut s, "Add the octo", "click");
+        wait_until(&mut s, "commit open", 10, |s| history(s).is_some_and(|h| h.3 == Some(1)));
+        s.idle(3);
+        assert!(in_insp(&s, "OC"), "initials while off");
+        assert_eq!((s.app.avatars.asked(), log.lock().unwrap().len()), (0, 0), "off: nothing asked");
+        assert!(states(&s).iter().all(|x| x.is_empty()));
+        s.act("key Escape");
+        s.idle(2);
+        // Without curl the option says so, quietly.
+        s.app.avatars.set_curl(false);
+        s.act("key ctrl+Comma");
+        s.act("text show github pictures");
+        wait_until(&mut s, "the curl note", 5, |s| s.texts.iter().any(|(_, t)| t == "Needs curl, which isn't installed; authors keep their initials."));
+        s.idle(30);
+        s.shot("option-no-curl");
+        s.app.avatars.set_curl(true);
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t == "Looks authors up on GitHub by username or email; pictures are saved on this computer."), "what it does and what GitHub learns");
+        look(&mut s, "the option");
+        s.shot("option");
+        // Still inside its window when that is small.
+        s.resize(520.0, 340.0);
+        s.idle(30);
+        s.resize(1280.0, 800.0);
+        s.idle(2);
+        s.act("key Enter");
+        s.idle(2);
+        s.act("key Escape");
+        s.settle();
+        assert!(s.app.cfg.github_pictures, "switched on from Options");
+        wait_until(&mut s, "every author answered", 10, |s| s.app.avatars.on() && !s.app.avatars.busy() && states(s).iter().all(|x| *x == "ready" || *x == "none"));
+        assert_eq!(states(&s), ["ready", "ready", "ready", "none", "none"]);
+        let asked: Vec<String> = log.lock().unwrap().clone();
+        assert_eq!(asked.len(), 6, "three pictures and three lookups, once each: {asked:?}");
+        for e in ["Build the engine", "Find the bug", "Write the kernel"] {
+            assert_eq!(asked.iter().filter(|u| u.contains(&api(e))).count(), 1, "one lookup for {e}");
+        }
+        assert!(asked.iter().all(|u| u.starts_with("https://")));
+        look(&mut s, "graph with pictures");
+        s.shot("graph-pictures");
+        // The header: the picture in place of the initials.
+        click_in_inspector(&mut s, "Add the octo", "click");
+        wait_until(&mut s, "commit open", 10, |s| history(s).is_some_and(|h| h.3 == Some(1)));
+        s.idle(3);
+        assert!(!in_insp(&s, "OC"), "the picture replaces the initials");
+        assert!(in_insp(&s, "Octo Cat"), "the name stays beside it");
+        look(&mut s, "commit with a picture");
+        s.shot("commit-picture");
+        for (subject, initials, picture) in [("Paint the mona", "ML", true), ("Build the engine", "AL", true), ("Find the bug", "GH", false), ("Write the kernel", "LT", false)] {
+            s.act("key Escape");
+            s.idle(2);
+            click_in_inspector(&mut s, subject, "click");
+            wait_until(&mut s, "commit open", 10, |s| probe(s).subject.as_deref() == Some(subject) && history(s).is_some_and(|h| h.3 == Some(1)));
+            s.idle(3);
+            assert_eq!(in_insp(&s, initials), !picture, "{subject}: initials only without a picture");
+            look(&mut s, subject);
+        }
+        s.shot("commit-failed-lookup");
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        s.act("key Escape");
+        look(&mut s, "pictures on a light theme");
+        s.shot("graph-pictures-paper");
+        click_in_inspector(&mut s, "Build the engine", "click");
+        wait_until(&mut s, "commit open", 10, |s| history(s).is_some_and(|h| h.3 == Some(1)));
+        look(&mut s, "a picture on a light theme");
+        s.shot("commit-picture-paper");
+        s.app.cfg.theme = crate::theme::ThemeName::default();
+        // Off again: initials at once, and nothing more asked whatever is opened.
+        s.act("key ctrl+Comma");
+        s.act("text show github pictures");
+        s.idle(2);
+        s.act("key Enter");
+        s.idle(2);
+        s.act("key Escape");
+        s.settle();
+        assert!(!s.app.cfg.github_pictures && !s.app.avatars.on());
+        assert!(states(&s).iter().all(|x| x.is_empty()), "pictures dropped");
+        let before = (s.app.avatars.asked(), log.lock().unwrap().len());
+        assert!(in_insp(&s, "AL"), "initials back");
+        for subject in ["Add the octo", "Find the bug"] {
+            s.act("key Escape");
+            s.idle(2);
+            click_in_inspector(&mut s, subject, "click");
+            s.idle(20);
+        }
+        assert!(in_insp(&s, "GH"));
+        assert_eq!((s.app.avatars.asked(), log.lock().unwrap().len()), before, "off: nothing asked");
+        look(&mut s, "pictures off again");
+        // On again: the kept answers come from the cache; only the failed lookup is asked
+        // again.
+        s.app.cfg.github_pictures = true;
+        s.act("key Escape");
+        wait_until(&mut s, "answered again", 10, |s| s.app.avatars.on() && !s.app.avatars.busy() && states(s).iter().all(|x| *x == "ready" || *x == "none"));
+        assert_eq!(states(&s), ["ready", "ready", "ready", "none", "none"]);
+        let again: Vec<String> = log.lock().unwrap()[before.1..].to_vec();
+        assert_eq!(again, [format!("https://{}", api("Find the bug"))], "only what wasn't kept");
+        report("git pictures", &s);
+    }
+
     fn palette_run(s: &mut Sim, title: &str) {
         s.act("key ctrl+shift+p");
         s.act(&format!("text {title}"));
@@ -4174,6 +4344,7 @@ mod journeys {
             crate::tests::git_fixture(&home.join("Code/repo"));
             // And a small project whose commits change files of every kind, pictures too.
             crate::tests::commit_view_fixture(&home.join("Code/project"));
+            let _ = std::process::Command::new("git").args(["remote", "add", "origin", "https://github.com/octo-org/project.git"]).current_dir(home.join("Code/project")).status();
             // Fake drives, network places and pkexec to use at random (never the real tools).
             let drv = fake_drives(&format!("monkey{seed}"));
             let net = fake_network(&format!("monkey{seed}"));
@@ -4192,6 +4363,11 @@ mod journeys {
                 let _ = std::process::Command::new("zip").args(["-q", "-r", "-P", "pw"]).arg(home.join("locked.zip")).arg("Taxes").current_dir(home.join("Documents")).status();
             }
             let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+            // GitHub pictures, when a session turns them on, from a stand-in for GitHub.
+            s.app.avatars.dir = root().join("xdg/cache/maia-avatars");
+            let json = br#"[{"sha":"0","author":{"avatar_url":"https://avatars.githubusercontent.com/u/1?v=4"}}]"#.to_vec();
+            let table = vec![("api.github.com".to_string(), crate::avatars::Http::Ok(json)), ("avatars.githubusercontent.com".to_string(), crate::avatars::Http::Ok(crate::tests::png_bytes(96, 96, seed as u32)))];
+            s.app.avatars.set_get(crate::avatars::fake_get(table, Default::default()));
             // Later launches handing folders over (single instance).
             let (tx, rx) = std::sync::mpsc::channel();
             s.app.requests = Some(rx);

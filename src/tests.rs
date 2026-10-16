@@ -2898,3 +2898,225 @@ fn themes_and_their_code_colours_are_readable() {
     assert_eq!(palette(ThemeName::TokyoNight).syntax, Syntax::of(ThemeName::TokyoNight));
     assert_ne!(Syntax::of(ThemeName::Gruvbox), Syntax::of(ThemeName::Mocha), "each its own");
 }
+
+/// A noreply address names its GitHub account: by number when it has one, else by name.
+/// Anything else, or a malformed one, names nobody.
+#[test]
+fn github_noreply_addresses_name_the_picture() {
+    use crate::avatars::{Source, noreply_url, source};
+    assert_eq!(noreply_url("12345+octo@users.noreply.github.com").as_deref(), Some("https://avatars.githubusercontent.com/u/12345?s=96"));
+    assert_eq!(noreply_url(" 12345+octo@Users.NoReply.GitHub.com ").as_deref(), Some("https://avatars.githubusercontent.com/u/12345?s=96"), "any case, trimmed");
+    assert_eq!(noreply_url("octo-cat@users.noreply.github.com").as_deref(), Some("https://avatars.githubusercontent.com/octo-cat?s=96"));
+    for none in ["octo@example.invalid", "octo@noreply.github.com", "octo@users.noreply.github.com.example.invalid", "x1+octo@users.noreply.github.com", "+octo@users.noreply.github.com", "-octo@users.noreply.github.com", "oc/to@users.noreply.github.com", "oc to@users.noreply.github.com", "@users.noreply.github.com", "users.noreply.github.com", ""] {
+        assert_eq!(noreply_url(none), None, "{none:?}");
+    }
+    let repo = ("octo-org".to_string(), "demo".to_string());
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    // The cheapest way first: a noreply address needs no lookup, even on github.com.
+    assert_eq!(source("12345+octo@users.noreply.github.com", sha, Some(&repo)), Some(Source::Picture("https://avatars.githubusercontent.com/u/12345?s=96".into())));
+    assert_eq!(source("ada@example.invalid", sha, Some(&repo)), Some(Source::Api(format!("https://api.github.com/repos/octo-org/demo/commits?sha={sha}&per_page=1"))));
+    assert_eq!(source("ada@example.invalid", sha, None), None, "not on github.com: no picture");
+    assert_eq!(source("ada@example.invalid", "not a sha", Some(&repo)), None);
+    assert_eq!(source("no address", sha, Some(&repo)), None);
+}
+
+/// Only a remote on github.com itself is looked up, in every form git writes it; an
+/// Enterprise host or a look-alike is not github.com.
+#[test]
+fn github_remote_urls() {
+    use crate::avatars::github_repo;
+    let ok = Some(("octo-org".to_string(), "demo".to_string()));
+    for u in [
+        "https://github.com/octo-org/demo.git",
+        "https://github.com/octo-org/demo",
+        "https://github.com/octo-org/demo/",
+        "http://github.com/octo-org/demo.git",
+        "https://GitHub.com/octo-org/demo.git",
+        "https://www.github.com/octo-org/demo",
+        "https://someone:not-a-real-token@github.com/octo-org/demo.git",
+        "git@github.com:octo-org/demo.git",
+        "git@github.com:octo-org/demo",
+        "github.com:octo-org/demo.git",
+        "ssh://git@github.com/octo-org/demo.git",
+        "ssh://git@ssh.github.com:443/octo-org/demo.git",
+        "git://github.com/octo-org/demo.git",
+        "  https://github.com/octo-org/demo.git\n",
+    ] {
+        assert_eq!(github_repo(u), ok, "{u:?}");
+    }
+    assert_eq!(github_repo("https://github.com/octo-org/my.site.git"), Some(("octo-org".into(), "my.site".into())));
+    for u in [
+        "https://github.example.com/octo-org/demo.git",
+        "git@github.example.com:octo-org/demo.git",
+        "ssh://git@ghe.example.invalid/octo-org/demo.git",
+        "https://github.com.example.invalid/octo-org/demo.git",
+        "https://notgithub.com/octo-org/demo.git",
+        "https://gitlab.com/octo-org/demo.git",
+        "https://example.invalid/github.com/octo-org/demo.git",
+        "https://github.com@example.invalid/octo-org/demo.git",
+        "file:///srv/github.com/octo-org/demo.git",
+        "/srv/git/demo.git",
+        "../demo.git",
+        "https://github.com/octo-org",
+        "https://github.com/octo-org/demo/tree/main",
+        "https://github.com/../demo",
+        "https://github.com/octo org/demo",
+        "",
+    ] {
+        assert_eq!(github_repo(u), None, "{u:?}");
+    }
+}
+
+/// GitHub's answer about a commit gives the account's picture at the size drawn, from
+/// GitHub's picture host only; an author without an account is said to have none.
+#[test]
+fn github_api_answer_gives_the_picture() {
+    use crate::avatars::{avatar_from_api, sized_avatar};
+    let one = br#"{"sha":"0123abc","commit":{"author":{"name":"Octo"}},"author":{"login":"octo","id":12345,"avatar_url":"https://avatars.githubusercontent.com/u/12345?v=4"}}"#;
+    assert_eq!(avatar_from_api(one), Some(Some("https://avatars.githubusercontent.com/u/12345?v=4&s=96".into())));
+    let list = br#"[{"sha":"0123abc","author":{"avatar_url":"https://avatars.githubusercontent.com/u/777"}},{"sha":"9999"}]"#;
+    assert_eq!(avatar_from_api(list), Some(Some("https://avatars.githubusercontent.com/u/777?s=96".into())), "the list form: its first commit");
+    assert_eq!(avatar_from_api(br#"{"sha":"0123abc","author":null}"#), Some(None), "an address no account claims");
+    assert_eq!(avatar_from_api(br#"[{"sha":"0123abc"}]"#), Some(None));
+    assert_eq!(avatar_from_api(br#"{"sha":"0123abc","author":{"avatar_url":"https://example.invalid/me.png"}}"#), Some(None), "another host is not followed");
+    assert_eq!(avatar_from_api(br#"{"sha":"0123abc","author":{"avatar_url":"http://avatars.githubusercontent.com/u/1"}}"#), Some(None), "https only");
+    for bad in [&br#"{"message":"API rate limit exceeded"}"#[..], b"[]", b"not json", b"", b"null", br#""text""#] {
+        assert_eq!(avatar_from_api(bad), None, "{:?}", String::from_utf8_lossy(bad));
+    }
+    assert_eq!(sized_avatar("https://avatars.githubusercontent.com/octo").as_deref(), Some("https://avatars.githubusercontent.com/octo?s=96"));
+    assert_eq!(sized_avatar("https://avatars.githubusercontent.com/"), None);
+    assert_eq!(sized_avatar("https://avatars.githubusercontent.com/u/1 --output x"), None);
+}
+
+/// An answer holds for a week, then a picture is shown while it is asked for again and a
+/// "none" is forgotten. A clock set back doesn't make an answer last for ever.
+#[test]
+fn github_picture_cache_staleness() {
+    use crate::avatars::{Cached, MAX_AGE, fresh, key, read_cache, write_hit, write_miss};
+    use std::time::SystemTime;
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+    let day = Duration::from_secs(86_400);
+    assert!(fresh(now, now) && fresh(now - 6 * day, now));
+    assert!(!fresh(now - MAX_AGE, now) && !fresh(now - 30 * day, now));
+    assert!(fresh(now + day, now), "a little ahead: the clock moved back a bit");
+    assert!(!fresh(now + 8 * day, now), "far ahead: asked again");
+    assert_eq!(key(" Ada@Example.invalid "), key("ada@example.invalid"), "one answer per address, whatever its case");
+    assert_ne!(key("ada@example.invalid"), key("grace@example.invalid"));
+    assert!(key("ada@example.invalid").bytes().all(|b| b.is_ascii_hexdigit()), "no address in a file name");
+    let d = tmpdir("avatar-cache");
+    let k = key("ada@example.invalid");
+    let age = |name: &str, ago: Duration| std::fs::File::options().write(true).open(d.join(format!("{k}.{name}"))).unwrap().set_modified(SystemTime::now() - ago).unwrap();
+    let now = SystemTime::now();
+    assert_eq!(read_cache(&d, &k, now), Cached::Nothing);
+    write_hit(&d, &k, b"picture");
+    assert_eq!(read_cache(&d, &k, now), Cached::Hit(b"picture".to_vec()));
+    age("img", 8 * day);
+    assert_eq!(read_cache(&d, &k, now), Cached::Stale(b"picture".to_vec()));
+    write_miss(&d, &k);
+    assert_eq!(read_cache(&d, &k, now), Cached::Miss, "none, this week");
+    assert!(!d.join(format!("{k}.img")).exists(), "the old picture goes with it");
+    age("none", 8 * day);
+    assert_eq!(read_cache(&d, &k, now), Cached::Nothing, "a week on, asked again");
+    write_hit(&d, &k, b"new");
+    assert!(!d.join(format!("{k}.none")).exists());
+    assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1, "no temporary file left behind");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// One author's picture end to end against a stand-in for GitHub: fetched once, kept,
+/// then read from the cache; a "none" kept the same way; too many requests and errors
+/// keep nothing; a week-old picture stands in when GitHub can't be asked.
+#[test]
+fn github_find_asks_once_and_keeps_the_answer() {
+    use crate::avatars::{Found, Http, Source, find, key, write_hit};
+    use std::cell::RefCell;
+    let d = tmpdir("avatar-find");
+    let png = png_bytes(120, 80, 4);
+    let now = std::time::SystemTime::now();
+    let asked = RefCell::new(vec![]);
+    let get = |answers: Vec<(&'static str, Http)>| {
+        let asked = &asked;
+        move |url: &str| {
+            asked.borrow_mut().push(url.to_string());
+            answers.iter().find(|(k, _)| url.contains(k)).map_or(Http::Failed, |(_, h)| h.clone())
+        }
+    };
+    let pic = Source::Picture("https://avatars.githubusercontent.com/u/12345?s=96".into());
+    let k = key("12345+octo@users.noreply.github.com");
+    let g = get(vec![("/u/12345", Http::Ok(png.clone()))]);
+    assert!(matches!(find(&d, &k, &pic, &g, now), Found::Picture(i) if (i.w, i.h) == (120, 80)));
+    assert!(matches!(find(&d, &k, &pic, &g, now), Found::Picture(_)));
+    assert_eq!(asked.borrow().len(), 1, "the second time from the cache");
+    // Through the API: the commit's account, then its picture.
+    let api = Source::Api("https://api.github.com/repos/octo-org/demo/commits?sha=0123abc&per_page=1".into());
+    let json = br#"[{"sha":"0123abc","author":{"avatar_url":"https://avatars.githubusercontent.com/u/777?v=4"}}]"#.to_vec();
+    asked.borrow_mut().clear();
+    let g = get(vec![("api.github.com", Http::Ok(json)), ("/u/777?v=4&s=96", Http::Ok(png.clone()))]);
+    assert!(matches!(find(&d, &key("grace@example.invalid"), &api, &g, now), Found::Picture(_)));
+    assert_eq!(asked.borrow().len(), 2);
+    // No account behind the address: kept as none, not asked again.
+    asked.borrow_mut().clear();
+    let g = get(vec![("api.github.com", Http::Ok(br#"{"sha":"0123abc","author":null}"#.to_vec()))]);
+    assert!(matches!(find(&d, &key("linus@example.invalid"), &api, &g, now), Found::None));
+    assert!(matches!(find(&d, &key("linus@example.invalid"), &api, &g, now), Found::None));
+    assert_eq!(asked.borrow().len(), 1);
+    // Too many requests, or an error: nothing kept, so it is asked again later.
+    for (h, limited) in [(Http::Status(403), true), (Http::Status(429), true), (Http::Status(500), false), (Http::Failed, false)] {
+        let g = get(vec![("api.github.com", h)]);
+        let f = find(&d, &key("edsger@example.invalid"), &api, &g, now);
+        assert!(if limited { matches!(f, Found::Limited) } else { matches!(f, Found::Failed) });
+    }
+    assert!(!std::fs::read_dir(&d).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(&key("edsger@example.invalid"))));
+    // A commit GitHub doesn't have: none, for a week.
+    let g = get(vec![("api.github.com", Http::Status(422))]);
+    assert!(matches!(find(&d, &key("barbara@example.invalid"), &api, &g, now), Found::None));
+    // A picture that doesn't decode is not kept.
+    let g = get(vec![("/u/12345", Http::Ok(b"<html>".to_vec()))]);
+    assert!(matches!(find(&d, &key("12345+other@users.noreply.github.com"), &pic, &g, now), Found::Failed));
+    // A week-old picture while GitHub can't be reached, or limits us.
+    let ks = key("13+old@users.noreply.github.com");
+    write_hit(&d, &ks, &png);
+    std::fs::File::options().write(true).open(d.join(format!("{ks}.img"))).unwrap().set_modified(now - Duration::from_secs(8 * 86_400)).unwrap();
+    asked.borrow_mut().clear();
+    let g = get(vec![]);
+    assert!(matches!(find(&d, &ks, &pic, &g, now), Found::Picture(_)));
+    assert_eq!(asked.borrow().len(), 1, "a stale picture is asked for again");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// curl's answer splits into body and status; the command reads no user settings, speaks
+/// only https, caps the answer and the time, and names itself plainly.
+#[test]
+fn github_requests_through_curl() {
+    use crate::avatars::{Http, curl_args, parse_curl};
+    assert_eq!(parse_curl(b"\x89PNG\n\x00data\n200"), Http::Ok(b"\x89PNG\n\x00data".to_vec()));
+    assert_eq!(parse_curl(b"{\"message\":\"rate\"}\n403"), Http::Status(403));
+    assert_eq!(parse_curl(b"\n000"), Http::Failed, "no answer at all");
+    assert_eq!(parse_curl(b""), Http::Failed);
+    assert_eq!(parse_curl(b"cut short"), Http::Failed);
+    let a = curl_args("https://avatars.githubusercontent.com/u/12345?s=96");
+    assert_eq!(a[0], "-q", "first, or ~/.curlrc is read");
+    let has = |a: &[String], k: &str, v: &str| a.windows(2).any(|w| w[0] == k && w[1] == v);
+    assert!(has(&a, "--proto", "=https") && has(&a, "--proto-redir", "=https") && a.iter().any(|x| x == "--location"));
+    assert!(has(&a, "--max-time", "10") && has(&a, "--max-filesize", "1048576") && has(&a, "--user-agent", "Maia"));
+    assert!(!a.iter().any(|x| matches!(x.as_str(), "-u" | "--user" | "-n" | "--netrc" | "--netrc-optional" | "-b" | "--cookie" | "-K" | "--config")), "no credentials of any kind");
+    assert!(!a.iter().any(|x| x.to_ascii_lowercase().contains("authorization")));
+    assert_eq!(a.last().map(String::as_str), Some("https://avatars.githubusercontent.com/u/12345?s=96"));
+    assert!(curl_args("https://api.github.com/repos/o/r/commits?sha=0123abc&per_page=1").iter().any(|x| x == "Accept: application/vnd.github+json"));
+    assert!(!a.iter().any(|x| x.starts_with("Accept")), "pictures need no API header");
+}
+
+/// A picture is cut to the middle square at the size drawn, round, with a soft edge.
+#[test]
+fn github_picture_is_cut_round() {
+    let img = crate::imgdec::decode_bytes(&png_bytes(120, 80, 2)).unwrap();
+    let c = crate::avatars::round(&img, 37);
+    assert_eq!(c.size, [37, 37]);
+    let a = |x: usize, y: usize| c.pixels[y * 37 + x].a();
+    assert_eq!((a(0, 0), a(36, 0), a(0, 36), a(36, 36)), (0, 0, 0, 0), "corners outside the circle");
+    assert_eq!(a(18, 18), 255);
+    assert!((1..255).contains(&a(18, 0)) || a(18, 0) == 255, "the top edge is inside or soft");
+    assert!(c.pixels.iter().any(|p| (1..255).contains(&p.a())), "a soft edge, not a jagged one");
+    let small = crate::imgdec::decode_bytes(&png_bytes(20, 20, 2)).unwrap();
+    assert_eq!(crate::avatars::round(&small, 96).size, [20, 20], "a small picture is not blown up here");
+}

@@ -177,6 +177,8 @@ pub struct Config {
     pub inspector_layout: InspectorLayout,
     pub startup: Startup,
     pub new_tab: NewTabShows,
+    /// Authors' GitHub pictures in the history. Off: GitHub is never contacted.
+    pub github_pictures: bool,
     pub cross_filesystems: bool,
     // Hotkeys: command id -> bindings (overrides defaults when present).
     pub hotkeys: BTreeMap<String, Vec<String>>,
@@ -237,6 +239,7 @@ impl Default for Config {
             inspector_layout: InspectorLayout::Auto,
             startup: Startup::LastSession,
             new_tab: NewTabShows::Current,
+            github_pictures: false,
             cross_filesystems: false,
             hotkeys: BTreeMap::new(),
             custom_actions: vec![CustomAction {

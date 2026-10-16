@@ -34,6 +34,7 @@ pub struct Env<'a> {
     pub panel_id: u64,
     pub active: bool,
     pub bookmarks: &'a [PathBuf],
+    pub avatars: &'a mut crate::avatars::Avatars,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]

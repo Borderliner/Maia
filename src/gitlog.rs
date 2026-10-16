@@ -183,6 +183,12 @@ fn run(root: &Path, args: &[&str], limit: u64) -> (Vec<u8>, bool) {
     (v, cut)
 }
 
+/// Where the work tree's origin remote points, as configured.
+pub fn origin_url(root: &Path) -> Option<String> {
+    let s = String::from_utf8_lossy(&run(root, &["config", "--get", "remote.origin.url"], 4096).0).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Change {
     /// `A`dded, `M`odified, `D`eleted, `R`enamed, `C`opied or `T`ype changed.
@@ -1283,6 +1289,28 @@ fn avatar(p: &egui::Painter, c: Pos2, d: f32, name: &str, col: Color32) {
     p.text(c, Align2::CENTER_CENTER, initials(name), FontId::proportional((d * 0.4).round()), col);
 }
 
+/// The commit header's author circle and the graph rows' smaller one, across.
+fn face_sizes(fs: f32) -> (f32, f32) {
+    ((fs * 2.3).round(), (fs - 1.5 + 1.5).round())
+}
+
+/// Both sizes in pixels, which the pictures are cut to.
+fn face_px(fs: f32, ppp: f32) -> [u32; 2] {
+    let (big, small) = face_sizes(fs);
+    [(big * ppp).round() as u32, (small * ppp).round() as u32]
+}
+
+/// An author's picture in place of their circle: drawn pixel for pixel when it was cut
+/// to this size, with a faint ring so a white picture keeps its edge on a light theme.
+fn face(p: &egui::Painter, c: Pos2, d: f32, tex: &egui::TextureHandle, ppp: f32, pal: &Palette) {
+    let side = tex.size()[0] as f32 / ppp;
+    let side = if (side - d).abs() <= 1.0 { side } else { d };
+    let min = pos2(((c.x - side / 2.0) * ppp).round() / ppp, ((c.y - side / 2.0) * ppp).round() / ppp);
+    let r = Rect::from_min_size(min, Vec2::splat(side));
+    p.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+    p.circle_stroke(r.center(), side / 2.0, Stroke::new(1.0, pal.text.gamma_multiply(0.14)));
+}
+
 /// The history in place of the inspector's preview. False when it should close.
 /// `wrap`: diffs wrap their long lines (the code previews' setting, shared).
 pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, wrap: &mut bool, env: &mut Env) -> bool {
@@ -1423,6 +1451,14 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
     let l = &mut h.list;
     let n = l.commits.len() + usize::from(!l.done);
     let anim = env.cfg.animations;
+    // With pictures on, every author gets a picture-sized place, so the names don't shift
+    // as pictures arrive.
+    let pictures = env.cfg.github_pictures;
+    let avatars = &mut *env.avatars;
+    let (ppp, fd) = (ui.ctx().pixels_per_point(), face_sizes(fs).1);
+    let fpx = face_px(fs, ppp);
+    let ctx = ui.ctx().clone();
+    let root = &h.root;
     let mut open = None;
     let mut inner = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(4.0, 4.0))));
     ScrollArea::vertical().auto_shrink([false, false]).id_salt(("git_graph", l.path.is_some())).show_viewport(&mut inner, |ui, vp| {
@@ -1531,9 +1567,15 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
             p.galley(pos2(tx, my + (mh - hg.size().y) / 2.0), hg, pal.text_dim);
             let ax = tx + hw + 10.0;
             if tx + w - ax > 30.0 {
-                p.circle_filled(pos2(ax + 3.0, my + mh / 2.0), 3.0, author_color(&pal, &c.email, &c.author));
-                let ag = crate::listing::elided(ui, &format!("{}  ·  {}", c.author, ago(c.time, now)), small.clone(), tx + w - ax - 10.0, pal.text_dim);
-                p.galley(pos2(ax + 10.0, my + (mh - ag.size().y) / 2.0), ag, pal.text_dim);
+                let (dc, nx) = if pictures { (pos2(ax + fd / 2.0, my + mh / 2.0), ax + fd + 5.0) } else { (pos2(ax + 3.0, my + mh / 2.0), ax + 10.0) };
+                match pictures.then(|| avatars.picture(&ctx, &c.email, &c.hash, root, fpx)).flatten() {
+                    Some(pic) => face(&p, dc, fd, &pic.small, ppp, &pal),
+                    None => {
+                        p.circle_filled(dc, 3.0, author_color(&pal, &c.email, &c.author));
+                    }
+                }
+                let ag = crate::listing::elided(ui, &format!("{}  ·  {}", c.author, ago(c.time, now)), small.clone(), tx + w - nx, pal.text_dim);
+                p.galley(pos2(nx, my + (mh - ag.size().y) / 2.0), ag, pal.text_dim);
             }
         }
     });
@@ -1567,6 +1609,8 @@ fn commit(ui: &mut Ui, body: Rect, h: &mut History, wrap: bool, env: &mut Env) {
     let mut act = None;
     let reveal = std::mem::take(&mut o.reveal);
     let ctx = ui.ctx().clone();
+    let pictures = env.cfg.github_pictures;
+    let avatars = &mut *env.avatars;
     ScrollArea::vertical().auto_shrink([false, false]).id_salt(("git_commit", c.hash.as_str())).show(&mut inner, |ui| {
         ui.add_space(6.0);
         egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0)).show(ui, |ui| {
@@ -1583,11 +1627,17 @@ fn commit(ui: &mut Ui, body: Rect, h: &mut History, wrap: bool, env: &mut Env) {
                     px += pill(ui, ui.painter(), pos2(px, r.center().y), name, remote, &tag, kind, lane, &pal, r.right() - px) + 4.0;
                 }
             }
-            // The author: initials in their colour, then their name over when.
+            // The author: their GitHub picture when that is on and found, else initials in
+            // their colour; then their name over when.
             ui.add_space(2.0);
-            let d = (fs * 2.3).round();
+            let d = face_sizes(fs).0;
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), d), Sense::hover());
-            avatar(ui.painter(), pos2(r.left() + d / 2.0, r.center().y), d, &c.author, author_color(&pal, &c.email, &c.author));
+            let at = pos2(r.left() + d / 2.0, r.center().y);
+            let ppp = ctx.pixels_per_point();
+            match pictures.then(|| avatars.picture(&ctx, &c.email, &c.hash, &root, face_px(fs, ppp))).flatten() {
+                Some(pic) => face(ui.painter(), at, d, &pic.big, ppp, &pal),
+                None => avatar(ui.painter(), at, d, &c.author, author_color(&pal, &c.email, &c.author)),
+            }
             let (x, w) = (r.left() + d + 9.0, r.right() - r.left() - d - 9.0);
             if w > 20.0 {
                 let a = crate::listing::elided(ui, &c.author, FontId::proportional(fs - 0.5), w, pal.text);

@@ -38,20 +38,28 @@ pub(crate) fn tool(bin: &str) -> Command {
 }
 
 /// Output of a short-lived tool, or None after `timeout`.
-pub(crate) fn output(mut c: Command, timeout: Duration) -> Option<Vec<u8>> {
+pub(crate) fn output(c: Command, timeout: Duration) -> Option<Vec<u8>> {
+    output_capped(c, timeout, u64::MAX, &|| false)
+}
+
+/// `output`, but None once the tool writes more than `cap` bytes or `stop` says so (the
+/// tool is killed either way).
+pub(crate) fn output_capped(mut c: Command, timeout: Duration, cap: u64, stop: &dyn Fn() -> bool) -> Option<Vec<u8>> {
     let mut child = c.stdout(Stdio::piped()).spawn().ok()?;
-    let mut out = child.stdout.take()?;
+    let out = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
         let mut v = vec![];
-        let _ = out.read_to_end(&mut v);
+        let _ = out.take(cap.saturating_add(1)).read_to_end(&mut v);
         v
     });
     let t0 = Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(st)) if st.success() => return reader.join().ok(),
+            Ok(Some(st)) if st.success() => return reader.join().ok().filter(|v| v.len() as u64 <= cap),
             Ok(Some(_)) => return None,
-            Ok(None) if t0.elapsed() < timeout => std::thread::sleep(Duration::from_millis(10)),
+            // Past the cap the reader stops and drops the pipe, so the tool dies on its
+            // next write.
+            Ok(None) if t0.elapsed() < timeout && !stop() => std::thread::sleep(Duration::from_millis(10)),
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();

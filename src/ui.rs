@@ -802,7 +802,7 @@ impl App {
             }
         };
         {
-            let App { panels, cfg, thumbs, stats, recents_set, actions, keymap, drag, clipboard, ud, .. } = self;
+            let App { panels, cfg, thumbs, stats, recents_set, actions, keymap, drag, clipboard, ud, avatars, .. } = self;
             let panel = panels.get_mut(&id).unwrap();
             panel.rect = rect;
             panel.list_rect = list_rect;
@@ -823,6 +823,7 @@ impl App {
                 panel_id: id,
                 active: is_active,
                 bookmarks: &ud.bookmarks,
+                avatars,
             };
             listing::listing(ui, list_rect, panel, &mut env);
             panel.inspector_rect = None;

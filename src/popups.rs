@@ -1572,6 +1572,7 @@ enum Opt {
     InspectorLayout,
     Startup,
     NewTab,
+    GitPictures,
     DefaultFm,
     SingleInstance,
     Meaning,
@@ -1625,6 +1626,7 @@ const OPTS: &[(Opt, &str, &str, &str)] = &[
     (Opt::InspectorLayout, "Inspector & startup", "Inspector layout", "Where the inspector docks."),
     (Opt::Startup, "Inspector & startup", "On startup", "What to show when Maia starts."),
     (Opt::NewTab, "Inspector & startup", "New tab shows", "Folder opened by a new tab."),
+    (Opt::GitPictures, "Inspector & startup", "Show GitHub pictures", "Looks authors up on GitHub by username or email; pictures are saved on this computer."),
     (Opt::DefaultFm, "System", "Default file manager", "Open folders from other apps in Maia."),
     (Opt::SingleInstance, "System", "Reuse the open window", "Folders from other apps and new launches open as tabs here."),
     (Opt::Meaning, "Search", "Search by meaning", "Find files by what they are about, with a local model through Ollama."),
@@ -1758,6 +1760,7 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
         Opt::InspectorLayout => f!(inspector_layout),
         Opt::Startup => f!(startup),
         Opt::NewTab => f!(new_tab),
+        Opt::GitPictures => f!(github_pictures),
     }
 }
 
@@ -1832,6 +1835,7 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         Opt::SingleInstance => toggle(ui, &mut c.single_instance, &pal),
         Opt::Meaning => toggle(ui, &mut c.semantic_search, &pal),
         Opt::MeaningPictures => toggle(ui, &mut c.semantic_pictures, &pal),
+        Opt::GitPictures => toggle(ui, &mut c.github_pictures, &pal),
         Opt::MeaningFolders => ui.add(egui::TextEdit::singleline(&mut c.semantic_folders).hint_text("~/Documents").desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).lost_focus(),
         Opt::DefaultFm => false,
         Opt::InspectorFont => {
@@ -1939,6 +1943,8 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
             let mut last_group = "";
             for (vi, &oi) in visible.iter().enumerate() {
                 let (o, group, title, desc) = &OPTS[oi];
+                // Without curl there is no way to ask: said in place of what it would do.
+                let desc: &str = if *o == Opt::GitPictures && app.avatars.curl() == Some(false) { "Needs curl, which isn't installed; authors keep their initials." } else { desc };
                 // A flat list: sections only add a little space.
                 if *group != last_group {
                     if !last_group.is_empty() {
@@ -1967,7 +1973,7 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
                     ui.painter().text(pos2(r.left() + 10.0 + indent, r.center().y), Align2::LEFT_CENTER, *title, FontId::proportional(12.5), tc);
                 } else {
                     ui.painter().text(pos2(r.left() + 10.0 + indent, r.top() + 11.0), Align2::LEFT_CENTER, *title, FontId::proportional(12.5), tc);
-                    ui.painter().text(pos2(r.left() + 10.0 + indent, r.top() + 25.0), Align2::LEFT_CENTER, *desc, FontId::proportional(10.5), pal.text_dim.gamma_multiply(if inert { 0.6 } else { 1.0 }));
+                    ui.painter().text(pos2(r.left() + 10.0 + indent, r.top() + 25.0), Align2::LEFT_CENTER, desc, FontId::proportional(10.5), pal.text_dim.gamma_multiply(if inert { 0.6 } else { 1.0 }));
                 }
                 let pad = if compact { 2.0 } else { 4.0 };
                 let ctrl_rect = Rect::from_min_max(pos2(r.right() - 230.0, r.top() + pad), pos2(r.right() - 8.0, r.bottom() - pad));
@@ -4078,6 +4084,7 @@ fn opt_flip(c: &mut crate::config::Config, o: Opt) -> bool {
         Opt::SingleInstance => &mut c.single_instance,
         Opt::Meaning => &mut c.semantic_search,
         Opt::MeaningPictures => &mut c.semantic_pictures,
+        Opt::GitPictures => &mut c.github_pictures,
         _ => return false,
     };
     *b = !*b;
