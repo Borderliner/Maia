@@ -1747,7 +1747,12 @@ impl App {
             }
             Cmd::InspectorWrap => {
                 if let Some(i) = self.panel().inspector.as_mut() {
-                    i.toggle_wrap();
+                    // The history's diffs follow the code setting.
+                    if i.git.is_some() {
+                        i.wrap_code = !i.wrap_code;
+                    } else {
+                        i.toggle_wrap();
+                    }
                 }
             }
             Cmd::InspectorMinimap => {

@@ -382,6 +382,8 @@ pub struct History {
     keyed: bool,
     reveal: bool,
     open: Option<Open>,
+    /// Where the open diff's wrapped rows start, when wrapping.
+    wrapped: Option<crate::inspector::Wrapped>,
 }
 
 #[cfg(test)]
@@ -390,6 +392,10 @@ impl History {
     pub fn state(&self) -> (usize, bool, Option<usize>, Option<usize>, Option<usize>) {
         let o = self.open.as_ref();
         (self.commits.len(), self.done, o.map(|o| o.at), o.and_then(|o| o.info.as_ref()).map(|i| i.1.len()), o.and_then(|o| o.diff.as_ref()?.text.as_ref()).map(|t| t.0.len()))
+    }
+    /// Rows the open diff is drawn in when wrapped (None when not wrapping).
+    pub fn wrapped_rows(&self) -> Option<usize> {
+        self.wrapped.as_ref().map(|w| w.rows.len())
     }
     /// The running git (0 when none).
     pub fn git_pid(&self) -> u32 {
@@ -405,7 +411,7 @@ impl History {
 
 impl History {
     pub fn new(root: PathBuf, branch: String, opened: bool) -> History {
-        History { root, branch, opened, commits: vec![], rows: vec![], lanes: Lanes::default(), feed: None, asked: false, done: false, sel: 0, keyed: false, reveal: false, open: None }
+        History { root, branch, opened, commits: vec![], rows: vec![], lanes: Lanes::default(), feed: None, asked: false, done: false, sel: 0, keyed: false, reveal: false, open: None, wrapped: None }
     }
 
     /// Back to the graph (the palette command run while the history is open).
@@ -560,7 +566,8 @@ fn pill(ui: &Ui, p: &egui::Painter, at: Pos2, text: &str, font: &FontId, kind: R
 }
 
 /// The history in place of the inspector's preview. False when it should close.
-pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, env: &mut Env) -> bool {
+/// `wrap`: diffs wrap their long lines (the code previews' setting, shared).
+pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, wrap: &mut bool, env: &mut Env) -> bool {
     let pal = *env.pal;
     h.poll(ui.ctx());
     ui.painter().rect_filled(rect, CornerRadius::ZERO, pal.bg);
@@ -575,6 +582,15 @@ pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, env: &mut Env) -> bool {
     }
     if deep && crate::ui::glyph_button(&mut hui, Glyph::Back, "Back (Esc)", true, &pal).clicked() {
         h.back();
+    }
+    // A diff wraps like a code preview, from the same button.
+    if h.open.as_ref().is_some_and(|o| o.diff.is_some()) {
+        hui.add_space(4.0);
+        crate::inspector::seg_frame(&mut hui, &pal, |ui| {
+            if crate::inspector::seg_button(ui, *wrap, "Wrap lines", &pal, |p, r, c| crate::theme::paint_glyph(p, r, Glyph::Wrap, c)) {
+                *wrap = !*wrap;
+            }
+        });
     }
     // What is shown, as the same tinted pill the preview puts its file name in.
     let (icon, label) = match &h.open {
@@ -610,7 +626,13 @@ pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, env: &mut Env) -> bool {
         Some(None) => commit(&mut bui, body, h, env),
         Some(Some(None)) => dim(&bui, "Loading…"),
         Some(Some(Some((l, _, _)))) if l.is_empty() => dim(&bui, "No text changes"),
-        Some(Some(Some((lines, spans, cut)))) => crate::inspector::text_view(&mut bui, body, lines, *cut, spans.as_deref(), false, None, env.cfg.inspector_font_size, &pal, true),
+        Some(Some(Some((lines, spans, cut)))) => {
+            if !*wrap {
+                h.wrapped = None;
+            }
+            let wrapped = if *wrap { Some(&mut h.wrapped) } else { None };
+            crate::inspector::text_view(&mut bui, body, lines, *cut, spans.as_deref(), false, wrapped, env.cfg.inspector_font_size, &pal, true)
+        }
     }
     true
 }

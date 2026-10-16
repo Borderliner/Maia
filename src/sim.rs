@@ -2960,6 +2960,55 @@ mod journeys {
         s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_ref()).map(|h| h.state())
     }
 
+    /// A commit's diff with a long line: the history's Wrap lines button wraps it (every
+    /// row inside the preview), and the setting is the code previews' own.
+    #[test]
+    fn git_history_diffs_wrap() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let home = fixture("gitwrap");
+        let repo = home.join("Code/wrap");
+        std::fs::create_dir_all(&repo).unwrap();
+        let g = |args: &[&str]| assert!(std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).current_dir(&repo).stdout(std::process::Stdio::null()).status().is_ok_and(|st| st.success()), "git {args:?}");
+        g(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("notes.md"), "# Notes\n").unwrap();
+        g(&["add", "."]);
+        g(&["commit", "-qm", "Start the notes"]);
+        let long = "A long line in a diff keeps going well past the right edge of the preview, and wrapped it stays readable. ".repeat(4);
+        std::fs::write(repo.join("notes.md"), format!("# Notes\n{long}\n")).unwrap();
+        g(&["commit", "-qam", "Write the long notes"]);
+        let mut s = Sim::new(&repo, vec2(1280.0, 800.0));
+        wait_until(&mut s, "branch read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
+        s.idle(2);
+        s.click_text("main");
+        wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 2));
+        s.idle(2);
+        s.click_text("Write the long notes");
+        wait_until(&mut s, "files", 10, |s| history(s).is_some_and(|h| h.3 == Some(1)));
+        s.idle(2);
+        s.click_text("notes.md");
+        wait_until(&mut s, "diff", 10, |s| history(s).is_some_and(|h| h.4.is_some()));
+        s.idle(2);
+        let hist = |s: &Sim| s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_ref()).and_then(|h| h.wrapped_rows());
+        assert_eq!(hist(&s), None, "diffs start unwrapped, as code does");
+        click_control(&mut s, "Wrap lines");
+        s.idle(2);
+        let lines = history(&s).and_then(|h| h.4).unwrap();
+        assert!(hist(&s).is_some_and(|n| n > lines + 2), "the long line wraps: {:?} rows for {lines} lines", hist(&s));
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
+        for r in s.texts.iter().filter(|(r, _)| r.top() > ir.top() + 30.0 && r.left() >= ir.left()).map(|(r, _)| *r) {
+            assert!(r.right() <= ir.right() + 0.5, "a wrapped diff row runs past the preview: {r:?} in {ir:?}");
+        }
+        assert!(s.app.panels[&s.app.active].inspector.as_ref().is_some_and(|i| i.wrap_code), "the code previews' setting");
+        look(&mut s, "wrapped diff");
+        // The palette command turns it off again here too.
+        s.cmd(InspectorWrap);
+        s.idle(2);
+        assert_eq!(hist(&s), None);
+        report("gitwrap", &s);
+    }
+
     /// Git history: the branch chip opens the commit graph in the inspector, scrolling
     /// reads further pages from the one running git, a commit lists its files, a file
     /// shows its diff, and Escape walks back out, closing the inspector it opened. Then

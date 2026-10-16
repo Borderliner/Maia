@@ -325,7 +325,7 @@ fn read_text(p: &Path) -> Content {
 }
 
 /// One icon button of a toolbar segment; `paint` draws the icon in the given color.
-fn seg_button(ui: &mut Ui, on: bool, tip: &'static str, pal: &theme::Palette, paint: impl FnOnce(&egui::Painter, Rect, Color32)) -> bool {
+pub(crate) fn seg_button(ui: &mut Ui, on: bool, tip: &'static str, pal: &theme::Palette, paint: impl FnOnce(&egui::Painter, Rect, Color32)) -> bool {
     // Narrow inspector: leave out what doesn't fit rather than spill into the next panel.
     if crate::ui::no_room(ui, 24.0) {
         return false;
@@ -342,7 +342,7 @@ fn seg_button(ui: &mut Ui, on: bool, tip: &'static str, pal: &theme::Palette, pa
 }
 
 /// Dashed rounded outline around a group of toolbar buttons.
-fn seg_frame(ui: &mut Ui, pal: &theme::Palette, add: impl FnOnce(&mut Ui)) {
+pub(crate) fn seg_frame(ui: &mut Ui, pal: &theme::Palette, add: impl FnOnce(&mut Ui)) {
     // The buttons go straight into the toolbar row, so they centre on it like the close
     // button does; the outline is a fixed 24 px around that centre (buttons are 20 high).
     let x0 = ui.cursor().min.x;
@@ -408,8 +408,8 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         return;
     }
     if let Some(h) = ins.git.as_mut() {
-        // Leaving the work tree closes its history.
-        if !here.starts_with(&h.root) || !crate::gitlog::view(ui, rect, h, env) {
+        // Leaving the work tree closes its history. Diffs wrap as code previews do.
+        if !here.starts_with(&h.root) || !crate::gitlog::view(ui, rect, h, &mut ins.wrap_code, env) {
             close_history(panel);
         }
         return;
@@ -1042,7 +1042,7 @@ fn syntax_color(k: crate::syntax::Kind, pal: &theme::Palette) -> Color32 {
 pub(crate) struct Wrapped {
     /// Columns, and which text (its line count and where its lines live) they are for.
     key: (usize, usize, usize),
-    rows: Vec<(u32, u32)>,
+    pub(crate) rows: Vec<(u32, u32)>,
 }
 
 /// Columns a character takes in a monospace font: wide East Asian scripts and emoji
