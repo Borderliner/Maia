@@ -3390,15 +3390,19 @@ mod journeys {
         let card = |s: &Sim, name: &str| crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == name).map(|(_, r, _)| *r));
         let done = card(&s, "themes done").unwrap_or_else(|| s.fail("no Done"));
         let top = s.texts.iter().find(|(_, x)| x == "Themes").map(|(r, _)| r.bottom()).unwrap_or_else(|| s.fail("no title"));
+        let full_h = card(&s, ThemeName::ALL[0].label()).map_or(0.0, |r| r.height());
         for t in ThemeName::ALL {
             // In view: its name drawn (the list clips what is scrolled out) above Done.
             let named = |s: &Sim| s.texts.iter().any(|(tr, x)| x == t.label() && tr.top() >= top && tr.bottom() <= done.top());
-            for _ in 0..30 {
+            for _ in 0..120 {
                 let r = card(&s, t.label()).unwrap_or_else(|| s.fail(&format!("{} not drawn", t.label())));
                 if named(&s) && r.top() >= top {
                     break;
                 }
-                let dy = if r.top() < top { 60 } else { -60 };
+                // Cut off at the list's top edge (its outline clipped there): up; else down.
+                let clipped_top = r.height() < full_h - 1.0 && r.top() <= top + 40.0;
+                // Small steps: one wheel notch moves the list by several rows.
+                let dy = if r.top() < top || clipped_top { 6 } else { -6 };
                 s.act(&format!("scroll {:.0} {:.0} {dy}", done.center().x - 200.0, (top + done.top()) / 2.0));
                 s.idle(2);
             }
@@ -3440,6 +3444,19 @@ mod journeys {
         look(&mut s, "code in a light theme");
         s.shot("code-latte");
         assert_eq!(s.app.pal.syntax, Syntax::of(ThemeName::Latte));
+        // Line spacing: the gap between two lines of code grows with it, the text kept
+        // whole in each row.
+        let gap = |s: &mut Sim, spacing: f32| {
+            s.app.cfg.preview_line_spacing = spacing;
+            s.idle(3);
+            let y = |t: &str| s.texts.iter().find(|(_, x)| x.starts_with(t)).map(|(r, _)| r.top()).unwrap_or_else(|| s.fail(&format!("no {t:?}")));
+            y("fn") - y("// demo")
+        };
+        let (tight, roomy) = (gap(&mut s, 1.0), gap(&mut s, 2.0));
+        assert!(roomy > tight * 1.8, "lines spread out: {tight} then {roomy}");
+        s.app.cfg.preview_line_spacing = 1.25;
+        s.idle(2);
+        s.shot("code-line-spacing");
         report("themes", &s);
     }
 

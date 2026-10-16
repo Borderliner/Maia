@@ -1544,6 +1544,7 @@ pub(crate) enum Opt {
     Theme,
     Font,
     InspectorFontSize,
+    LineSpacing,
     RectButtons,
     AssetCache,
     FollowSystem,
@@ -1718,6 +1719,7 @@ pub(crate) const OPTS: &[(Opt, Section, &str, &str, &str)] = &[
     (Opt::InspectorLayout, Section::Preview, "", "Inspector layout", "Where the inspector docks."),
     (Opt::InspectorFont, Section::Preview, "", "Inspector font", "For text previews; empty uses monospace."),
     (Opt::InspectorFontSize, Section::Preview, "", "Inspector font size", "Text size in previews."),
+    (Opt::LineSpacing, Section::Preview, "", "Line spacing", "Room between lines of text and code."),
     (Opt::Meaning, Section::Search, "", "Search by meaning", "Find files by topic, with a local Ollama model."),
     (Opt::MeaningFolders, Section::Search, "", "Folders to search", "Separated by commas; ~ is your home folder."),
     (Opt::MeaningPictures, Section::Search, "", "Include pictures", "Find pictures by what they show."),
@@ -1874,6 +1876,7 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
         Opt::MeaningPictures => f!(semantic_pictures),
         Opt::Font => f!(font_family),
         Opt::InspectorFontSize => f!(inspector_font_size),
+        Opt::LineSpacing => f!(preview_line_spacing),
         Opt::RectButtons => f!(rect_buttons),
         Opt::AssetCache => f!(asset_cache_mb),
         Opt::FollowSystem => f!(follow_system_theme),
@@ -1939,6 +1942,7 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
     match o {
         Opt::Font => ui.add(egui::TextEdit::singleline(&mut c.font_family).hint_text("System font").desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).lost_focus(),
         Opt::InspectorFontSize => stepper(ui, &mut c.inspector_font_size, 0.5, 8.0, 28.0, &pal),
+        Opt::LineSpacing => ui.add(egui::Slider::new(&mut c.preview_line_spacing, 1.0..=2.0).step_by(0.05).fixed_decimals(2)).changed(),
         Opt::RectButtons => toggle(ui, &mut c.rect_buttons, &pal),
         Opt::AssetCache => ui.add(egui::Slider::new(&mut c.asset_cache_mb, 32..=2048).suffix(" MB").logarithmic(true)).changed(),
         Opt::Theme => {

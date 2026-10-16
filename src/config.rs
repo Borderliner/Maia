@@ -123,6 +123,8 @@ pub struct Config {
     pub font_family: String,
     pub font_size: f32,
     pub inspector_font_size: f32,
+    /// Room between lines in text and code previews, as a multiple of the font's own.
+    pub preview_line_spacing: f32,
     pub asset_cache_mb: u32,
     pub spacing: f32,
     pub animations: bool,
@@ -197,6 +199,7 @@ impl Default for Config {
             font_family: String::new(),
             font_size: 12.0,
             inspector_font_size: 12.5,
+            preview_line_spacing: 1.25,
             asset_cache_mb: 256,
             spacing: 1.0,
             animations: true,

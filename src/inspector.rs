@@ -609,7 +609,7 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         Content::Text { lines, truncated, spans, prose } => {
             let wrap = if *prose { ins.wrap_prose } else { ins.wrap_code };
             let wrapped = if wrap { Some(&mut ins.wrapped) } else { None };
-            text_view(&mut bui, body, lines, *truncated, spans.as_deref(), ins.line_numbers, wrapped, env.cfg.inspector_font_size + ins.text_size, &pal, false);
+            text_view(&mut bui, body, lines, *truncated, spans.as_deref(), ins.line_numbers, wrapped, env.cfg.inspector_font_size + ins.text_size, &pal, false, env.cfg.preview_line_spacing);
         }
         Content::Binary(bytes) => {
             let mut lines = vec!["Binary file: first 4 KB shown as hex".to_string(), String::new()];
@@ -618,7 +618,7 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                 let ascii: String = chunk.iter().map(|&b| if (32..127).contains(&b) { b as char } else { '.' }).collect();
                 lines.push(format!("{:08x}  {:<47}  {}", i * 16, hex.join(" "), ascii));
             }
-            text_view(&mut bui, body, &lines, false, None, false, None, env.cfg.inspector_font_size + ins.text_size, &pal, false);
+            text_view(&mut bui, body, &lines, false, None, false, None, env.cfg.inspector_font_size + ins.text_size, &pal, false, env.cfg.preview_line_spacing);
         }
         Content::Folder(entries) => folder_view(&mut bui, body, entries, env),
         Content::Volume => volume_view(&mut bui, body, &e, vol.as_ref(), &pal),
@@ -1087,9 +1087,17 @@ pub fn wrap_line(line: &str, cols: usize, out: &mut Vec<u32>) {
 
 /// `diff`: lines of a unified diff, tinted green where added and red where removed.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bool, spans: Option<&[Vec<(usize, usize, crate::syntax::Kind)>]>, numbers: bool, wrapped: Option<&mut Option<Wrapped>>, size: f32, pal: &theme::Palette, diff: bool) {
+/// A text preview's row: the font's own line height times the line spacing setting.
+pub(crate) fn row_height(ui: &Ui, size: f32, spacing: f32) -> f32 {
+    ui.fonts_mut(|f| (f.row_height(&FontId::monospace(size)) * spacing.clamp(1.0, 2.0)).round().max(1.0))
+}
+
+pub(crate) fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bool, spans: Option<&[Vec<(usize, usize, crate::syntax::Kind)>]>, numbers: bool, wrapped: Option<&mut Option<Wrapped>>, size: f32, pal: &theme::Palette, diff: bool, spacing: f32) {
     let font = FontId::monospace(size);
-    let (row_h, cw) = ui.fonts_mut(|f| (f.row_height(&font) + 1.0, f.glyph_width(&font, 'M')));
+    let (line_h, cw) = ui.fonts_mut(|f| (f.row_height(&font), f.glyph_width(&font, 'M')));
+    let row_h = row_height(ui, size, spacing);
+    // Text sits in the middle of its (taller) row.
+    let lift = ((row_h - line_h) / 2.0).floor().max(0.0);
     let gutter = if numbers { (lines.len().max(1).to_string().len() as f32) * size * 0.62 + 16.0 } else { 6.0 };
     let mut inner = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(4.0, 4.0))));
     // Wrapping: rows are (line, start byte), made again only when the width or the text
@@ -1122,7 +1130,8 @@ pub(crate) fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bo
         let last = ((vp.max.y / row_h).ceil() as usize + 1).min(n);
         let p = ui.painter();
         for i in first..last {
-            let y = r.top() + i as f32 * row_h;
+            let top = r.top() + i as f32 * row_h;
+            let y = top + lift;
             if i == total {
                 p.text(pos2(r.left() + gutter, y), Align2::LEFT_TOP, "… (preview truncated at 1 MB)", font.clone(), pal.text_dim);
                 continue;
@@ -1149,7 +1158,7 @@ pub(crate) fn text_view(ui: &mut Ui, body: Rect, lines: &[String], truncated: bo
                 _ => Color32::TRANSPARENT,
             };
             if tint != Color32::TRANSPARENT {
-                p.rect_filled(Rect::from_min_size(pos2(r.left(), y), vec2(r.width(), row_h)), CornerRadius::ZERO, tint.gamma_multiply(if pal.dark { 0.13 } else { 0.11 }));
+                p.rect_filled(Rect::from_min_size(pos2(r.left(), top), vec2(r.width(), row_h)), CornerRadius::ZERO, tint.gamma_multiply(if pal.dark { 0.13 } else { 0.11 }));
             }
             if mark == Some(b'@') || mark == Some(b'\\') {
                 p.text(pos2(r.left() + gutter, y), Align2::LEFT_TOP, &line[a..b], font.clone(), pal.text_dim);

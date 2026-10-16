@@ -1720,7 +1720,9 @@ fn commit(ui: &mut Ui, body: Rect, h: &mut History, wrap: bool, env: &mut Env) {
         // screen are drawn and only their pictures read.
         let row_h = (fs + 4.0 + 4.0 * sp).round();
         let code = env.cfg.inspector_font_size;
-        let (line_h, cw) = ui.fonts_mut(|f| (f.row_height(&FontId::monospace(code)) + 1.0, f.glyph_width(&mono, '0')));
+        let spacing = env.cfg.preview_line_spacing;
+        let line_h = crate::inspector::row_height(ui, code, env.cfg.preview_line_spacing);
+        let cw = ui.fonts_mut(|f| f.glyph_width(&mono, '0'));
         let pic_small = (fs * 4.6).round();
         let pic_big = (fs * 15.0).round().min(body.height() * 0.6).max(pic_small);
         let cap = (body.height() * 0.62).max(line_h * 8.0);
@@ -1903,7 +1905,7 @@ fn commit(ui: &mut Ui, body: Rect, h: &mut History, wrap: bool, env: &mut Env) {
                             x.wrapped = None;
                         }
                         let wrapped = if wrap { Some(&mut x.wrapped) } else { None };
-                        crate::inspector::text_view(&mut cui, b, lines, *cut, spans.as_deref(), false, wrapped, code, &pal, true);
+                        crate::inspector::text_view(&mut cui, b, lines, *cut, spans.as_deref(), false, wrapped, code, &pal, true, spacing);
                     }
                 }
                 if x.text.is_none() {
@@ -2015,7 +2017,7 @@ fn whole(ui: &mut Ui, body: Rect, h: &mut History, wrap: bool, env: &mut Env) {
                 h.wrapped = None;
             }
             let wrapped = if wrap { Some(&mut h.wrapped) } else { None };
-            crate::inspector::text_view(ui, body, lines, *cut, spans.as_deref(), !*is_diff, wrapped, env.cfg.inspector_font_size, &pal, *is_diff)
+            crate::inspector::text_view(ui, body, lines, *cut, spans.as_deref(), !*is_diff, wrapped, env.cfg.inspector_font_size, &pal, *is_diff, env.cfg.preview_line_spacing)
         }
         Some(View::Pic(tex, dims)) => {
             let a = body.shrink(12.0);
