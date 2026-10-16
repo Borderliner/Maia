@@ -1241,7 +1241,28 @@ impl App {
         let hint = if t.content.on { if fw < 150.0 { "Find…".into() } else { "Find in files…".into() } } else { hint };
         let before = t.filter.clone();
         let mut fui = ui.new_child(UiBuilder::new().max_rect(edit_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        let resp = fui.add(egui::TextEdit::singleline(&mut t.filter).hint_text(hint).frame(false).desired_width(edit_rect.width()).font(egui::TextStyle::Body));
+        // Conditions the filter understands (size>10M, modified<7d) show in the accent.
+        let (accent, text) = (pal.accent, pal.text);
+        let mut conds = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+            let s = buf.as_str();
+            let font = egui::TextStyle::Body.resolve(ui.style());
+            let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
+            let mut job = egui::text::LayoutJob::default();
+            let mut at = 0;
+            for (a, b) in crate::query::parse(s, std::time::SystemTime::now()).spans {
+                job.append(&s[at..a], 0.0, fmt(text));
+                job.append(&s[a..b], 0.0, fmt(accent));
+                at = b;
+            }
+            job.append(&s[at..], 0.0, fmt(text));
+            job.wrap.max_width = wrap;
+            ui.fonts_mut(|f| f.layout_job(job))
+        };
+        let mut edit = egui::TextEdit::singleline(&mut t.filter).hint_text(hint).frame(false).desired_width(edit_rect.width()).font(egui::TextStyle::Body);
+        if before.contains(['>', '<', '=', ':']) {
+            edit = edit.layouter(&mut conds);
+        }
+        let resp = fui.add(edit);
         if focus_req {
             resp.request_focus();
             if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), resp.id) {

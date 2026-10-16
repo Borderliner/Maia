@@ -253,7 +253,8 @@ pub fn listing(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         t.check_drag = None;
     }
     // Contents mode matched inside the files: no letters of the name to highlight.
-    let q = fuzzy::Query::new(if t.content.on { "" } else { &t.filter });
+    let name = crate::query::name_part(&t.filter);
+    let q = fuzzy::Query::new(if t.content.on { "" } else { &name });
     let mut ui = ui.new_child(UiBuilder::new().max_rect(rect).id_salt(("listing", env.panel_id, t.id)));
     ui.set_clip_rect(rect.intersect(ui.clip_rect()));
     match mode_for(t.shown_zoom) {
@@ -856,7 +857,7 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                     let mut job = name_job(&name, suffix.as_deref(), q, &font, dimc(pal.text), dimc(pal.text_dim), pal.accent, name_r.width(), 1);
                                     // The line that matched, after the name (elided with it).
                                     if let Some(line) = t.content.snippet(&e.path) {
-                                        append_match(&mut job, line, t.filter.trim(), &font, dimc(pal.text_dim), pal.accent);
+                                        append_match(&mut job, line, crate::query::name_part(&t.filter).trim(), &font, dimc(pal.text_dim), pal.accent);
                                     }
                                     let g = ui.fonts_mut(|f| f.layout_job(job));
                                     ui.painter().galley(pos2(name_r.left(), cell.center().y - g.size().y / 2.0), g, pal.text);

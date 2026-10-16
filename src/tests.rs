@@ -1771,3 +1771,61 @@ fn checksums_match_known_values_and_pasted_formats() {
     };
     assert_eq!(r, Err("No such file or directory".into()));
 }
+
+#[test]
+fn filter_conditions_by_size_and_date() {
+    use std::time::SystemTime;
+    let d = tmpdir("filterq");
+    let now = SystemTime::now();
+    let day = Duration::from_secs(86_400);
+    // name, bytes, age
+    let files = [("tiny.txt", 10, 0), ("page.html", 3000, 2), ("photo.jpg", 2 << 20, 10), ("movie.mkv", 150 << 20, 400), ("empty.log", 0, 40)];
+    for (name, n, age) in files {
+        let f = std::fs::File::create(d.join(name)).unwrap();
+        f.set_len(n).unwrap();
+        f.set_modified(now - day * age).unwrap();
+    }
+    std::fs::create_dir(d.join("Big folder")).unwrap();
+    let mut stats = HashMap::new();
+    let mut t = Tab::new(77, d.clone(), ViewSettings::default(), egui::Context::default());
+    pump(&mut t, &stats);
+    let mut shown = |t: &mut Tab, stats: &HashMap<PathBuf, crate::stats::DirStats>, f: &str| -> Vec<String> {
+        t.filter = f.into();
+        pump(t, stats);
+        let mut v: Vec<String> = t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(shown(&mut t, &stats, "size>1M"), ["movie.mkv", "photo.jpg"]);
+    assert_eq!(shown(&mut t, &stats, "size<2k"), ["empty.log", "tiny.txt"]);
+    assert_eq!(shown(&mut t, &stats, "size<3k"), ["empty.log", "page.html", "tiny.txt"], "k is 1024");
+    assert_eq!(shown(&mut t, &stats, "size<=3000"), ["empty.log", "page.html", "tiny.txt"]);
+    assert_eq!(shown(&mut t, &stats, "size:0"), ["empty.log"]);
+    assert_eq!(shown(&mut t, &stats, "SIZE>1.5mb size<100MiB"), ["photo.jpg"]);
+    assert_eq!(shown(&mut t, &stats, "modified<7d"), ["Big folder", "page.html", "tiny.txt"]);
+    assert_eq!(shown(&mut t, &stats, "modified>1y"), ["movie.mkv"]);
+    assert_eq!(shown(&mut t, &stats, "date:today"), ["Big folder", "tiny.txt"]);
+    assert_eq!(shown(&mut t, &stats, "mod>=30d size>1k"), ["movie.mkv"]);
+    // Conditions and a name search together; a folder's size counts once it is known.
+    assert_eq!(shown(&mut t, &stats, "o size>1k"), ["movie.mkv", "photo.jpg"]);
+    stats.insert(d.join("Big folder"), crate::stats::DirStats { size: 5 << 30, ..Default::default() });
+    assert_eq!(shown(&mut t, &stats, "size>1g"), ["Big folder"]);
+    // Words that only look like conditions stay part of the name search.
+    assert_eq!(shown(&mut t, &stats, "size>huge"), Vec::<String>::new());
+    assert_eq!(crate::query::name_part("size>huge"), "size>huge");
+    assert_eq!(crate::query::name_part("report modified<2w"), "report");
+    assert_eq!(crate::query::name_part("a:b"), "a:b");
+    // Dates are local days, months and years.
+    let tm = crate::timefmt::local(now);
+    let (y, m, dd) = (tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+    assert_eq!(shown(&mut t, &stats, &format!("modified:{y:04}-{m:02}-{dd:02}")), ["Big folder", "tiny.txt"]);
+    let before_year = shown(&mut t, &stats, &format!("modified<{y:04}"));
+    assert!(before_year.contains(&"movie.mkv".to_string()) && !before_year.contains(&"tiny.txt".to_string()), "{before_year:?}");
+    let this_month = shown(&mut t, &stats, &format!("modified>={y:04}-{m:02}"));
+    assert!(this_month.contains(&"tiny.txt".to_string()) && !this_month.contains(&"movie.mkv".to_string()), "{this_month:?}");
+    // Spans mark exactly the recognised words.
+    let f = crate::query::parse("big size>10M  modified<7d x", now);
+    assert_eq!(f.spans, vec![(4, 12), (14, 25)]);
+    assert_eq!(f.name, "big x");
+    let _ = std::fs::remove_dir_all(&d);
+}

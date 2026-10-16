@@ -838,7 +838,8 @@ impl Tab {
         self.dirty = false;
         self.stream_dirty = false;
         let walking = self.walk.as_ref().map(|w| !w.done.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(false);
-        let q = fuzzy::Query::new(if content.is_some() { "" } else { &self.filter });
+        let fq = crate::query::parse(&self.filter, std::time::SystemTime::now());
+        let q = fuzzy::Query::new(if content.is_some() { "" } else { &fq.name });
         let only: HashSet<String> = self.settings.only_types.iter().cloned().collect();
         let (show_folders, show_files) = (self.settings.show_folders, self.settings.show_files);
         let flatten = self.flatten;
@@ -857,6 +858,9 @@ impl Tab {
             if content.is_some_and(|h| e.is_dir || !h.contains_key(&e.path)) {
                 return false;
             }
+            if fq.has_conds() && !fq.ok(e, c.stats) {
+                return false;
+            }
             only.is_empty() || only.contains(e.special_kind().map(String::from).unwrap_or_else(|| db.label(&e.name, &e.ext(), e.is_dir, e.is_executable())).as_str())
         };
         let mut hidden_count = 0;
@@ -866,7 +870,7 @@ impl Tab {
         // Fuzzy score of each entry in `top` (same order), when filtering.
         let mut scores: Vec<i32> = vec![];
         let tree_view = self.tree_active();
-        let tree = tree_view && q.is_empty() && only.is_empty() && content.is_none();
+        let tree = tree_view && q.is_empty() && only.is_empty() && content.is_none() && !fq.has_conds();
         self.dimmed.clear();
         if tree_view && !tree {
             self.rebuild_tree_filtered(c, &q, &hidden_ok, &row_ok);

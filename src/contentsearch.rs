@@ -67,7 +67,8 @@ impl Drop for State {
 /// Keep the tab's search in step with its filter, folder and the hidden-files setting,
 /// and take in what the workers found. Called every frame; allocates only on a change.
 pub fn pump(t: &mut Tab, hidden: bool) {
-    let q = t.filter.trim();
+    let name = crate::query::name_part(&t.filter);
+    let q = name.trim();
     let active = t.content.on && !q.is_empty() && !crate::tab::is_computer(&t.path);
     let same = match &t.content.key {
         None => !active,

@@ -26,6 +26,7 @@ mod network;
 mod ops;
 mod panel;
 mod popups;
+mod query;
 mod rename;
 mod runner;
 mod sidebar;

@@ -2483,6 +2483,85 @@ mod journeys {
         report("archives", &s);
     }
 
+    /// Size and date conditions typed into the filter, alone and with a name, in every
+    /// view, flattened, in contents mode, and words that only look like conditions.
+    #[test]
+    fn filter_by_size_and_date() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("filterq");
+        let d = home.join("Documents");
+        let now = std::time::SystemTime::now();
+        let day = std::time::Duration::from_secs(86_400);
+        for (name, n, age) in [("big video.mkv", 300u64 << 20, 500u64), ("small note.txt", 40, 1), ("Taxes/2025/scan.pdf", 4 << 20, 3)] {
+            let f = std::fs::File::create(d.join(name)).unwrap();
+            f.set_len(n).unwrap();
+            f.set_modified(now - day * age as u32).unwrap();
+        }
+        std::fs::write(d.join("lazy note.txt"), "a lazy afternoon").unwrap();
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        let names = |s: &Sim| -> Vec<String> {
+            let t = s.tab();
+            let mut v: Vec<String> = t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect();
+            v.sort();
+            v
+        };
+        s.act("key ctrl+f");
+        s.act("text size>100M");
+        s.settle();
+        assert_eq!(names(&s), ["big video.mkv"]);
+        assert!(s.texts.iter().any(|(_, t)| t == "size>100M"), "the condition stays in the field");
+        look(&mut s, "size condition");
+        for v in [ViewTree, ViewList, ViewMedium, ViewLarge, ViewDetails] {
+            s.cmd(v);
+            s.settle();
+            assert!(names(&s).contains(&"big video.mkv".to_string()), "{v:?}");
+            look(&mut s, &format!("size condition {v:?}"));
+        }
+        // Older than a year, then a name and an age together.
+        s.act("key ctrl+a");
+        s.act("text modified>1y");
+        s.settle();
+        assert_eq!(names(&s), ["big video.mkv"]);
+        s.act("key ctrl+a");
+        s.act("text note modified<1w");
+        s.settle();
+        assert_eq!(names(&s), ["lazy note.txt", "notes.txt", "small note.txt"]);
+        // Flattened: the scan two folders down.
+        s.act("key ctrl+a");
+        s.act("text size>1M modified<7d");
+        s.cmd(ToggleFlatten);
+        wait_until(&mut s, "flattened", 10, |s| !s.tab().is_loading());
+        s.settle();
+        assert_eq!(names(&s), ["scan.pdf"]);
+        look(&mut s, "conditions flattened");
+        s.cmd(ToggleFlatten);
+        s.settle();
+        // Contents mode: the condition narrows the files searched.
+        click_control(&mut s, "contents toggle");
+        s.act("key ctrl+a");
+        s.act("text lazy size<1k");
+        // The toggle hands focus back to the field: Ctrl+A selects its text, not the files.
+        wait_until(&mut s, "contents search with a size", 10, |s| names(s) == ["lazy note.txt"]);
+        s.act("key ctrl+a");
+        s.act("text lazy size>1k");
+        s.idle(2);
+        wait_until(&mut s, "contents search done", 10, |s| !s.tab().content.busy());
+        s.settle();
+        assert!(names(&s).is_empty(), "the only file with the word is under 1 KB");
+        click_control(&mut s, "contents toggle");
+        // Not a condition: searched as a name, nothing found.
+        s.act("key ctrl+a");
+        s.act("text size>big");
+        s.settle();
+        assert!(names(&s).is_empty());
+        s.act("key Escape");
+        s.settle();
+        assert!(s.tab().filter.is_empty() && names(&s).len() > 3);
+        report("filterq", &s);
+    }
+
     /// Properties of a file: work out its SHA-256 and copy it; paste a checksum that is
     /// wrong, then the file's real MD5, and see each verdict.
     #[test]
