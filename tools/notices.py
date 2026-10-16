@@ -15,6 +15,9 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "assets", "THIRD-PARTY-NOTICES.txt")
 NAMES = ("license", "licence", "copying", "notice", "unlicense", "copyright")
+# Crates offering several licences that are taken under one: (its file, the licence,
+# where to find the crate).
+CHOSEN = {"nohash-hasher": ("LICENSE-APACHE", "Apache-2.0", "https://crates.io/crates/nohash-hasher")}
 
 
 def crates():
@@ -52,6 +55,8 @@ def texts(package):
     rest = [p for p in found if "0bsd" not in os.path.basename(p).lower()]
     if rest:
         found = rest
+    if package["name"] in CHOSEN:
+        found = [p for p in found if os.path.basename(p) == CHOSEN[package["name"]][0]]
     out = []
     for path in found:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -65,7 +70,11 @@ def main():
     for p in crates():
         label = f"{p['name']} {p['version']}"
         source = p.get("repository") or f"https://crates.io/crates/{p['name']}"
-        listing.append(f"  {label:<40} {p.get('license') or 'see its licence file'}\n    {source}")
+        licence = p.get("license") or "see its licence file"
+        if p["name"] in CHOSEN:
+            _, chosen, source = CHOSEN[p["name"]]
+            licence = f"{licence}, taken as {chosen}"
+        listing.append(f"  {label:<40} {licence}\n    {source}")
         bodies = texts(p)
         if not bodies:
             missing.append(p)
