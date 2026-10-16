@@ -1697,10 +1697,15 @@ fn commit(ui: &mut Ui, body: Rect, h: &mut History, wrap: bool, env: &mut Env) {
         let mut x = r.left() + 8.0;
         let parts = [(summary(files.len()), &small, pal.text_dim, true), (format!("+{}", o.totals.0), &mono, crate::gitstatus::GREEN, o.totals.0 > 0), (format!("−{}", o.totals.1), &mono, pal.danger, o.totals.1 > 0)];
         for (k, (t, f, c, shown)) in parts.into_iter().enumerate() {
-            if !shown || end - x < 24.0 {
+            if !shown || end - x < 12.0 {
                 continue;
             }
-            let g = crate::listing::elided(ui, &t, f.clone(), end - x, c);
+            // The words may end in "…"; a count shows whole or not at all (a short "−9"
+            // was left out with room to spare).
+            let g = if k == 0 { crate::listing::elided(ui, &t, f.clone(), end - x, c) } else { ui.painter().layout_no_wrap(t, f.clone(), c) };
+            if k > 0 && g.size().x > end - x {
+                break;
+            }
             let w = g.size().x;
             ui.painter().galley(pos2(x, r.center().y - g.size().y / 2.0), g, c);
             x += w + if k == 0 { 10.0 } else { 6.0 };
