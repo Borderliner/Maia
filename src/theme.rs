@@ -23,10 +23,14 @@ pub enum ThemeName {
     OneDark,
     SolarizedLight,
     RosePineDawn,
+    Everforest,
+    Kanagawa,
+    GruvboxLight,
+    AyuLight,
 }
 
 impl ThemeName {
-    pub const ALL: [ThemeName; 15] = [
+    pub const ALL: [ThemeName; 19] = [
         ThemeName::Midnight,
         ThemeName::Graphite,
         ThemeName::Lagoon,
@@ -37,11 +41,15 @@ impl ThemeName {
         ThemeName::Dracula,
         ThemeName::Nord,
         ThemeName::OneDark,
+        ThemeName::Everforest,
+        ThemeName::Kanagawa,
         ThemeName::Paper,
         ThemeName::Linen,
         ThemeName::Latte,
         ThemeName::SolarizedLight,
         ThemeName::RosePineDawn,
+        ThemeName::GruvboxLight,
+        ThemeName::AyuLight,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -60,6 +68,10 @@ impl ThemeName {
             ThemeName::OneDark => "One Dark",
             ThemeName::SolarizedLight => "Solarized Light",
             ThemeName::RosePineDawn => "Rosé Pine Dawn",
+            ThemeName::Everforest => "Everforest",
+            ThemeName::Kanagawa => "Kanagawa",
+            ThemeName::GruvboxLight => "Gruvbox Light",
+            ThemeName::AyuLight => "Ayu Light",
         }
     }
     /// A line about the theme, under its name in the theme picker.
@@ -80,10 +92,14 @@ impl ThemeName {
             ThemeName::OneDark => "The classic editor dark",
             ThemeName::SolarizedLight => "Warm and low-glare",
             ThemeName::RosePineDawn => "Soft rose and pine",
+            ThemeName::Everforest => "Calm forest greens",
+            ThemeName::Kanagawa => "Ink and a great wave",
+            ThemeName::GruvboxLight => "Warm and retro, by day",
+            ThemeName::AyuLight => "Bright and clean",
         }
     }
     pub fn is_light(self) -> bool {
-        matches!(self, ThemeName::Paper | ThemeName::Linen | ThemeName::Latte | ThemeName::SolarizedLight | ThemeName::RosePineDawn)
+        matches!(self, ThemeName::Paper | ThemeName::Linen | ThemeName::Latte | ThemeName::SolarizedLight | ThemeName::RosePineDawn | ThemeName::GruvboxLight | ThemeName::AyuLight)
     }
 }
 
@@ -129,6 +145,10 @@ impl Syntax {
             // The light ones' greens, yellows and cyans a shade deeper, to read on their base.
             ThemeName::SolarizedLight => (c(0x7d, 0x8f, 0x00), c(0xaa, 0x80, 0x00), c(0x26, 0x94, 0x8b), c(0x93, 0xa1, 0xa1), c(0xd3, 0x36, 0x82)),
             ThemeName::RosePineDawn => (c(0x28, 0x69, 0x83), c(0x52, 0x8e, 0x98), c(0xb6, 0x7a, 0x28), c(0x98, 0x93, 0xa5), c(0xbd, 0x72, 0x6e)),
+            ThemeName::Everforest => (c(0xe6, 0x7e, 0x80), c(0xdb, 0xbc, 0x7f), c(0xa7, 0xc0, 0x80), c(0x85, 0x92, 0x89), c(0xd6, 0x99, 0xb6)),
+            ThemeName::Kanagawa => (c(0x95, 0x7f, 0xb8), c(0x7a, 0xa8, 0x9f), c(0x98, 0xbb, 0x6c), c(0x72, 0x71, 0x69), c(0xd2, 0x7e, 0x99)),
+            ThemeName::GruvboxLight => (c(0x9d, 0x00, 0x06), c(0xb5, 0x76, 0x14), c(0x79, 0x74, 0x0e), c(0x92, 0x83, 0x74), c(0x8f, 0x3f, 0x71)),
+            ThemeName::AyuLight => (c(0xcd, 0x73, 0x32), c(0x34, 0x91, 0xd3), c(0x70, 0x96, 0x00), c(0xa9, 0xaa, 0xad), c(0x9f, 0x77, 0xc7)),
         };
         Syntax { keyword, kind, string, comment, number }
     }
@@ -460,6 +480,82 @@ fn base_palette(t: ThemeName) -> Palette {
             text_dim: c(0x79, 0x75, 0x93),
             border: c(0xdf, 0xda, 0xd9),
             danger: c(0xb4, 0x63, 0x7a),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(false),
+        },
+        ThemeName::Everforest => Palette {
+            dark: true,
+            bg: c(0x23, 0x2a, 0x2e),
+            panel: c(0x2d, 0x35, 0x3b),
+            sidebar: c(0x27, 0x2e, 0x33),
+            raised: c(0x34, 0x3f, 0x44),
+            hover: c(0x3d, 0x48, 0x4d),
+            selected: c(0x47, 0x52, 0x58),
+            cursor: c(0x4f, 0x58, 0x5e),
+            accent: c(0xa7, 0xc0, 0x80),
+            text: c(0xd3, 0xc6, 0xaa),
+            text_dim: c(0x9d, 0xa9, 0xa0),
+            border: c(0x3d, 0x48, 0x4d),
+            danger: c(0xe6, 0x7e, 0x80),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+        },
+        ThemeName::Kanagawa => Palette {
+            dark: true,
+            bg: c(0x16, 0x16, 0x1d),
+            panel: c(0x1f, 0x1f, 0x28),
+            sidebar: c(0x1a, 0x1a, 0x22),
+            raised: c(0x2a, 0x2a, 0x37),
+            hover: c(0x2a, 0x2a, 0x37),
+            selected: c(0x22, 0x32, 0x49),
+            cursor: c(0x2d, 0x4f, 0x67),
+            accent: c(0x7e, 0x9c, 0xd8),
+            text: c(0xdc, 0xd7, 0xba),
+            text_dim: c(0x93, 0x8f, 0x7f),
+            border: c(0x2a, 0x2a, 0x37),
+            danger: c(0xe8, 0x24, 0x24),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+        },
+        ThemeName::GruvboxLight => Palette {
+            dark: false,
+            bg: c(0xf2, 0xe5, 0xbc),
+            panel: c(0xfb, 0xf1, 0xc7),
+            sidebar: c(0xf2, 0xe5, 0xbc),
+            raised: c(0xeb, 0xdb, 0xb2),
+            hover: c(0xf2, 0xe5, 0xbc),
+            selected: c(0xe5, 0xd5, 0xab),
+            cursor: c(0xd5, 0xc4, 0xa1),
+            accent: c(0x07, 0x66, 0x78),
+            text: c(0x3c, 0x38, 0x36),
+            text_dim: c(0x7c, 0x6f, 0x64),
+            border: c(0xe0, 0xd0, 0xa8),
+            danger: c(0x9d, 0x00, 0x06),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(false),
+        },
+        ThemeName::AyuLight => Palette {
+            dark: false,
+            bg: c(0xf0, 0xf1, 0xf2),
+            panel: c(0xfc, 0xfc, 0xfc),
+            sidebar: c(0xf3, 0xf4, 0xf5),
+            raised: c(0xe9, 0xea, 0xeb),
+            hover: c(0xee, 0xf0, 0xf2),
+            selected: c(0xdc, 0xe9, 0xf5),
+            cursor: c(0xc8, 0xdb, 0xf0),
+            accent: c(0xff, 0x99, 0x40),
+            text: c(0x52, 0x57, 0x5b),
+            text_dim: c(0x8a, 0x91, 0x99),
+            border: c(0xe1, 0xe3, 0xe6),
+            danger: c(0xe6, 0x50, 0x50),
             chrome: z,
             alt: z,
             row_hover: z,
