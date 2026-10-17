@@ -3155,13 +3155,15 @@ fn every_option_has_one_section() {
         Opt::Editor => 56,
         Opt::IgnoredFiles => 57,
         Opt::TrashAge => 58,
+        Opt::PictureViewer => 61,
     };
-    let mut seen = vec![0; 59];
+    let numbered: Vec<usize> = (0..59).chain([61]).collect();
+    let mut seen = vec![0; 64];
     for o in OPTS {
         seen[index(o.0)] += 1;
     }
     for (i, n) in seen.iter().enumerate() {
-        assert_eq!(*n, 1, "option {i} listed {n} times");
+        assert_eq!(*n, numbered.contains(&i) as usize, "option {i} listed {n} times");
     }
     // Sections in the order of the left column, each a block; groups never split.
     let order: Vec<Section> = OPTS.iter().map(|o| o.1).fold(vec![], |mut v, s| {
@@ -6002,5 +6004,270 @@ fn smart_folders_find_what_they_say() {
     std::fs::write(&path, r#"{"bookmarks": ["/tmp"], "smart": [{"id": 4, "name": "Scans", "root": "/tmp", "kinds": ["pdfs", "holograms"], "colour": "red"}]}"#).unwrap();
     let later: crate::config::UserData = crate::config::load_json(&path);
     assert_eq!((later.bookmarks.len(), later.smart[0].name.as_str(), later.smart[0].kinds.len()), (1, "Scans", 2));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Fake snapshot trees: Snapper's numbered snapshots with info.xml, Timeshift's dated
+/// btrfs and rsync snapshots with info.json, each found through a mount table written
+/// the way /proc/self/mountinfo is.
+pub fn snapshot_fixture(d: &Path) -> (PathBuf, String) {
+    let vol = d.join("vol");
+    let file = vol.join("docs/report.txt");
+    let at = |p: &Path, days: u64| {
+        let t = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_791_792_001 - days * 86_400);
+        std::fs::File::options().write(true).open(p).unwrap().set_modified(t).unwrap();
+    };
+    touch(&file, "fourth draft, the one in use\n");
+    at(&file, 0);
+    let snap = |n: u32, date: &str, desc: &str, text: Option<(&str, u64)>| {
+        let s = vol.join(format!(".snapshots/{n}"));
+        std::fs::create_dir_all(s.join("snapshot/docs")).unwrap();
+        std::fs::write(s.join("info.xml"), format!("<?xml version=\"1.0\"?>\n<snapshot>\n  <type>single</type>\n  <num>{n}</num>\n  <date>{date}</date>\n  <description>{desc}</description>\n  <cleanup>timeline</cleanup>\n</snapshot>\n")).unwrap();
+        if let Some((t, days)) = text {
+            let f = s.join("snapshot/docs/report.txt");
+            std::fs::write(&f, t).unwrap();
+            at(&f, days);
+        }
+    };
+    // 5 is the file as it is now; 4 has no such file; 2 holds what 3 does under an
+    // older time; 1 is as long as 3 with other words in it.
+    snap(5, "2026-10-12 06:00:00", "timeline", Some(("fourth draft, the one in use\n", 0)));
+    snap(4, "2026-10-11 06:00:00", "timeline", None);
+    snap(3, "2026-10-10 06:00:00", "before &amp; after", Some(("third\n", 2)));
+    snap(2, "2026-10-09 06:00:00", "", Some(("third\n", 3)));
+    snap(1, "2026-10-08 06:00:00", "first", Some(("frist\n", 4)));
+    std::fs::create_dir_all(vol.join(".snapshots/0/snapshot/docs")).unwrap();
+    std::fs::write(vol.join(".snapshots/0/snapshot/docs/report.txt"), "zero").unwrap();
+    // Timeshift on btrfs: the file system's top mounted beside it.
+    let ts = d.join("top/timeshift-btrfs/snapshots/2026-10-07_09-00-00");
+    touch(&ts.join("@home/docs/report.txt"), "an old btrfs copy\n");
+    std::fs::write(ts.join("info.json"), r#"{"created" : "1791363600", "sys-uuid" : "x", "tags" : "D", "comments" : "before update"}"#).unwrap();
+    // Timeshift with rsync, on a backup disk.
+    let rs = d.join("backup/timeshift/snapshots/2026-10-06_10-00-00");
+    touch(&rs.join("localhost").join(file.strip_prefix("/").unwrap()), "rsync copy, the oldest\n");
+    std::fs::write(rs.join("info.json"), r#"{"tags" : "W M"}"#).unwrap();
+    let esc = |p: &Path| p.display().to_string().replace(' ', "\\040");
+    let table = format!(
+        "40 1 0:33 /@ / rw,noatime shared:1 - btrfs /dev/sda2 rw,subvolid=256,subvol=/@\n\
+         38 40 0:7 / /dev rw,nosuid shared:2 - devtmpfs devtmpfs rw,size=16195776k\n\
+         60 40 0:50 /@home {} rw,noatime shared:9 - btrfs /dev/sdb1 rw,subvolid=257,subvol=/@home\n\
+         61 40 0:50 / {} rw,noatime shared:10 - btrfs /dev/sdb1 rw,subvolid=5,subvol=/\n\
+         62 40 8:17 / {} rw,relatime shared:11 - ext4 /dev/sdc1 rw\n\
+         63 40 0:60 / {}/net rw shared:12 - nfs4 nas:/x rw\n",
+        esc(&vol),
+        esc(&d.join("top")),
+        esc(&d.join("backup")),
+        esc(d)
+    );
+    (file, table)
+}
+
+/// A folder for Show Space Used: a folder of 500,000 bytes in two levels, a file of
+/// 400,000, a folder of 10 bytes, an empty one, and a link to the big folder.
+pub fn space_fixture(d: &Path) {
+    std::fs::create_dir_all(d.join("Big/Sub")).unwrap();
+    std::fs::write(d.join("Big/a.bin"), vec![1u8; 300_000]).unwrap();
+    std::fs::write(d.join("Big/Sub/b.bin"), vec![2u8; 200_000]).unwrap();
+    std::fs::write(d.join("movie.mkv"), vec![3u8; 400_000]).unwrap();
+    std::fs::create_dir_all(d.join("Small")).unwrap();
+    std::fs::write(d.join("Small/c.txt"), "ten bytes!").unwrap();
+    std::fs::create_dir_all(d.join("Empty")).unwrap();
+    let _ = std::os::unix::fs::symlink(d.join("Big"), d.join("big-link"));
+}
+
+#[test]
+fn space_used_lists_biggest_first_as_sizes_land() {
+    use crate::spaceuse::State;
+    let d = tmpdir("space");
+    space_fixture(&d);
+    let ctx = egui::Context::default();
+    let mut stats = crate::stats::Stats::new(ctx.clone());
+    let mut st = State::new(d.clone(), &ctx);
+    let t0 = Instant::now();
+    while st.counting() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "sizes never came");
+        stats.pump();
+        st.pump(&mut stats, &ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let shown: Vec<(&str, Option<u64>)> = st.order.iter().map(|&k| (st.items[k as usize].entry.name.as_str(), st.items[k as usize].size)).collect();
+    assert_eq!(shown, vec![("Big", Some(500_000)), ("movie.mkv", Some(400_000)), ("Small", Some(10)), ("big-link", Some(0)), ("Empty", Some(0))], "folders by everything under them, a link by itself");
+    assert_eq!(st.total(), 900_010);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn picture_viewer_steps_fits_and_fades_its_name() {
+    use crate::viewer::{Pic, State, fit_scale, is_picture};
+    assert!(["jpg", "jpeg", "png", "webp", "gif", "bmp", "svg"].iter().all(|e| is_picture(e)));
+    assert!(!is_picture("txt") && !is_picture("mp4") && !is_picture("pdf"));
+    let pics: Vec<Pic> = (0..3).map(|i| Pic { path: PathBuf::from(format!("/p/{i}.png")), name: format!("{i}.png"), modified: None }).collect();
+    let mut st = State::new(1, pics, 1, 10.0);
+    assert_eq!(st.label_alpha(11.0, true), 1.0, "shown while the pointer has just moved");
+    assert!((st.label_alpha(12.2, true) - 0.5).abs() < 1e-3, "fading out");
+    assert_eq!(st.label_alpha(13.0, true), 0.0, "then gone");
+    assert_eq!(st.label_alpha(12.1, false), 0.0, "without animations it goes at once");
+    st.zoom = 3.0;
+    st.go(2, 20.0, true);
+    assert_eq!((st.at, st.zoom, st.fading_from()), (2, 1.0, Some(1)), "the next fits the window, the last fading out");
+    st.go(5, 21.0, true);
+    assert_eq!(st.at, 2, "no picture past the last");
+    st.go(0, 22.0, false);
+    assert_eq!((st.at, st.fading_from()), (0, None), "no fade without animations");
+    let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 500.0));
+    assert_eq!(fit_scale(area, [4000, 1000]), 0.25, "a wide picture by its width");
+    assert_eq!(fit_scale(area, [1000, 2000]), 0.25, "a tall one by its height");
+    assert_eq!(fit_scale(area, [40, 30]), 1.0, "a small one never blown up");
+}
+
+/// A photograph turned on its side by its EXIF tag reaches the viewer upright: the
+/// thumbnail cache's decode, as the viewer asks for it.
+#[test]
+fn viewer_pictures_decode_upright_off_the_frame() {
+    let d = tmpdir("viewer-exif");
+    // A JPEG 64 × 32 as stored whose tag says it is turned a quarter (orientation 6).
+    let Some(t) = imagemagick_tools(&d.join("bin")) else { return };
+    let src = d.join("wide.png");
+    std::fs::write(&src, png_bytes(64, 32, 2)).unwrap();
+    let jpg = d.join("side.jpg");
+    let ok = std::process::Command::new(t.join("magick")).arg(&src).arg(&jpg).status().is_ok_and(|s| s.success());
+    if !ok {
+        return;
+    }
+    let tagged = with_exif_orientation(&std::fs::read(&jpg).unwrap(), 6);
+    std::fs::write(&jpg, tagged).unwrap();
+    let ctx = egui::Context::default();
+    let mut thumbs = crate::thumbs::Thumbs::new(ctx.clone(), 1);
+    let mtime = std::fs::metadata(&jpg).unwrap().modified().ok();
+    let t0 = Instant::now();
+    let dims = loop {
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            thumbs.pump(ctx);
+        });
+        if let Some(l) = thumbs.get(&jpg, mtime, 1600.0) {
+            break (l.dims, l.tex.size());
+        }
+        assert!(t0.elapsed() < Duration::from_secs(10) && !thumbs.failed(&jpg), "never decoded");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(dims, ([32, 64], [32, 64]), "upright, at its full size: 1600 px asked for, the bucket above it");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The shelf keeps one of each, reads the details of what was dropped on it and lets go
+/// of what is gone, on its own thread.
+#[test]
+fn shelf_gathers_once_and_drops_what_vanished() {
+    let d = tmpdir("shelf");
+    touch(&d.join("a/report.md"), "# r");
+    touch(&d.join("b/photo.png"), "png");
+    std::fs::create_dir_all(d.join("c/folder")).unwrap();
+    let mut sh = crate::shelf::Shelf::default();
+    let items = vec![(d.join("a/report.md"), None), (d.join("b/photo.png"), None), (d.join("c/folder"), None)];
+    assert_eq!(sh.add(items), 3);
+    assert_eq!(sh.add(vec![(d.join("a/report.md"), None)]), 0, "once only");
+    std::fs::remove_file(d.join("b/photo.png")).unwrap();
+    let ctx = egui::Context::default();
+    let t0 = Instant::now();
+    while sh.items.len() == 3 || sh.items.iter().any(|i| i.entry.is_none()) {
+        assert!(t0.elapsed() < Duration::from_secs(5), "never looked");
+        sh.pump(&ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(sh.paths(), vec![d.join("a/report.md"), d.join("c/folder")], "the vanished one gone, the order kept");
+    assert!(sh.items[1].entry.as_ref().is_some_and(|e| e.is_dir), "details read for the icon");
+    sh.remove(&d.join("a/report.md"));
+    assert_eq!(sh.paths(), vec![d.join("c/folder")]);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn mountinfo_lines_read_with_their_subvolumes() {
+    use crate::versions::parse_mountinfo;
+    let m = parse_mountinfo("40 1 0:33 /@ / rw,noatime shared:1 - btrfs /dev/sda2 rw,subvol=/@\n63 40 8:17 / /run/media/me/My\\040Disk rw,nosuid,nodev,relatime shared:40 - exfat /dev/sdc1 rw\nnot a line\n");
+    assert_eq!(m.len(), 2);
+    assert_eq!((m[0].point.as_path(), m[0].root.as_path(), m[0].dev.as_str(), m[0].fstype.as_str()), (Path::new("/"), Path::new("/@"), "0:33", "btrfs"));
+    assert_eq!(m[1].point, PathBuf::from("/run/media/me/My Disk"));
+    assert_eq!(m[1].fstype, "exfat");
+    assert_eq!(crate::versions::parse_utc("2026-10-12 08:00:01"), Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_791_792_001)));
+    assert_eq!(crate::versions::parse_utc("2000-02-29 23:59:59"), Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(951_868_799)));
+    assert_eq!(crate::versions::parse_utc("2026-13-01 00:00:00"), None);
+}
+
+#[test]
+fn previous_versions_from_snapper_and_timeshift_skip_the_unchanged() {
+    use crate::versions::{Tool, find, parse_mountinfo};
+    let d = tmpdir("versions");
+    let (file, table) = snapshot_fixture(&d);
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let f = find(&file, &parse_mountinfo(&table), &stop);
+    let got: Vec<(String, String, Tool)> = f.versions.iter().map(|v| (std::fs::read_to_string(&v.entry.path).unwrap(), v.label.clone(), v.tool)).collect();
+    let want = [("third\n", "before & after", Tool::Snapper), ("frist\n", "first", Tool::Snapper), ("an old btrfs copy\n", "before update", Tool::Timeshift), ("rsync copy, the oldest\n", "weekly, monthly", Tool::Timeshift)];
+    assert_eq!(got, want.map(|(a, b, c)| (a.to_string(), b.to_string(), c)).to_vec(), "newest first; the copy like the file now, and the one like the next newer, left out");
+    assert_eq!(f.versions[0].when, crate::versions::parse_utc("2026-10-10 06:00:00"), "Snapper's dates are in UTC");
+    assert_eq!(f.versions[2].when, Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_791_363_600)), "Timeshift's own time when it gives one");
+    assert_eq!(f.versions[3].when, crate::timefmt::parse_local("2026-10-06_10-00-00"), "else the folder's name, in local time");
+    assert_eq!(f.snapshots, 7, "five Snapper snapshots and one of each Timeshift kind");
+    assert!(f.locked.is_empty());
+    // A file no snapshot has, and one on no known mount.
+    touch(&d.join("vol/docs/new.txt"), "new");
+    let f = find(&d.join("vol/docs/new.txt"), &parse_mountinfo(&table), &stop);
+    assert!(f.versions.is_empty() && f.snapshots > 0);
+    assert!(find(&file, &[], &stop).versions.is_empty());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn snapshots_only_root_reads_are_said_plainly() {
+    use crate::versions::{Tool, find, locked_note, parse_mountinfo};
+    use std::os::unix::fs::PermissionsExt;
+    let d = tmpdir("versions-locked");
+    let (file, table) = snapshot_fixture(&d);
+    let dot = d.join("vol/.snapshots");
+    std::fs::set_permissions(&dot, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let f = find(&file, &parse_mountinfo(&table), &stop);
+    if unsafe { libc::geteuid() } != 0 {
+        assert_eq!(f.locked, vec![Tool::Snapper]);
+        assert!(!f.versions.is_empty() && f.versions.iter().all(|v| v.tool == Tool::Timeshift), "the others still found");
+        assert_eq!(locked_note(&f.locked).as_deref(), Some("Snapper's snapshots here can only be read by an administrator."));
+    }
+    assert_eq!(locked_note(&[Tool::Snapper, Tool::Timeshift]).as_deref(), Some("The snapshots here can only be read by an administrator."));
+    std::fs::set_permissions(&dot, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_version_restored_in_place_or_as_a_copy() {
+    use crate::versions::{copy_name, find, parse_mountinfo, restore};
+    let d = tmpdir("versions-restore");
+    let (file, table) = snapshot_fixture(&d);
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let f = find(&file, &parse_mountinfo(&table), &stop);
+    let v = &f.versions[1];
+    let day = crate::timefmt::format(v.when.unwrap(), "%Y-%m-%d");
+    assert_eq!(copy_name(&file, v.when), format!("report (from {day}).txt"));
+    assert_eq!(copy_name(Path::new("/x/Makefile"), None), "Makefile (from a snapshot)");
+    let copy = restore(&v.entry.path, &file, v.when, true).unwrap();
+    assert_eq!(copy.parent(), file.parent());
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), "frist\n");
+    assert_eq!(std::fs::metadata(&copy).unwrap().modified().unwrap(), v.entry.modified.unwrap(), "the version's time kept");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "fourth draft, the one in use\n", "a copy leaves the file alone");
+    let again = restore(&v.entry.path, &file, v.when, true).unwrap();
+    assert_eq!(again.file_name().unwrap().to_string_lossy(), format!("report (from {day}) (1).txt"), "never over the first copy");
+    // In place: the file goes to the trash, the version takes its name.
+    restore(&v.entry.path, &file, v.when, false).unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "frist\n");
+    assert!(!d.join("vol/docs/.report.txt.restore").exists());
+    let trashed = crate::trashcan::list().into_iter().filter(|it| it.original == file).count();
+    assert_eq!(trashed, 1, "what it replaced is in the trash");
+    assert_eq!(crate::picfix::undo_replaced(std::slice::from_ref(&file)), 0);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "fourth draft, the one in use\n", "undone");
+    // A version gone from under it: nothing changed.
+    assert!(restore(&d.join("nowhere"), &file, None, false).is_err());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "fourth draft, the one in use\n");
+    for it in crate::trashcan::list().into_iter().filter(|it| it.original.starts_with(&d)) {
+        let _ = crate::trashcan::purge(&it);
+    }
     let _ = std::fs::remove_dir_all(&d);
 }

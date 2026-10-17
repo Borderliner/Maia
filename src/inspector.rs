@@ -164,6 +164,8 @@ pub struct Inspector {
     pub compare: Option<Box<crate::filediff::Compare>>,
     /// A crop being drawn on the picture shown.
     pub crop: Option<crate::picfix::Crop>,
+    /// Earlier versions of a file from the disk's snapshots, listed above the preview.
+    pub versions: Option<Box<crate::versions::Page>>,
 }
 
 /// Test-only views of the preview state (simulations check behaviour, not pixels).
@@ -309,6 +311,9 @@ impl Inspector {
         if self.crop.is_some() && matches!(k, egui::Key::Enter | egui::Key::Escape) {
             return true;
         }
+        if let Some(v) = &self.versions {
+            return v.takes(k);
+        }
         match &self.content {
             Content::Text { rich: Some(r), .. } => matches!(&**r, Rich::Data(t) if t.takes(k)),
             Content::Sqlite(v) => v.takes(k),
@@ -317,6 +322,10 @@ impl Inspector {
     }
 
     pub fn key(&mut self, k: egui::Key) {
+        if let Some(v) = self.versions.as_mut() {
+            v.key(k);
+            return;
+        }
         if let Some(c) = self.crop.as_mut() {
             match k {
                 egui::Key::Enter => c.save = c.sel.is_some(),
@@ -385,6 +394,7 @@ impl Default for Inspector {
             env_all: false,
             compare: None,
             crop: None,
+            versions: None,
         }
     }
 }
@@ -800,6 +810,26 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         }
         ins.compare = None;
     }
+    // Previous versions: the list across the top, the version picked previewed below.
+    let (mut rect, mut target) = (rect, target);
+    if let Some(v) = ins.versions.as_mut() {
+        let band = if target.as_ref().is_some_and(|e| e.path == v.file) { crate::versions::band(ui, rect, v, env) } else { crate::versions::Band::Close };
+        match band {
+            crate::versions::Band::Close => {
+                if v.opened {
+                    panel.inspector = None;
+                    return;
+                }
+                ins.versions = None;
+            }
+            crate::versions::Band::Whole => return,
+            crate::versions::Band::Preview(r, e) => {
+                rect = r;
+                target = Some(e);
+            }
+        }
+    }
+    let Some(ins) = panel.inspector.as_mut() else { return };
     ui.painter().rect_filled(rect, CornerRadius::ZERO, pal.bg);
     // A crop belongs to the picture it was started on.
     if ins.crop.as_ref().is_some_and(|c| target.as_ref().map(|e| &e.path) != Some(&c.path)) {

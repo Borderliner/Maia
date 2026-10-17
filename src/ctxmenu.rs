@@ -142,6 +142,10 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             items.push(Item::cmd(Cmd::NewFolder));
             items.push(Item::cmd(Cmd::NewFile));
             items.push(Item::cmd(Cmd::Paste));
+            if !app.shelf.items.is_empty() {
+                items.push(Item::cmd(Cmd::ShelfMoveHere));
+                items.push(Item::cmd(Cmd::ShelfCopyHere));
+            }
             items.push(Item { id: "terminal_here".into(), label: "Open Terminal Here".into(), act: Act::Terminal(here.clone()), children: vec![] });
             items.push(Item::sep());
         }
@@ -184,6 +188,7 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             if !t.filter.trim().is_empty() && !t.content.on && t.smart.is_none() {
                 items.push(Item::cmd(Cmd::SaveSmart));
             }
+            items.push(Item::cmd(Cmd::SpaceUsed));
         }
         if in_trash {
             items.push(Item::sep());
@@ -329,6 +334,12 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             }
             items.push(Item::sub("picture", "Picture", kids));
         }
+        // Below what was there before it, so long menus keep their places.
+        if let [(_, false, _, ext)] = ents.as_slice() {
+            if crate::viewer::is_picture(ext) {
+                items.push(Item::cmd(Cmd::ViewPictures));
+            }
+        }
         if crate::archive::available() {
             if ents.iter().any(|e| !e.1 && crate::archive::is_archive(&e.0.to_string_lossy())) {
                 items.push(Item::cmd(Cmd::ExtractHere));
@@ -364,6 +375,12 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         }
         if !in_trash {
             items.push(Item::cmd(Cmd::WhatsUsing));
+        }
+        if !in_trash && ents.iter().any(|e| !app.shelf.has(&e.0)) {
+            items.push(Item::labeled(Cmd::AddToShelf, "Add to Shelf"));
+        }
+        if single && !ents[0].1 && !in_trash {
+            items.push(Item::cmd(Cmd::PreviousVersions));
         }
         items.push(Item::cmd(Cmd::Properties));
     }

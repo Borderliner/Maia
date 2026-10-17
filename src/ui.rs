@@ -308,6 +308,17 @@ impl App {
             .show_separator_line(false)
             .frame(egui::Frame::NONE.fill(pal.chrome))
             .show(&ctx, |ui| self.title_bar(ui));
+        // ------------------------------------------------ shelf (only while it holds something)
+        let full = !self.shelf.items.is_empty();
+        let open = if self.cfg.animations { ctx.animate_bool_with_time(Id::new("shelf open"), full, 0.13) } else if full { 1.0 } else { 0.0 };
+        self.shelf.shown_h = (crate::shelf::height(self) * open).round();
+        if self.shelf.shown_h >= 1.0 {
+            egui::TopBottomPanel::bottom("shelf")
+                .exact_height(self.shelf.shown_h)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE.fill(pal.chrome))
+                .show(&ctx, |ui| crate::shelf::strip(self, ui));
+        }
         // ------------------------------------------------ panels
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(pal.bg)).show(&ctx, |ui| {
             let full = ui.max_rect();
@@ -398,6 +409,7 @@ impl App {
         });
         // ------------------------------------------------ overlays
         self.jobs_overlay(&ctx);
+        crate::shelf::drop_spot(self, &ctx);
         crate::popups::draw(self, &ctx);
         self.window_edges(&ctx);
         // Files dragged past the window's edge carry on as a system drag, into other
@@ -1565,7 +1577,7 @@ impl App {
         let screen = ctx.content_rect();
         egui::Area::new(Id::new("jobs"))
             .order(egui::Order::Foreground)
-            .anchor(Align2::RIGHT_BOTTOM, vec2(-14.0, -38.0))
+            .anchor(Align2::RIGHT_BOTTOM, vec2(-14.0, -38.0 - self.shelf.shown_h))
             .show(ctx, |ui| {
                 ui.set_max_width(340.0f32.min(screen.width() - 40.0));
                 let mut remove = None;

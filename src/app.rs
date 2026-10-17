@@ -48,6 +48,8 @@ pub enum Action {
     ExternalDrop { paths: Vec<PathBuf>, dest: PathBuf },
     /// Show a smart folder (by id), here or in a new tab.
     OpenSmart { panel: u64, id: u64, new_tab: bool, focus: bool },
+    /// Work that needs the whole app, handed up from a view that holds only its part.
+    Run(Box<dyn FnOnce(&mut App)>),
 }
 
 pub enum Drag {
@@ -166,6 +168,8 @@ pub struct App {
     dialog_result: Option<(String, Result<(), String>)>,
     /// Wallpapers, printing and picture fixes, run one after another.
     pub errands: crate::errands::Runner,
+    /// Files gathered to move or copy together, for this session.
+    pub shelf: crate::shelf::Shelf,
 }
 
 /// What a thread sharing files hands back: text for the clipboard, what to say, and a
@@ -270,6 +274,7 @@ impl App {
             shares: vec![],
             dialog_result: None,
             errands: Default::default(),
+            shelf: Default::default(),
             cfg,
             ud,
         };
@@ -936,6 +941,7 @@ impl App {
         self.pump_shares(ctx);
         self.age_trash();
         crate::errands::pump(self);
+        self.shelf.pump(ctx);
         let notes = std::mem::take(&mut *self.notes.lock().unwrap_or_else(|e| e.into_inner()));
         if let Some(n) = notes.into_iter().last() {
             self.toast(n);
@@ -1173,6 +1179,8 @@ impl App {
                 }
                 if let OpKind::Trash { paths } = &j.kind {
                     self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Trashed(paths.clone()) });
+                    // The folders they left are smaller now.
+                    finished_dirs.extend(paths.iter().filter_map(|p| p.parent().map(Path::to_path_buf)));
                 }
             }
         }
@@ -1871,6 +1879,12 @@ impl App {
                 Some(d) => self.popup = crate::dupes::open(&ctx, d),
                 None => self.toast("Find Duplicates needs a folder"),
             },
+            Cmd::PreviousVersions => crate::versions::open(self),
+            Cmd::SpaceUsed => crate::spaceuse::open(self),
+            Cmd::ViewPictures => crate::viewer::open(self),
+            Cmd::AddToShelf => crate::shelf::add_selection(self),
+            Cmd::ShelfMoveHere | Cmd::ShelfCopyHere => crate::shelf::put_here(self, cmd == Cmd::ShelfMoveHere),
+            Cmd::ClearShelf => self.shelf.items.clear(),
             Cmd::CleanBuilds => match crate::devtools::target_dir(self) {
                 Some(d) => self.popup = crate::devtools::clean(&ctx, d),
                 None => self.toast("Clean Build Folders needs a folder"),
@@ -2909,6 +2923,7 @@ impl App {
             Action::OpenSmart { panel, id, new_tab, focus } => self.open_smart(panel, id, new_tab, focus),
             Action::StartJob(k) => self.start_job(k),
             Action::ExternalDrop { paths, dest } => self.begin_transfer(paths, dest, false),
+            Action::Run(f) => f(self),
         }
     }
 
@@ -2937,6 +2952,8 @@ impl App {
             } else {
                 self.navigate(panel, e.path);
             }
+        } else if self.cfg.picture_viewer && crate::viewer::is_picture(e.ext()) && self.active == panel && crate::viewer::open_at(self, Some(e.path.clone())) {
+            // Shown in Maia's own viewer, as Options asks.
         } else if e.ext() == "desktop" || !e.is_executable() {
             self.actions.push(Action::OpenFile(e.path));
         } else {

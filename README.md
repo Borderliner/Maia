@@ -89,6 +89,8 @@ as `size>100M`, `modified<7d`, `created:today` or `tag:red`. Some keys to start 
 | Trash, delete | Delete, Shift+Delete |
 | Undo | Ctrl+Z |
 | Options | Ctrl+, |
+| Pictures full window | F3 |
+| Onto the shelf | Alt+S |
 
 Every binding can be changed from the command palette.
 
@@ -115,6 +117,16 @@ menu ignores it or every file with its extension. Copy as gives files as Markdow
 blocks under their paths, or as links to them on GitHub, GitLab or Codeberg at the
 commit checked out, and Open Web Link opens that page. Compare Files, in the menu of two
 selected files, shows how they differ in the inspector. Maia never pushes.
+
+F3 shows the folder's pictures full window: Left and Right go through them, the wheel,
++ and - zoom, 0 fits and 1 shows one pixel for one, and Space plays them as a slideshow
+(Options can make Enter and a double-click open pictures there too). Show Space Used, in
+a folder's menu, lists what is in it biggest first with each item's share, and trashes
+what you check. Previous Versions, in a file's menu, lists the earlier copies Snapper or
+Timeshift keep in the disk's snapshots; pick one to preview it, then restore it in place
+(the file it replaces goes to the trash) or as a copy beside it. Alt+S puts the selection
+on the shelf, a strip along the bottom of the window, and Move Here or Copy Here takes
+everything on it into the folder you are in.
 
 The inspector renders Markdown, shows JSON, TOML and YAML as trees you fold with the
 arrow keys, and CSV and TSV as tables; its toolbar switches any of them to the text as

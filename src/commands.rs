@@ -195,6 +195,7 @@ commands! {
     NewSmart, "new_smart_folder", View, "New Smart Folder…", "A saved search in the sidebar: a folder and what to find in it, by name, kind, date or size.", [];
     CodeSearch, "search_code", View, "Search Code", "Find text in this project's files, by word, case or regular expression.", ["Ctrl+Alt+F"];
     FindTodos, "find_todos", View, "Find TODOs", "List every TODO, FIXME, HACK and XXX comment in this project.", [];
+    ViewPictures, "view_pictures", View, "View Pictures", "Show this folder's pictures full window, from the one under the cursor; Space plays them as a slideshow.", ["F3"];
     TypesFilter, "types_filter", View, "Filter By Type", "Choose which file types are shown.", ["Alt+T"];
     ToggleHidden, "toggle_hidden", View, "Toggle Hidden Files", "Show or hide dotfiles.", ["Ctrl+H"];
     ToggleSystem, "toggle_system", View, "Toggle System Files", "Show or hide backup files and special files (sockets, devices).", [];
@@ -278,6 +279,10 @@ commands! {
     CompareFiles, "compare_files", Files, "Compare Files", "Show how the two selected files differ, in the inspector.", [];
     GitIgnore, "git_ignore", Files, "Add To .gitignore", "Ignore the selected files or folders in this repository's .gitignore.", [];
     GitIgnoreExt, "git_ignore_ext", Files, "Ignore Files Like This", "Ignore every file with the selected file's extension in this repository's .gitignore.", [];
+    AddToShelf, "add_to_shelf", Files, "Add To Shelf", "Gather the selection on the shelf, to move or copy it with things from other folders.", ["Alt+S"];
+    ShelfMoveHere, "shelf_move_here", Files, "Move Shelf Here", "Move everything on the shelf into this folder.", [];
+    ShelfCopyHere, "shelf_copy_here", Files, "Copy Shelf Here", "Copy everything on the shelf into this folder, keeping the shelf.", [];
+    ClearShelf, "clear_shelf", Files, "Clear Shelf", "Take everything off the shelf; the files stay where they are.", [];
     Trash, "trash", Files, "Move To Trash", "Move the selection to the trash.", ["Delete"];
     DeletePermanent, "delete_permanent", Files, "Delete Permanently", "Delete the selection without using the trash (asks first).", ["Shift+Delete"];
     BatchRename, "batch_rename", Files, "Batch Rename…", "Rename the selected items together, numbered or found and replaced, seeing every new name first.", [];
@@ -290,6 +295,8 @@ commands! {
     OpenInEditor, "open_in_editor", Files, "Open In Editor", "Open the selected files in your code editor (chosen in Options).", ["F4"];
     WhatsUsing, "whats_using", Files, "What's Using This…", "List the programs that have the selection open or work inside it, and stop your own.", [];
     FindDuplicates, "find_duplicates", Files, "Find Duplicates…", "Find files with the same contents under this folder, whatever their names, and trash the extra copies.", [];
+    SpaceUsed, "space_used", Files, "Show Space Used", "This folder's contents biggest first, each with its share, to find what fills the disk.", [];
+    PreviousVersions, "previous_versions", Files, "Previous Versions…", "Earlier copies of the file kept in the disk's snapshots, to look at and restore.", [];
     CleanBuilds, "clean_build_folders", Files, "Clean Build Folders…", "Find build output and installed packages under this folder and trash the ones you pick.", [];
     ContextMenu, "context_menu", Files, "Context Menu", "Open the action menu at the file cursor.", ["Shift+F10"];
     RestoreTrash, "restore_trash", Files, "Restore From Trash", "Put trashed items back where they came from.", [];

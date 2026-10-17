@@ -1022,7 +1022,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(140) {
+    match rng.below(146) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1406,6 +1406,164 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.act(&format!("key {}", rng.pick(&["Enter", "Escape", "ArrowDown"])));
             }
             s.idle(1 + rng.below(10));
+        }
+        140 => {
+            // Previous Versions, often of the file the fake snapshots hold: the list walked
+            // by keys and clicks, a version restored or saved beside it, or the page shut.
+            let f = root().join("home").read_dir().ok().and_then(|r| r.flatten().map(|d| d.path().join("Disk/vol/docs/report.txt")).find(|p| p.is_file()));
+            if let Some(f) = f.filter(|_| rng.below(3) > 0) {
+                s.act("key ctrl+p");
+                s.act(&format!("text {}", f.display()));
+                s.act("key Enter");
+                s.settle();
+            }
+            if rng.below(2) == 0 {
+                s.cmd(Cmd::PreviousVersions);
+            } else {
+                let (x, y) = p(rng);
+                s.act(&format!("click {x:.0} {y:.0} right"));
+                s.act("text previous versions");
+                s.act("key Enter");
+            }
+            s.idle(2 + rng.below(10));
+            for _ in 0..rng.below(5) {
+                match rng.below(4) {
+                    0 => click_control_at(s, rng.pick(&["version row", "version restore", "version copy", "versions close"])),
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "End", "Home", "PageDown", "Escape"]))),
+                }
+            }
+            s.idle(1 + rng.below(5));
+        }
+        141 => {
+            // Show Space Used: walked by keys and clicks, into folders and back, some
+            // checked and trashed (asked first) or left, sometimes shown in Maia.
+            if rng.below(2) == 0 {
+                s.cmd(Cmd::SpaceUsed);
+            } else {
+                let (x, y) = p(rng);
+                s.act(&format!("click {x:.0} {y:.0} right"));
+                s.act("text space used");
+                s.act("key Enter");
+            }
+            s.idle(2 + rng.below(20));
+            for _ in 0..rng.below(8) {
+                if !matches!(s.app.popup, Popup::SpaceUsed(_)) {
+                    break;
+                }
+                match rng.below(5) {
+                    0 => click_control_at(s, rng.pick(&["space row", "space show", "space trash", "space trash cancel", "space close"])),
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "Enter", "Backspace", "space", "Delete", "End", "PageDown", "Escape"]))),
+                }
+                s.idle(rng.below(4));
+            }
+        }
+        142 => {
+            // The picture viewer, often among the trip's pictures: keys, the wheel, drags,
+            // clicks on its buttons, a slideshow left running a while, then Escape or not.
+            let pics = root().join("home").read_dir().ok().and_then(|r| r.flatten().map(|d| d.path().join("Pictures/Trip")).find(|p| p.is_dir()));
+            if let Some(dir) = pics.filter(|_| rng.below(3) > 0) {
+                s.act("key ctrl+p");
+                s.act(&format!("text {}", dir.join(format!("img{:02}.png", rng.below(12))).display()));
+                s.act("key Enter");
+                s.settle();
+            }
+            match rng.below(3) {
+                0 => s.act("key F3"),
+                1 => s.cmd(Cmd::ViewPictures),
+                _ => {
+                    let (x, y) = p(rng);
+                    s.act(&format!("click {x:.0} {y:.0} right"));
+                    s.act("text view pictures");
+                    s.act("key Enter");
+                }
+            }
+            for _ in 0..rng.below(10) {
+                if !matches!(s.app.popup, Popup::Viewer(_)) {
+                    break;
+                }
+                match rng.below(6) {
+                    0 => {
+                        let (x, y) = p(rng);
+                        s.act(&format!("scroll {x:.0} {y:.0} {:.1}", rng.f(-10.0, 10.0)));
+                    }
+                    1 => {
+                        let ((x, y), (x2, y2)) = (p(rng), p(rng));
+                        s.act(&format!("drag {x:.0} {y:.0} {x2:.0} {y2:.0}"));
+                    }
+                    2 => click_control_at(s, rng.pick(&["viewer next", "viewer previous", "viewer close"])),
+                    3 => s.idle(rng.below(300)),
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowRight", "ArrowLeft", "Space", "Plus", "Minus", "0", "1", "Home", "End", "Escape"]))),
+                }
+            }
+        }
+        143 => {
+            // Pictures sent to the viewer by Enter and double-clicks, or not.
+            s.app.cfg.picture_viewer = rng.below(2) == 0;
+            let (x, y) = p(rng);
+            s.act(&format!("{} {x:.0} {y:.0}", rng.pick(&["dclick", "click"])));
+            s.act(rng.pick(&["key Enter", "key ArrowRight", "key Escape"]));
+            if matches!(s.app.popup, Popup::Viewer(_)) && rng.below(2) == 0 {
+                s.act("key Escape");
+            }
+        }
+        144 => {
+            // Onto the shelf by key, menu or a drag onto it; then Copy Here, Move Here or
+            // Clear, from its buttons or the palette, now and then in another folder.
+            match rng.below(3) {
+                0 => s.act("key alt+s"),
+                1 => {
+                    let (x, y) = p(rng);
+                    s.act(&format!("click {x:.0} {y:.0} right"));
+                    s.act("text add to shelf");
+                    s.act("key Enter");
+                }
+                _ => {
+                    let (x, y) = p(rng);
+                    s.act(&format!("drag {x:.0} {y:.0} {:.0} {:.0}", s.size.x / 2.0 + rng.f(-200.0, 200.0), s.size.y - rng.f(4.0, 30.0)));
+                }
+            }
+            if rng.below(3) == 0 {
+                s.act("key alt+ArrowUp");
+                s.settle();
+            }
+            match rng.below(4) {
+                0 => click_control_at(s, rng.pick(&["shelf copy", "shelf move", "shelf clear"])),
+                1 => s.cmd(*rng.pick(&[Cmd::ShelfCopyHere, Cmd::ShelfMoveHere, Cmd::ClearShelf])),
+                _ => {}
+            }
+            s.idle(1 + rng.below(6));
+            if matches!(s.app.popup, Popup::Conflict(_)) {
+                s.act(rng.pick(&["key Enter", "key Escape"]));
+            }
+        }
+        145 => {
+            // The shelf's items: shown in their folder, taken off, or dragged out of it;
+            // everything dragged at once.
+            click_control_at(s, "shelf item");
+            let item = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "shelf item").map(|(_, r, _)| *r));
+            if let Some(r) = item {
+                match rng.below(3) {
+                    0 => {
+                        s.act(&format!("move {:.0} {:.0}", r.center().x, r.center().y));
+                        s.act(&format!("click {:.0} {:.0}", r.right() - 12.0, r.center().y));
+                    }
+                    _ => {
+                        let (x, y) = p(rng);
+                        s.act(&format!("drag {:.0} {:.0} {x:.0} {y:.0}", r.left() + 14.0, r.center().y));
+                    }
+                }
+            }
+            if rng.below(3) == 0 {
+                let all = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "shelf all").map(|(_, r, _)| *r));
+                if let Some(r) = all {
+                    let (x, y) = p(rng);
+                    s.act(&format!("drag {:.0} {:.0} {x:.0} {y:.0}", r.center().x, r.center().y));
+                }
+            }
+            s.idle(1 + rng.below(4));
+            if matches!(s.app.popup, Popup::Conflict(_) | Popup::DropMenu { .. }) {
+                s.act("key Escape");
+            }
         }
         121 => {
             // Sharing: code blocks, a web link or .gitignore, from the palette or a menu.
@@ -8751,6 +8909,494 @@ mod journeys {
         report("smart folders", &s);
     }
 
+    fn versions_page(s: &Sim) -> Option<&crate::versions::Page> {
+        s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.versions.as_deref())
+    }
+
+    /// Previous Versions from a file's menu: Snapper's and Timeshift's copies newest first,
+    /// the unchanged ones left out, each previewed under the list as it is picked; one
+    /// saved beside the file, one put in its place and undone; snapshots only root can
+    /// read said in a sentence; a disk without snapshots said so; Escape closing the
+    /// inspector it opened.
+    #[test]
+    fn previous_versions_from_the_snapshots() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("versions");
+        let d = home.join("Disk");
+        let (file, table) = crate::tests::snapshot_fixture(&d);
+        crate::versions::FAKE.with(|f| *f.borrow_mut() = Some(table.clone()));
+        let docs = file.parent().unwrap().to_path_buf();
+        let mut s = Sim::new(&docs, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        let row = row_text(&s, "report.txt");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        assert!(some_text(&s, "Previous Versions…"), "in the file's menu");
+        s.click_text("Previous Versions…");
+        wait_until(&mut s, "the snapshots read", 10, |s| versions_page(s).is_some_and(|p| p.found.is_some()));
+        s.idle(3);
+        let n = versions_page(&s).and_then(|p| p.found.as_ref()).map_or(0, |f| f.versions.len());
+        assert_eq!(n, 4, "the copies that differ, newest first");
+        assert!(some_text(&s, "Previous versions of report.txt"));
+        assert!(some_text(&s, "before & after") && some_text(&s, "before update") && some_text(&s, "weekly, monthly"), "what each snapshot says of itself");
+        let first = versions_page(&s).and_then(|p| p.selected()).map(|v| v.entry.path.clone()).unwrap();
+        wait_until(&mut s, "the newest version previewed", 10, |s| s.texts.iter().any(|(_, t)| t.trim() == "third"));
+        assert!(first.starts_with(d.join("vol/.snapshots/3")));
+        look(&mut s, "previous versions");
+        s.shot("versions-graphite");
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        look(&mut s, "previous versions, light");
+        s.shot("versions-paper");
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        // The keys walk the list; each version shows under it.
+        s.act("key ArrowDown");
+        wait_until(&mut s, "the second version previewed", 10, |s| s.texts.iter().any(|(_, t)| t.trim() == "frist"));
+        assert_eq!(versions_page(&s).map(|p| p.sel), Some(1));
+        s.act("key End");
+        wait_until(&mut s, "the oldest previewed", 10, |s| s.texts.iter().any(|(_, t)| t.trim() == "rsync copy, the oldest"));
+        s.act("key Home");
+        s.act("key ArrowDown");
+        // Saved beside the file.
+        click_control(&mut s, "version copy");
+        let when = crate::versions::parse_utc("2026-10-08 06:00:00");
+        let copy = docs.join(crate::versions::copy_name(&file, when));
+        wait_until(&mut s, "the copy saved", 10, |_| copy.is_file());
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "frist\n");
+        assert!(versions_page(&s).is_none(), "the page closes once it is done");
+        wait_until(&mut s, "the copy selected", 10, |s| s.tab().cursor.map(|c| s.tab().entries[c as usize].path.clone()) == Some(copy.clone()));
+        // Put in its place, from the palette, and undone.
+        select_path(&mut s, &file);
+        palette_run(&mut s, "Previous Versions");
+        wait_until(&mut s, "the snapshots read again", 10, |s| versions_page(s).is_some_and(|p| p.found.is_some()));
+        click_control(&mut s, "version restore");
+        wait_until(&mut s, "restored", 10, |_| std::fs::read_to_string(&file).ok().as_deref() == Some("third\n"));
+        wait_until(&mut s, "undo offered", 10, |s| s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Replaced(_))));
+        assert!(root().join("xdg/data/Trash/files/report.txt").exists(), "the file it replaced is in the trash");
+        s.act("key ctrl+z");
+        wait_until(&mut s, "undone", 10, |_| std::fs::read_to_string(&file).ok().as_deref() == Some("fourth draft, the one in use\n"));
+        // Snapshots only root may read.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(d.join("vol/.snapshots"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        select_path(&mut s, &file);
+        s.cmd(PreviousVersions);
+        wait_until(&mut s, "read as far as it can", 10, |s| versions_page(s).is_some_and(|p| p.found.is_some()));
+        s.idle(3);
+        assert!(some_text(&s, "Snapper's snapshots here can only be read by an administrator."), "said plainly");
+        assert_eq!(versions_page(&s).and_then(|p| p.found.as_ref()).map(|f| f.versions.len()), Some(2), "Timeshift's still listed");
+        look(&mut s, "versions with locked snapshots");
+        s.shot("versions-locked-graphite");
+        s.resize(520.0, 340.0);
+        look(&mut s, "versions small");
+        s.shot("versions-small-graphite");
+        s.resize(1280.0, 800.0);
+        std::fs::set_permissions(d.join("vol/.snapshots"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Escape: the inspector the page opened goes with it.
+        s.act("key Escape");
+        s.idle(2);
+        assert!(s.app.panels[&s.app.active].inspector.is_none(), "closed with the page");
+        // A disk with no snapshots.
+        crate::versions::FAKE.with(|f| *f.borrow_mut() = Some(String::new()));
+        s.cmd(PreviousVersions);
+        wait_until(&mut s, "nothing found", 10, |s| versions_page(s).is_some_and(|p| p.found.is_some()));
+        s.idle(2);
+        assert!(some_text(&s, "This disk keeps no snapshots of this file's folder."));
+        look(&mut s, "no snapshots");
+        // Another file: the page leaves for its preview.
+        s.cmd(ToggleInspector);
+        s.cmd(ToggleInspector);
+        s.cmd(PreviousVersions);
+        s.act("key ArrowDown");
+        s.idle(2);
+        assert!(versions_page(&s).is_some(), "the keys stay with the page");
+        let other = docs.join(crate::versions::copy_name(&file, when));
+        select_path(&mut s, &other);
+        s.idle(2);
+        assert!(versions_page(&s).is_none(), "gone with another file under the cursor");
+        crate::versions::FAKE.with(|f| *f.borrow_mut() = None);
+        report("versions", &s);
+    }
+
+    fn space(s: &Sim) -> &crate::spaceuse::State {
+        match &s.app.popup {
+            Popup::SpaceUsed(st) => st,
+            _ => s.fail("Show Space Used is not open"),
+        }
+    }
+
+    fn space_names(s: &Sim) -> Vec<String> {
+        let st = space(s);
+        st.order.iter().map(|&k| st.items[k as usize].entry.name.clone()).collect()
+    }
+
+    /// Show Space Used from the folder's menu: biggest first as the sizes come in, each
+    /// with its bar; into a folder and back to it, never above where it started; two
+    /// items trashed after asking, gone from the list and brought back by Undo; a file
+    /// shown in its folder.
+    #[test]
+    fn space_used_biggest_first() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("space");
+        let d = home.join("Disk");
+        crate::tests::space_fixture(&d);
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        let list = s.app.panels[&s.app.active].list_rect;
+        s.act(&format!("click {:.0} {:.0} right", list.center().x, list.bottom() - 40.0));
+        s.idle(2);
+        assert!(some_text(&s, "Show Space Used"), "in the folder's menu");
+        s.click_text("Show Space Used");
+        wait_until(&mut s, "every size counted", 10, |s| !space(s).counting());
+        s.idle(3);
+        assert_eq!(space_names(&s), ["Big", "movie.mkv", "Small", "big-link", "Empty"]);
+        assert!(some_text(&s, "488 KB") && some_text(&s, "391 KB") && some_text(&s, "10 B"), "each size beside its bar");
+        assert!(s.texts.iter().any(|(_, t)| t.ends_with("Disk · 879 KB")), "where, and how much in all");
+        look(&mut s, "space used");
+        s.shot("space-used-graphite");
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        look(&mut s, "space used, light");
+        s.shot("space-used-paper");
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        // Into Big, and back with the cursor on it.
+        s.act("key Enter");
+        wait_until(&mut s, "Big read", 10, |s| space(s).dir == d.join("Big") && !space(s).counting());
+        assert_eq!(space_names(&s), ["a.bin", "Sub"]);
+        s.act("key Backspace");
+        wait_until(&mut s, "back up", 10, |s| space(s).dir == d && !space(s).counting());
+        assert_eq!(space(&s).sel, 0, "on the folder it came from");
+        s.act("key Backspace");
+        assert_eq!(space(&s).dir, d, "never above where it started");
+        assert!(some_text(&s, "Space used was opened in Disk: it goes no higher"));
+        // A click on a folder opens it too.
+        let r = s.text_rect("Small");
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        wait_until(&mut s, "Small read", 10, |s| space(s).dir == d.join("Small"));
+        s.act("key Backspace");
+        wait_until(&mut s, "back up again", 10, |s| space(s).dir == d && !space(s).counting());
+        // The movie and Small checked, trashed after asking.
+        assert_eq!(space(&s).sel, 2, "back on Small");
+        s.act("key Home");
+        s.act("key ArrowDown");
+        s.act("key Space");
+        s.act("key ArrowDown");
+        s.act("key Space");
+        assert_eq!(space(&s).checked.len(), 2);
+        s.act("key Delete");
+        assert!(space(&s).confirm, "asks first");
+        assert!(some_text(&s, "Move 2 items (391 KB) to the trash?"), "{:?}", s.texts.iter().filter(|t| t.1.starts_with("Move")).collect::<Vec<_>>());
+        look(&mut s, "space used asking");
+        s.shot("space-used-confirm-graphite");
+        s.act("key Enter");
+        wait_until(&mut s, "trashed", 10, |_| !d.join("movie.mkv").exists() && !d.join("Small").exists());
+        assert_eq!(space_names(&s), ["Big", "big-link", "Empty"], "gone from the list");
+        // A file shown in its folder.
+        s.act("key Home");
+        s.act("key Enter");
+        wait_until(&mut s, "Big read once more", 10, |s| space(s).dir == d.join("Big") && !space(s).counting());
+        click_control(&mut s, "space show");
+        s.settle();
+        assert!(!s.popup_open());
+        assert_eq!(s.tab().path, d.join("Big"));
+        assert_eq!(s.tab().cursor.map(|c| s.tab().entries[c as usize].name.clone()).as_deref(), Some("a.bin"), "selected in its folder");
+        wait_until(&mut s, "undo offered", 10, |s| s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Trashed(_))));
+        s.act("key ctrl+z");
+        wait_until(&mut s, "undone", 10, |_| d.join("movie.mkv").exists() && d.join("Small/c.txt").exists());
+        // From the palette, in a small window and at another view.
+        go(&mut s, &d);
+        palette_run(&mut s, "Show Space Used");
+        wait_until(&mut s, "counted again", 10, |s| !space(s).counting());
+        s.resize(520.0, 340.0);
+        look(&mut s, "space used small");
+        s.shot("space-used-small-graphite");
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        s.resize(1280.0, 800.0);
+        go(&mut s, &d.join("Empty"));
+        palette_run(&mut s, "Show Space Used");
+        wait_until(&mut s, "an empty folder read", 10, |s| !space(s).counting());
+        assert!(some_text(&s, "This folder is empty"));
+        s.act("key Escape");
+        report("space used", &s);
+    }
+
+    fn viewer(s: &Sim) -> &crate::viewer::State {
+        match &s.app.popup {
+            Popup::Viewer(v) => v,
+            _ => s.fail("the picture viewer is not open"),
+        }
+    }
+
+    /// The picture viewer: F3 from a picture, the neighbours decoded ahead, Left and
+    /// Right in the listing's order, zoom by keys, wheel and double-click, a drag that
+    /// pans, a slideshow with its fade, nothing drawn while it rests, Escape leaving the
+    /// cursor on the last picture; Enter and double-click opening the picture's app until
+    /// Options says otherwise; a broken picture said so; a small window.
+    #[test]
+    fn picture_viewer_full_window() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("viewer");
+        let trip = home.join("Pictures/Trip");
+        png_file(&trip.join("panorama.png"), 2400, 1200, 7);
+        let mut s = Sim::new(&trip, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        let pic = |s: &Sim| viewer(s).current().map(|p| p.name.clone()).unwrap_or_default();
+        select_path(&mut s, &trip.join("img03.png"));
+        s.act("key F3");
+        assert_eq!(pic(&s), "img03.png");
+        assert_eq!(viewer(&s).pics.len(), 13, "every picture in the folder");
+        wait_until(&mut s, "the picture decoded", 10, |s| s.app.thumbs.dims(&trip.join("img03.png")).is_some());
+        wait_until(&mut s, "its neighbours decoded ahead", 10, |s| s.app.thumbs.dims(&trip.join("img02.png")).is_some() && s.app.thumbs.dims(&trip.join("img04.png")).is_some());
+        assert!(s.app.thumbs.dims(&trip.join("img08.png")).is_none(), "and no further");
+        s.idle(2);
+        assert!(some_text(&s, "img03.png") && some_text(&s, "4 / 13"), "the name and where it is");
+        shot_still(&mut s, "viewer-graphite");
+        s.act("key ArrowRight");
+        assert_eq!(pic(&s), "img04.png");
+        s.act("key ArrowLeft");
+        s.act("key ArrowLeft");
+        assert_eq!(pic(&s), "img02.png");
+        s.act("key End");
+        assert_eq!(pic(&s), "panorama.png");
+        s.act("key ArrowRight");
+        assert_eq!(pic(&s), "panorama.png", "the last stays the last");
+        wait_until(&mut s, "the panorama decoded", 10, |s| s.app.thumbs.dims(&trip.join("panorama.png")).is_some());
+        s.idle(2);
+        // Zoom: one to one, fit, a step, the wheel; a drag moves a zoomed picture.
+        s.act("key 1");
+        let one = viewer(&s).zoom;
+        assert!(one > 1.1, "one pixel for one is bigger than fitting: {one}");
+        shot_still(&mut s, "viewer-zoomed-graphite");
+        s.act("drag 640 400 500 300");
+        assert!(viewer(&s).pan != Vec2::ZERO, "dragged");
+        s.act("key 0");
+        assert_eq!((viewer(&s).zoom, viewer(&s).pan), (1.0, Vec2::ZERO));
+        s.act("drag 640 400 500 300");
+        assert_eq!(viewer(&s).pan, Vec2::ZERO, "a picture that fits doesn't move");
+        s.act("key Plus");
+        assert!((viewer(&s).zoom - 1.25).abs() < 1e-3);
+        s.act("scroll 640 400 -5");
+        // The wheel's scroll eases out over a few frames.
+        s.idle(60);
+        assert!(viewer(&s).zoom < 1.25, "the wheel zooms out");
+        s.act("dclick 640 400");
+        assert_eq!(viewer(&s).zoom, 1.0, "a double-click fits it again");
+        s.idle(40);
+        s.act("dclick 640 400");
+        assert!((viewer(&s).zoom - one).abs() < 1e-3, "and then shows it one to one");
+        s.act("key 0");
+        // A slideshow: on to the next by itself, round to the first, with a fade.
+        s.act("key Space");
+        assert!(viewer(&s).playing);
+        assert!(s.repaint <= std::time::Duration::from_secs_f64(crate::viewer::SLIDE), "the timer runs while it plays: {:?}", s.repaint);
+        s.idle(250);
+        assert_eq!(pic(&s), "img00.png", "round to the first");
+        s.act("key Space");
+        assert!(!viewer(&s).playing);
+        s.idle(200);
+        // Memory goes back to the system two seconds (real ones) after decodes settle:
+        // that one wake is the app's, not the viewer's.
+        std::thread::sleep(std::time::Duration::from_millis(2200));
+        s.idle(3);
+        assert_eq!(s.repaint, std::time::Duration::MAX, "nothing repaints while the viewer rests");
+        assert!(!some_text(&s, "1 / 13"), "the name gone once the pointer rests");
+        s.act("move 300 300");
+        assert!(some_text(&s, "1 / 13"), "back when it moves");
+        s.act("key ArrowRight");
+        assert_eq!(viewer(&s).fading_from(), Some(0), "a quiet fade between pictures");
+        s.app.cfg.animations = false;
+        s.act("key ArrowRight");
+        assert_eq!(viewer(&s).fading_from(), None, "none without animations");
+        s.app.cfg.animations = true;
+        // Escape: the cursor on the picture last shown.
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        assert_eq!(s.tab().cursor.map(|c| s.tab().entries[c as usize].name.clone()).as_deref(), Some("img02.png"));
+        // From the picture's menu.
+        let row = row_text(&s, "img07.png");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        s.click_text("View Pictures");
+        assert_eq!(pic(&s), "img07.png");
+        s.act("key Escape");
+        // Enter and double-click open the picture's app by default.
+        let n = crate::mime::LAUNCHED.lock().unwrap().len();
+        select_path(&mut s, &trip.join("img05.png"));
+        s.act("key Enter");
+        assert!(!s.popup_open(), "not the viewer");
+        assert!(crate::mime::LAUNCHED.lock().unwrap().len() > n, "its app");
+        // Options can send them to the viewer.
+        s.act("key ctrl+Comma");
+        s.act("text pictures in maia");
+        s.act("key Enter");
+        s.act("key Escape");
+        assert!(s.app.cfg.picture_viewer, "switched on in Options");
+        select_path(&mut s, &trip.join("img05.png"));
+        s.act("key Enter");
+        assert_eq!(pic(&s), "img05.png", "Enter shows it here");
+        s.act("key Escape");
+        s.idle(30);
+        let row = row_text(&s, "img06.png");
+        s.act(&format!("dclick {:.0} {:.0}", row.center().x, row.center().y));
+        assert_eq!(pic(&s), "img06.png", "so does a double-click");
+        s.act("key Escape");
+        // A broken picture.
+        go(&mut s, &home.join("Pictures"));
+        select_path(&mut s, &home.join("Pictures/broken.png"));
+        s.cmd(ViewPictures);
+        wait_until(&mut s, "the broken one tried", 10, |s| s.app.thumbs.failed(&home.join("Pictures/broken.png")));
+        s.idle(2);
+        assert!(some_text(&s, "Can't show this picture"));
+        s.resize(520.0, 340.0);
+        s.act("key ArrowLeft");
+        s.act("move 200 200");
+        s.idle(3);
+        s.shot("viewer-small-graphite");
+        s.act("key Escape");
+        look(&mut s, "after the viewer, small");
+        s.resize(1280.0, 800.0);
+        go(&mut s, &home.join("Documents"));
+        s.cmd(ViewPictures);
+        assert!(!s.popup_open() && toast_is(&s, "No pictures here"));
+        report("viewer", &s);
+    }
+
+    fn control_rect(s: &mut Sim, what: &str) -> Rect {
+        s.idle(1);
+        crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == what).map(|(_, r, _)| *r)).unwrap_or_else(|| s.fail(&format!("no {what} on screen")))
+    }
+
+    fn shelf_names(s: &Sim) -> Vec<String> {
+        s.app.shelf.items.iter().map(|i| i.path.file_name().unwrap().to_string_lossy().into_owned()).collect()
+    }
+
+    /// The shelf: files gathered from three folders by key, menu and a drop; copied into
+    /// one folder and undone, then moved into another and undone; one item taken off by
+    /// its ×, one whose file went away dropping off by itself, the rest cleared; a file
+    /// dropped on the empty shelf's spot; an item dragged off it into a folder; the strip
+    /// only there while it holds something.
+    #[test]
+    fn shelf_gathers_then_moves_or_copies() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("shelf");
+        let mut s = Sim::new(&home.join("Documents"), vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        assert_eq!(s.app.shelf.shown_h, 0.0, "no strip while it is empty");
+        select_path(&mut s, &home.join("Documents/notes.txt"));
+        s.act("key alt+s");
+        assert_eq!(shelf_names(&s), ["notes.txt"]);
+        s.idle(12);
+        assert!(s.app.shelf.shown_h > 20.0, "the strip slides in");
+        assert!(some_text(&s, "1 item"));
+        go(&mut s, &home.join("Music/Album"));
+        let row = row_text(&s, "01 Intro.mp3");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        s.click_text("Add to Shelf");
+        assert_eq!(shelf_names(&s), ["notes.txt", "01 Intro.mp3"]);
+        // Dragged from the list onto the strip.
+        let row = row_text(&s, "02 Song.flac");
+        let strip = control_rect(&mut s, "shelf all");
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", row.center().x, row.center().y, strip.right() + 200.0, strip.center().y));
+        assert_eq!(shelf_names(&s), ["notes.txt", "01 Intro.mp3", "02 Song.flac"], "dropped on it");
+        assert!(home.join("Music/Album/02 Song.flac").exists(), "and left where it was");
+        assert!(some_text(&s, "3 items") && some_text(&s, "notes.txt") && some_text(&s, "02 Song.flac"));
+        look(&mut s, "shelf with three items");
+        s.shot("shelf-graphite");
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        look(&mut s, "shelf, light");
+        s.shot("shelf-paper");
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        // Copied into Empty, and undone.
+        go(&mut s, &home.join("Empty"));
+        click_control(&mut s, "shelf copy");
+        wait_until(&mut s, "copied", 10, |_| ["notes.txt", "01 Intro.mp3", "02 Song.flac"].iter().all(|f| home.join("Empty").join(f).exists()));
+        assert_eq!(s.app.shelf.items.len(), 3, "a copy keeps the shelf");
+        wait_until(&mut s, "the copy's undo", 10, |s| s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Created(_))));
+        s.act("key ctrl+z");
+        wait_until(&mut s, "copies undone", 10, |_| !home.join("Empty/notes.txt").exists());
+        // Moved into a new folder from the palette, and undone.
+        std::fs::create_dir_all(home.join("Gathered")).unwrap();
+        go(&mut s, &home.join("Gathered"));
+        palette_run(&mut s, "Move Shelf Here");
+        wait_until(&mut s, "moved", 10, |_| ["notes.txt", "01 Intro.mp3", "02 Song.flac"].iter().all(|f| home.join("Gathered").join(f).exists()));
+        assert!(!home.join("Documents/notes.txt").exists());
+        assert!(s.app.shelf.items.is_empty(), "a move empties the shelf");
+        s.idle(12);
+        assert_eq!(s.app.shelf.shown_h, 0.0, "and the strip goes");
+        wait_until(&mut s, "the move's undo", 10, |s| s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Move(_))));
+        s.act("key ctrl+z");
+        wait_until(&mut s, "move undone", 10, |_| home.join("Documents/notes.txt").exists() && home.join("Music/Album/01 Intro.mp3").exists());
+        // One off by its ×, one gone from the disk, the rest cleared.
+        go(&mut s, &home.join("Documents"));
+        s.act("key ctrl+a");
+        s.act("key alt+s");
+        let n = s.app.shelf.items.len();
+        assert!(n >= 5, "the whole folder: {n}");
+        s.idle(12);
+        let chip = control_rect(&mut s, "shelf item");
+        s.act(&format!("move {:.0} {:.0}", chip.center().x, chip.center().y));
+        s.act(&format!("click {:.0} {:.0}", chip.right() - 12.0, chip.center().y));
+        assert_eq!(s.app.shelf.items.len(), n - 1, "taken off by its ×");
+        assert!(!s.app.shelf.items.iter().any(|i| i.path == home.join("Documents/Taxes")), "the first one");
+        std::fs::remove_file(home.join("Documents/report.md")).unwrap();
+        wait_until(&mut s, "the vanished file dropped", 10, |s| !s.app.shelf.has(&home.join("Documents/report.md")));
+        // A click on an item shows it in its folder.
+        go(&mut s, &home);
+        let chip = control_rect(&mut s, "shelf item");
+        s.act(&format!("click {:.0} {:.0}", chip.left() + 12.0, chip.center().y));
+        s.settle();
+        assert_eq!(s.tab().path, home.join("Documents"), "its folder");
+        assert_eq!(s.tab().cursor.map(|c| s.tab().entries[c as usize].path.clone()), s.app.shelf.items.first().map(|i| i.path.clone()), "selected there");
+        click_control(&mut s, "shelf clear");
+        assert!(s.app.shelf.items.is_empty());
+        // Dropped on the empty shelf's spot, at the bottom while files are dragged.
+        go(&mut s, &home.join("Music/Album"));
+        s.idle(12);
+        let row = row_text(&s, "01 Intro.mp3");
+        let (cx, by) = (s.size.x / 2.0 + 20.0, s.size.y - 22.0);
+        s.act(&format!("down {:.0} {:.0}", row.center().x, row.center().y));
+        for k in 1..=10 {
+            let t = k as f32 / 10.0;
+            s.act(&format!("move {:.0} {:.0}", row.center().x + (cx - row.center().x) * t, row.center().y + (by - row.center().y) * t));
+        }
+        assert!(some_text(&s, "Shelf"), "the spot to drop on");
+        s.shot("shelf-drop-spot-graphite");
+        s.act(&format!("up {cx:.0} {by:.0}"));
+        assert_eq!(shelf_names(&s), ["01 Intro.mp3"], "dropped on the spot");
+        assert!(home.join("Music/Album/01 Intro.mp3").exists());
+        // Dragged off the shelf onto a folder: moved there.
+        go(&mut s, &home);
+        s.idle(12);
+        let chip = control_rect(&mut s, "shelf item");
+        let docs = row_text(&s, "Documents");
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", chip.left() + 14.0, chip.center().y, docs.center().x, docs.center().y));
+        wait_until(&mut s, "moved onto the folder", 10, |_| home.join("Documents/01 Intro.mp3").exists());
+        wait_until(&mut s, "and off the shelf", 10, |s| s.app.shelf.items.is_empty());
+        // Tight and split.
+        go(&mut s, &home.join("Documents"));
+        s.act("key ctrl+a");
+        s.act("key alt+s");
+        s.cmd(SplitRight);
+        s.settle();
+        look(&mut s, "shelf with a split");
+        s.resize(520.0, 340.0);
+        look(&mut s, "shelf small");
+        s.shot("shelf-small-graphite");
+        s.resize(1280.0, 800.0);
+        report("shelf", &s);
+    }
+
     #[test]
     fn monkey_sessions() {
         if !sandboxed() {
@@ -8806,6 +9452,9 @@ mod journeys {
                 let _ = std::fs::write(home.join("Documents/Office").join(f), "not really an office file");
             }
             crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(drv));
+            // Snapshots of one file, for Previous Versions.
+            let (_, table) = crate::tests::snapshot_fixture(&home.join("Disk"));
+            crate::versions::FAKE.with(|f| *f.borrow_mut() = Some(table));
             // An archive to wander into.
             if crate::archive::available() {
                 let _ = crate::archive::create(&home.join("bundle.zip"), &home.join("Documents"), &["notes.txt".into(), "Taxes".into()]);
@@ -8871,6 +9520,7 @@ mod journeys {
             wipe_root();
         }
         crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        crate::versions::FAKE.with(|f| *f.borrow_mut() = None);
         crate::wallpaper::DESKTOP.with(|w| w.borrow_mut().clear());
         crate::sendto::MAIL_APP.with(|m| *m.borrow_mut() = None);
         let launched = crate::mime::LAUNCHED.lock().unwrap().len();
