@@ -46,7 +46,7 @@ impl Tail {
         let stop = Arc::new(unsafe { OwnedFd::from_raw_fd(efd) });
         let got = Arc::new(Mutex::new(Got::default()));
         let (g2, s2) = (got.clone(), stop.clone());
-        std::thread::spawn(move || follow(path, from, g2, s2, ctx));
+        std::thread::Builder::new().name("follow".into()).spawn(move || follow(path, from, g2, s2, ctx)).ok()?;
         Some(Tail { got, stop })
     }
 

@@ -4678,8 +4678,9 @@ fn followed_file_appends_rotates_and_stops() {
     std::fs::write(&p, "rotated and longer than before\n").unwrap();
     let (reset, data) = wait("rotation");
     assert!(reset && data.ends_with(b"rotated and longer than before\n"));
-    // Dropped: the worker ends (its thread finishes; nothing more is read).
-    let threads = || std::fs::read_dir("/proc/self/task").map(|r| r.count()).unwrap_or(0);
+    // Dropped: the worker ends (its thread finishes; nothing more is read). Only threads
+    // by its name are counted: tests running beside this one start and end their own.
+    let threads = || std::fs::read_dir("/proc/self/task").map(|r| r.flatten().filter(|t| std::fs::read_to_string(t.path().join("comm")).is_ok_and(|c| c.trim() == "follow")).count()).unwrap_or(0);
     let before = threads();
     drop(tail);
     let t0 = Instant::now();
