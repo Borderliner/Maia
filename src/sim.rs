@@ -4382,6 +4382,8 @@ mod journeys {
         let chip = s.texts.iter().filter(|(_, t)| t == "main").max_by(|a, b| a.0.center().y.total_cmp(&b.0.center().y)).map(|(r, _)| *r).unwrap_or_else(|| s.fail("no branch chip"));
         s.act(&format!("click {:.0} {:.0}", chip.center().x, chip.center().y));
         wait_until(s, "the branch menu", 5, |s| matches!(s.app.popup, Popup::Branches(_)) && s.texts.iter().any(|(_, t)| t == "History"));
+        // A menu taller than when it was last open settles on its next frame.
+        s.idle(3);
         s.click_text("History");
     }
 
@@ -5031,8 +5033,11 @@ mod journeys {
         let menu = s.text_rect("New branch…");
         assert!(menu.bottom() < s.text_rect("History").bottom() + 400.0 && s.text_rect("History").top() >= 0.0);
         s.shot("branch-menu");
-        // By keyboard: down to docs, Enter.
-        let at = 1 + r.local.iter().position(|b| b.name == "docs").unwrap();
+        for t in ["Pull", "Push", "Fetch"] {
+            assert!(s.texts.iter().any(|(_, x)| x == t), "{t:?} in the menu: there is a remote");
+        }
+        // By keyboard: down past History, Pull, Push and Fetch to docs, Enter.
+        let at = 4 + r.local.iter().position(|b| b.name == "docs").unwrap();
         for _ in 0..at {
             s.act("key ArrowDown");
         }
@@ -7905,6 +7910,15 @@ mod journeys {
         }
         s.click_text("Resize");
         s.idle(2);
+        // A long menu in a short window scrolls down to the sizes.
+        for _ in 0..20 {
+            if some_text(&s, "Other size…") {
+                break;
+            }
+            let at = s.text_rect("Resize").center();
+            s.act(&format!("scroll {:.0} {:.0} -3", at.x, at.y));
+            s.idle(2);
+        }
         assert!(some_text(&s, "Fit within 1920 px") && some_text(&s, "Other size…"));
         look(&mut s, "the picture menu");
         shot_still(&mut s, "picture-menu");
