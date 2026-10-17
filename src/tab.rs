@@ -1322,6 +1322,10 @@ impl Tab {
         self.selected.retain(|&i| (i as usize) < self.entries.len());
         // When filtering, land on the first match.
         if !self.filter.is_empty() {
+            // What the filter hides is not acted on: F2 or Delete after typing a name
+            // renamed or trashed a file still selected from before, out of sight.
+            let view: std::collections::HashSet<u32> = self.view.iter().copied().collect();
+            self.selected.retain(|i| view.contains(i));
             let cur_visible = self.cursor.map(|c| self.view_pos(c).is_some()).unwrap_or(false);
             if !cur_visible {
                 if let Some(&first) = self.view.first() {

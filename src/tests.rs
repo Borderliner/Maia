@@ -7353,3 +7353,33 @@ fn quick_open_lists_and_ranks_a_projects_files() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A filter that hides a selected file takes it out of the selection: after renaming
+/// one file (which stays selected) and typing another's name, F2 or Delete act on the
+/// file found, never on the one out of sight.
+#[test]
+fn a_filter_drops_hidden_files_from_the_selection() {
+    let d = tmpdir("filter-selection");
+    for f in ["a.txt", "report.md", "notes.txt"] {
+        touch(&d.join(f), "x\n");
+    }
+    let stats = HashMap::new();
+    let mut t = Tab::new(1, d.clone(), ViewSettings::default(), egui::Context::default());
+    pump(&mut t, &stats);
+    let at = |t: &Tab, n: &str| t.entries.iter().position(|e| e.name == n).unwrap() as u32;
+    let (a, report) = (at(&t, "a.txt"), at(&t, "report.md"));
+    t.select_only(a);
+    t.filter = "report".into();
+    t.dirty = true;
+    pump(&mut t, &stats);
+    assert_eq!(t.cursor, Some(report), "the cursor on the match");
+    assert!(t.selected.is_empty(), "a.txt hidden, no longer selected");
+    assert_eq!(t.target_entries().iter().map(|e| e.name.clone()).collect::<Vec<_>>(), ["report.md"], "what F2 and Delete act on");
+    // A selection the filter keeps in view stays.
+    t.select_only(report);
+    t.filter = "rep".into();
+    t.dirty = true;
+    pump(&mut t, &stats);
+    assert!(t.selected.contains(&report));
+    let _ = std::fs::remove_dir_all(&d);
+}
