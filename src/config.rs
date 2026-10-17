@@ -537,6 +537,8 @@ pub struct UserData {
     pub pinned_ctx: Vec<String>,
     pub quick: Vec<String>,
     pub aliases: HashMap<String, String>,
+    /// Commands last run from the palette, newest first.
+    pub recent_cmds: Vec<String>,
     pub layouts: BTreeMap<String, LayoutSnap>,
     pub views: HashMap<PathBuf, SavedView>,
     pub default_view: Option<ViewSettings>,

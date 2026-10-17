@@ -1022,7 +1022,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(132) {
+    match rng.below(133) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1421,6 +1421,25 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 }
             }
             s.idle(1 + rng.below(4));
+        }
+        132 => {
+            // The palette: a category clicked or stepped to, a search, a row moved to,
+            // starred, run or let go.
+            s.act("key ctrl+shift+p");
+            for _ in 0..1 + rng.below(5) {
+                match rng.below(6) {
+                    0 => {
+                        let c = *rng.pick(&crate::commands::Cat::ORDER);
+                        click_control_at(s, rng.pick(&[c.control(), "category All"]));
+                    }
+                    1 => s.act(rng.pick(&["key Tab", "key shift+Tab", "key ctrl+PageDown"])),
+                    2 => s.act(&format!("text {}", rng.pick(&["size", "tog", "git", "zq", "view"]))),
+                    3 => s.act(rng.pick(&["key ArrowDown", "key ArrowUp", "key PageDown", "key ctrl+d"])),
+                    4 => click_control_at(s, rng.pick(&["star button", "compact rows"])),
+                    _ => s.act(rng.pick(&["key Escape", "key Enter"])),
+                }
+            }
+            s.act("key Escape");
         }
         122 => {
             // Find Duplicates: wait a little, check some, maybe ask to trash, then leave.
@@ -5633,6 +5652,98 @@ mod journeys {
         assert_eq!(mark(&a.join("size.txt")), None, "marks clear when a panel moves");
         look(&mut s, "after compare");
         report("compare", &s);
+    }
+
+    /// The palette by mouse and by keys: a category clicked on the left lists only its
+    /// commands and keeps them while typing, Tab and Shift+Tab step through the ones a
+    /// search leaves something in, Ctrl+D and the row's star keep a command in Quick,
+    /// Ctrl+Enter asks for a hotkey, a click runs a row, and what ran comes back first
+    /// under Recent. A narrow window keeps the categories as glyphs.
+    #[test]
+    fn palette_categories() {
+        if !sandboxed() {
+            return;
+        }
+        use crate::commands::Cat;
+        let home = fixture("palette");
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        let cat = |s: &Sim| match &s.app.popup {
+            Popup::Palette(p) => Some(p.cat),
+            _ => None,
+        };
+        let quick = |s: &Sim, id: &str| s.app.ud.quick.iter().any(|q| q == id);
+        s.act("key ctrl+shift+p");
+        s.idle(2);
+        assert_eq!(cat(&s), Some(None), "everything to begin with");
+        assert!(some_text(&s, "Navigate") && some_text(&s, "Open In New Tab"));
+        look(&mut s, "palette");
+        click_control(&mut s, "category Sort");
+        s.idle(2);
+        assert_eq!(cat(&s), Some(Some(Cat::Sort)));
+        assert!(some_text(&s, "Sort By Size Asc") && !some_text(&s, "New Tab"), "only Sort's commands");
+        // The click left the keyboard with the search: typing narrows the category.
+        s.act("text desc");
+        s.idle(2);
+        assert!(some_text(&s, "Sort By Size Desc") && !some_text(&s, "Sort By Size Asc"));
+        s.act("key Tab");
+        s.idle(2);
+        // Nothing after Sort has a "desc": round to everything.
+        assert_eq!(cat(&s), Some(None), "on past the categories without a match");
+        assert!(!some_text(&s, "No command matches"));
+        s.act("key shift+Tab");
+        assert_eq!(cat(&s), Some(Some(Cat::Sort)), "and back");
+        look(&mut s, "palette in a category");
+        s.shot("palette-category");
+        click_control(&mut s, "category All");
+        s.act("key ctrl+a");
+        s.act("key Backspace");
+        // Quick: Ctrl+D adds the selected command, its star takes it out again.
+        s.act("text Toggle Sidebar");
+        s.idle(2);
+        s.act("key ctrl+d");
+        assert!(quick(&s, "toggle_sidebar"), "Ctrl+D keeps it in Quick");
+        click_control(&mut s, "star button");
+        assert!(!quick(&s, "toggle_sidebar"), "the star takes it out");
+        // Ctrl+Enter asks for a hotkey; Escape leaves that.
+        s.act("key ctrl+Enter");
+        assert!(matches!(&s.app.popup, Popup::Palette(p) if p.capture.is_some()), "a new hotkey is asked for");
+        s.act("key Escape");
+        assert!(matches!(&s.app.popup, Popup::Palette(p) if p.capture.is_none()));
+        let side = s.app.sidebar;
+        s.act("key Enter");
+        assert_eq!(s.app.sidebar, !side, "Enter ran it");
+        assert_eq!(s.app.ud.recent_cmds.first().map(String::as_str), Some("toggle_sidebar"));
+        // Next time it is first, under Recent.
+        s.act("key ctrl+shift+p");
+        s.idle(2);
+        assert!(some_text(&s, "Recent"));
+        s.act("key Enter");
+        assert_eq!(s.app.sidebar, side, "the recent command first");
+        // A click on a row runs it.
+        let hidden = s.app.cfg.show_hidden;
+        s.act("key ctrl+shift+p");
+        s.act("text hidden files");
+        s.idle(2);
+        s.click_text("Toggle Hidden Files");
+        s.settle();
+        assert_eq!(s.app.cfg.show_hidden, !hidden, "the clicked row ran");
+        assert!(matches!(s.app.popup, Popup::None));
+        // Down the list by keys, in a narrow window.
+        s.resize(560.0, 460.0);
+        s.act("key ctrl+shift+p");
+        s.idle(2);
+        assert!(!some_text(&s, "Navigate"), "glyphs only on the left");
+        for _ in 0..30 {
+            s.act("key ArrowDown");
+        }
+        s.act("key PageDown");
+        s.act("key Tab");
+        s.idle(20);
+        assert!(some_text(&s, "Open In New Tab"), "a new category starts at its top");
+        look(&mut s, "palette narrow");
+        s.shot("palette-narrow");
+        s.act("key Escape");
+        report("palette", &s);
     }
 
     /// Command aliases from the palette: set one with the row's alias button, find and
