@@ -1017,7 +1017,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(138) {
+    match rng.below(140) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1665,6 +1665,70 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             if matches!(s.app.popup, Popup::Holders(_)) {
                 s.act(&format!("key {}", rng.pick(&["Escape", "Escape", "Enter"])));
             }
+        }
+        138 => {
+            // A smart folder made: from a search in the filter or the palette, its
+            // fields typed into, kinds picked, saved or let go.
+            if rng.below(2) == 0 {
+                s.act("key ctrl+f");
+                s.act(&format!("text {}", rng.pick(&["doc", "img", ".png", "notes size>1k", "a modified<30d", "résumé"])));
+                s.cmd(Cmd::SaveSmart);
+            } else {
+                s.cmd(Cmd::NewSmart);
+            }
+            for _ in 0..rng.below(6) {
+                if !matches!(s.app.popup, Popup::SmartEdit(_)) {
+                    break;
+                }
+                match rng.below(3) {
+                    0 => click_control_at(s, "smart kind"),
+                    1 => {
+                        click_control_at(s, rng.pick(&["smart name", "smart root", "smart words", "smart days", "smart size"]));
+                        s.act(&format!("text {}", rng.pick(&["7", "10 MB", "~/", "IMG_*", "zz", "-1", "Code"])));
+                    }
+                    _ => s.act(&format!("key {}", rng.pick(&["Backspace", "Tab", "ctrl+a"]))),
+                }
+            }
+            if matches!(s.app.popup, Popup::SmartEdit(_)) {
+                s.act(&format!("key {}", rng.pick(&["Enter", "Enter", "Escape"])));
+                if matches!(s.app.popup, Popup::SmartEdit(_)) {
+                    s.act("key Escape");
+                }
+            }
+            s.idle(1 + rng.below(20));
+        }
+        139 => {
+            // A smart folder in the sidebar: opened, in a new tab, or its menu's Edit,
+            // Rename or Remove.
+            let names: Vec<String> = s.app.ud.smart.iter().map(|x| x.name.clone()).collect();
+            let at = names.iter().find_map(|n| s.texts.iter().find(|(r, t)| t == n && r.right() <= s.app.sidebar_width + 1.0).map(|x| x.0));
+            if let Some(r) = at {
+                match rng.below(4) {
+                    0 => s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y)),
+                    1 => s.act(&format!("click {:.0} {:.0} middle", r.center().x, r.center().y)),
+                    _ => {
+                        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+                        s.act(&format!("text {}", rng.pick(&["open", "new tab", "edit", "rename", "remove"])));
+                        s.act("key Enter");
+                        s.idle(2);
+                        match &s.app.popup {
+                            Popup::Prompt { .. } => {
+                                s.act(&format!("text {}", rng.pick(&["Mine", " ", "日本"])));
+                                s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
+                            }
+                            Popup::SmartEdit(_) => s.act(&format!("key {}", rng.pick(&["Enter", "Escape"]))),
+                            _ => {}
+                        }
+                        if s.popup_open() && rng.below(2) == 0 {
+                            s.act("key Escape");
+                        }
+                    }
+                }
+            } else {
+                s.cmd(Cmd::NewSmart);
+                s.act("key Enter");
+            }
+            s.idle(1 + rng.below(20));
         }
         _ => {
             s.note("idle".into());
@@ -8156,6 +8220,162 @@ mod journeys {
         assert_eq!(crate::holders::REFUSED.lock().unwrap().len(), refused, "nothing else was signalled");
         drop(kids);
         report("whats using", &s);
+    }
+
+    /// Smart folders: a search in the filter saved as one from the folder's menu, the
+    /// dialog filled in from it; a section of its own in the sidebar; opened, it lists
+    /// what matches and finds a new file on Refresh. Edited, renamed and removed from
+    /// its entry's menu; a new one from the palette with a size it can't read refused
+    /// first; Ctrl+click opens a new tab; the section goes with the last one.
+    #[test]
+    fn smart_folders_saved_opened_edited() {
+        if !sandboxed() {
+            return;
+        }
+        let d = root().join("home/smart");
+        let _ = std::fs::remove_dir_all(&d);
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400 * 90);
+        let file = |p: &str, len: usize, aged: bool| {
+            let p = d.join(p);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, vec![b'x'; len]).unwrap();
+            if aged {
+                std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+            }
+        };
+        file("Invoices/2026/invoice-031.pdf", 2_000_000, false);
+        file("Invoices/2026/invoice-030.pdf", 1000, false);
+        file("Invoices/2025/invoice-001.pdf", 3_000_000, true);
+        file("Invoices/invoice notes.txt", 10, false);
+        file("Photos/IMG_0001.jpg", 500_000, false);
+        file("Photos/IMG_0002.png", 400_000, true);
+        file("Photos/thumb.png", 1000, false);
+        file(".cache/invoice-cached.pdf", 10, false);
+        file("web/package.json", 2, false);
+        file("web/node_modules/x/invoice-y.pdf", 10, false);
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        let rels = |s: &Sim| -> Vec<String> {
+            let mut v: Vec<String> = s.tab().entries.iter().filter_map(|e| e.rel().map(|r| r.into_owned())).collect();
+            v.sort();
+            v
+        };
+        fn ed(s: &Sim) -> &crate::smart::Edit {
+            match &s.app.popup {
+                Popup::SmartEdit(e) => e,
+                _ => s.fail("the smart folder dialog is not open"),
+            }
+        }
+        s.act("key ctrl+f");
+        s.act("text invoice");
+        s.idle(3);
+        let list = s.app.panels[&s.app.active].list_rect;
+        s.act(&format!("click {:.0} {:.0} right", list.center().x, list.bottom() - 30.0));
+        s.idle(2);
+        s.act("text smart");
+        s.idle(1);
+        assert!(some_text(&s, "Save As Smart Folder…"), "in the folder's menu while searching");
+        s.act("key Enter");
+        assert_eq!((ed(&s).name.as_str(), ed(&s).name_has.as_str(), ed(&s).root.as_str(), ed(&s).id), ("invoice", "invoice", "~/smart", None));
+        s.click_text("PDFs");
+        assert_eq!(ed(&s).kinds, ["pdfs"]);
+        look(&mut s, "smart folder dialog");
+        s.idle(12);
+        s.shot("smart-folder-edit");
+        s.act("key Enter");
+        assert!(!s.popup_open(), "saved");
+        assert_eq!(s.app.ud.smart.len(), 1);
+        wait_until(&mut s, "its search", 10, |s| s.tab().smart.is_some() && !s.tab().is_loading());
+        s.settle();
+        assert_eq!(rels(&s), ["Invoices/2025/invoice-001.pdf", "Invoices/2026/invoice-030.pdf", "Invoices/2026/invoice-031.pdf"], "PDFs with invoice in the name; no hidden or installed copies");
+        assert!(s.tab().filter.is_empty(), "the search is the smart folder now");
+        assert_eq!(s.tab().title(), "invoice");
+        assert!(sidebar_text(&s, "Smart Folders").is_some() && sidebar_text(&s, "invoice").is_some());
+        look(&mut s, "smart folder results");
+        s.shot("smart-folder-results");
+        // Up to date: found again on Refresh.
+        file("Invoices/invoice-032.pdf", 10, false);
+        s.cmd(Refresh);
+        wait_until(&mut s, "the new invoice", 10, |s| rels(s).iter().any(|r| r == "Invoices/invoice-032.pdf"));
+        // Back to the folder; the sidebar opens it again.
+        s.act("key alt+ArrowLeft");
+        s.settle();
+        assert!(s.tab().smart.is_none() && s.tab().path == d);
+        let r = sidebar_text(&s, "invoice").unwrap();
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        wait_until(&mut s, "opened from the sidebar", 10, |s| s.tab().smart.is_some() && !s.tab().is_loading() && rels(s).len() == 4);
+        // Edited from its menu: changed in the last 30 days only.
+        let r = sidebar_text(&s, "invoice").unwrap();
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(2);
+        s.click_text("Edit…");
+        assert!(ed(&s).id.is_some());
+        click_control(&mut s, "smart days");
+        s.act("text 30");
+        s.act("key Enter");
+        assert!(!s.popup_open());
+        wait_until(&mut s, "searched again", 10, |s| !s.tab().is_loading() && rels(s).len() == 3);
+        assert!(!rels(&s).iter().any(|r| r.contains("invoice-001")), "the old one left out");
+        // Renamed.
+        let r = sidebar_text(&s, "invoice").unwrap();
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(2);
+        s.click_text("Rename…");
+        assert!(matches!(s.app.popup, Popup::Prompt { .. }));
+        s.act("key ctrl+a");
+        s.act("text Bills");
+        s.act("key Enter");
+        s.idle(2);
+        assert!(sidebar_text(&s, "Bills").is_some() && s.tab().title() == "Bills");
+        // A new one from the palette; a size it can't read is refused first.
+        palette_run(&mut s, "New Smart Folder");
+        assert_eq!(ed(&s).root, "~/smart");
+        click_control(&mut s, "smart name");
+        s.act("key ctrl+a");
+        s.act("text Big pictures");
+        let chip = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|x| x.2 == "smart kind").map(|x| x.1).next()).unwrap_or_else(|| s.fail("the kinds"));
+        s.act(&format!("click {:.0} {:.0}", chip.center().x, chip.center().y));
+        assert_eq!(ed(&s).kinds, ["pictures"]);
+        click_control(&mut s, "smart size");
+        s.act("text huge");
+        s.act("key Enter");
+        assert_eq!(ed(&s).error.as_deref(), Some("Size: a number and a unit, like 10 MB"));
+        assert!(some_text(&s, "Size: a number and a unit, like 10 MB"));
+        look(&mut s, "smart folder refused");
+        s.act("key ctrl+a");
+        s.act("text 100 KB");
+        s.act("key Enter");
+        assert!(!s.popup_open());
+        wait_until(&mut s, "the pictures", 10, |s| s.tab().smart.as_ref().is_some_and(|x| x.name == "Big pictures") && !s.tab().is_loading());
+        s.settle();
+        assert_eq!(rels(&s), ["Photos/IMG_0001.jpg", "Photos/IMG_0002.png"]);
+        // Ctrl+click: a new tab.
+        let tabs = s.app.panels[&s.app.active].tabs.len();
+        let r = sidebar_text(&s, "Bills").unwrap();
+        s.act(&format!("click {:.0} {:.0} ctrl", r.center().x, r.center().y));
+        s.settle();
+        assert_eq!(s.app.panels[&s.app.active].tabs.len(), tabs + 1);
+        assert_eq!(s.tab().smart.as_ref().map(|x| x.name.as_str()), Some("Bills"));
+        for v in [ViewList, ViewLarge, ViewTree, ViewDetails] {
+            s.cmd(v);
+            look(&mut s, &format!("smart folder {v:?}"));
+        }
+        // Removed from their menus: the tabs show their folders; the section goes.
+        for name in ["Bills", "Big pictures"] {
+            let r = sidebar_text(&s, name).unwrap_or_else(|| s.fail(&format!("{name} in the sidebar")));
+            s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+            s.idle(2);
+            s.click_text("Remove");
+            s.idle(2);
+        }
+        assert!(s.app.ud.smart.is_empty());
+        assert!(sidebar_text(&s, "Smart Folders").is_none(), "no section with none");
+        assert!(s.app.panels.values().all(|p| p.tabs.iter().all(|t| t.smart.is_none())));
+        for (w, h) in [(520.0, 340.0), (1280.0, 800.0)] {
+            s.resize(w, h);
+            look(&mut s, &format!("smart folders at {w}x{h}"));
+        }
+        report("smart folders", &s);
     }
 
     #[test]

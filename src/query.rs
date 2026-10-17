@@ -35,6 +35,21 @@ pub struct Filter {
 }
 
 impl Filter {
+    /// What a smart folder can keep of the conditions: the size files must be over and
+    /// how many days back they were last changed.
+    pub fn floor_and_days(&self, now: SystemTime) -> (Option<u64>, Option<u32>) {
+        let mut floor = None;
+        let mut days = None;
+        for c in &self.conds {
+            match c.field {
+                Field::Size if c.hi == i64::MAX && c.lo > 0 => floor = Some((c.lo - 1).max(0) as u64),
+                Field::Modified if c.hi == i64::MAX && c.lo > i64::MIN => days = Some(((secs(now) - c.lo).max(0) as u64).div_ceil(86_400).max(1) as u32),
+                _ => {}
+            }
+        }
+        (floor, days)
+    }
+
     pub fn has_conds(&self) -> bool {
         !self.conds.is_empty() || !self.tags.is_empty()
     }
@@ -145,7 +160,7 @@ fn cond(w: &str, now: i64) -> Option<Cond> {
 }
 
 /// "100M", "1.5g", "20kb", "0": binary units, like the sizes shown in the list.
-fn size(v: &str) -> Option<i64> {
+pub(crate) fn size(v: &str) -> Option<i64> {
     let v = v.to_ascii_lowercase();
     let digits = v.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(v.len());
     let n: f64 = v[..digits].parse().ok()?;

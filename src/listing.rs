@@ -326,6 +326,8 @@ pub fn listing(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             "No matches".into()
         } else if t.hidden_count > 0 {
             format!("{} hidden item{}", t.hidden_count, if t.hidden_count == 1 { "" } else { "s" })
+        } else if t.smart.is_some() {
+            "No files match".into()
         } else {
             "This folder is empty".into()
         };
@@ -333,7 +335,7 @@ pub fn listing(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         let g = elided(&ui, &msg, FontId::proportional(env.cfg.font_size), (rect.width() - 24.0).max(40.0), env.pal.text_dim);
         ui.painter().galley(rect.center() - g.size() / 2.0, g, env.pal.text_dim);
     } else if t.view.is_empty() && (t.flatten || t.content.busy()) {
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, if t.content.busy() { "Searching…" } else { "Indexing…" }, FontId::proportional(env.cfg.font_size), env.pal.text_dim);
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, if t.content.busy() || t.smart.is_some() { "Searching…" } else { "Indexing…" }, FontId::proportional(env.cfg.font_size), env.pal.text_dim);
     }
     // Files dragged inside Maia and released over this list but not on a folder row
     // (rows got the first chance above) go into this folder. Pointer position, not

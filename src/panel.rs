@@ -56,7 +56,7 @@ impl Panel {
             tabs: self
                 .tabs
                 .iter()
-                .map(|t| TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: t.flatten })
+                .map(|t| TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: t.flatten, smart: t.smart.as_ref().map(|s| s.id) })
                 .collect(),
             active: self.active,
             inspector: self.inspector.is_some(),

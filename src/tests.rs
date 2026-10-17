@@ -5629,3 +5629,95 @@ fn ports_and_their_owners() {
     assert_eq!((v[0].port, v[0].addr), (5353, std::net::IpAddr::from([0, 0, 0, 0])));
     drop((tcp, udp, client));
 }
+
+/// Smart folders: names by part or by pattern, kinds, age and size, tested on a real
+/// folder: hidden folders, installed packages and links left out; a search's filter
+/// turned into one; sizes as people write them; the dialog's fields checked; and kept in
+/// the user data file, where an older file without them still loads and a kind from a
+/// later version doesn't stop it loading.
+#[test]
+fn smart_folders_find_what_they_say() {
+    use crate::smart::{SmartFolder, glob, parse_bytes, search};
+    let d = tmpdir("smart");
+    let old = std::time::SystemTime::now() - Duration::from_secs(86_400 * 90);
+    let file = |p: &str, len: usize, aged: bool| {
+        let p = d.join(p);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, vec![b'x'; len]).unwrap();
+        if aged {
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+        }
+    };
+    file("Invoices/2026/invoice-031.pdf", 2_000_000, false);
+    file("Invoices/2026/Invoice-030.PDF", 1000, false);
+    file("Invoices/2025/invoice-001.pdf", 3_000_000, true);
+    file("Invoices/notes.txt", 10, false);
+    file("Photos/IMG_0001.jpg", 500_000, false);
+    file("Photos/IMG_0002.png", 400_000, true);
+    file("Photos/holiday.mp4", 9_000_000, false);
+    file(".cache/invoice-cached.pdf", 10, false);
+    file("web/package.json", 2, false);
+    file("web/node_modules/pdfjs/invoice-test.pdf", 10, false);
+    std::fs::create_dir_all(d.join("Photos/invoice-folder.pdf")).unwrap();
+    std::os::unix::fs::symlink(d.join("Invoices"), d.join("Links")).unwrap();
+    let found = |sf: &SmartFolder| -> Vec<String> {
+        let mut v = vec![];
+        let (stop, cut) = (std::sync::atomic::AtomicBool::new(false), std::sync::atomic::AtomicBool::new(false));
+        search(sf, &mut |b| {
+            v.extend(b.into_iter().map(|e| e.rel().map(|r| r.into_owned()).unwrap_or_default()));
+            true
+        }, &stop, &cut);
+        v.sort();
+        v
+    };
+    let sf = |has: &str, kinds: &[&str], days: Option<u32>, bigger: Option<u64>| SmartFolder { id: 1, name: "x".into(), root: d.clone(), name_has: has.into(), kinds: kinds.iter().map(|k| k.to_string()).collect(), days, bigger };
+    assert_eq!(found(&sf("invoice", &[], None, None)), ["Invoices/2025/invoice-001.pdf", "Invoices/2026/Invoice-030.PDF", "Invoices/2026/invoice-031.pdf"], "any case; no folders, hidden, installed or linked copies");
+    assert_eq!(found(&sf("invoice-0??.pdf", &[], None, None)), ["Invoices/2025/invoice-001.pdf", "Invoices/2026/Invoice-030.PDF", "Invoices/2026/invoice-031.pdf"]);
+    assert_eq!(found(&sf("IMG_*", &[], None, None)), ["Photos/IMG_0001.jpg", "Photos/IMG_0002.png"]);
+    assert_eq!(found(&sf("", &["pictures"], None, None)), ["Photos/IMG_0001.jpg", "Photos/IMG_0002.png"]);
+    assert_eq!(found(&sf("", &["pictures", "videos"], Some(30), None)), ["Photos/IMG_0001.jpg", "Photos/holiday.mp4"], "the old picture left out");
+    assert_eq!(found(&sf("", &["pdfs"], Some(30), Some(1_000_000))), ["Invoices/2026/invoice-031.pdf"]);
+    assert_eq!(found(&sf("", &["documents"], None, None)).len(), 4, "the PDFs and the notes");
+    assert_eq!(found(&sf("", &["code"], None, None)), ["web/package.json"], "not the installed package's");
+    assert!(glob(&"a*b?c".chars().collect::<Vec<_>>(), &"axxbyc".chars().collect::<Vec<_>>()));
+    assert!(!glob(&"a*b?c".chars().collect::<Vec<_>>(), &"axxbc".chars().collect::<Vec<_>>()));
+    assert!(glob(&"*".chars().collect::<Vec<_>>(), &[]));
+    // From a search in the filter.
+    let from = crate::smart::from_filter(&d, "invoice size>1M modified<30d");
+    assert_eq!((from.name.as_str(), from.name_has.as_str(), from.bigger, from.days), ("invoice", "invoice", Some(1 << 20), Some(30)));
+    assert_eq!(found(&from), ["Invoices/2026/invoice-031.pdf"]);
+    assert_eq!(crate::smart::from_filter(&d.join("Photos"), "size>=2k").name, "Photos");
+    assert_eq!(parse_bytes("10 MB"), Some(10 << 20));
+    assert_eq!(parse_bytes("1.5G"), Some(1_610_612_736));
+    assert_eq!(parse_bytes("500k"), Some(512_000));
+    assert_eq!(parse_bytes("lots"), None);
+    // The dialog's fields.
+    let crate::popups::Popup::SmartEdit(mut e) = crate::smart::edit(&sf("invoice", &["pdfs"], Some(30), Some(10 << 20)), true) else { panic!() };
+    assert_eq!((e.days.as_str(), e.bigger.as_str()), ("30", "10.0 MB"));
+    assert_eq!(e.build().unwrap(), SmartFolder { name: "x".into(), ..sf("invoice", &["pdfs"], Some(30), Some(10 << 20)) });
+    e.days = "soon".into();
+    assert!(e.build().unwrap_err().starts_with("Days"));
+    e.days.clear();
+    e.bigger = "big".into();
+    assert!(e.build().unwrap_err().starts_with("Size"));
+    e.bigger.clear();
+    e.root = d.join("nowhere").display().to_string();
+    assert!(e.build().unwrap_err().starts_with("There is no folder"));
+    e.root = d.display().to_string();
+    e.name = "  ".into();
+    assert!(e.build().is_err());
+    // Kept in the user data file; older files load.
+    let path = d.join("userdata.json");
+    let mut ud = crate::config::UserData::with_defaults();
+    ud.smart.push(sf("invoice", &["pdfs"], Some(30), None));
+    crate::config::save_json(&path, &ud).unwrap();
+    let back: crate::config::UserData = crate::config::load_json(&path);
+    assert_eq!(back.smart, ud.smart);
+    std::fs::write(&path, r#"{"bookmarks": ["/tmp"], "recents": []}"#).unwrap();
+    let older: crate::config::UserData = crate::config::load_json(&path);
+    assert_eq!((older.bookmarks.len(), older.smart.len()), (1, 0));
+    std::fs::write(&path, r#"{"bookmarks": ["/tmp"], "smart": [{"id": 4, "name": "Scans", "root": "/tmp", "kinds": ["pdfs", "holograms"], "colour": "red"}]}"#).unwrap();
+    let later: crate::config::UserData = crate::config::load_json(&path);
+    assert_eq!((later.bookmarks.len(), later.smart[0].name.as_str(), later.smart[0].kinds.len()), (1, "Scans", 2));
+    let _ = std::fs::remove_dir_all(&d);
+}

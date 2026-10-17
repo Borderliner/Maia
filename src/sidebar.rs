@@ -434,6 +434,46 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             }
         }
         ui.add_space(6.0);
+        // ---------------- smart folders, once there are any
+        if !app.ud.smart.is_empty() && section(ui, app, "smart", "Smart Folders", Glyph::Search) {
+            let list: Vec<(u64, String)> = app.ud.smart.iter().map(|s| (s.id, s.name.clone())).collect();
+            for (id, name) in list {
+                if !matches(&name) {
+                    continue;
+                }
+                let key = crate::ctxmenu::smart_key(id);
+                let (r, resp) = ui.allocate_exact_size(vec2(width, row_h), Sense::click());
+                let r2 = r.shrink2(vec2(6.0, 1.0));
+                if ctx_target.as_deref() == Some(key.as_path()) {
+                    ui.painter().rect_filled(r2, CornerRadius::same(5), pal.selected);
+                } else if resp.hovered() {
+                    ui.painter().rect_filled(r2, CornerRadius::same(5), pal.row_hover);
+                }
+                let ic = Rect::from_center_size(pos2(r.left() + 36.0, r.center().y), Vec2::splat(15.0));
+                crate::theme::paint_lucide(ui.painter(), ic, "file-search", pal.text_dim);
+                let g = crate::listing::elided(ui, &name, font.clone(), r.width() - 62.0, pal.text);
+                ui.painter().galley(pos2(r.left() + 52.0, r.center().y - g.size().y / 2.0), g, pal.text);
+                // What it looks for, put in words only while the pointer is on it.
+                let summary = resp.hovered().then(|| app.ud.smart.iter().find(|s| s.id == id).map(|s| s.summary())).flatten();
+                let resp = match summary {
+                    Some(sum) => resp.on_hover_text(format!("{sum}\nCtrl+click: open in a new tab")),
+                    None => resp,
+                };
+                if resp.clicked() {
+                    actions.push(Action::OpenSmart { panel: active, id, new_tab: mods.ctrl, focus: true });
+                }
+                if resp.middle_clicked() {
+                    actions.push(Action::OpenSmart { panel: active, id, new_tab: true, focus: false });
+                }
+                if resp.secondary_clicked() {
+                    let pos = resp.interact_pointer_pos().unwrap_or(r.left_bottom());
+                    actions.push(Action::Open(crate::ctxmenu::build_smart(active, id, pos)));
+                }
+            }
+            ui.add_space(6.0);
+        } else if !app.ud.smart.is_empty() {
+            ui.add_space(6.0);
+        }
         // ---------------- storage
         if section(ui, app, "storage", "Storage", Glyph::Drive) {
             let mounts = CACHE.with(|c| c.borrow().mounts.clone());

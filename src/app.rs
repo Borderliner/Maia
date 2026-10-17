@@ -46,6 +46,8 @@ pub enum Action {
     Open(Popup),
     StartJob(OpKind),
     ExternalDrop { paths: Vec<PathBuf>, dest: PathBuf },
+    /// Show a smart folder (by id), here or in a new tab.
+    OpenSmart { panel: u64, id: u64, new_tab: bool, focus: bool },
 }
 
 pub enum Drag {
@@ -765,8 +767,10 @@ impl App {
                     t.scroll_to_cursor = true;
                 }
                 t.saved_scope = self.ud.views.get(&path).map(|v| v.scope);
-                if ts.flatten {
-                    t.set_flatten(true);
+                match ts.smart.and_then(|id| self.ud.smart.iter().find(|s| s.id == id)) {
+                    Some(sf) if sf.root == path => t.open_smart(sf.clone(), None),
+                    _ if ts.flatten => t.set_flatten(true),
+                    _ => {}
                 }
                 tabs.push(t);
             }
@@ -1697,7 +1701,7 @@ impl App {
                     if i != keep {
                         let p = self.panels.get_mut(&id).unwrap();
                         let t = p.tabs.remove(i);
-                        self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false });
+                        self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false, smart: None });
                     }
                 }
                 self.panel().active = 0;
@@ -1822,6 +1826,20 @@ impl App {
                 }
             }
             Cmd::WhatsUsingPort => self.popup = crate::holders::open(&ctx, crate::holders::What::Ports, None),
+            Cmd::SaveSmart => {
+                let t = self.tab();
+                let sf = crate::smart::from_filter(&t.path, &t.filter);
+                match t.filter.trim().is_empty() {
+                    true => self.toast("Type what to search for in the filter first"),
+                    false => self.popup = crate::smart::edit(&sf, false),
+                }
+            }
+            Cmd::NewSmart => {
+                let t = self.tab();
+                let root = if tab::is_computer(&t.path) || t.archive.is_some() { fsx::home() } else { t.path.clone() };
+                let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.popup = crate::smart::edit(&crate::smart::SmartFolder { root, name, ..Default::default() }, false);
+            }
             Cmd::FindDuplicates => match crate::devtools::target_dir(self) {
                 Some(d) => self.popup = crate::dupes::open(&ctx, d),
                 None => self.toast("Find Duplicates needs a folder"),
@@ -1947,7 +1965,7 @@ impl App {
                 for i in range {
                     let p = self.panels.get_mut(&id).unwrap();
                     let t = p.tabs.remove(i);
-                    self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false });
+                    self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false, smart: None });
                 }
                 let p = self.panel();
                 p.active = if cmd == Cmd::CloseLeftTabs { 0 } else { p.active.min(p.tabs.len().saturating_sub(1)) };
@@ -2479,7 +2497,7 @@ impl App {
         }
     }
 
-    fn track_leave(&mut self, old: &Path) {
+    pub(crate) fn track_leave(&mut self, old: &Path) {
         if self.cfg.track_recents() && !tab::is_computer(old) {
             self.ud.push_recent(old);
             self.ud_dirty = true;
@@ -2540,7 +2558,7 @@ impl App {
         if self.cfg.animations && !p.tabs.is_empty() {
             self.tab_ghosts.push((panel, idx, t.shown_tab_w, std::time::Instant::now()));
         }
-        self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false });
+        self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false, smart: None });
         if self.closed_tabs.len() > 50 {
             self.closed_tabs.remove(0);
         }
@@ -2571,7 +2589,7 @@ impl App {
         }
         if let Some(p) = self.panels.remove(&id) {
             for t in p.tabs {
-                self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false });
+                self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false, smart: None });
             }
         }
         self.tree.remove(id);
@@ -2850,6 +2868,7 @@ impl App {
             }
             Action::Toast(s) => self.toast(s),
             Action::Open(p) => self.popup = p,
+            Action::OpenSmart { panel, id, new_tab, focus } => self.open_smart(panel, id, new_tab, focus),
             Action::StartJob(k) => self.start_job(k),
             Action::ExternalDrop { paths, dest } => self.begin_transfer(paths, dest, false),
         }

@@ -29,7 +29,31 @@ pub enum Act {
     Tag(String, bool),
     /// Ask for a new tag's name, then add it.
     NewTag,
+    /// A smart folder's entry in the sidebar: (what, its id, panel to act in).
+    Smart(SmartAct, u64, u64),
     None,
+}
+
+#[derive(Clone, Copy)]
+pub enum SmartAct {
+    Open,
+    NewTab,
+    Edit,
+    Rename,
+    Remove,
+}
+
+/// The path the sidebar stands a smart folder's row for (its row stays lit while its
+/// menu is open).
+pub fn smart_key(id: u64) -> PathBuf {
+    PathBuf::from(format!("maia:smart:{id}"))
+}
+
+/// The menu of a smart folder in the sidebar.
+pub fn build_smart(panel: u64, id: u64, pos: Pos2) -> Popup {
+    let it = |key: &str, label: &str, a: SmartAct| Item { id: format!("smart:{key}"), label: label.into(), act: Act::Smart(a, id, panel), children: vec![] };
+    let items = vec![it("open", "Open", SmartAct::Open), it("new_tab", "Open In New Tab", SmartAct::NewTab), Item::sep(), it("edit", "Edit…", SmartAct::Edit), it("rename", "Rename…", SmartAct::Rename), Item::sep(), it("remove", "Remove", SmartAct::Remove)];
+    Popup::Ctx(CtxState { sidebar: Some(smart_key(id)), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![], focus: true, reveal: None })
 }
 
 #[derive(Clone, Copy)]
@@ -157,6 +181,9 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             items.push(Item::cmd(Cmd::ConnectServer));
         } else if !in_trash && t.archive.is_none() {
             items.push(Item::cmd(Cmd::FindDuplicates));
+            if !t.filter.trim().is_empty() && !t.content.on && t.smart.is_none() {
+                items.push(Item::cmd(Cmd::SaveSmart));
+            }
         }
         if in_trash {
             items.push(Item::sep());
@@ -810,6 +837,16 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                             app.drive_op(op, &d.dev, None);
                         }
                     }
+                }
+            }
+            Act::Smart(a, id, panel) => {
+                let Some(sf) = app.ud.smart.iter().find(|s| s.id == id).cloned() else { return false };
+                match a {
+                    SmartAct::Open => app.actions.push(Action::OpenSmart { panel, id, new_tab: false, focus: true }),
+                    SmartAct::NewTab => app.actions.push(Action::OpenSmart { panel, id, new_tab: true, focus: true }),
+                    SmartAct::Edit => app.actions.push(Action::Open(crate::smart::edit(&sf, true))),
+                    SmartAct::Rename => app.actions.push(Action::Open(Popup::prompt("Rename smart folder", sf.name.clone(), Box::new(move |app: &mut App, name: String| app.rename_smart(id, name))))),
+                    SmartAct::Remove => app.remove_smart(id),
                 }
             }
             Act::None => {}

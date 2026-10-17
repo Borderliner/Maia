@@ -58,6 +58,7 @@ mod semantic;
 mod sendto;
 mod share;
 mod sidebar;
+mod smart;
 mod signals;
 mod sqlite;
 mod single;
