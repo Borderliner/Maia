@@ -53,11 +53,12 @@ These are optional. Maia works without them and uses them when they are there:
 | `7z` | password-protected 7z archives (and quicker password checks for zip) |
 | `gio` (GVFS) | network places (smb, sftp, ftp, WebDAV) and phones over MTP |
 | `pkexec` (polkit) | retrying a refused copy, move, delete or rename as administrator |
-| `git` | change marks on files in git repositories, their history and blame, staging and committing, branches and the stash |
+| `git` | change marks on files in git repositories, their history and blame, staging and committing, branches, the stash, pulling and pushing |
 | `sqlite3` | the tables and first rows of SQLite databases, read-only, in the inspector |
 | `ollama` | search by meaning, if you turn it on (it fetches a ~860 MB model only when you ask); `ollama-vulkan` lets it use the graphics card |
 | `ffmpeg`, `ffprobe`, `ffplay` | video and audio previews and thumbnails |
 | `pdfinfo`, `pdftoppm` (poppler) | PDF pages in the inspector |
+| `pdflatex` (TeX Live) or `tectonic`, with poppler's `pdftocairo` | formulas in Markdown |
 | `soffice` (LibreOffice) | Word, Excel, PowerPoint and OpenDocument files in the inspector, with poppler |
 | `udisksctl` (udisks2), `lsblk` | mounting, unmounting and ejecting drives |
 | `magick` or `convert` (ImageMagick) | turning, resizing and cropping pictures |
@@ -84,6 +85,8 @@ as `size>100M`, `modified<7d`, `created:today` or `tag:red`. Some keys to start 
 | Switch panel | Tab |
 | Preview | Space |
 | Every file below this folder in one list | Ctrl+E |
+| Only the files git marks as changed | Ctrl+Shift+G |
+| Recent git projects | Ctrl+Alt+P |
 | Rename (several files at once) | F2 |
 | New folder | Ctrl+Shift+N |
 | Trash, delete | Delete, Shift+Delete |
@@ -97,42 +100,52 @@ Every binding can be changed from the command palette.
 An archive opens like a folder; right-click it for Extract Here, or right-click files
 for Compress. Set As Wallpaper, in a picture's menu, works on GNOME, KDE, XFCE,
 Cinnamon, MATE, sway, Hyprland (with hyprpaper or swww) and Noctalia. Its Picture menu
-turns pictures in place (Undo brings the original back from the trash) and saves
-smaller copies beside them; Crop works in the inspector: drag over what to keep and
-press Enter. Connect To Server (in the menu, or type an `smb://`, `sftp://` or
-`ftp://` address into Go To) opens network shares, which then stay in the sidebar's
-Network section. Right-click files for Tags to give them colour labels or named tags
-(kept on the files as extended attributes, which other programs can read). Batch Rename,
-in the menu of several files, numbers them or finds and replaces in their names and shows
-every new name before anything changes. Find Duplicates, in a folder's menu, lists the
-files under it with the same contents and moves the extra copies to the trash. Options
-can empty the trash of what has been in it longer than 7, 30 or 90 days. In a git
-repository, the branch name in the status bar opens a menu: the commit history, the
-branches to switch to or create, the stash and the other work trees. In the history a
-commit shows its files with their diffs, and right-clicking a file shows the commits
-that changed it. Changes, above the commits, stages files or single hunks, discards
-(into the stash, or the trash for a new file) and commits; Ctrl+Enter commits. Files
-git ignores are drawn faded, or hidden (Options, Git), and Add to .gitignore in a file's
-menu ignores it or every file with its extension. Copy as gives files as Markdown code
-blocks under their paths, or as links to them on GitHub, GitLab or Codeberg at the
-commit checked out, and Open Web Link opens that page. Compare Files, in the menu of two
-selected files, shows how they differ in the inspector. Maia never pushes.
+turns pictures in place (Undo brings the original back from the trash) and saves smaller
+copies beside them; Crop works in the inspector: drag over what to keep and press Enter.
+Connect To Server (in the menu, or type an `smb://`, `sftp://` or `ftp://` address into
+Go To) opens network shares, which then stay in the sidebar's Network section. Right-
+click files for Tags to give them colour labels or named tags (kept on the files as
+extended attributes, which other programs can read). Batch Rename, in the menu of
+several files, numbers them or finds and replaces in their names and shows every new
+name before anything changes. Find Duplicates, in a folder's menu, lists the files under
+it with the same contents and moves the extra copies to the trash. Options can empty the
+trash of what has been in it longer than 7, 30 or 90 days. In a git repository, the
+branch name in the status bar opens a menu: the commit history, the branches to switch
+to or create, the stash and the other work trees, and Pull, Push and Fetch. A pull that
+can't fast-forward asks whether to merge or rebase; a file left in conflict shows both
+sides on the Changes page, where Keep settles each one and Continue or Abort finishes
+the merge. In the history a commit shows its files with their diffs, and right-clicking
+a file shows the commits that changed it. Changes, above the commits, stages files or
+single hunks, discards (into the stash, or the trash for a new file) and commits;
+Ctrl+Enter commits. Files git ignores are drawn faded, or hidden (Options, Git), and Add
+to .gitignore in a file's menu ignores it or every file with its extension. Copy as
+gives files as Markdown code blocks under their paths, or as links to them on GitHub,
+GitLab or Codeberg at the commit checked out, and Open Web Link opens that page. Compare
+Files, in the menu of two selected files, shows how they differ in the inspector. Maia
+pushes only when you ask.
 
-F3 shows the folder's pictures full window: Left and Right go through them, the wheel,
-+ and - zoom, 0 fits and 1 shows one pixel for one, and Space plays them as a slideshow
+What's Using This, in the menu of a file, folder or drive, lists the programs that have
+it open and can stop them; a drive that refuses to unmount shows the same list, and the
+palette's What's Using a Port finds what listens on one. A filter typed into a folder
+can be kept with Save As Smart Folder, which lists the matching files under it again
+each time it opens, from the sidebar.
+
+F3 shows the folder's pictures full window: Left and Right go through them, the wheel, +
+and - zoom, 0 fits and 1 shows one pixel for one, and Space plays them as a slideshow
 (Options can make Enter and a double-click open pictures there too). Show Space Used, in
 a folder's menu, lists what is in it biggest first with each item's share, and trashes
 what you check. Previous Versions, in a file's menu, lists the earlier copies Snapper or
 Timeshift keep in the disk's snapshots; pick one to preview it, then restore it in place
-(the file it replaces goes to the trash) or as a copy beside it. Alt+S puts the selection
-on the shelf, a strip along the bottom of the window, and Move Here or Copy Here takes
-everything on it into the folder you are in.
+(the file it replaces goes to the trash) or as a copy beside it. Alt+S puts the
+selection on the shelf, a strip along the bottom of the window, and Move Here or Copy
+Here takes everything on it into the folder you are in.
 
 The inspector renders Markdown, shows JSON, TOML and YAML as trees you fold with the
 arrow keys, and CSV and TSV as tables; its toolbar switches any of them to the text as
-written. Values in `.env` files stay hidden until clicked. A log can be followed as it
-grows and filtered to the lines you want, and Blame puts who last changed each line
-of a committed file beside it; clicking a line opens that commit.
+written. Formulas between `$` or `$$` in Markdown are typeset when TeX is installed and
+shown as written when it isn't. Values in `.env` files stay hidden until clicked. A log
+can be followed as it grows and filtered to the lines you want, and Blame puts who last
+changed each line of a committed file beside it; clicking a line opens that commit.
 
 Ctrl+K finds files and folders anywhere in your home folder by name, as you type.
 With search by meaning turned on, it also finds documents, PDFs and pictures by what
