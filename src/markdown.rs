@@ -16,6 +16,8 @@ pub const STRONG: u8 = 1;
 pub const EM: u8 = 2;
 pub const CODE: u8 = 4;
 pub const STRIKE: u8 = 8;
+/// A formula: its TeX in `text`, its number (from 1) in `link`.
+pub const MATH: u8 = 16;
 
 /// Source rendered at most; past it the preview says the rest is in Source.
 pub const MAX_BYTES: usize = 512 << 10;
@@ -47,6 +49,8 @@ pub enum Block {
     Rule,
     /// Pictures standing alone (1-based image indexes), each perhaps a link.
     Images(Vec<(u32, u32)>),
+    /// A formula on lines of its own (its number, from 1).
+    Math(u32),
 }
 
 #[derive(Debug, Default, Clone)]
@@ -70,6 +74,8 @@ pub struct Doc {
     pub blocks: Vec<Block>,
     pub links: Vec<Link>,
     pub images: Vec<Image>,
+    /// Formulas: TeX, and whether each is shown on a line of its own.
+    pub maths: Vec<(String, bool)>,
     /// Only the first `MAX_BYTES` were rendered.
     pub cut: bool,
 }
@@ -78,6 +84,7 @@ struct Cx {
     refs: HashMap<String, String>,
     links: Vec<Link>,
     images: Vec<Image>,
+    maths: Vec<(String, bool)>,
 }
 
 // ---------------------------------------------------------------- blocks
@@ -265,7 +272,7 @@ pub fn parse(lines: &[String], base: Option<&Path>) -> Doc {
             }
         }
     }
-    let mut cx = Cx { refs, links: vec![], images: vec![] };
+    let mut cx = Cx { refs, links: vec![], images: vec![], maths: vec![] };
     let blocks = blocks(&src, &mut cx, 0);
     if let Some(base) = base {
         for l in &mut cx.links {
@@ -284,7 +291,7 @@ pub fn parse(lines: &[String], base: Option<&Path>) -> Doc {
             }
         }
     }
-    Doc { blocks, links: cx.links, images: cx.images, cut }
+    Doc { blocks, links: cx.links, images: cx.images, maths: cx.maths, cut }
 }
 
 /// A relative link or picture source as a path below `base` (no scheme, no anchor).
@@ -362,6 +369,14 @@ fn blocks(lines: &[&str], cx: &mut Cx, depth: usize) -> Vec<Block> {
             out.push(Block::Code { lang: String::new(), lines: code, spans: None });
             continue;
         }
+        if para.is_empty() && ind <= 3 {
+            if let Some((tex, next)) = crate::texmath::block_at(lines, i) {
+                cx.maths.push((tex, true));
+                out.push(Block::Math(cx.maths.len() as u32));
+                i = next;
+                continue;
+            }
+        }
         if let Some((c, n, info)) = fence(l) {
             flush(&mut para, &mut out, cx);
             let lang = info.split_whitespace().next().unwrap_or("").to_string();
@@ -378,6 +393,12 @@ fn blocks(lines: &[&str], cx: &mut Cx, depth: usize) -> Vec<Block> {
                 let strip = indent(x).min(ind);
                 code.push(x[strip..].to_string());
                 i += 1;
+            }
+            // GitHub's other way of writing a formula block.
+            if lang.eq_ignore_ascii_case("math") {
+                cx.maths.push((code.join("\n").trim().to_string(), true));
+                out.push(Block::Math(cx.maths.len() as u32));
+                continue;
             }
             let spans = crate::syntax::lang_for(&format!("x.{}", fence_ext(&lang))).map(|lg| crate::syntax::highlight(lg, &code, 5000));
             out.push(Block::Code { lang, lines: code, spans });
@@ -812,6 +833,13 @@ fn inlines(s: &str, cx: &mut Cx, depth: usize) -> Vec<Run> {
     while i < b.len() {
         let c = b[i];
         match c {
+            b'$' | b'\\' if (c == b'$' || b.get(i + 1) == Some(&b'(')) && crate::texmath::inline_at(s, i).is_some() => {
+                let Some((end, tex, display)) = crate::texmath::inline_at(s, i) else { break };
+                flush(&mut buf, &mut toks);
+                cx.maths.push((tex.clone(), display));
+                toks.push(Tok::Text(Run { text: tex, st: MATH, link: cx.maths.len() as u32 }));
+                i = end;
+            }
             b'\\' if b.get(i + 1).is_some_and(|n| n.is_ascii_punctuation()) => {
                 buf.push(b[i + 1] as char);
                 i += 2;
@@ -1069,13 +1097,15 @@ enum Piece {
     Dot { c: Pos2, r: f32, col: Color32, hollow: bool },
     Check { r: Rect, done: bool },
     Picture { r: Rect, img: u32, link: u32 },
+    /// A typeset formula, tinted in the text's colour.
+    Math { r: Rect, tex: egui::TextureId },
 }
 
 impl Piece {
     fn rect(&self) -> Rect {
         match self {
             Piece::Text { pos, g, .. } => Rect::from_min_size(*pos, g.size()),
-            Piece::Fill { r, .. } | Piece::Check { r, .. } | Piece::Picture { r, .. } => *r,
+            Piece::Fill { r, .. } | Piece::Check { r, .. } | Piece::Picture { r, .. } | Piece::Math { r, .. } => *r,
             Piece::Line { a, b, .. } => Rect::from_two_pos(*a, *b).expand(1.0),
             Piece::Dot { c, r, .. } => Rect::from_center_size(*c, Vec2::splat(r * 2.0)),
         }
@@ -1085,10 +1115,82 @@ impl Piece {
 pub struct View {
     pub doc: Doc,
     laid: Option<Laid>,
+    math: Maths,
     /// A `#heading` link was followed: where to scroll.
     jump: Option<f32>,
     /// Where the document's top left was drawn last.
     origin: Pos2,
+}
+
+/// The document's formulas, typeset on a thread the first time it is shown.
+#[derive(Default)]
+struct Maths {
+    started: bool,
+    rx: Option<std::sync::mpsc::Receiver<Vec<Result<crate::texmath::Typeset, String>>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Each formula's picture (its size and depth in pixels), or why it shows as written.
+    got: Vec<Result<(egui::TextureHandle, Vec2, f32), String>>,
+    /// Why none are typeset here.
+    note: Option<String>,
+}
+
+impl Drop for Maths {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Maths {
+    fn pump(&mut self, ctx: &egui::Context, maths: &[(String, bool)]) {
+        if !self.started && !maths.is_empty() {
+            self.started = true;
+            let tools = crate::drives::Tools::current();
+            match tools.as_ref().and_then(crate::texmath::engine) {
+                None => self.note = Some(tools.as_ref().map_or("Formulas show as written: install TeX Live to typeset them", crate::texmath::missing).to_string()),
+                Some(e) => {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let (items, stop, c) = (maths.to_vec(), self.stop.clone(), ctx.clone());
+                    let t = tools.expect("checked above");
+                    let started = std::thread::Builder::new().name("texmath".into()).spawn(move || {
+                        let r = crate::texmath::typeset(&t, e, &items, &|| stop.load(std::sync::atomic::Ordering::Relaxed));
+                        let _ = tx.send(r);
+                        c.request_repaint();
+                    });
+                    if started.is_ok() {
+                        self.rx = Some(rx);
+                    }
+                }
+            }
+        }
+        if let Some(r) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.rx = None;
+            self.got = r
+                .into_iter()
+                .map(|x| {
+                    x.map(|t| {
+                        let img = egui::ColorImage::from_rgba_unmultiplied([t.img.w as usize, t.img.h as usize], &t.img.px);
+                        (ctx.load_texture("formula", img, egui::TextureOptions::LINEAR), vec2(t.img.w as f32, t.img.h as f32), t.depth)
+                    })
+                })
+                .collect();
+            // Say why when TeX itself is what failed, not one formula.
+            if self.got.iter().all(|g| g.is_err()) {
+                if let Some(Err(w)) = self.got.first() {
+                    if w.starts_with("Formulas show as written") {
+                        self.note = Some(w.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A formula as the layout uses it: its picture's size and depth in points.
+#[derive(Clone, Copy)]
+struct MathPic {
+    tex: egui::TextureId,
+    size: Vec2,
+    depth: f32,
 }
 
 struct Laid {
@@ -1104,8 +1206,14 @@ struct Laid {
 }
 
 impl View {
+    /// Formulas typeset so far, and the note shown when none can be.
+    #[cfg(test)]
+    pub fn maths_state(&self) -> (usize, Option<&str>) {
+        (self.math.got.iter().filter(|g| g.is_ok()).count(), self.math.note.as_deref())
+    }
+
     pub fn new(doc: Doc) -> View {
-        View { doc, laid: None, jump: None, origin: Pos2::ZERO }
+        View { doc, laid: None, math: Maths::default(), jump: None, origin: Pos2::ZERO }
     }
     /// Where a link to `url` was drawn last, for a simulated click.
     #[cfg(test)]
@@ -1145,8 +1253,19 @@ struct Writer<'a, 'u> {
     /// Pictures' sizes in points, once loaded (index 0 is image 1).
     pics: &'a [Option<Vec2>],
     images: &'a [Image],
+    /// Each formula, once typeset, and its TeX.
+    maths: &'a [Option<MathPic>],
+    sources: &'a [(String, bool)],
     /// Lists this one is inside (bullets alternate filled and hollow by it).
     lists: usize,
+}
+
+impl MathPic {
+    /// Shrunk to stay inside a line of text: at most three ems tall and `w` wide.
+    fn inline(self, size: f32, w: f32) -> MathPic {
+        let k = (size * 3.0 / self.size.y).min(w.max(16.0) / self.size.x).min(1.0);
+        MathPic { size: self.size * k, depth: self.depth * k, ..self }
+    }
 }
 
 impl Writer<'_, '_> {
@@ -1155,13 +1274,44 @@ impl Writer<'_, '_> {
     }
 
     fn job(&self, runs: &[Run], size: f32, color: Color32, w: f32, all_bold: bool, faux: bool) -> (LayoutJob, Vec<(std::ops::Range<usize>, u32)>, bool) {
+        let (job, links, bold, _) = self.job_math(runs, size, color, w, all_bold, faux, false);
+        (job, links, bold)
+    }
+
+    /// `job`, and with `place` a typeset formula keeps its room in the line as a
+    /// no-break space after a gap its width: (the space's character index, formula).
+    #[allow(clippy::too_many_arguments)]
+    fn job_math(&self, runs: &[Run], size: f32, color: Color32, w: f32, all_bold: bool, faux: bool, place: bool) -> (LayoutJob, Vec<(std::ops::Range<usize>, u32)>, bool, Vec<(usize, u32)>) {
         let pal = self.st.pal;
         let mut job = LayoutJob::default();
         job.wrap.max_width = w.max(16.0);
         let lh = self.line_h(size);
         let mut links = vec![];
+        let mut maths = vec![];
         let mut any_bold = all_bold;
         for r in runs {
+            if r.st & MATH != 0 {
+                let pic = self.maths.get(r.link as usize - 1).copied().flatten().map(|m| m.inline(size, w));
+                match pic.filter(|_| place) {
+                    Some(m) => {
+                        // The formula covers its space too, so punctuation after it sits against it.
+                        let font = FontId::proportional(size);
+                        let sp = self.ui.fonts_mut(|f| f.glyph_width(&font, '\u{a0}'));
+                        let fmt = TextFormat { font_id: font, color: Color32::TRANSPARENT, line_height: Some(lh.max(m.size.y + 2.0)), ..Default::default() };
+                        maths.push((job.text.chars().count(), r.link));
+                        job.append("\u{a0}", (m.size.x - sp).max(0.0), fmt);
+                    }
+                    None => {
+                        let col = if faux { Color32::TRANSPARENT } else { pal.text_dim };
+                        let mut fmt = TextFormat { font_id: FontId::monospace((size * 0.9).round()), color: col, line_height: Some(lh), ..Default::default() };
+                        if !faux {
+                            fmt.background = pal.raised.gamma_multiply(if pal.dark { 0.9 } else { 0.7 });
+                        }
+                        job.append(&format!("${}$", r.text), 0.0, fmt);
+                    }
+                }
+                continue;
+            }
             let bold = all_bold || r.st & STRONG != 0;
             any_bold |= bold;
             let code = r.st & CODE != 0;
@@ -1195,7 +1345,7 @@ impl Writer<'_, '_> {
                 links.push((start..job.text.len(), r.link));
             }
         }
-        (job, links, any_bold)
+        (job, links, any_bold, maths)
     }
 
     /// Lay out a run of text at (x, y) in width `w`; returns its height.
@@ -1203,13 +1353,33 @@ impl Writer<'_, '_> {
         if runs.is_empty() {
             return 0.0;
         }
-        let (job, links, any_bold) = self.job(runs, size, color, w, all_bold, false);
+        let (job, links, any_bold, maths) = self.job_math(runs, size, color, w, all_bold, false, true);
         let g = self.ui.fonts_mut(|f| f.layout_job(job));
         let bold = any_bold.then(|| {
-            let (job, ..) = self.job(runs, size, color, w, all_bold, true);
+            let (job, ..) = self.job_math(runs, size, color, w, all_bold, true, true);
             self.ui.fonts_mut(|f| f.layout_job(job))
         });
         let h = g.size().y;
+        // Each formula fills the gap before its space, standing on the line's baseline.
+        if !maths.is_empty() {
+            let mut at = 0;
+            for row in &g.rows {
+                for gl in &row.row.glyphs {
+                    if let Some(&(_, k)) = maths.iter().find(|m| m.0 == at) {
+                        if let Some(m) = self.maths.get(k as usize - 1).copied().flatten().map(|m| m.inline(size, w)) {
+                            let right = x + row.pos.x + gl.pos.x + gl.advance_width;
+                            let base = self.y + row.pos.y + gl.pos.y;
+                            let r = Rect::from_min_max(pos2(right - m.size.x, base + m.depth - m.size.y), pos2(right, base + m.depth));
+                            self.pieces.push(Piece::Math { r, tex: m.tex });
+                        }
+                    }
+                    at += 1;
+                }
+                if row.row.ends_with_newline {
+                    at += 1;
+                }
+            }
+        }
         self.pieces.push(Piece::Text { pos: pos2(x, self.y), g, bold, links });
         h
     }
@@ -1231,6 +1401,23 @@ impl Writer<'_, '_> {
         let pal = self.st.pal;
         let size = self.st.size;
         match b {
+            Block::Math(k) => match self.maths.get(*k as usize - 1).copied().flatten() {
+                // Centred on its own line; one wider than the column shrinks to fit.
+                Some(m) => {
+                    let s = (w / m.size.x).min(1.0);
+                    let sz = m.size * s;
+                    let pad = (size * 0.3).round();
+                    let r = Rect::from_min_size(pos2(x + (w - sz.x) / 2.0, self.y + pad), sz);
+                    self.pieces.push(Piece::Math { r, tex: m.tex });
+                    self.y += sz.y + pad * 2.0;
+                }
+                None => {
+                    let tex = self.sources.get(*k as usize - 1).map(|m| m.0.clone()).unwrap_or_default();
+                    let run = Run { text: format!("$$ {tex} $$"), st: CODE, link: 0 };
+                    let h = self.text(std::slice::from_ref(&run), x, w, size, pal.text_dim, false);
+                    self.y += h;
+                }
+            },
             Block::Heading(level, runs) => {
                 let k = [1.6, 1.32, 1.15, 1.02, 0.95, 0.9][(*level as usize - 1).min(5)];
                 if self.y > 0.0 && *level <= 2 {
@@ -1465,7 +1652,12 @@ pub fn view(ui: &mut Ui, body: Rect, v: &mut View, size: f32, pal: &Palette, spa
         })
         .collect();
     let loaded = pics.iter().filter(|p| p.is_some()).count() as u32;
-    let key = (w.round() as u32, (size * 10.0) as u32, (spacing * 100.0) as u32, pal.text.to_array(), pal.accent.to_array(), loaded);
+    // Formulas as TeX hands them back: a 10 pt em drawn at the text's size.
+    v.math.pump(ui.ctx(), &v.doc.maths);
+    let scale = size * 1.08 / (crate::texmath::DPI as f32 * 10.0 / 72.27);
+    let maths: Vec<Option<MathPic>> = (0..v.doc.maths.len()).map(|i| v.math.got.get(i).and_then(|g| g.as_ref().ok()).map(|(t, px, d)| MathPic { tex: t.id(), size: *px * scale, depth: d * scale })).collect();
+    let typeset = maths.iter().filter(|m| m.is_some()).count() as u32;
+    let key = (w.round() as u32, (size * 10.0) as u32, (spacing * 100.0) as u32, pal.text.to_array(), pal.accent.to_array(), loaded + (typeset << 16));
     let atlas = ui.fonts(|f| f.font_atlas_fill_ratio());
     if v.laid.as_ref().is_none_or(|l| l.key != key || atlas < l.atlas) {
         v.laid = Some(Laid { key, pieces: vec![], height: 0.0, anchors: vec![], next: 0, atlas });
@@ -1477,7 +1669,15 @@ pub fn view(ui: &mut Ui, body: Rect, v: &mut View, size: f32, pal: &Palette, spa
     // at once and the rest follows, without a stalled frame.
     if let Some(l) = v.laid.as_mut().filter(|l| l.next <= v.doc.blocks.len()) {
         let t0 = std::time::Instant::now();
-        let mut wr = Writer { ui, st: Style { size, spacing, pal }, pieces: std::mem::take(&mut l.pieces), anchors: std::mem::take(&mut l.anchors), y: l.height, pics: &pics, images: &v.doc.images, lists: 0 };
+        let mut wr = Writer { ui, st: Style { size, spacing, pal }, pieces: std::mem::take(&mut l.pieces), anchors: std::mem::take(&mut l.anchors), y: l.height, pics: &pics, images: &v.doc.images, maths: &maths, sources: &v.doc.maths, lists: 0 };
+        // Why the formulas show as written, once, above them all.
+        if l.next == 0 {
+            if let Some(n) = &v.math.note {
+                let run = Run { text: n.clone(), st: EM, link: 0 };
+                let h = wr.text(std::slice::from_ref(&run), 0.0, w, size - 1.0, pal.text_dim, false);
+                wr.y += h + wr.gap();
+            }
+        }
         while l.next < v.doc.blocks.len() && t0.elapsed() < std::time::Duration::from_millis(6) {
             if l.next > 0 {
                 wr.y += wr.gap();
@@ -1567,6 +1767,9 @@ pub fn view(ui: &mut Ui, body: Rect, v: &mut View, size: f32, pal: &Palette, spa
                     } else {
                         p.rect_stroke(rr, CornerRadius::same(3), Stroke::new(1.2, pal.text_dim), StrokeKind::Inside);
                     }
+                }
+                Piece::Math { r, tex } => {
+                    p.image(*tex, r.translate(origin.to_vec2()), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), pal.text);
                 }
                 Piece::Picture { r, img, link } => {
                     let rr = r.translate(origin.to_vec2());

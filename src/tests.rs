@@ -4353,6 +4353,7 @@ fn markdown_reads_every_block_and_inline_form() {
         Block::Table { .. } => "table",
         Block::Rule => "rule",
         Block::Images(_) => "img",
+        Block::Math(_) => "math",
     }).collect();
     assert_eq!(kinds, ["h", "p", "img", "img", "p", "h", "quote", "list", "list", "table", "code", "code", "p", "rule", "img"], "{b:#?}");
     // Emphasis, strong and both; a heading's text.
@@ -5571,5 +5572,94 @@ fn only_changed_files_listed() {
     t.dirty = true;
     pump(&mut t, &stats);
     assert_eq!(names(&t).len(), 5);
+}
+
+/// Formulas found in Markdown as GitHub writes them: `$…$` in a sentence (but not
+/// "$5 and $10"), `$$…$$` and `\(…\)`, blocks between `$$` or `\[` lines and fenced
+/// as `math`; code spans and escaped dollars left alone.
+#[test]
+fn formulas_found_in_markdown() {
+    use crate::markdown::{Block, MATH, parse};
+    use crate::texmath::{block_at, inline_at};
+    assert_eq!(inline_at("$x^2$ is", 0), Some((5, "x^2".into(), false)));
+    assert_eq!(inline_at("costs $5 and $10", 6), None, "money");
+    assert_eq!(inline_at("$ x$", 0), None, "a space after the opening one");
+    assert_eq!(inline_at("$x $", 0), None, "a space before the closing one");
+    assert_eq!(inline_at("$a\\$b$", 0), Some((6, "a\\$b".into(), false)), "an escaped dollar inside");
+    assert_eq!(inline_at("$$\\sum_i x_i$$", 0), Some((14, "\\sum_i x_i".into(), true)));
+    assert_eq!(inline_at("\\(\\alpha\\)", 0), Some((10, "\\alpha".into(), false)));
+    let lines = ["$$", "\\int_0^1 x\\,dx", "= \\tfrac12", "$$", "after"];
+    assert_eq!(block_at(&lines, 0), Some(("\\int_0^1 x\\,dx\n= \\tfrac12".into(), 4)));
+    assert_eq!(block_at(&["\\[ e^{i\\pi} + 1 = 0 \\]"], 0), Some(("e^{i\\pi} + 1 = 0".into(), 1)));
+    assert_eq!(block_at(&["$$ unclosed"], 0), None);
+    let md: Vec<String> = "Energy is $E=mc^2$, not `$code$`, and \\$4.\n\n$$\na^2+b^2=c^2\n$$\n\n```math\n\\frac{1}{2}\n```\n".lines().map(String::from).collect();
+    let doc = parse(&md, None);
+    assert_eq!(doc.maths, vec![("E=mc^2".to_string(), false), ("a^2+b^2=c^2".into(), true), ("\\frac{1}{2}".into(), true)]);
+    let Block::Para(runs) = &doc.blocks[0] else { panic!("{:?}", doc.blocks[0]) };
+    let m: Vec<(&str, u32)> = runs.iter().filter(|r| r.st & MATH != 0).map(|r| (r.text.as_str(), r.link)).collect();
+    assert_eq!(m, [("E=mc^2", 1)]);
+    let text: String = runs.iter().filter(|r| r.st & MATH == 0).map(|r| r.text.as_str()).collect();
+    assert!(text.contains("$code$") && text.ends_with("and $4."), "{text}");
+    assert!(matches!(doc.blocks[1], Block::Math(2)) && matches!(doc.blocks[2], Block::Math(3)));
+    assert_eq!(crate::texmath::depths("Preview: Snippet 1 ended.(368640+1505299x1347574).\nother\nPreview: Snippet 2 ended.(10+0x5)."), vec![(368640.0, 1505299.0), (10.0, 0.0)]);
+}
+
+/// A stand-in for pdflatex: a real PDF with a page per formula and a log in the preview
+/// package's words; a formula with `\broken` in it fails as TeX does. It notes each run.
+pub(crate) fn fake_tex(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    for n in 1..=4 {
+        std::fs::write(dir.join(format!("pages-{n}.pdf")), crate::sim::sized_pdf(&vec!["0 0 0"; n], [40, 14], [1, 1, 38, 12])).unwrap();
+    }
+    let script = format!(
+        "#!/bin/sh\necho run >> {calls}\nif grep -q 'broken' f.tex; then echo '! Undefined control sequence.' > f.log; exit 1; fi\nn=$(grep -c 'begin{{preview}}' f.tex)\ncp {dir}/pages-$n.pdf f.pdf\n: > f.log\ni=1\nwhile [ $i -le $n ]; do echo \"Preview: Snippet $i ended.(458752+196608x1000000).\" >> f.log; i=$((i+1)); done\n",
+        calls = dir.join("calls").display(),
+        dir = dir.display()
+    );
+    std::fs::write(dir.join("pdflatex"), script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir.join("pdflatex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _ = std::os::unix::fs::symlink("/usr/bin/pdftocairo", dir.join("pdftocairo"));
+}
+
+/// Formulas typeset through a TeX and poppler's pdftocairo: one run for them all, each
+/// a white picture with its depth from the log; one TeX can't read shows why while the
+/// rest are typeset; the second time they come from the cache without TeX.
+#[test]
+fn formulas_typeset_through_tex_and_poppler() {
+    use crate::texmath::{Engine, engine, typeset};
+    if !crate::media::have("pdftocairo") {
+        return;
+    }
+    let d = tmpdir("texmath");
+    fake_tex(&d.join("tools"));
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(d.join("tools")));
+    let tools = crate::drives::Tools::current().unwrap();
+    assert_eq!(engine(&tools), Some(Engine::Pdflatex));
+    // Unique to this run, so nothing comes from an earlier one's cache.
+    let n = format!("{:?}", std::time::Instant::now());
+    let items = vec![(format!("x^2 % {n}"), false), (format!("\\int_0^1 f % {n}"), true)];
+    let got = typeset(&tools, Engine::Pdflatex, &items, &|| false);
+    let runs = || std::fs::read_to_string(d.join("tools/calls")).unwrap_or_default().lines().count();
+    assert_eq!(runs(), 1, "one TeX run for the lot");
+    for g in &got {
+        let t = g.as_ref().unwrap();
+        assert!(t.img.w > 100 && t.img.h > 30);
+        assert!(t.img.px.chunks(4).all(|p| p[..3] == [255, 255, 255]), "white, to be tinted");
+        assert!(t.img.px.chunks(4).any(|p| p[3] == 255), "with its ink solid");
+        // Depth from the log: (3 pt + 1 pt border) of (7 + 3 + 2 border) pt.
+        let share = t.depth / t.img.h as f32;
+        assert!((share - 4.0 / 12.0).abs() < 0.01, "{share}");
+    }
+    // From the cache: no TeX.
+    let again = typeset(&tools, Engine::Pdflatex, &items, &|| false);
+    assert!(again.iter().all(|g| g.is_ok()));
+    assert_eq!(runs(), 1);
+    // One broken among good ones: the batch fails, each is tried alone.
+    let mixed = vec![(format!("a+b % {n}"), false), (format!("\\broken % {n}"), false)];
+    let got = typeset(&tools, Engine::Pdflatex, &mixed, &|| false);
+    assert!(got[0].is_ok());
+    assert_eq!(got[1].as_ref().err().map(String::as_str), Some("TeX: Undefined control sequence"));
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
     let _ = std::fs::remove_dir_all(&d);
 }

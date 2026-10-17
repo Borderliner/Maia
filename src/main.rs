@@ -67,6 +67,7 @@ mod tasks;
 mod stats;
 mod tab;
 mod table;
+mod texmath;
 mod tail;
 #[cfg(any(test, feature = "testkit"))]
 mod testkit;
