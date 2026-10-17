@@ -365,6 +365,27 @@ pub fn extract(archive: &Path, members: &[PathBuf], dir: &Path) -> Result<(), St
     }
 }
 
+/// One member's bytes, read without putting it on the disk (a comic's page, a book's
+/// chapter); refused past `cap` bytes.
+pub fn read_member(archive: &Path, inner: &Path, cap: usize) -> Result<Vec<u8>, String> {
+    let all = list(archive)?;
+    let dot = all.iter().find(|i| i.path == inner).is_some_and(|i| i.dot);
+    if all.iter().find(|i| i.path == inner).is_some_and(|i| i.size as usize > cap) {
+        return Err("Too big to read here".into());
+    }
+    let pw = password(archive);
+    let mut c = tool("bsdtar");
+    if pw.is_none() {
+        c.arg("--passphrase").arg(NO_PASSWORD);
+    }
+    c.arg("-xOf").arg(archive).arg("--").arg(if dot { Path::new(".").join(inner) } else { inner.to_path_buf() });
+    let out = run(c, Duration::from_secs(60), pw.as_deref())?;
+    if out.len() > cap {
+        return Err("Too big to read here".into());
+    }
+    Ok(out)
+}
+
 /// The 7z command, under whichever name it is installed.
 fn seven() -> Result<&'static str, String> {
     ["7z", "7zz", "7za"].into_iter().find(|t| crate::media::have(t)).ok_or_else(|| "Encrypted 7z archives need the 7z command".to_string())

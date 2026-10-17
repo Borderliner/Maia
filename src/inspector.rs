@@ -39,6 +39,8 @@ enum Content {
     /// An office document LibreOffice is turning into a PDF to show.
     Office(Box<crate::office::Conversion>),
     Media(Box<MediaView>),
+    /// A font's names and lines of sample text drawn with it.
+    Font(Box<FontView>),
     Other,
 }
 
@@ -50,6 +52,8 @@ pub enum Rich {
     /// A data file that would not parse: why, above its source.
     Broken(String),
     Env(Box<crate::envfile::View>),
+    /// An EPUB's text as Markdown, which has no source worth switching to.
+    Book(Box<crate::markdown::View>),
 }
 
 /// The previews with a Rendered / Source choice, remembered apart.
@@ -66,7 +70,7 @@ impl Rich {
             Rich::Markdown(_) => Some(RichKind::Markdown),
             Rich::Data(_) | Rich::Broken(_) => Some(RichKind::Data),
             Rich::Table(_) => Some(RichKind::Table),
-            Rich::Env(_) => None,
+            Rich::Env(_) | Rich::Book(_) => None,
         }
     }
 }
@@ -83,6 +87,9 @@ pub const FOLLOW_LINES: usize = 100_000;
 
 pub struct PdfView {
     path: PathBuf,
+    /// A comic's pages: the pictures inside it, in order (a PDF has none).
+    comic: Option<std::sync::Arc<Vec<PathBuf>>>,
+    comic_rx: Option<std::sync::mpsc::Receiver<Result<Vec<PathBuf>, String>>>,
     pages: Option<usize>,
     pages_rx: Option<std::sync::mpsc::Receiver<Option<usize>>>,
     /// 1-based page shown.
@@ -92,6 +99,15 @@ pub struct PdfView {
     shown: Option<(usize, u32)>,
     job: Option<std::sync::mpsc::Receiver<(usize, u32, Option<egui::ColorImage>)>>,
     failed: bool,
+}
+
+pub struct FontView {
+    path: PathBuf,
+    rx: Option<std::sync::mpsc::Receiver<Result<crate::fontview::Preview, String>>>,
+    got: Option<Result<(crate::fontview::Info, bool), String>>,
+    /// The sample lines' pictures, and the scale they were drawn for.
+    tex: Vec<(f32, egui::TextureHandle)>,
+    ppp: f32,
 }
 
 pub struct MediaView {
@@ -166,6 +182,8 @@ pub struct Inspector {
     pub crop: Option<crate::picfix::Crop>,
     /// Earlier versions of a file from the disk's snapshots, listed above the preview.
     pub versions: Option<Box<crate::versions::Page>>,
+    /// A photo's EXIF for its details (read on a worker once the card is open).
+    exif: Option<(PathBuf, Option<std::sync::mpsc::Receiver<Option<crate::exif::Exif>>>, Option<crate::exif::Exif>)>,
 }
 
 /// Test-only views of the preview state (simulations check behaviour, not pixels).
@@ -177,6 +195,25 @@ impl Inspector {
             Content::Pdf(v) => Some((v.page, v.pages, v.shown)),
             _ => None,
         }
+    }
+    /// A comic's pages, once listed.
+    pub fn comic_pages(&self) -> Option<usize> {
+        match &self.content {
+            Content::Pdf(v) => v.comic.as_ref().map(|c| c.len()),
+            _ => None,
+        }
+    }
+    /// A font preview: (family, style, sample lines drawn, installed), once read; the
+    /// reason when it can't be shown.
+    pub fn font_state(&self) -> Option<Result<(String, String, usize, bool), String>> {
+        match &self.content {
+            Content::Font(v) => v.got.as_ref().map(|g| g.clone().map(|(i, inst)| (i.family, i.style, v.tex.len(), inst))),
+            _ => None,
+        }
+    }
+    /// The EXIF read for the details card.
+    pub fn exif_state(&self) -> Option<&crate::exif::Exif> {
+        self.exif.as_ref().and_then(|e| e.2.as_ref())
     }
     /// An office document waiting for LibreOffice.
     pub fn office_pending(&self) -> bool {
@@ -216,6 +253,7 @@ impl Inspector {
             Rich::Table(t) => ("table", t.t.rows.len()),
             Rich::Broken(_) => ("broken", 0),
             Rich::Env(v) => ("env", v.kinds.len()),
+            Rich::Book(v) => ("book", v.counts().map_or(0, |c| c.0)),
         })
     }
     pub fn rich_name(&self) -> Option<&'static str> {
@@ -226,12 +264,13 @@ impl Inspector {
             Rich::Table(_) => "table",
             Rich::Broken(_) => "broken",
             Rich::Env(_) => "env",
+            Rich::Book(_) => "book",
         })
     }
     pub fn markdown(&self) -> Option<&crate::markdown::View> {
         match &self.content {
             Content::Text { rich: Some(r), .. } => match &**r {
-                Rich::Markdown(v) => Some(v),
+                Rich::Markdown(v) | Rich::Book(v) => Some(v),
                 _ => None,
             },
             _ => None,
@@ -395,6 +434,7 @@ impl Default for Inspector {
             compare: None,
             crop: None,
             versions: None,
+            exif: None,
         }
     }
 }
@@ -474,6 +514,33 @@ impl Inspector {
         if e.special {
             // Sockets, FIFOs and device nodes: opening or reading them can block forever.
             self.set(Content::Other);
+            return;
+        }
+        if !e.is_dir && crate::archive::available() && (crate::books::is_book(e.ext()) || crate::books::is_comic(e.ext())) {
+            if crate::books::is_comic(e.ext()) {
+                self.set(comic_content(e.path.clone(), ctx));
+                return;
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (path, ctx) = (e.path.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                let c = match crate::books::read_book(&path) {
+                    Ok(md) => {
+                        let lines: Vec<String> = md.lines().map(String::from).collect();
+                        let view = crate::markdown::View::new(crate::markdown::parse(&lines, path.parent()));
+                        Content::Text { lines, truncated: false, spans: None, prose: true, rich: Some(Box::new(Rich::Book(Box::new(view)))), end: 0, from_end: false }
+                    }
+                    Err(why) => Content::Note(why),
+                };
+                let _ = tx.send(c);
+                ctx.request_repaint();
+            });
+            self.pending = Some(rx);
+            self.set(Content::Loading);
+            return;
+        }
+        if !e.is_dir && crate::fontview::is_font(e.ext()) {
+            self.set(font_content(e.path.clone(), ctx));
             return;
         }
         if !e.is_dir {
@@ -587,7 +654,30 @@ fn pdf_content(path: PathBuf, ctx: &egui::Context) -> Content {
         let _ = tx.send(crate::media::pdf_pages(&p));
         ctx.request_repaint();
     });
-    Content::Pdf(Box::new(PdfView { path, pages: None, pages_rx: Some(rx), page: 1, tex: None, shown: None, job: None, failed: false }))
+    Content::Pdf(Box::new(PdfView { path, comic: None, comic_rx: None, pages: None, pages_rx: Some(rx), page: 1, tex: None, shown: None, job: None, failed: false }))
+}
+
+/// A comic's preview: its pictures listed on a worker, then shown a page at a time.
+fn comic_content(path: PathBuf, ctx: &egui::Context) -> Content {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (p, ctx) = (path.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(crate::books::comic_pages(&p));
+        ctx.request_repaint();
+    });
+    Content::Pdf(Box::new(PdfView { path, comic: None, comic_rx: Some(rx), pages: None, pages_rx: None, page: 1, tex: None, shown: None, job: None, failed: false }))
+}
+
+/// A font's preview, read and drawn on a worker at the screen's scale.
+fn font_content(path: PathBuf, ctx: &egui::Context) -> Content {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ppp = ctx.pixels_per_point();
+    let (p, ctx) = (path.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(crate::fontview::read(&p, ppp, crate::fontview::fonts_dir().as_deref()));
+        ctx.request_repaint();
+    });
+    Content::Font(Box::new(FontView { path, rx: Some(rx), got: None, tex: vec![], ppp }))
 }
 
 /// What a text file's preview becomes, by its name.
@@ -997,7 +1087,8 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                 });
             }
             // A data file that would not parse shows its text either way.
-            let as_text = kind.is_none() || source || matches!(rich.as_deref(), Some(Rich::Broken(_)));
+            let book = matches!(rich.as_deref(), Some(Rich::Book(_)));
+            let as_text = !book && (kind.is_none() || source || matches!(rich.as_deref(), Some(Rich::Broken(_))));
             seg_frame(&mut hui, &pal, |ui| {
                 if as_text && seg_button(ui, ins.line_numbers, "Line numbers", &pal, |p, r, c| {
                     theme::paint_lucide(p, r, "list-ordered", c);
@@ -1094,6 +1185,10 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             media_view(&mut bui, body, &e, v, env);
             return;
         }
+        Content::Font(v) => {
+            font_view(&mut bui, body, v, env);
+            return;
+        }
         _ => {}
     }
     if matches!(ins.content, Content::Text { .. } | Content::Sqlite(_)) {
@@ -1109,7 +1204,7 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         }
     }
     match &ins.content {
-        Content::Pdf(_) | Content::Office(_) | Content::Media(_) | Content::Text { .. } | Content::Sqlite(_) => {}
+        Content::Pdf(_) | Content::Office(_) | Content::Media(_) | Content::Font(_) | Content::Text { .. } | Content::Sqlite(_) => {}
         Content::Image => image_view(&mut bui, body, &e, ins, env),
         Content::Binary(bytes) => {
             let mut lines = vec!["Binary file: first 4 KB shown as hex".to_string(), String::new()];
@@ -1137,6 +1232,26 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             bui.painter().text(pos2(body.center().x, ic.bottom() + 34.0), Align2::CENTER_TOP, sub, FontId::proportional(env.cfg.font_size - 1.5), pal.text_dim);
         }
     }
+    // A photo's date and place, for the card; read off this thread once it is open.
+    let photo = ins.show_meta && matches!(e.ext(), "jpg" | "jpeg" | "png" | "webp" | "tif" | "tiff");
+    if !photo {
+        ins.exif = None;
+    } else if ins.exif.as_ref().is_none_or(|x| x.0 != e.path) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (path, ctx) = (e.path.clone(), ui.ctx().clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::exif::read(&path));
+            ctx.request_repaint();
+        });
+        ins.exif = Some((e.path.clone(), Some(rx), None));
+    }
+    if let Some((_, rx @ Some(_), got)) = ins.exif.as_mut() {
+        if let Some(Ok(x)) = rx.as_ref().map(|r| r.try_recv()) {
+            *got = x;
+            *rx = None;
+        }
+    }
+    let exif = ins.exif.as_ref().and_then(|x| x.2.clone());
     // Metadata dropdown overlays the body.
     if ins.show_meta {
         let w = 360.0f32.min(body.width() - 16.0);
@@ -1209,6 +1324,23 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                                 row("Megapixels", format!("{mp:.2}"));
                             }
                         }
+                    }
+                    if let Some([y, mo, d, h, mi, _]) = exif.as_ref().and_then(|x| x.taken) {
+                        row("Taken", format!("{y}-{mo:02}-{d:02} {h:02}:{mi:02}"));
+                    }
+                    if let Some((lat, lon)) = exif.as_ref().and_then(|x| x.gps) {
+                        ui.label(egui::RichText::new("Location").color(pal.text_dim).size(11.5));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let b = ui.add(egui::Button::new(egui::RichText::new("Open map").size(11.5)).small());
+                            crate::ui::note_control(ui, b.rect, "open map");
+                            if b.on_hover_text("Show this place on OpenStreetMap, in your browser").clicked() {
+                                if let Err(err) = crate::mime::open_uri(&crate::exif::map_url(lat, lon)) {
+                                    env.actions.push(crate::app::Action::Toast(format!("Couldn't open the map: {err}")));
+                                }
+                            }
+                            ui.add(egui::Label::new(egui::RichText::new(crate::exif::place(lat, lon)).size(11.5)).truncate());
+                        });
+                        ui.end_row();
                     }
                 });
             });
@@ -1314,7 +1446,7 @@ fn text_body(ui: &mut Ui, body: Rect, ins: &mut Inspector, e: &Entry, env: &mut 
     let source = marking || kind.is_some_and(|k| env.cfg.source_views.get(k));
     if !source {
         match rich.as_deref_mut() {
-            Some(Rich::Markdown(v)) => {
+            Some(Rich::Markdown(v) | Rich::Book(v)) => {
                 match crate::markdown::view(ui, body, v, size, &pal, spacing, env.thumbs, id) {
                     Some(crate::markdown::Follow::Open(p)) => env.actions.push(crate::app::Action::OpenFile(p)),
                     Some(crate::markdown::Follow::Folder(p)) => env.actions.push(crate::app::Action::Navigate { panel: id, path: p }),
@@ -1550,6 +1682,18 @@ fn fit_texture(ui: &Ui, area: Rect, tex: &egui::TextureHandle) -> Rect {
 }
 
 fn pdf_view(ui: &mut Ui, body: Rect, v: &mut PdfView, pal: &theme::Palette) {
+    if let Some(rx) = &v.comic_rx {
+        if let Ok(r) = rx.try_recv() {
+            v.comic_rx = None;
+            match r {
+                Ok(list) if !list.is_empty() => {
+                    v.pages = Some(list.len());
+                    v.comic = Some(std::sync::Arc::new(list));
+                }
+                _ => v.failed = true,
+            }
+        }
+    }
     if let Some(rx) = &v.pages_rx {
         if let Ok(n) = rx.try_recv() {
             v.pages = n;
@@ -1577,9 +1721,13 @@ fn pdf_view(ui: &mut Ui, body: Rect, v: &mut PdfView, pal: &theme::Palette) {
     let want = ((area.width().max(area.height() * 0.71) * ctx.pixels_per_point() / 128.0).ceil() * 128.0).clamp(256.0, 2048.0) as u32;
     if v.job.is_none() && !v.failed && v.pages.is_some() && v.shown != Some((v.page, want)) {
         let (tx, rx) = std::sync::mpsc::channel();
-        let (path, page, c2) = (v.path.clone(), v.page, ctx.clone());
+        let (path, page, c2, comic) = (v.path.clone(), v.page, ctx.clone(), v.comic.clone());
         std::thread::spawn(move || {
-            let img = crate::media::pdf_page(&path, page, want).map(|i| egui::ColorImage::from_rgba_unmultiplied([i.w as usize, i.h as usize], &i.px));
+            let pic = match &comic {
+                Some(list) => list.get(page - 1).and_then(|m| crate::books::comic_page(&path, m, want)),
+                None => crate::media::pdf_page(&path, page, want),
+            };
+            let img = pic.map(|i| egui::ColorImage::from_rgba_unmultiplied([i.w as usize, i.h as usize], &i.px));
             let _ = tx.send((page, want, img));
             c2.request_repaint();
         });
@@ -1587,7 +1735,8 @@ fn pdf_view(ui: &mut Ui, body: Rect, v: &mut PdfView, pal: &theme::Palette) {
     }
     let font = FontId::proportional(12.5);
     if v.failed {
-        ui.painter().text(body.center(), Align2::CENTER_CENTER, "Can't render this PDF", font, pal.text_dim);
+        let why = if v.comic.is_some() || v.comic_rx.is_some() || v.pages_rx.is_none() { "Can't show this comic" } else { "Can't render this PDF" };
+        ui.painter().text(body.center(), Align2::CENTER_CENTER, why, font, pal.text_dim);
         return;
     }
     match &v.tex {
@@ -1596,7 +1745,7 @@ fn pdf_view(ui: &mut Ui, body: Rect, v: &mut PdfView, pal: &theme::Palette) {
             ui.painter().rect_stroke(r, CornerRadius::same(2), Stroke::new(1.0, pal.border), StrokeKind::Outside);
         }
         None => {
-            ui.painter().text(body.center(), Align2::CENTER_CENTER, "Rendering page…", font, pal.text_dim);
+            ui.painter().text(body.center(), Align2::CENTER_CENTER, if v.pages_rx.is_none() { "Opening…" } else { "Rendering page…" }, font, pal.text_dim);
         }
     }
     // Wheel / Page keys over the page turn pages.
@@ -1610,6 +1759,89 @@ fn pdf_view(ui: &mut Ui, body: Rect, v: &mut PdfView, pal: &theme::Palette) {
             v.page -= 1;
         }
     }
+}
+
+/// A font: its name, style and version, Install, and the sample lines drawn with it.
+fn font_view(ui: &mut Ui, body: Rect, v: &mut FontView, env: &mut Env) {
+    let pal = *env.pal;
+    let ctx = ui.ctx().clone();
+    if let Some(rx) = &v.rx {
+        if let Ok(r) = rx.try_recv() {
+            v.rx = None;
+            match r {
+                Ok(p) => {
+                    v.tex = p.lines.into_iter().enumerate().map(|(i, (pt, img))| (pt, ctx.load_texture(format!("font-sample-{i}"), img, egui::TextureOptions::LINEAR))).collect();
+                    v.got = Some(Ok((p.info, p.installed)));
+                }
+                Err(e) => v.got = Some(Err(e)),
+            }
+        }
+    }
+    // Moved to a screen of another scale: drawn again for it.
+    if v.rx.is_none() && v.got.as_ref().is_some_and(|g| g.is_ok()) && (ctx.pixels_per_point() - v.ppp).abs() > 0.01 {
+        if let Content::Font(f) = font_content(v.path.clone(), &ctx) {
+            v.rx = f.rx;
+            v.ppp = f.ppp;
+        }
+    }
+    let fs = env.cfg.font_size;
+    let (info, installed) = match &v.got {
+        None => {
+            ui.painter().text(body.center(), Align2::CENTER_CENTER, "Reading the font…", FontId::proportional(12.5), pal.text_dim);
+            return;
+        }
+        Some(Err(why)) => {
+            ui.painter().text(body.center(), Align2::CENTER_CENTER, why, FontId::proportional(12.5), pal.text_dim);
+            return;
+        }
+        Some(Ok((i, inst))) => (i.clone(), *inst),
+    };
+    let ext = v.path.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let inner = body.shrink2(vec2(16.0, 12.0));
+    let mut cui = ui.new_child(UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)));
+    egui::ScrollArea::vertical().id_salt(("font view", env.panel_id)).auto_shrink([false, false]).show(&mut cui, |ui| {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.add(egui::Label::new(egui::RichText::new(&info.family).size(fs + 6.0).color(pal.text)).truncate());
+                let mut sub = vec![];
+                if !info.style.is_empty() {
+                    sub.push(info.style.clone());
+                }
+                if !info.version.is_empty() {
+                    sub.push(format!("version {}", info.version));
+                }
+                if info.glyphs > 0 {
+                    sub.push(format!("{} glyphs", info.glyphs));
+                }
+                ui.add(egui::Label::new(egui::RichText::new(sub.join("  ·  ")).size(fs - 1.5).color(pal.text_dim)).truncate());
+            });
+        });
+        if crate::fontview::installable(&ext) {
+            ui.add_space(6.0);
+            if installed {
+                ui.label(egui::RichText::new("Installed").size(fs - 1.5).color(pal.text_dim));
+            } else {
+                let b = crate::popups::plain_button(ui, "Install", &pal);
+                crate::ui::note_control(ui, b.rect, "font install");
+                if b.on_hover_text("Copy it into your fonts folder, for every app").clicked() {
+                    let (path, family) = (v.path.clone(), info.family.clone());
+                    env.actions.push(crate::app::Action::Run(Box::new(move |app: &mut crate::app::App| crate::fontview::start_install(app, path, family))));
+                }
+            }
+        }
+        ui.add_space(12.0);
+        let ppp = v.ppp.max(0.5);
+        for (pt, tex) in &v.tex {
+            ui.label(egui::RichText::new(format!("{pt:.0} pt")).size(fs - 2.5).color(pal.text_dim));
+            let [w, h] = tex.size();
+            let size = vec2(w as f32 / ppp, h as f32 / ppp);
+            // Lines wider than the preview are cut at its edge, as a sample is.
+            let (r, _) = ui.allocate_exact_size(vec2(size.x.min(ui.available_width()), size.y), Sense::hover());
+            let uv = Rect::from_min_max(Pos2::ZERO, pos2(r.width() / size.x, 1.0));
+            ui.painter().image(tex.id(), Rect::from_min_size(r.min, vec2(r.width(), size.y)), uv, pal.text);
+            ui.add_space(8.0);
+        }
+    });
 }
 
 fn media_view(ui: &mut Ui, body: Rect, e: &Entry, v: &mut MediaView, env: &mut Env) {

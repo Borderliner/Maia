@@ -1022,7 +1022,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(148) {
+    match rng.below(149) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2007,6 +2007,53 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.settle();
                 if rng.below(2) == 0 {
                     s.act("key ctrl+z");
+                }
+            }
+        }
+        148 => {
+            // The previews of books, comics, fonts and photos: one picked in the media
+            // folder, its details opened now and then, Install, Open map and Page Down.
+            let media = std::fs::read_dir(root().join("home")).ok().and_then(|r| r.flatten().map(|d| d.path().join("Media")).find(|p| p.is_dir()));
+            if let Some(m) = media {
+                if s.tab().path != m {
+                    s.note(format!("into {}", m.display()));
+                    let id = s.app.active;
+                    if let Some(p) = s.app.panels.get_mut(&id) {
+                        p.tab_mut().navigate(m.clone(), None);
+                    }
+                    s.settle();
+                }
+                let pick = *rng.pick(&["Lighthouse.epub", "Harbour.cbz", "Sample.ttf", "place.jpg"]);
+                let id = s.app.active;
+                if let Some(p) = s.app.panels.get_mut(&id) {
+                    let t = p.tab_mut();
+                    if let Some(i) = t.entries.iter().position(|e| e.name == pick) {
+                        t.select_only(i as u32);
+                    }
+                    if p.inspector.is_none() {
+                        p.inspector = Some(Default::default());
+                    }
+                }
+                s.idle(5 + rng.below(40));
+                for _ in 0..rng.below(4) {
+                    match rng.below(4) {
+                        0 => click_control_at(s, rng.pick(&["font install", "open map"])),
+                        1 => {
+                            let ir = s.app.panels.get(&s.app.active).and_then(|p| p.inspector_rect);
+                            if let Some(r) = ir {
+                                s.act(&format!("move {:.0} {:.0}", r.center().x, r.center().y));
+                                s.act(rng.pick(&["key PageDown", "key PageUp"]));
+                            }
+                        }
+                        2 => {
+                            let ir = s.app.panels.get(&s.app.active).and_then(|p| p.inspector_rect);
+                            let pill = ir.and_then(|r| s.texts.iter().rev().find(|(t, n)| n == pick && r.contains(t.center())).map(|x| x.0));
+                            if let Some(r) = pill {
+                                s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+                            }
+                        }
+                        _ => s.idle(5),
+                    }
                 }
             }
         }
@@ -8840,6 +8887,117 @@ mod journeys {
         report("tidy", &s);
     }
 
+    /// Books, comics, fonts and a photo's place in the inspector: an EPUB's title, cover
+    /// and chapters as text; a CBZ a page at a time with Page Down; a font's names and
+    /// samples, Install copying it into the fonts folder with fc-cache told, Undo taking
+    /// it out; the details of a photo with its date and place, Open map handing
+    /// OpenStreetMap's address to the browser. At other font sizes and Spacing.
+    #[test]
+    fn books_comics_fonts_and_places() {
+        if !sandboxed() {
+            return;
+        }
+        let d = root().join("home/reading");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        if crate::tests::book_fixture(&d).is_none() {
+            return;
+        }
+        let font = crate::tests::sample_font();
+        let font_name = font.file_name().unwrap().to_string_lossy().into_owned();
+        std::fs::copy(&font, d.join(&font_name)).unwrap();
+        let family = crate::fontview::info(&std::fs::read(&font).unwrap()).family;
+        if crate::tests::exif_photo(&d.join("harbour.jpg"), "320x200", "2023:07:14 10:20:30", Some(["S", "33/1 51/1 3540/100", "E", "151/1 12/1 4020/100"])).is_none() {
+            return;
+        }
+        let tools = root().join("reading-tools");
+        crate::tests::fake_tool(&tools, "fc-cache", "exit 0");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(tools.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.cmd(ToggleInspector);
+        s.settle();
+        let looks = |s: &mut Sim, what: &str| {
+            for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
+                s.app.cfg.font_size = font;
+                s.app.cfg.spacing = spacing;
+                s.idle(3);
+                look(s, &format!("{what} at font {font}, spacing {spacing}"));
+            }
+        };
+        // The book.
+        select_path(&mut s, &d.join("Lighthouse.epub"));
+        wait_until(&mut s, "the book", 15, |s| inspector(s).rich_name() == Some("book"));
+        s.settle();
+        for t in ["The Lighthouse & the Sea", "Ada Keeper", "Chapter One"] {
+            in_inspector(&s, t);
+        }
+        assert!(inspector(&s).markdown().is_some_and(|m| m.doc.images.len() == 1), "the cover");
+        look(&mut s, "a book");
+        s.shot("preview-book");
+        looks(&mut s, "a book");
+        // The comic, turned with Page Down.
+        select_path(&mut s, &d.join("Harbour.cbz"));
+        wait_until(&mut s, "the comic's first page", 15, |s| inspector(s).comic_pages() == Some(10) && inspector(s).pdf_state().is_some_and(|p| p.2.is_some_and(|x| x.0 == 1)));
+        s.idle(2);
+        in_inspector(&s, "1 / 10");
+        look(&mut s, "a comic");
+        s.shot("preview-comic");
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
+        s.act(&format!("move {:.0} {:.0}", ir.center().x, ir.center().y));
+        s.act("key PageDown");
+        wait_until(&mut s, "page two", 15, |s| inspector(s).pdf_state().is_some_and(|p| p.0 == 2 && p.2.is_some_and(|x| x.0 == 2)));
+        looks(&mut s, "a comic");
+        // The font, installed and taken out again.
+        select_path(&mut s, &d.join(&font_name));
+        wait_until(&mut s, "the font", 15, |s| inspector(s).font_state().is_some_and(|f| f.is_ok_and(|f| f.2 > 0)));
+        s.idle(2);
+        in_inspector(&s, &family);
+        in_inspector(&s, "54 pt");
+        assert!(!inspector(&s).font_state().unwrap().unwrap().3, "not installed yet");
+        look(&mut s, "a font");
+        s.shot("preview-font");
+        click_control(&mut s, "font install");
+        let fonts = root().join("xdg/data/fonts");
+        wait_until(&mut s, "installed", 15, |s| toast_is(s, &format!("Installed {family}")));
+        assert_eq!(std::fs::read(fonts.join(&font_name)).unwrap(), std::fs::read(&font).unwrap());
+        assert!(crate::tests::fake_calls(&tools).iter().any(|c| c.first().is_some_and(|p| p == "fc-cache")), "fc-cache told");
+        wait_until(&mut s, "shown as installed", 15, |s| inspector(s).font_state().is_some_and(|f| f.is_ok_and(|f| f.3)));
+        s.idle(2);
+        in_inspector(&s, "Installed");
+        looks(&mut s, "an installed font");
+        s.act("key ctrl+z");
+        s.settle();
+        assert!(!fonts.join(&font_name).exists(), "Undo took it out");
+        // The photo's place.
+        select_path(&mut s, &d.join("harbour.jpg"));
+        s.settle();
+        let pill = in_inspector(&s, "harbour.jpg");
+        s.act(&format!("click {:.0} {:.0}", pill.center().x, pill.center().y));
+        wait_until(&mut s, "the place", 15, |s| some_text(s, "33.85983° S, 151.21117° E"));
+        for t in ["Taken", "2023-07-14 10:20", "Location", "Open map"] {
+            assert!(some_text(&s, t), "{t:?} in the details");
+        }
+        s.act("move -50 -50");
+        s.idle(3);
+        s.shot("preview-place");
+        let n = launched().len();
+        click_control(&mut s, "open map");
+        s.idle(2);
+        let l = launched();
+        assert_eq!(l.len(), n + 1);
+        assert!(l.last().is_some_and(|c| c.contains("https://www.openstreetmap.org/?mlat=-33.859833&mlon=151.211167")), "{:?}", l.last());
+        looks(&mut s, "a photo's details");
+        report("books, comics, fonts, places", &s);
+    }
+
     /// Recent Projects from its key: the git repositories under the home folder, the
     /// last visited first and the rest by git's own activity, each with its branch and,
     /// once git has said, a dot for uncommitted changes. Typing narrows; Enter opens one
@@ -9803,6 +9961,11 @@ mod journeys {
                 let _ = std::fs::create_dir_all(home.join("Media"));
                 crate::tests::convert_inputs(&home.join("Media"), &drv);
             }
+            // A book, a comic, a font and a photo with a place, to preview.
+            let _ = crate::tests::book_fixture(&home.join("Media"));
+            let _ = std::fs::copy(crate::tests::sample_font(), home.join("Media/Sample.ttf"));
+            let _ = crate::tests::exif_photo(&home.join("Media/place.jpg"), "64x48", "2023:07:14 10:20:30", Some(["N", "48/1 51/1 3000/100", "E", "2/1 17/1 4000/100"]));
+            crate::tests::fake_tool(&drv, "fc-cache", "exit 0");
             // A mail opener and CUPS with two printers.
             crate::tests::fake_tool(&drv, "xdg-email", "exit 0");
             crate::tests::fake_tool(&drv, "lpstat", "case \"$1\" in -e) printf 'Office_Laser\\nHP_ENVY_6000\\n';; -d) echo 'system default destination: HP_ENVY_6000';; esac");

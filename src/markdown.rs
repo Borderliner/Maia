@@ -304,7 +304,7 @@ fn local(url: &str, base: &Path) -> Option<PathBuf> {
     Some(if p.is_absolute() { p } else { base.join(p) })
 }
 
-fn percent_decode(s: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn percent_decode(s: &str) -> std::borrow::Cow<'_, str> {
     if !s.contains('%') {
         return s.into();
     }
@@ -694,7 +694,7 @@ fn is_punct(c: char) -> bool {
     c.is_ascii_punctuation() || (!c.is_ascii() && !c.is_alphanumeric() && !c.is_whitespace())
 }
 
-fn decode_entities(s: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn decode_entities(s: &str) -> std::borrow::Cow<'_, str> {
     if !s.contains('&') {
         return s.into();
     }

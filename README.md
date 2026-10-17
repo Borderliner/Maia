@@ -49,7 +49,7 @@ These are optional. Maia works without them and uses them when they are there:
 
 | Program | Used for |
 |---|---|
-| `bsdtar` (libarchive) | opening zip, tar, 7z, rar and iso archives like folders; extracting and compressing |
+| `bsdtar` (libarchive) | opening zip, tar, 7z, rar and iso archives like folders; extracting and compressing; EPUB and comic previews |
 | `7z` | password-protected 7z archives (and quicker password checks for zip) |
 | `gio` (GVFS) | network places (smb, sftp, ftp, WebDAV) and phones over MTP |
 | `pkexec` (polkit) | retrying a refused copy, move, delete or rename as administrator |
@@ -64,6 +64,7 @@ These are optional. Maia works without them and uses them when they are there:
 | `magick` or `convert` (ImageMagick) | turning, resizing, cropping and converting pictures |
 | `heif-dec` (libheif) | converting HEIC photos an ImageMagick without HEIC can't read |
 | `pdfunite`, `pdfseparate` (poppler) | merging PDFs and splitting one into pages |
+| `fc-cache` (fontconfig) | other apps seeing a font installed from its preview |
 | `xdg-email` (xdg-utils) | Email: files attached to a new message in your mail app |
 | `lp`, `lpstat` (CUPS) | Print |
 | desktop thumbnailers | thumbnails for other formats, shared with your other apps |
@@ -155,6 +156,10 @@ written. Formulas between `$` or `$$` in Markdown are typeset when TeX is instal
 shown as written when it isn't. Values in `.env` files stay hidden until clicked. A log
 can be followed as it grows and filtered to the lines you want, and Blame puts who last
 changed each line of a committed file beside it; clicking a line opens that commit.
+EPUB books show their cover and text, CBZ and CBR comics a page at a time (Page Down
+turns them, as in a PDF), and fonts their names and lines of sample text, with Install
+to put the font in `~/.local/share/fonts`. A photo's details say when and where it was
+taken, and Open map shows the place on OpenStreetMap in your browser.
 
 Ctrl+K finds files and folders anywhere in your home folder by name, as you type.
 With search by meaning turned on, it also finds documents, PDFs and pictures by what

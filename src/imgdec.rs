@@ -41,6 +41,13 @@ fn shrink(d: Option<(Rgba, u8)>, max: u32) -> Option<(Rgba, [u32; 2])> {
     Some((img, dims))
 }
 
+/// Decode an in-memory image, turned as its EXIF says and scaled to fit `max`×`max`.
+pub fn decode_fit(b: &[u8], max: u32) -> Option<Rgba> {
+    let r = shrink(decode(b), max).map(|x| x.0);
+    release();
+    r
+}
+
 /// Decode an in-memory image (PNG, JPEG, WebP, GIF, BMP, ICO) without EXIF rotation.
 pub fn decode_bytes(b: &[u8]) -> Option<Rgba> {
     let r = decode(b).map(|(i, _)| i);

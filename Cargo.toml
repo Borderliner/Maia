@@ -6,6 +6,8 @@ rust-version = "1.88"
 license = "GPL-3.0-or-later"
 
 [dependencies]
+# egui draws its text with it already; fonts previewed in the inspector use the same.
+ab_glyph = "=0.2.32"
 arboard = { version = "3.6.1", default-features = false }
 dirs = "7.0.0"
 fdeflate = "=0.3.7"

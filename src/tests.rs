@@ -6697,3 +6697,241 @@ fn tidy_moves_and_undo() {
     assert_eq!(p.made, [d.join("2024"), d.join("2024/2024-06"), d.join("Documents")]);
     assert_eq!(p.produced.len(), 3);
 }
+
+/// A small EPUB made with zip as the format asks (the mimetype first, stored): a package
+/// in a subfolder with a title, an author and a cover, two chapters in spine order
+/// (the manifest lists them the other way round), headings, paragraphs, a list, a quote,
+/// entities, a script and Markdown's own characters in the text. And a CBZ of ten
+/// pages named so only a natural sort orders them, with a hidden macOS copy and a text
+/// file beside them. None without zip and ImageMagick.
+pub(crate) fn book_fixture(d: &Path) -> Option<()> {
+    if !crate::media::have("zip") || !crate::media::have("magick") {
+        return None;
+    }
+    let src = d.join("book-src");
+    let w = |p: &str, s: &str| touch(&src.join(p), s);
+    w("mimetype", "application/epub+zip");
+    w("META-INF/container.xml", r#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#);
+    w("OEBPS/content.opf", r#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>The Lighthouse &amp; the Sea</dc:title>
+    <dc:creator>Ada Keeper</dc:creator>
+    <meta name="cover" content="cover-img"/>
+  </metadata>
+  <manifest>
+    <item id="c2" href="text/chapter%202.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c1" href="text/chapter1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="cover-img" href="images/cover.png" media-type="image/png"/>
+    <item id="css" href="style.css" media-type="text/css"/>
+  </manifest>
+  <spine><itemref idref="c1"/><itemref idref="c2"/></spine>
+</package>"#);
+    w("OEBPS/style.css", "p { margin: 0 }");
+    w("OEBPS/text/chapter1.xhtml", r#"<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title><style>p{}</style></head><body><section><h1>Chapter One</h1><p>The keeper climbed   the
+stairs at dusk &hellip; every night, for <em>forty</em> years.</p><script>alert(1)</script><p>It cost $5 and *never* more.</p><ul><li>Oil</li><li>Wicks</li></ul><blockquote><p>Light the lamp.</p></blockquote><p>1. Not a list.</p></section></body></html>"#);
+    w("OEBPS/text/chapter 2.xhtml", r#"<html><body><h2>Chapter Two</h2><p>A ship&#8217;s bell rang<br/>twice.</p><!-- a comment --></body></html>"#);
+    std::fs::create_dir_all(src.join("OEBPS/images")).unwrap();
+    assert!(std::process::Command::new("magick").args(["-size", "60x90", "gradient:#123-#9ab"]).arg(src.join("OEBPS/images/cover.png")).status().unwrap().success());
+    let book = d.join("Lighthouse.epub");
+    let _ = std::fs::remove_file(&book);
+    let zip = |args: &[&str]| assert!(std::process::Command::new("zip").args(args).current_dir(&src).stdout(std::process::Stdio::null()).status().unwrap().success());
+    zip(&["-X0", book.to_str().unwrap(), "mimetype"]);
+    zip(&["-rX9", book.to_str().unwrap(), "META-INF", "OEBPS"]);
+    let pages = d.join("comic-src");
+    std::fs::create_dir_all(pages.join("__MACOSX")).unwrap();
+    for k in 1..=10 {
+        let colour = format!("rgb({},{},{})", k * 20, 255 - k * 20, 120);
+        assert!(std::process::Command::new("magick").args(["-size", &format!("{}x{}", 100 + k, 150), &format!("xc:{colour}")]).arg(pages.join(format!("page{k}.png"))).status().unwrap().success());
+    }
+    std::fs::write(pages.join("__MACOSX/._page1.png"), "junk").unwrap();
+    std::fs::write(pages.join("credits.txt"), "drawn by hand").unwrap();
+    let comic = d.join("Harbour.cbz");
+    let _ = std::fs::remove_file(&comic);
+    assert!(std::process::Command::new("zip").args(["-rqX"]).arg(&comic).arg(".").current_dir(&pages).status().unwrap().success());
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&pages);
+    Some(())
+}
+
+/// A real font to look at: DejaVu Sans when installed, else Maia's own fallback.
+pub(crate) fn sample_font() -> PathBuf {
+    let dejavu = PathBuf::from("/usr/share/fonts/TTF/DejaVuSans.ttf");
+    if dejavu.is_file() { dejavu } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/fallback-sans.ttf") }
+}
+
+/// An EPUB read through the archive code: title, author, cover and chapters in spine
+/// order as Markdown that keeps headings, paragraphs, lists and quotes, leaves scripts
+/// and comments out and shows Markdown's own characters as typed; a zip that isn't a
+/// book says so. A comic's pages in natural order without the junk beside them, each
+/// decoded at the size asked.
+#[test]
+fn books_and_comics_read_through_the_archive_code() {
+    let d = tmpdir("books");
+    if !crate::archive::available() || book_fixture(&d).is_none() {
+        return;
+    }
+    let md = crate::books::read_book(&d.join("Lighthouse.epub")).unwrap();
+    let lines: Vec<String> = md.lines().map(String::from).collect();
+    let doc = crate::markdown::parse(&lines, None);
+    use crate::markdown::Block;
+    let text = |b: &Block| match b {
+        Block::Heading(_, r) | Block::Para(r) => crate::markdown::plain(r),
+        _ => String::new(),
+    };
+    let heads: Vec<(u8, String)> = doc.blocks.iter().filter_map(|b| if let Block::Heading(n, r) = b { Some((*n, crate::markdown::plain(r))) } else { None }).collect();
+    assert_eq!(heads, [(1, "The Lighthouse & the Sea".to_string()), (1, "Chapter One".into()), (2, "Chapter Two".into())]);
+    let paras: Vec<String> = doc.blocks.iter().filter(|b| matches!(b, Block::Para(_))).map(text).collect();
+    assert!(paras.contains(&"Ada Keeper".to_string()), "{paras:?}");
+    assert!(paras.contains(&"The keeper climbed the stairs at dusk … every night, for forty years.".to_string()), "{paras:?}");
+    assert!(paras.contains(&"It cost $5 and *never* more.".to_string()), "as typed, no formula, no emphasis: {paras:?}");
+    assert!(paras.contains(&"1. Not a list.".to_string()), "{paras:?}");
+    assert!(paras.contains(&"A ship’s bell rang twice.".to_string()), "{paras:?}");
+    assert!(doc.blocks.iter().any(|b| matches!(b, Block::List { items, .. } if items.len() == 2)));
+    assert!(doc.blocks.iter().any(|b| matches!(b, Block::Quote(_))));
+    assert!(!md.contains("alert") && !md.contains("comment") && !md.contains("p{}"));
+    assert!(md.find("Chapter One").unwrap() < md.find("Chapter Two").unwrap(), "spine order");
+    assert_eq!(doc.images.len(), 1, "the cover");
+    let cover = PathBuf::from(&doc.images[0].src);
+    assert!(cover.is_absolute() && cover.is_file(), "the cover extracted: {cover:?}");
+    assert_eq!(crate::imgdec::load(&cover, 128).unwrap().1, [60, 90]);
+    // Not a book.
+    let zip = d.join("plain.epub");
+    assert!(std::process::Command::new("zip").args(["-qj"]).arg(&zip).arg(&cover).status().unwrap().success());
+    assert_eq!(crate::books::read_book(&zip), Err("Not an EPUB book".into()));
+    // The comic.
+    let comic = d.join("Harbour.cbz");
+    let pages = crate::books::comic_pages(&comic).unwrap();
+    let names: Vec<String> = pages.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    assert_eq!(names, (1..=10).map(|k| format!("page{k}.png")).collect::<Vec<_>>());
+    let p10 = crate::books::comic_page(&comic, &pages[9], 4096).unwrap();
+    assert_eq!((p10.w, p10.h), (110, 150));
+    let small = crate::books::comic_page(&comic, &pages[0], 75).unwrap();
+    assert_eq!((small.w, small.h), (51, 75), "101 × 150 fitted to the size asked");
+    // bsdtar reads by content: the same pages under a CBR's name.
+    std::fs::copy(&comic, d.join("Harbour.cbr")).unwrap();
+    assert_eq!(crate::books::comic_pages(&d.join("Harbour.cbr")).unwrap().len(), 10);
+    assert!(crate::books::comic_page(&comic, Path::new("missing.png"), 100).is_none());
+}
+
+/// XML just well enough read: tags with namespaces, attributes in either quotes,
+/// comments, CDATA and declarations.
+#[test]
+fn xml_tokens_and_attributes() {
+    use crate::books::{Tok, attr, tokens};
+    let t = tokens(r#"<?xml version="1.0"?><!-- c --><opf:item id='a' href="x y.html"/><p>Hi<![CDATA[ <b> ]]></p>"#);
+    assert_eq!(t.len(), 5, "{t:?}");
+    assert!(matches!(&t[0], Tok::Tag { name, empty: true, close: false, .. } if name == "item"));
+    if let Tok::Tag { attrs, .. } = &t[0] {
+        assert_eq!(attr(attrs, "id").as_deref(), Some("a"));
+        assert_eq!(attr(attrs, "href").as_deref(), Some("x y.html"));
+        assert_eq!(attr(attrs, "media-type"), None);
+    }
+    assert_eq!(t[2], Tok::Text("Hi"));
+    assert_eq!(t[3], Tok::Text(" <b> "));
+    assert!(matches!(&t[4], Tok::Tag { name, close: true, .. } if name == "p"));
+    assert_eq!(attr(r#" xlink:href="&amp;x""#, "href").as_deref(), Some("&x"));
+    assert_eq!(crate::books::package_path("<container><rootfiles><rootfile full-path=\"a/b.opf\"/></rootfiles></container>"), Some(PathBuf::from("a/b.opf")));
+    assert!(tokens("<p unclosed").is_empty());
+}
+
+/// A real font's names as fontconfig reads them, sample lines drawn with it, the same
+/// font packed as WOFF read back, WOFF2 and a non-font refused; Install copying it into
+/// a fonts folder and calling fc-cache, a second Install finding it there.
+#[test]
+fn fonts_previewed_and_installed() {
+    use crate::fontview::{info, install, read, samples, sfnt};
+    let font = sample_font();
+    let raw = std::fs::read(&font).unwrap();
+    let i = info(&raw);
+    if crate::media::have("fc-scan") {
+        let o = std::process::Command::new("fc-scan").args(["--format", "%{family[0]}|%{style[0]}"]).arg(&font).output().unwrap();
+        let fc = String::from_utf8_lossy(&o.stdout).into_owned();
+        assert_eq!(fc, format!("{}|{}", i.family, i.style), "the names fontconfig gives");
+    }
+    assert!(i.glyphs > 10 && !i.version.is_empty() && !i.version.starts_with("Version"), "{i:?}");
+    let d = tmpdir("fonts");
+    let p = read(&font, 1.6, Some(&d.join("fonts"))).unwrap();
+    assert_eq!(p.info, i);
+    assert_eq!(p.lines.len(), samples().len());
+    assert!(!p.installed);
+    let (pt, img) = &p.lines[7];
+    assert_eq!(*pt, 54.0);
+    assert!(img.size[1] as f32 >= 54.0 * 1.6 * 0.9 && img.size[0] > img.size[1] * 10, "{:?}", img.size);
+    assert!(img.pixels.iter().any(|c| c.a() == 255) && img.pixels.iter().any(|c| c.a() == 0), "ink and paper");
+    // The same font as a WOFF: tables deflated behind WOFF's own directory.
+    let n = u16::from_be_bytes([raw[4], raw[5]]) as usize;
+    let mut tables = vec![];
+    for k in 0..n {
+        let e = 12 + k * 16;
+        let be = |i: usize| u32::from_be_bytes([raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]);
+        let (tag, sum, off, len) = (be(e), be(e + 4), be(e + 8) as usize, be(e + 12) as usize);
+        tables.push((tag, sum, raw[off..off + len].to_vec()));
+    }
+    let mut woff = b"wOFF".to_vec();
+    woff.extend_from_slice(&raw[0..4]);
+    woff.extend_from_slice(&[0; 4]);
+    woff.extend_from_slice(&(n as u16).to_be_bytes());
+    woff.extend_from_slice(&[0; 30]);
+    let mut body = vec![];
+    let start = 44 + n * 20;
+    for (tag, sum, data) in &tables {
+        // Compressed where that is smaller, as WOFF asks; stored as it is otherwise.
+        let z = fdeflate::compress_to_vec(data);
+        let stored = if z.len() < data.len() { z } else { data.clone() };
+        let off = start + body.len();
+        for v in [*tag, off as u32, stored.len() as u32, data.len() as u32, *sum] {
+            woff.extend_from_slice(&v.to_be_bytes());
+        }
+        body.extend_from_slice(&stored);
+        body.resize((body.len() + 3) & !3, 0);
+    }
+    woff.extend_from_slice(&body);
+    let total = woff.len() as u32;
+    woff[8..12].copy_from_slice(&total.to_be_bytes());
+    let unpacked = sfnt(&woff).unwrap();
+    assert_eq!(info(&unpacked), i, "the WOFF's names");
+    std::fs::write(d.join("packed.woff"), &woff).unwrap();
+    assert_eq!(read(&d.join("packed.woff"), 1.0, None).unwrap().lines.len(), samples().len());
+    if crate::media::have("woff2_compress") {
+        std::fs::copy(&font, d.join("w2.ttf")).unwrap();
+        let _ = std::process::Command::new("woff2_compress").arg(d.join("w2.ttf")).stdout(std::process::Stdio::null()).status();
+        if d.join("w2.woff2").exists() {
+            assert_eq!(read(&d.join("w2.woff2"), 1.0, None).err().as_deref(), Some("WOFF2 fonts can't be shown here"));
+        }
+    }
+    std::fs::write(d.join("fake.ttf"), "not a font at all").unwrap();
+    assert_eq!(read(&d.join("fake.ttf"), 1.0, None).err().as_deref(), Some("Not a font"));
+    let mut cut = raw.clone();
+    cut.truncate(200);
+    std::fs::write(d.join("cut.ttf"), &cut).unwrap();
+    assert!(read(&d.join("cut.ttf"), 1.0, None).is_err(), "a damaged font is refused, not a crash");
+    // Install, with a stand-in fc-cache.
+    let tools = d.join("tools");
+    fake_tool(&tools, "fc-cache", "exit 0");
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(tools.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    let fonts = d.join("fonts");
+    let name = font.file_name().unwrap();
+    let got = install(&font, &fonts, Some(&t)).unwrap();
+    assert_eq!(got, Some(fonts.join(name)));
+    assert_eq!(std::fs::read(fonts.join(name)).unwrap(), raw);
+    assert_eq!(fake_calls(&tools), [vec!["fc-cache".to_string(), fonts.display().to_string()]]);
+    assert_eq!(install(&font, &fonts, Some(&t)).unwrap(), None, "already there");
+    assert!(read(&font, 1.0, Some(&fonts)).unwrap().installed);
+    // Another font under the same name keeps both.
+    std::fs::create_dir_all(d.join("x")).unwrap();
+    std::fs::write(d.join("x").join(name), &woff).unwrap();
+    let other = install(&d.join("x").join(name), &fonts, None).unwrap().unwrap();
+    assert_ne!(other, fonts.join(name));
+}
+
+/// Where a photo was taken, written for people and as a map's address.
+#[test]
+fn photo_places_and_map_links() {
+    use crate::exif::{map_url, place};
+    assert_eq!(place(-33.8598, 151.2112), "33.85980° S, 151.21120° E");
+    assert_eq!(place(48.85837, -2.294481), "48.85837° N, 2.29448° W");
+    assert_eq!(map_url(48.85837, 2.294481), "https://www.openstreetmap.org/?mlat=48.858370&mlon=2.294481#map=16/48.858370/2.294481");
+}

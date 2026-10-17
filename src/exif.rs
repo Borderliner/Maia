@@ -200,3 +200,13 @@ pub fn read(path: &Path) -> Option<Exif> {
     (&mut f).take(256 << 10).read_to_end(&mut b).ok()?;
     block(&b).map(parse)
 }
+
+/// "33.85980° S, 151.21120° E".
+pub fn place(lat: f64, lon: f64) -> String {
+    format!("{:.5}° {}, {:.5}° {}", lat.abs(), if lat < 0.0 { 'S' } else { 'N' }, lon.abs(), if lon < 0.0 { 'W' } else { 'E' })
+}
+
+/// The place on OpenStreetMap, marked, at street level.
+pub fn map_url(lat: f64, lon: f64) -> String {
+    format!("https://www.openstreetmap.org/?mlat={lat:.6}&mlon={lon:.6}#map=16/{lat:.6}/{lon:.6}")
+}
