@@ -269,6 +269,13 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             copy.push(Item::cmd(Cmd::CopyWebLink));
         }
         items.push(Item::sub("copy_as", "Copy as", copy));
+        if any_file && ents.iter().all(|e| !e.1) {
+            items.push(Item::cmd(Cmd::Email));
+            let paper = ents.iter().all(|e| crate::sendto::printable(&e.0.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), &e.3));
+            if paper && crate::drives::Tools::current().is_some_and(|t| crate::sendto::cups(&t)) {
+                items.push(Item::cmd(Cmd::Print));
+            }
+        }
         items.push(Item::sep());
         items.push(Item::labeled(Cmd::Rename, if single { "Rename" } else { "Rename All (inline)" }));
         items.push(Item::cmd(Cmd::Duplicate));

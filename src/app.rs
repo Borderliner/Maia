@@ -2043,7 +2043,7 @@ impl App {
                     Err(e) => ShareDone { copy: None, open: vec![], toast: format!("Couldn't make a link: {e}"), rescan: None },
                 });
             }
-            Cmd::SetWallpaper => crate::errands::run(self, cmd),
+            Cmd::SetWallpaper | Cmd::Email | Cmd::Print => crate::errands::run(self, cmd),
             Cmd::CompareFiles => {
                 let files: Vec<PathBuf> = self.tab().target_entries().iter().filter(|e| !e.is_dir).map(|e| e.path.clone()).collect();
                 let [a, b] = files.as_slice() else {

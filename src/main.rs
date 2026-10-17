@@ -50,6 +50,7 @@ mod query;
 mod rename;
 mod runner;
 mod semantic;
+mod sendto;
 mod share;
 mod sidebar;
 mod signals;

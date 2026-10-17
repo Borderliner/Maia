@@ -1017,7 +1017,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(132) {
+    match rng.below(133) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1341,6 +1341,29 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.act("key Enter");
             }
             s.idle(1 + rng.below(10));
+        }
+        132 => {
+            // Email or print what is selected, from the palette or a menu; in the Print
+            // dialog, printers and copies by key or click, then print or cancel.
+            crate::sendto::MAIL_APP.with(|m| *m.borrow_mut() = (rng.below(3) > 0).then(|| "thunderbird %u".to_string()));
+            if rng.below(2) == 0 {
+                s.cmd(*rng.pick(&[Cmd::Email, Cmd::Print]));
+            } else {
+                let (x, y) = p(rng);
+                s.act(&format!("click {x:.0} {y:.0} right"));
+                s.act(&format!("text {}", rng.pick(&["email", "print"])));
+                s.act("key Enter");
+            }
+            s.idle(2 + rng.below(6));
+            if matches!(s.app.popup, Popup::Print(_)) {
+                for _ in 0..rng.below(5) {
+                    match rng.below(3) {
+                        0 => click_control_at(s, rng.pick(&["more copies", "fewer copies", "printer"])),
+                        _ => s.act(&format!("key {}", rng.pick(&["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]))),
+                    }
+                }
+                s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
+            }
         }
         121 => {
             // Sharing: code blocks, a web link or .gitignore, from the palette or a menu.
@@ -7261,6 +7284,116 @@ mod journeys {
         report("wallpaper", &s);
     }
 
+    /// Email and Print from a file's menu and the palette: the mail app opened with the
+    /// files attached; the Print dialog with CUPS's printers, the default chosen, another
+    /// picked by key, two copies sent to lp; no printers said plainly; neither offered
+    /// for a folder, Print not without CUPS, and no mail app said so.
+    #[test]
+    fn email_and_print() {
+        if !sandboxed() {
+            return;
+        }
+        let d = root().join("home/sendto");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("Receipts")).unwrap();
+        std::fs::write(d.join("report.pdf"), sample_pdf(&["0.2 0.4 0.8"])).unwrap();
+        png_file(&d.join("photo.png"), 120, 80, 2);
+        std::fs::write(d.join("notes.txt"), "remember the milk").unwrap();
+        let fake = root().join("sendto-tools");
+        let _ = std::fs::remove_dir_all(&fake);
+        crate::tests::fake_tool(&fake, "xdg-email", "exit 0");
+        let lpstat = |printers: &str| crate::tests::fake_tool(&fake, "lpstat", &format!("case \"$1\" in -e) printf '{printers}';; -d) echo 'system default destination: HP_ENVY_6000';; esac"));
+        lpstat("Office_Laser\\nHP_ENVY_6000\\n");
+        crate::tests::fake_tool(&fake, "lp", "echo 'request id is Office_Laser-12 (2 file(s))'");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+        crate::sendto::MAIL_APP.with(|m| *m.borrow_mut() = Some("thunderbird %u".into()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+                crate::sendto::MAIL_APP.with(|m| *m.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.settle();
+        let right = |s: &mut Sim, name: &str| {
+            let row = row_text(s, name);
+            s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+            s.idle(2);
+        };
+        // A folder: neither.
+        select_path(&mut s, &d.join("Receipts"));
+        right(&mut s, "Receipts");
+        assert!(!some_text(&s, "Email") && !some_text(&s, "Print…"));
+        s.act("key Escape");
+        // Email from the menu.
+        select_path(&mut s, &d.join("report.pdf"));
+        right(&mut s, "report.pdf");
+        assert!(some_text(&s, "Email") && some_text(&s, "Print…"));
+        shot_still(&mut s, "email-print-menu");
+        let n = launched().len();
+        s.click_text("Email");
+        s.idle(2);
+        assert!(launched()[n..].iter().any(|l| l.contains("xdg-email") && l.contains(&format!("\"--attach\" \"{}\"", d.join("report.pdf").display()))), "{:?}", &launched()[n..]);
+        assert!(toast_is(&s, "Opening a new email"));
+        // Print two files from the palette: the default printer first chosen.
+        let r = row_text(&s, "photo.png");
+        s.act(&format!("click {:.0} {:.0} ctrl", r.center().x, r.center().y));
+        palette_run(&mut s, "Print…");
+        wait_until(&mut s, "the printers", 10, |s| matches!(&s.app.popup, Popup::Print(st) if st.printers.is_some()));
+        s.idle(3);
+        assert!(some_text(&s, "Print 2 files") && some_text(&s, "Office_Laser") && some_text(&s, "HP_ENVY_6000") && some_text(&s, "Default"));
+        assert!(matches!(&s.app.popup, Popup::Print(st) if st.sel == 1), "the default chosen");
+        look(&mut s, "print dialog");
+        shot_still(&mut s, "print-dialog");
+        for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
+            s.app.cfg.font_size = font;
+            s.app.cfg.spacing = spacing;
+            s.idle(3);
+            look(&mut s, &format!("print dialog at font {font}, spacing {spacing}"));
+            if font == 16.5 {
+                shot_still(&mut s, "print-dialog-large");
+            }
+        }
+        s.act("key ArrowUp");
+        assert!(matches!(&s.app.popup, Popup::Print(st) if st.sel == 0));
+        click_control(&mut s, "more copies");
+        click_control(&mut s, "more copies");
+        s.act("key ArrowLeft");
+        s.idle(1);
+        assert!(some_text(&s, "2"));
+        assert!(matches!(&s.app.popup, Popup::Print(st) if st.copies == 2));
+        s.act("key Enter");
+        wait_until(&mut s, "lp", 10, |s| toast_is(s, "Sent 2 copies to Office_Laser"));
+        let lp = crate::tests::fake_calls(&fake).into_iter().find(|c| c[0] == "lp").unwrap();
+        assert_eq!(lp, ["lp", "-d", "Office_Laser", "-n", "2", d.join("photo.png").to_str().unwrap(), d.join("report.pdf").to_str().unwrap()]);
+        assert!(!s.popup_open());
+        // No printers.
+        lpstat("");
+        select_path(&mut s, &d.join("notes.txt"));
+        palette_run(&mut s, "Print…");
+        wait_until(&mut s, "no printers", 10, |s| matches!(&s.app.popup, Popup::Print(st) if st.printers.is_some()));
+        s.idle(3);
+        assert!(some_text(&s, "No printers are set up"));
+        look(&mut s, "no printers");
+        shot_still(&mut s, "print-none");
+        s.act("key Enter");
+        assert!(s.popup_open(), "nothing to print on");
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        // No CUPS: not offered. No mail app: said so.
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(root().join("sendto-none")));
+        crate::sendto::MAIL_APP.with(|m| *m.borrow_mut() = None);
+        right(&mut s, "notes.txt");
+        assert!(some_text(&s, "Email") && !some_text(&s, "Print…"));
+        s.click_text("Email");
+        s.idle(2);
+        assert!(toast_is(&s, "No mail app is set up"));
+        report("email-print", &s);
+    }
+
     #[test]
     fn monkey_sessions() {
         if !sandboxed() {
@@ -7305,6 +7438,10 @@ mod journeys {
             for t in ["gsettings", "plasma-apply-wallpaperimage", "noctalia"] {
                 crate::tests::fake_tool(&drv, t, "exit 0");
             }
+            // A mail opener and CUPS with two printers.
+            crate::tests::fake_tool(&drv, "xdg-email", "exit 0");
+            crate::tests::fake_tool(&drv, "lpstat", "case \"$1\" in -e) printf 'Office_Laser\\nHP_ENVY_6000\\n';; -d) echo 'system default destination: HP_ENVY_6000';; esac");
+            crate::tests::fake_tool(&drv, "lp", "echo 'request id is Office_Laser-1 (1 file(s))'");
             for f in ["plan.docx", "sheet.ods", "slow deck.odp", "broken.pptx"] {
                 let _ = std::fs::create_dir_all(home.join("Documents/Office"));
                 let _ = std::fs::write(home.join("Documents/Office").join(f), "not really an office file");
@@ -7376,6 +7513,7 @@ mod journeys {
         }
         crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
         crate::wallpaper::DESKTOP.with(|w| w.borrow_mut().clear());
+        crate::sendto::MAIL_APP.with(|m| *m.borrow_mut() = None);
         let launched = crate::mime::LAUNCHED.lock().unwrap().len();
         let out = crate::clipboard::DRAGGED_OUT.lock().unwrap().len();
         eprintln!("sim monkey: {launched} external launches intercepted, {out} drags handed out");

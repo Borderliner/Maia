@@ -171,6 +171,15 @@ pub fn run(app: &mut crate::app::App, cmd: crate::commands::Cmd) {
                 }
             });
         }
+        Cmd::Email => match crate::sendto::email(&files) {
+            Ok(()) => app.toast("Opening a new email"),
+            Err(e) => app.toast(e),
+        },
+        Cmd::Print => match crate::drives::Tools::current().filter(crate::sendto::cups) {
+            Some(t) if !files.is_empty() => app.popup = crate::popups::Popup::Print(Box::new(crate::sendto::PrintState::open(t, files, &ctx))),
+            Some(_) => app.toast("Select files to print"),
+            None => app.toast("Printing needs CUPS"),
+        },
         _ => {}
     }
 }

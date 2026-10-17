@@ -60,6 +60,8 @@ These are optional. Maia works without them and uses them when they are there:
 | `pdfinfo`, `pdftoppm` (poppler) | PDF pages in the inspector |
 | `soffice` (LibreOffice) | Word, Excel, PowerPoint and OpenDocument files in the inspector, with poppler |
 | `udisksctl` (udisks2), `lsblk` | mounting, unmounting and ejecting drives |
+| `xdg-email` (xdg-utils) | Email: files attached to a new message in your mail app |
+| `lp`, `lpstat` (CUPS) | Print |
 | desktop thumbnailers | thumbnails for other formats, shared with your other apps |
 
 ## Use

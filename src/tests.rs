@@ -5000,7 +5000,7 @@ fn office_documents_convert_to_pdf_once() {
 pub(crate) fn fake_tool(dir: &Path, name: &str, body: &str) {
     std::fs::create_dir_all(dir).unwrap();
     let p = dir.join(name);
-    std::fs::write(&p, format!("#!/bin/sh\nD=\"$(dirname \"$0\")\"\n{{ echo {name}; for a; do echo \"$a\"; done; echo; }} >> \"$D/calls.log\"\n{body}\n")).unwrap();
+    std::fs::write(&p, format!("#!/bin/sh\nD=\"$(dirname \"$0\")\"\n{{ echo {name}; for a; do printf '%s\\n' \"$a\"; done; echo; }} >> \"$D/calls.log\"\n{body}\n")).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
@@ -5078,5 +5078,77 @@ fn wallpaper_each_desktop_its_way() {
     assert_eq!(set(&t, &desk("KDE", &[]), plain).unwrap_err(), "Couldn't set the wallpaper: Unable to find the wallpaper plugin");
     assert_eq!(set(&t, &desk("sway", &[]), plain).unwrap_err(), "Maia can't set the wallpaper on this desktop", "swaymsg isn't there");
     assert!(crate::wallpaper::is_wallpaper("jpg") && crate::wallpaper::is_wallpaper("webp") && !crate::wallpaper::is_wallpaper("gif") && !crate::wallpaper::is_wallpaper("svg"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Email: xdg-email with each file attached; without it, the mail app's own way for
+/// Thunderbird (and a flatpak one), Evolution, KMail and Claws Mail, and nothing for one
+/// that can't take attachments; no mail app at all is said so and nothing starts.
+#[test]
+fn email_attaches_files() {
+    use crate::sendto::{MAIL_APP, email, email_args};
+    let f = [PathBuf::from("/home/ana/Q3 report.pdf"), PathBuf::from("/home/ana/photo,1.jpg")];
+    let s = |v: Option<Vec<std::ffi::OsString>>| v.map(|v| v.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>());
+    assert_eq!(s(email_args(&f, true, None)).unwrap(), ["xdg-email", "--attach", "/home/ana/Q3 report.pdf", "--attach", "/home/ana/photo,1.jpg"]);
+    let tb = ["thunderbird", "-compose", "attachment='file:///home/ana/Q3%20report.pdf,file:///home/ana/photo%2C1.jpg'"];
+    assert_eq!(s(email_args(&f, false, Some("thunderbird %u"))).unwrap(), tb);
+    assert_eq!(s(email_args(&f, false, Some("/usr/bin/flatpak run --branch=stable org.mozilla.Thunderbird %u"))).unwrap()[..5], ["/usr/bin/flatpak", "run", "--branch=stable", "org.mozilla.Thunderbird", "-compose"]);
+    assert_eq!(s(email_args(&f, false, Some("evolution %U"))).unwrap(), ["evolution", "mailto:?attach=file:///home/ana/Q3%20report.pdf&attach=file:///home/ana/photo%2C1.jpg"]);
+    assert_eq!(s(email_args(&f[..1], false, Some("kmail -caption \"%c\" %u"))).unwrap()[3..], ["--attach", "file:///home/ana/Q3%20report.pdf"]);
+    assert_eq!(s(email_args(&f[..1], false, Some("claws-mail --compose %u"))).unwrap(), ["claws-mail", "--compose", "--attach", "/home/ana/Q3 report.pdf"]);
+    assert_eq!(email_args(&f, false, Some("firefox %u")), None, "a browser can't attach files");
+    assert_eq!(email_args(&f, false, None), None);
+    let d = tmpdir("email");
+    let fake = d.join("tools");
+    fake_tool(&fake, "xdg-email", "exit 0");
+    crate::drives::FAKE.with(|x| *x.borrow_mut() = Some(fake.clone()));
+    let n = crate::mime::LAUNCHED.lock().unwrap().len();
+    assert_eq!(email(&f).unwrap_err(), "No mail app is set up");
+    MAIL_APP.with(|m| *m.borrow_mut() = Some("thunderbird %u".into()));
+    email(&f).unwrap();
+    let launched = crate::mime::LAUNCHED.lock().unwrap().clone();
+    assert!(launched[n..].iter().any(|l| l.contains("xdg-email") && l.contains("\"--attach\" \"/home/ana/Q3 report.pdf\" \"--attach\" \"/home/ana/photo,1.jpg\"")), "{:?}", &launched[n..]);
+    // No xdg-email: Thunderbird itself.
+    crate::drives::FAKE.with(|x| *x.borrow_mut() = Some(d.join("none")));
+    email(&f).unwrap();
+    assert!(crate::mime::LAUNCHED.lock().unwrap()[n..].iter().any(|l| l.starts_with("\"thunderbird\" \"-compose\"")));
+    MAIL_APP.with(|m| *m.borrow_mut() = Some("firefox %u".into()));
+    assert_eq!(email(&f).unwrap_err(), "Install xdg-utils to attach files to an email");
+    MAIL_APP.with(|m| *m.borrow_mut() = None);
+    crate::drives::FAKE.with(|x| *x.borrow_mut() = None);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Print: CUPS's printers read from lpstat (names, and the default when it is one of
+/// them), lp's arguments, which files are offered, and the printers read through a
+/// stand-in lpstat, under the C locale.
+#[test]
+fn print_reads_cups_printers() {
+    use crate::sendto::{Printers, cups, lp_args, parse_printers, printable, printers};
+    let e = "Office_Laser\nHP_ENVY_6000\nPDF\n";
+    assert_eq!(parse_printers(e, "system default destination: HP_ENVY_6000\n"), Printers { names: vec!["Office_Laser".into(), "HP_ENVY_6000".into(), "PDF".into()], default: Some("HP_ENVY_6000".into()) });
+    assert_eq!(parse_printers(e, "no system default destination\n").default, None);
+    assert_eq!(parse_printers("", "no system default destination\n"), Printers::default());
+    assert_eq!(parse_printers("lpstat: No destinations added.\n", "").names, Vec::<String>::new(), "a complaint is no printer");
+    assert_eq!(parse_printers("A\n", "system default destination: Gone\n").default, None);
+    let a: Vec<String> = lp_args("Office_Laser", 2, &[PathBuf::from("/x/a b.pdf"), PathBuf::from("/x/c.png")]).iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    assert_eq!(a, ["-d", "Office_Laser", "-n", "2", "/x/a b.pdf", "/x/c.png"]);
+    for (n, x) in [("a.pdf", "pdf"), ("b.PS", "ps"), ("c.jpg", "jpg"), ("notes.txt", "txt"), ("main.rs", "rs"), ("README.md", "md")] {
+        assert!(printable(n, x), "{n}");
+    }
+    for (n, x) in [("a.docx", "docx"), ("b.zip", "zip"), ("c.mp4", "mp4"), ("d.ods", "ods")] {
+        assert!(!printable(n, x), "{n}");
+    }
+    let d = tmpdir("print");
+    let fake = d.join("tools");
+    fake_tool(&fake, "lpstat", "[ \"$LC_ALL\" = C ] || exit 3\ncase \"$1\" in -e) printf 'Office_Laser\\nHP_ENVY_6000\\n';; -d) echo 'system default destination: HP_ENVY_6000';; esac");
+    crate::drives::FAKE.with(|x| *x.borrow_mut() = Some(fake.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|x| *x.borrow_mut() = None);
+    assert!(!cups(&t), "lp missing");
+    fake_tool(&fake, "lp", "exit 0");
+    assert!(cups(&t));
+    assert_eq!(printers(&t).default.as_deref(), Some("HP_ENVY_6000"));
+    assert_eq!(printers(&t).names.len(), 2);
     let _ = std::fs::remove_dir_all(&d);
 }
