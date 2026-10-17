@@ -90,7 +90,8 @@ as `size>100M`, `modified<7d`, `created:today` or `tag:red`. Some keys to start 
 Every binding can be changed from the command palette.
 
 An archive opens like a folder; right-click it for Extract Here, or right-click files
-for Compress. Connect To Server (in the menu, or type an `smb://`, `sftp://` or
+for Compress. Set As Wallpaper, in a picture's menu, works on GNOME, KDE, XFCE,
+Cinnamon, MATE, sway, Hyprland (with hyprpaper or swww) and Noctalia. Connect To Server (in the menu, or type an `smb://`, `sftp://` or
 `ftp://` address into Go To) opens network shares, which then stay in the sidebar's
 Network section. Right-click files for Tags to give them colour labels or named tags
 (kept on the files as extended attributes, which other programs can read). In a git

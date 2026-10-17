@@ -1287,6 +1287,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::OpenInEditor => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::CopyPathRelative => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::CopyCodeBlocks => !tab::is_computer(&t.path) && t.archive.is_none(),
+        Cmd::SetWallpaper => t.archive.is_none() && matches!(t.target_entries().as_slice(), [e] if !e.is_dir && crate::wallpaper::is_wallpaper(e.ext())),
         Cmd::CompareFiles => t.archive.is_none() && t.target_entries().iter().filter(|e| !e.is_dir).count() == 2 && t.target_entries().len() == 2,
         Cmd::CopyWebLink | Cmd::OpenWebLink | Cmd::GitIgnore => t.archive.is_none() && crate::gitstatus::repo_for(&t.path).is_some(),
         Cmd::GitIgnoreExt => t.archive.is_none() && crate::gitstatus::repo_for(&t.path).is_some() && crate::share::shared_ext(t.target_entries().iter().map(|e| (e.path.as_path(), e.is_dir))).is_some(),

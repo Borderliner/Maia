@@ -223,6 +223,11 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
                 items.push(Item::cmd(Cmd::CompareFiles));
             }
         }
+        if let [(_, false, _, ext)] = ents.as_slice() {
+            if crate::wallpaper::is_wallpaper(ext) {
+                items.push(Item::cmd(Cmd::SetWallpaper));
+            }
+        }
         items.push(Item::cmd(Cmd::OpenInNewTab));
         items.push(Item::cmd(Cmd::OpenInRightSplit));
         items.push(Item::cmd(Cmd::OpenInBottomSplit));

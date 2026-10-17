@@ -1017,7 +1017,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(131) {
+    match rng.below(132) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1320,6 +1320,27 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                     s.act("key PageDown");
                 }
             }
+        }
+        131 => {
+            // A picture made the wallpaper on one desktop or another (stand-in setters),
+            // from a menu or the palette.
+            let pics = root().join("home").read_dir().ok().and_then(|r| r.flatten().map(|d| d.path().join("Pictures/Trip")).find(|p| p.is_dir()));
+            crate::wallpaper::DESKTOP.with(|w| *w.borrow_mut() = rng.pick(&["Hyprland", "GNOME", "KDE", "LXQt", ""]).to_string());
+            if let Some(dir) = pics.filter(|_| rng.below(3) > 0) {
+                s.act("key ctrl+p");
+                s.act(&format!("text {}", dir.join(format!("img{:02}.png", rng.below(12))).display()));
+                s.act("key Enter");
+                s.settle();
+            }
+            if rng.below(2) == 0 {
+                s.cmd(Cmd::SetWallpaper);
+            } else {
+                let (x, y) = p(rng);
+                s.act(&format!("click {x:.0} {y:.0} right"));
+                s.act("text wallpaper");
+                s.act("key Enter");
+            }
+            s.idle(1 + rng.below(10));
         }
         121 => {
             // Sharing: code blocks, a web link or .gitignore, from the palette or a menu.
@@ -7156,6 +7177,90 @@ mod journeys {
         report("office", &s);
     }
 
+    /// Set As Wallpaper from a picture's menu with Noctalia running (a stand-in, found
+    /// among the running programs) on Hyprland; from the palette on GNOME, both of its
+    /// pictures set; on a desktop Maia can't drive, a toast and nothing run. Not offered
+    /// for a text file or for two pictures.
+    #[test]
+    fn set_as_wallpaper() {
+        if !sandboxed() {
+            return;
+        }
+        let d = root().join("home/wallpaper");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        png_file(&d.join("dunes.png"), 320, 200, 4);
+        png_file(&d.join("forest.png"), 200, 320, 7);
+        std::fs::write(d.join("notes.txt"), "not a picture").unwrap();
+        let fake = root().join("wallpaper-tools");
+        let _ = std::fs::remove_dir_all(&fake);
+        crate::tests::fake_tool(&fake, "noctalia", "[ \"$1\" = run ] && while :; do sleep 1; done; exit 0");
+        crate::tests::fake_tool(&fake, "gsettings", "exit 0");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+        crate::wallpaper::DESKTOP.with(|w| *w.borrow_mut() = "Hyprland".into());
+        let mut shell = std::process::Command::new(fake.join("noctalia")).arg("run").spawn().unwrap();
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+                crate::wallpaper::DESKTOP.with(|w| w.borrow_mut().clear());
+            }
+        }
+        let _reset = Reset;
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.settle();
+        let calls = || crate::tests::fake_calls(&fake).into_iter().filter(|c| c.get(1).map(String::as_str) != Some("run")).collect::<Vec<_>>();
+        // Not for text, nor for two pictures at once.
+        for (what, ctrl) in [("notes.txt", false), ("forest.png", true)] {
+            let row = row_text(&s, if ctrl { "dunes.png" } else { what });
+            select_path(&mut s, &d.join("dunes.png"));
+            if !ctrl {
+                select_path(&mut s, &d.join(what));
+            } else {
+                let r = row_text(&s, what);
+                s.act(&format!("click {:.0} {:.0} ctrl", r.center().x, r.center().y));
+            }
+            let row = if ctrl { row } else { row_text(&s, what) };
+            s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+            s.idle(2);
+            assert!(s.popup_open() && !some_text(&s, "Set As Wallpaper"), "{what}");
+            s.act("key Escape");
+        }
+        // Noctalia: its own message, the picture's path.
+        select_path(&mut s, &d.join("dunes.png"));
+        let row = row_text(&s, "dunes.png");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        look(&mut s, "the picture's menu");
+        shot_still(&mut s, "wallpaper-menu");
+        s.click_text("Set As Wallpaper");
+        wait_until(&mut s, "noctalia asked", 10, |_| !calls().is_empty());
+        wait_until(&mut s, "the toast", 10, |s| toast_is(s, "Wallpaper set"));
+        assert_eq!(calls(), [["noctalia", "msg", "wallpaper-set", d.join("dunes.png").to_str().unwrap()]]);
+        look(&mut s, "wallpaper set");
+        s.shot("wallpaper-set");
+        let _ = shell.kill();
+        let _ = shell.wait();
+        // GNOME, from the palette: the light and the dark picture.
+        crate::wallpaper::DESKTOP.with(|w| *w.borrow_mut() = "ubuntu:GNOME".into());
+        select_path(&mut s, &d.join("forest.png"));
+        palette_run(&mut s, "Set As Wallpaper");
+        wait_until(&mut s, "gsettings run", 10, |_| calls().len() == 3);
+        let uri = crate::clipboard::path_to_uri(&d.join("forest.png"));
+        assert_eq!(calls()[1], ["gsettings", "set", "org.gnome.desktop.background", "picture-uri", uri.as_str()]);
+        assert_eq!(calls()[2], ["gsettings", "set", "org.gnome.desktop.background", "picture-uri-dark", uri.as_str()]);
+        // A desktop Maia doesn't know: said plainly, nothing run.
+        crate::wallpaper::DESKTOP.with(|w| *w.borrow_mut() = "LXQt".into());
+        s.app.toast = None;
+        palette_run(&mut s, "Set As Wallpaper");
+        wait_until(&mut s, "the refusal", 10, |s| toast_is(s, "Maia can't set the wallpaper on this desktop"));
+        assert_eq!(calls().len(), 3);
+        look(&mut s, "wallpaper refused");
+        s.shot("wallpaper-refused");
+        report("wallpaper", &s);
+    }
+
     #[test]
     fn monkey_sessions() {
         if !sandboxed() {
@@ -7196,6 +7301,10 @@ mod journeys {
             }
             // Office documents, converted by a stand-in for LibreOffice.
             crate::tests::fake_soffice(&drv);
+            // Wallpaper setters that only say yes.
+            for t in ["gsettings", "plasma-apply-wallpaperimage", "noctalia"] {
+                crate::tests::fake_tool(&drv, t, "exit 0");
+            }
             for f in ["plan.docx", "sheet.ods", "slow deck.odp", "broken.pptx"] {
                 let _ = std::fs::create_dir_all(home.join("Documents/Office"));
                 let _ = std::fs::write(home.join("Documents/Office").join(f), "not really an office file");
@@ -7266,6 +7375,7 @@ mod journeys {
             wipe_root();
         }
         crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        crate::wallpaper::DESKTOP.with(|w| w.borrow_mut().clear());
         let launched = crate::mime::LAUNCHED.lock().unwrap().len();
         let out = crate::clipboard::DRAGGED_OUT.lock().unwrap().len();
         eprintln!("sim monkey: {launched} external launches intercepted, {out} drags handed out");

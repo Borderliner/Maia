@@ -4994,3 +4994,89 @@ fn office_documents_convert_to_pdf_once() {
     assert!(!cached(&slow, ss, sm).exists());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A stand-in program `name` in `dir`: it appends its name and arguments, one per line
+/// and a blank line after, to `calls.log`, then runs `body` (sh).
+pub(crate) fn fake_tool(dir: &Path, name: &str, body: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    let p = dir.join(name);
+    std::fs::write(&p, format!("#!/bin/sh\nD=\"$(dirname \"$0\")\"\n{{ echo {name}; for a; do echo \"$a\"; done; echo; }} >> \"$D/calls.log\"\n{body}\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The calls the stand-ins in `dir` received, each as its program and arguments.
+pub(crate) fn fake_calls(dir: &Path) -> Vec<Vec<String>> {
+    let log = std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default();
+    log.split("\n\n").filter(|c| !c.trim().is_empty()).map(|c| c.lines().map(String::from).collect()).collect()
+}
+
+/// Set As Wallpaper picks each desktop's own way: Noctalia (and the Quickshell one before
+/// it) over the compositor it runs on; GNOME's two pictures, Cinnamon, MATE, KDE, XFCE's
+/// every monitor and workspace, sway's quoted command, swww and hyprpaper; nothing for a
+/// desktop it doesn't know or a tool that isn't there. Then the programs are run
+/// (stand-ins): an optional step may fail, a needed one says why, and hyprctl's refusal
+/// printed with exit 0 counts as failing.
+#[test]
+fn wallpaper_each_desktop_its_way() {
+    use crate::wallpaper::{Desk, Way, pick, set, steps, xfce_props};
+    let desk = |de: &str, run: &[&str]| Desk { desktop: de.into(), running: run.iter().map(|s| s.to_string()).collect(), outputs: vec!["DP-1".into(), "eDP-1".into()] };
+    let all = |_: &str| true;
+    let has = |list: &'static [&'static str]| move |n: &str| list.contains(&n);
+    assert_eq!(pick(&desk("Hyprland", &["Hyprland", "noctalia"]), all), Some(Way::Noctalia));
+    assert_eq!(pick(&desk("Hyprland", &["noctalia"]), has(&["hyprctl"])), None, "noctalia not on PATH");
+    assert_eq!(pick(&desk("niri", &["qs:noctalia-shell", "qs"]), all), Some(Way::NoctaliaQs));
+    assert_eq!(pick(&desk("Hyprland", &["hyprpaper"]), all), Some(Way::Hyprpaper));
+    assert_eq!(pick(&desk("Hyprland", &["hyprpaper", "swww-daemon"]), all), Some(Way::Swww));
+    assert_eq!(pick(&desk("Hyprland", &[]), all), None, "nothing draws a wallpaper");
+    assert_eq!(pick(&desk("sway", &[]), all), Some(Way::Sway));
+    assert_eq!(pick(&desk("ubuntu:GNOME", &[]), all), Some(Way::Gnome));
+    assert_eq!(pick(&desk("GNOME", &[]), has(&["swww"])), None, "no gsettings");
+    assert_eq!(pick(&desk("X-Cinnamon", &[]), all), Some(Way::Cinnamon));
+    assert_eq!(pick(&desk("MATE", &[]), all), Some(Way::Mate));
+    assert_eq!(pick(&desk("KDE", &["swww-daemon"]), all), Some(Way::Kde));
+    assert_eq!(pick(&desk("XFCE", &[]), all), Some(Way::Xfce));
+    assert_eq!(pick(&desk("LXQt", &[]), all), None);
+    assert_eq!(pick(&desk("", &[]), all), None);
+    let p = Path::new("/home/ana/Pictures/My \"best\" shot.jpg");
+    let plain = Path::new("/home/ana/Pictures/dunes.jpg");
+    let args = |w: Way, p: &Path, xf: &str| -> Vec<Vec<String>> { steps(w, p, &desk("", &[]), xf).iter().map(|s| s.args.iter().map(|a| a.to_string_lossy().into_owned()).collect()).collect() };
+    assert_eq!(args(Way::Noctalia, plain, ""), [["noctalia", "msg", "wallpaper-set", "/home/ana/Pictures/dunes.jpg"]]);
+    assert_eq!(args(Way::Noctalia, p, ""), [["noctalia", "msg", "wallpaper-set", "DP-1", p.to_str().unwrap()], ["noctalia", "msg", "wallpaper-set", "eDP-1", p.to_str().unwrap()]], "a path with a space goes to each output");
+    assert_eq!(args(Way::NoctaliaQs, plain, ""), [["qs", "-c", "noctalia-shell", "ipc", "call", "wallpaper", "set", "/home/ana/Pictures/dunes.jpg", "all"]]);
+    let uri = "file:///home/ana/Pictures/My%20%22best%22%20shot.jpg";
+    assert_eq!(args(Way::Gnome, p, ""), [["gsettings", "set", "org.gnome.desktop.background", "picture-uri", uri], ["gsettings", "set", "org.gnome.desktop.background", "picture-uri-dark", uri]]);
+    assert_eq!(args(Way::Cinnamon, p, ""), [["gsettings", "set", "org.cinnamon.desktop.background", "picture-uri", uri]]);
+    assert_eq!(args(Way::Mate, p, ""), [["gsettings", "set", "org.mate.background", "picture-filename", p.to_str().unwrap()]]);
+    assert_eq!(args(Way::Kde, p, ""), [["plasma-apply-wallpaperimage", p.to_str().unwrap()]]);
+    assert_eq!(args(Way::Sway, p, ""), [["swaymsg", r#"output * bg "/home/ana/Pictures/My \"best\" shot.jpg" fill"#]]);
+    assert_eq!(args(Way::Swww, plain, ""), [["swww", "img", "/home/ana/Pictures/dunes.jpg"]]);
+    assert_eq!(args(Way::Hyprpaper, plain, ""), [["hyprctl", "hyprpaper", "preload", "/home/ana/Pictures/dunes.jpg"], ["hyprctl", "hyprpaper", "wallpaper", ",/home/ana/Pictures/dunes.jpg"]]);
+    // xfconf-query -c xfce4-desktop -l, from a laptop with an external screen.
+    let listing = "/backdrop/screen0/monitorHDMI-1/workspace0/color-style\n/backdrop/screen0/monitorHDMI-1/workspace0/image-style\n/backdrop/screen0/monitorHDMI-1/workspace0/last-image\n/backdrop/screen0/monitoreDP-1/workspace0/last-image\n/backdrop/screen0/monitoreDP-1/workspace1/last-image\n/backdrop/single-workspace-mode\n/desktop-icons/style\n";
+    assert_eq!(xfce_props(listing), ["/backdrop/screen0/monitorHDMI-1/workspace0/last-image", "/backdrop/screen0/monitoreDP-1/workspace0/last-image", "/backdrop/screen0/monitoreDP-1/workspace1/last-image"]);
+    assert_eq!(args(Way::Xfce, plain, listing).len(), 3);
+    assert_eq!(args(Way::Xfce, plain, listing)[1], ["xfconf-query", "-c", "xfce4-desktop", "-p", "/backdrop/screen0/monitoreDP-1/workspace0/last-image", "-s", "/home/ana/Pictures/dunes.jpg"]);
+    assert_eq!(args(Way::Xfce, plain, "")[0][3..6], ["-n", "-t", "string"], "no property yet: made");
+    // Run through stand-ins.
+    let d = tmpdir("wallpaper");
+    let fake = d.join("tools");
+    fake_tool(&fake, "gsettings", "case \"$3\" in picture-uri-dark) echo \"No such key\" >&2; exit 1;; esac");
+    fake_tool(&fake, "xfconf-query", &format!("[ \"$3\" = -l ] && printf '{}'\nexit 0", listing.replace('\n', "\\n")));
+    fake_tool(&fake, "hyprctl", "echo \"wallpaper failed (not preloaded)\"");
+    fake_tool(&fake, "plasma-apply-wallpaperimage", "echo 'Unable to find the wallpaper plugin' >&2; exit 1");
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    assert_eq!(set(&t, &desk("GNOME", &[]), p), Ok(Way::Gnome), "the dark picture is optional");
+    assert_eq!(fake_calls(&fake).len(), 2);
+    assert_eq!(set(&t, &desk("XFCE", &[]), plain), Ok(Way::Xfce));
+    let calls = fake_calls(&fake);
+    assert_eq!(calls.len(), 6, "listed, then each of three set");
+    assert_eq!(calls[2], ["xfconf-query", "-c", "xfce4-desktop", "-l"]);
+    assert_eq!(set(&t, &desk("Hyprland", &["hyprpaper"]), plain).unwrap_err(), "Couldn't set the wallpaper: wallpaper failed (not preloaded)");
+    assert_eq!(set(&t, &desk("KDE", &[]), plain).unwrap_err(), "Couldn't set the wallpaper: Unable to find the wallpaper plugin");
+    assert_eq!(set(&t, &desk("sway", &[]), plain).unwrap_err(), "Maia can't set the wallpaper on this desktop", "swaymsg isn't there");
+    assert!(crate::wallpaper::is_wallpaper("jpg") && crate::wallpaper::is_wallpaper("webp") && !crate::wallpaper::is_wallpaper("gif") && !crate::wallpaper::is_wallpaper("svg"));
+    let _ = std::fs::remove_dir_all(&d);
+}

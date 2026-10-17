@@ -156,6 +156,8 @@ pub struct App {
     shares: Vec<std::sync::mpsc::Receiver<ShareDone>>,
     /// How the Connect dialog's last attempt ended: (address, Ok or the reason).
     dialog_result: Option<(String, Result<(), String>)>,
+    /// Wallpapers, printing and picture fixes, run one after another.
+    pub errands: crate::errands::Runner,
 }
 
 /// What a thread sharing files hands back: text for the clipboard, what to say, and a
@@ -255,6 +257,7 @@ impl App {
             net_jobs: vec![],
             shares: vec![],
             dialog_result: None,
+            errands: Default::default(),
             cfg,
             ud,
         };
@@ -869,6 +872,7 @@ impl App {
         self.pump_requests(ctx);
         self.pump_net();
         self.pump_shares(ctx);
+        crate::errands::pump(self);
         let notes = std::mem::take(&mut *self.notes.lock().unwrap_or_else(|e| e.into_inner()));
         if let Some(n) = notes.into_iter().last() {
             self.toast(n);
@@ -2039,6 +2043,7 @@ impl App {
                     Err(e) => ShareDone { copy: None, open: vec![], toast: format!("Couldn't make a link: {e}"), rescan: None },
                 });
             }
+            Cmd::SetWallpaper => crate::errands::run(self, cmd),
             Cmd::CompareFiles => {
                 let files: Vec<PathBuf> = self.tab().target_entries().iter().filter(|e| !e.is_dir).map(|e| e.path.clone()).collect();
                 let [a, b] = files.as_slice() else {
