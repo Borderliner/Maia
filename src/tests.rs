@@ -7258,3 +7258,39 @@ fn format_a_removable_drive_through_udisks() {
     assert_eq!(object_path("/dev/mmcblk0"), "/org/freedesktop/UDisks2/block_devices/mmcblk0");
     assert_eq!(object_path("/dev/dm-0"), "/org/freedesktop/UDisks2/block_devices/dm_2d0");
 }
+
+/// Quick Open's files: in a repository, git's (tracked and new, not what .gitignore
+/// leaves out), in one order; outside one, a walk past hidden folders and build output.
+/// A file's own name outranks its folders, and a query a newer one replaced gives up.
+#[test]
+fn quick_open_lists_and_ranks_a_projects_files() {
+    use crate::quickopen::{list, rank};
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    let d = tmpdir("quickopen");
+    let stop = AtomicBool::new(false);
+    for (f, body) in [("src/main.rs", "fn main() {}\n"), ("src/view/list.rs", "\n"), ("docs/main notes.md", "\n"), ("README.md", "\n"), ("node_modules/pkg/index.js", "\n"), (".cache/x", "\n"), ("package.json", "{}\n")] {
+        touch(&d.join(f), body);
+    }
+    // Not a repository: the walk, without node_modules (beside package.json) or .cache.
+    let walked = list(&d, &stop);
+    assert_eq!(walked, ["README.md", "docs/main notes.md", "package.json", "src/main.rs", "src/view/list.rs"]);
+    if crate::media::have("git") {
+        git(&d, &["init", "-q"]);
+        touch(&d.join(".gitignore"), "node_modules/\nbuild.log\n");
+        touch(&d.join("build.log"), "noise\n");
+        git(&d, &["add", "src", "README.md", ".gitignore"]);
+        git(&d, &["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "first"]);
+        touch(&d.join("src/new.rs"), "\n");
+        let files = list(&d, &stop);
+        assert_eq!(files, [".cache/x", ".gitignore", "README.md", "docs/main notes.md", "package.json", "src/main.rs", "src/new.rs", "src/view/list.rs"], "tracked and new (hidden too, as git sees them), in one order; ignored left out");
+        let g = AtomicU64::new(1);
+        let hits: Vec<&str> = rank(&files, "main", &g, 1).unwrap().iter().map(|&i| files[i as usize].as_str()).collect();
+        assert_eq!(hits.first(), Some(&"src/main.rs"), "the name, ahead of a folder or a longer name");
+        assert!(hits.contains(&"docs/main notes.md"));
+        let hits: Vec<&str> = rank(&files, "vl", &g, 1).unwrap().iter().map(|&i| files[i as usize].as_str()).collect();
+        assert_eq!(hits, ["src/view/list.rs"], "letters across folders");
+        assert!(rank(&files, "zzz", &g, 1).unwrap().is_empty());
+        assert_eq!(rank(&files, "main", &g, 0), None, "a newer query took over");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

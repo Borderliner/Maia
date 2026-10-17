@@ -9686,6 +9686,78 @@ mod journeys {
         report("recent projects", &s);
     }
 
+    /// Quick Open from its key, in a subfolder of a repository: the project's files listed
+    /// from its top, narrowed by a few letters; Enter goes to one (its folder, the file
+    /// selected), Ctrl+Enter in a new tab, a click too; small windows and nothing found.
+    #[test]
+    fn quick_open_finds_a_file_in_the_project() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let home = fixture("quickopen");
+        let p = home.join("Code/app");
+        for f in ["src/main.rs", "src/view/list.rs", "src/view/grid.rs", "docs/guide.md", "README.md"] {
+            std::fs::create_dir_all(p.join(f).parent().unwrap()).unwrap();
+            std::fs::write(p.join(f), "x\n").unwrap();
+        }
+        crate::tests::git(&p, &["init", "-q"]);
+        crate::tests::git(&p, &["add", "."]);
+        let mut s = Sim::new(&p.join("src/view"), vec2(1280.0, 800.0));
+        fn st(s: &Sim) -> &crate::quickopen::State {
+            match &s.app.popup {
+                Popup::QuickOpen(q) => q,
+                _ => s.fail("Quick Open is not open"),
+            }
+        }
+        s.act("key ctrl+o");
+        wait_until(&mut s, "the files listed", 10, |s| st(s).listed);
+        assert_eq!(st(&s).root, p, "the project's top, not the folder");
+        s.idle(3);
+        assert!(some_text(&s, "5 files in ~/Code/app") || s.texts.iter().any(|(_, t)| t.starts_with("5 files in")), "how many");
+        look(&mut s, "quick open");
+        s.idle(12);
+        s.shot("quick-open");
+        s.act("text guide");
+        wait_until(&mut s, "a match", 10, |s| st(s).rows().first() == Some(&"docs/guide.md"));
+        look(&mut s, "quick open narrowed");
+        s.shot("quick-open-narrowed");
+        s.act("key Enter");
+        wait_until(&mut s, "the file shown", 10, |s| s.tab().path == p.join("docs") && s.tab().cursor_path() == Some(p.join("docs/guide.md")));
+        assert!(!s.popup_open());
+        // Ctrl+Enter: in a new tab.
+        let tabs = s.app.panels[&s.app.active].tabs.len();
+        s.act("key ctrl+o");
+        wait_until(&mut s, "listed", 10, |s| st(s).listed);
+        s.act("text grid");
+        wait_until(&mut s, "grid", 10, |s| st(s).rows().first() == Some(&"src/view/grid.rs"));
+        s.act("key ctrl+Enter");
+        wait_until(&mut s, "a new tab on it", 10, |s| s.app.panels[&s.app.active].tabs.len() == tabs + 1 && s.tab().cursor_path() == Some(p.join("src/view/grid.rs")));
+        // A click.
+        s.act("key ctrl+o");
+        wait_until(&mut s, "listed", 10, |s| st(s).listed);
+        s.act("text readme");
+        wait_until(&mut s, "readme", 10, |s| st(s).rows().first() == Some(&"README.md"));
+        s.idle(2);
+        s.click_text("README.md");
+        wait_until(&mut s, "the readme shown", 10, |s| s.tab().path == p && s.tab().cursor_path() == Some(p.join("README.md")));
+        // Nothing by that name; small windows.
+        s.act("key ctrl+o");
+        wait_until(&mut s, "listed", 10, |s| st(s).listed);
+        s.act("text zzqqxx");
+        s.idle(3);
+        assert!(some_text(&s, "No file by that name"));
+        s.act("key ctrl+a");
+        s.act("key Backspace");
+        for (w, h) in [(520.0, 340.0), (720.0, 480.0), (1280.0, 800.0)] {
+            s.resize(w, h);
+            s.idle(3);
+            look(&mut s, &format!("quick open at {w}x{h}"));
+        }
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        report("quick open", &s);
+    }
+
     /// What's Using This… from a folder's menu lists a `sleep` this test started working
     /// in it, as the user's own, with its PID; Stop asks first, then ends it and the list
     /// empties. One that ignores SIGTERM is still there a few seconds later and is offered

@@ -210,6 +210,7 @@ pub enum Popup {
     Tidy(crate::tidy::State),
     Print(Box<crate::sendto::PrintState>),
     Projects(crate::projects::State),
+    QuickOpen(Box<crate::quickopen::State>),
     Holders(Box<crate::holders::State>),
     SmartEdit(crate::smart::Edit),
     SpaceUsed(Box<crate::spaceuse::State>),
@@ -350,6 +351,7 @@ impl Popup {
             Popup::Tidy(..) => "Tidy",
             Popup::Print(..) => "Print",
             Popup::Projects(..) => "Projects",
+            Popup::QuickOpen(..) => "QuickOpen",
             Popup::Holders(..) => "Holders",
             Popup::SmartEdit(..) => "SmartEdit",
             Popup::SpaceUsed(..) => "SpaceUsed",
@@ -773,7 +775,7 @@ fn row(ui: &mut Ui, h: f32, selected: bool, pal: &Palette, paint: impl FnOnce(&U
     resp
 }
 
-fn highlight_job(text: &str, q: &fuzzy::Query, font: FontId, col: Color32, accent: Color32) -> egui::text::LayoutJob {
+pub(crate) fn highlight_job(text: &str, q: &fuzzy::Query, font: FontId, col: Color32, accent: Color32) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     highlight_into(&mut job, text, q, font, col, accent);
     job
@@ -909,6 +911,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::Tidy(st) => crate::tidy::popup(app, ctx, st),
         Popup::Print(st) => crate::sendto::dialog(app, ctx, st),
         Popup::Projects(st) => crate::projects::popup(app, ctx, st),
+        Popup::QuickOpen(st) => crate::quickopen::popup(app, ctx, st),
         Popup::Holders(st) => crate::holders::popup(app, ctx, st),
         Popup::SmartEdit(st) => crate::smart::popup(app, ctx, st),
         Popup::SpaceUsed(st) => crate::spaceuse::popup(app, ctx, st),

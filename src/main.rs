@@ -60,6 +60,7 @@ mod picfix;
 mod popups;
 mod project;
 mod projects;
+mod quickopen;
 mod query;
 mod rename;
 mod runner;

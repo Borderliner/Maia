@@ -1895,6 +1895,10 @@ impl App {
                 }
             }
             Cmd::RecentProjects => self.popup = crate::projects::open(self, &ctx),
+            Cmd::QuickOpen => match crate::quickopen::open(self, &ctx) {
+                Some(p) => self.popup = p,
+                None => self.toast("Quick Open needs a folder"),
+            },
             Cmd::WhatsUsing => {
                 let t = self.tab();
                 let mut paths: Vec<PathBuf> = t.target_entries().iter().filter(|e| tab::drive_dev(&e.path).is_none()).map(|e| e.path.clone()).collect();
