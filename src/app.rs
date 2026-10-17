@@ -1064,6 +1064,13 @@ impl App {
                     t.git_hide = ig;
                     t.dirty = true;
                 }
+                // Only the changed files: each new status answer narrows the list again.
+                let only = t.only_changed.then(|| crate::gitstatus::repo_for(&t.path)).flatten();
+                if only.as_ref().map(std::rc::Rc::as_ptr) != t.git_only_from.as_ref().map(std::rc::Rc::as_ptr) {
+                    t.git_only = only.as_ref().map(|r| std::sync::Arc::new(r.marks.keys().cloned().collect()));
+                    t.git_only_from = only;
+                    t.dirty = true;
+                }
                 if t.dirty || t.built_tree != t.tree_active() {
                     t.rebuild(&ctxv);
                 } else if t.stream_dirty {
@@ -1984,6 +1991,17 @@ impl App {
                     // panel's lower right corner.
                     let at = p.branch_chip.unwrap_or_else(|| Rect::from_min_size(p.rect.right_bottom() - vec2(120.0, 30.0), vec2(100.0, 20.0)));
                     self.popup = Popup::branches(p.id, r.root.clone(), at);
+                }
+            }
+            Cmd::OnlyChanged => {
+                let t = self.panel().tab_mut();
+                t.only_changed = !t.only_changed;
+                let on = t.only_changed;
+                if on && crate::gitstatus::repo_for(&self.tab().path).is_none() {
+                    self.panel().tab_mut().only_changed = false;
+                    self.toast("Not in a git repository");
+                } else {
+                    self.toast(if on { "Showing only changed files" } else { "Showing every file" });
                 }
             }
             Cmd::GitChanges => {

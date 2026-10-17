@@ -118,6 +118,12 @@ pub struct Tab {
     pub hidden_count: usize,
     /// What git ignores here, left out of the view (the Ignored files option is Hide).
     pub git_hide: Option<std::sync::Arc<HashSet<std::ffi::OsString>>>,
+    /// Only what git marks as changed is listed (Show Only Changed Files), and the
+    /// work tree whose marks say so while it is on.
+    pub only_changed: bool,
+    pub git_only: Option<std::sync::Arc<HashSet<PathBuf>>>,
+    /// The status answer `git_only` was made from.
+    pub git_only_from: Option<std::rc::Rc<crate::gitstatus::Repo>>,
     /// In a trash folder: original location and deletion time per item.
     pub trash_meta: HashMap<PathBuf, (PathBuf, Option<SystemTime>)>,
     /// Tree-view context rows: ancestors kept only to show where filter matches live (drawn dimmed).
@@ -212,6 +218,9 @@ impl Tab {
             counts: (0, 0, 0, 0),
             hidden_count: 0,
             git_hide: None,
+            only_changed: false,
+            git_only: None,
+            git_only_from: None,
             gone: false,
             archive: None,
             dimmed: HashSet::new(),
@@ -869,6 +878,7 @@ impl Tab {
         let flatten = self.flatten;
         let db = crate::mime::mime_db();
         let (git_hide, here) = (self.git_hide.clone(), self.path.clone());
+        let git_only = self.git_only.clone();
         let hidden_ok = |e: &Entry| -> bool {
             if !c.show_hidden && (e.hidden || e.rel_hidden()) {
                 return false;
@@ -881,6 +891,10 @@ impl Tab {
         // Filters that apply to every row (top level and tree children).
         let row_ok = |e: &Entry| -> bool {
             if e.is_dir && (!show_folders || flatten) || !e.is_dir && !show_files {
+                return false;
+            }
+            // A folder stays when something below it changed.
+            if git_only.as_ref().is_some_and(|set| !set.contains(&e.path)) {
                 return false;
             }
             if content.is_some_and(|h| e.is_dir || !h.contains_key(&e.path)) {

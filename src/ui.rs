@@ -1327,7 +1327,8 @@ impl App {
         let edit_rect = Rect::from_min_max(pos2(frame_rect.left() + 22.0, frame_rect.top() + 1.0), pos2(frame_rect.right() - 22.0 * btns - 2.0, frame_rect.bottom() - 1.0));
         let shown = vf + vfi;
         // Files when only files are listed; an empty folder has items, not files.
-        let hint = format!("Filter {} {}…", fmt_count(shown), if shown > 0 && (t.flatten || vf == 0) { if shown == 1 { "file" } else { "files" } } else if shown == 1 { "item" } else { "items" });
+        let changed = if t.git_only.is_some() { " changed" } else { "" };
+        let hint = format!("Filter {}{changed} {}…", fmt_count(shown), if shown > 0 && (t.flatten || vf == 0) { if shown == 1 { "file" } else { "files" } } else if shown == 1 { "item" } else { "items" });
         // Short form when the full hint wouldn't fit.
         let hint = if fw < 150.0 { "Filter…".to_string() } else { hint };
         let hint = if t.content.on { if fw < 150.0 { "Find…".into() } else { "Find in files…".into() } } else { hint };
@@ -1684,7 +1685,7 @@ impl App {
 }
 
 fn p_filter_active(t: &tab::Tab) -> bool {
-    !t.filter.is_empty() || t.flatten
+    !t.filter.is_empty() || t.flatten || t.git_only.is_some()
 }
 
 pub fn fmt_count(n: usize) -> String {

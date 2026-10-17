@@ -5544,3 +5544,32 @@ fn merge_conflicts_settled_and_continued() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Show Only Changed Files: the list keeps what git marks as changed and the folders
+/// with changes inside, and everything comes back when it is turned off.
+#[test]
+fn only_changed_files_listed() {
+    let d = tmpdir("only-changed");
+    work_repo(&d);
+    for f in ["src/app.rs", "src/lib.rs", "docs/guide.md", "README.md", "LICENSE"] {
+        touch(&d.join(f), "x\n");
+    }
+    git(&d, &["add", "-A"]);
+    git(&d, &["commit", "-qm", "Start"]);
+    touch(&d.join("src/lib.rs"), "y\n");
+    touch(&d.join("NEW.txt"), "new\n");
+    let r = crate::gitstatus::query(&d).expect("a repository");
+    let stats = HashMap::new();
+    let mut t = Tab::new(1, d.clone(), ViewSettings::default(), egui::Context::default());
+    pump(&mut t, &stats);
+    let names = |t: &Tab| t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&t), ["docs", "src", "LICENSE", "NEW.txt", "README.md"]);
+    t.git_only = Some(std::sync::Arc::new(r.marks.keys().cloned().collect()));
+    t.dirty = true;
+    pump(&mut t, &stats);
+    assert_eq!(names(&t), ["src", "NEW.txt"]);
+    t.git_only = None;
+    t.dirty = true;
+    pump(&mut t, &stats);
+    assert_eq!(names(&t).len(), 5);
+    let _ = std::fs::remove_dir_all(&d);
+}

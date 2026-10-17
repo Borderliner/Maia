@@ -1017,7 +1017,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(131) {
+    match rng.below(132) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1467,6 +1467,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.act(&format!("key {}", rng.pick(&["Escape", "Escape", "Enter"])));
             }
         }
+        131 => s.cmd(Cmd::OnlyChanged),
         97 => {
             // A drag that leaves the window (handed to the system when it carries files).
             let (x, y) = p(rng);
@@ -6749,6 +6750,39 @@ mod journeys {
         wait_until(&mut s, "the banner gone", 10, |s| !s.texts.iter().any(|(_, t)| t.starts_with("Merging")));
         look(&mut s, "merged");
         report("conflicts", &s);
+    }
+
+    /// Show Only Changed Files from its key: the list narrows to what git marks, the
+    /// filter box says so, and the key again shows everything.
+    #[test]
+    fn only_changed_files_from_the_key() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let (_home, _a, b) = sync_repos("onlychanged");
+        for f in ["src/app.rs", "src/lib.rs", "docs/guide.md", "LICENSE"] {
+            std::fs::create_dir_all(b.join(f).parent().unwrap()).unwrap();
+            std::fs::write(b.join(f), "x\n").unwrap();
+        }
+        crate::tests::git(&b, &["add", "-A"]);
+        crate::tests::git(&b, &["commit", "-qm", "More"]);
+        std::fs::write(b.join("src/lib.rs"), "y\n").unwrap();
+        std::fs::write(b.join("NEW.txt"), "new\n").unwrap();
+        let mut s = Sim::new(&b, vec2(1280.0, 800.0));
+        wait_until(&mut s, "the marks", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some_and(|r| !r.marks.is_empty()));
+        s.idle(3);
+        let names = |s: &Sim| s.tab().view.iter().map(|&i| s.tab().entries[i as usize].name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&s).len(), 5);
+        s.act("key ctrl+shift+g");
+        wait_until(&mut s, "narrowed", 10, |s| s.tab().view.len() == 2);
+        assert_eq!(names(&s), ["src", "NEW.txt"]);
+        s.idle(3);
+        assert!(some_text(&s, "Filter 2 changed items…"));
+        look(&mut s, "only changed");
+        s.shot("only-changed");
+        s.act("key ctrl+shift+g");
+        wait_until(&mut s, "everything", 10, |s| s.tab().view.len() == 5);
+        report("only changed", &s);
     }
 
     /// Select the listed item named `label`, which scrolls it into view.

@@ -229,6 +229,7 @@ commands! {
     InspectorMinimap, "inspector_minimap", Inspector, "Toggle Inspector Image Minimap", "Show or hide the overview while zoomed into an image.", [];
     GitHistory, "show_git_history", Inspector, "Show Git History", "The commits of this folder's repository as a graph, in the inspector.", [];
     GitBranches, "git_branches", Inspector, "Git Branches", "Switch or create a branch, use the stash, open another work tree.", [];
+    OnlyChanged, "only_changed", View, "Show Only Changed Files", "List only what git marks as changed in this folder, and the folders with changes inside; again to show everything.", ["Ctrl+Shift+G"];
     GitChanges, "git_changes", Inspector, "Show Git Changes", "Stage, discard and commit this repository's changes, in the inspector.", [];
     Properties, "properties", Inspector, "Properties", "Details, sizes and permissions of the selection.", ["Alt+Enter"];
 
