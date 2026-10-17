@@ -7165,6 +7165,31 @@ mod journeys {
         wait_until(&mut s, "the trash job done", 20, |s| s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Trashed(_))));
         s.act("key ctrl+z");
         wait_until(&mut s, "undone", 20, |_| app.join("target/debug/app.d").exists() && app.join("web/node_modules/left-pad/index.js").exists());
+        // Every project in the home folder, from anywhere: the one untouched for two months
+        // checked in one go and deleted for good, freeing its room at once.
+        let nm = app.join("web/node_modules");
+        std::fs::File::open(&nm).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 86_400)).unwrap();
+        go(&mut s, &home.join("Documents"));
+        palette_run(&mut s, "Clean Build Folders In Home");
+        wait_until(&mut s, "the home scan", 30, |s| st(s).0);
+        s.idle(2);
+        let st_root = |s: &Sim| match &s.app.popup {
+            Popup::CleanBuilds(c) => c.root.clone(),
+            _ => s.fail("Clean Build Folders is not open"),
+        };
+        assert_eq!(st_root(&s), crate::fsx::home(), "the home folder, not the one shown");
+        assert!(st(&s).1.iter().any(|f| f.path == app.join("target")), "this project's among them");
+        let old: Vec<PathBuf> = st(&s).1.iter().filter(|f| crate::devtools::is_stale(f.modified)).map(|f| f.path.clone()).collect();
+        assert_eq!(old, [nm.clone()]);
+        look(&mut s, "clean builds in home");
+        click_control(&mut s, "clean stale");
+        assert_eq!(st(&s).2, 1, "the stale one checked");
+        shot_still(&mut s, "clean-builds-stale");
+        s.act("key shift+Delete");
+        assert!(s.texts.iter().any(|(_, t)| t.contains("for good")), "asks, saying it can't be undone");
+        s.act("key Enter");
+        wait_until(&mut s, "deleted", 20, |_| !nm.exists());
+        assert!(!root().join("xdg/data/Trash/files/node_modules (1)").exists() && app.join("target").exists(), "deleted, not trashed; the rest left alone");
         // A folder with nothing to clean.
         go(&mut s, &home.join("Documents"));
         palette_run(&mut s, "Clean Build Folders");

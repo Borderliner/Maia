@@ -302,6 +302,7 @@ commands! {
     SpaceUsed, "space_used", Files, "Show Space Used", "This folder's contents biggest first, each with its share, to find what fills the disk.", [];
     PreviousVersions, "previous_versions", Files, "Previous Versions…", "Earlier copies of the file kept in the disk's snapshots, to look at and restore.", [];
     CleanBuilds, "clean_build_folders", Files, "Clean Build Folders…", "Find build output and installed packages under this folder and trash the ones you pick.", [];
+    CleanBuildsHome, "clean_build_folders_home", Files, "Clean Build Folders In Home…", "Find build output and installed packages in every project under your home folder.", [];
     ContextMenu, "context_menu", Files, "Context Menu", "Open the action menu at the file cursor.", ["Shift+F10"];
     RestoreTrash, "restore_trash", Files, "Restore From Trash", "Put trashed items back where they came from.", [];
     Undo, "undo", Files, "Undo", "Reverse the last rename, move, copy, create or trash.", ["Ctrl+Z"];

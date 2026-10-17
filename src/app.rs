@@ -1908,6 +1908,7 @@ impl App {
             Cmd::AddToShelf => crate::shelf::add_selection(self),
             Cmd::ShelfMoveHere | Cmd::ShelfCopyHere => crate::shelf::put_here(self, cmd == Cmd::ShelfMoveHere),
             Cmd::ClearShelf => self.shelf.items.clear(),
+            Cmd::CleanBuildsHome => self.popup = crate::devtools::clean(&ctx, fsx::home()),
             Cmd::CleanBuilds => match crate::devtools::target_dir(self) {
                 Some(d) => self.popup = crate::devtools::clean(&ctx, d),
                 None => self.toast("Clean Build Folders needs a folder"),

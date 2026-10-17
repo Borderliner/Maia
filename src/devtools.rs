@@ -72,6 +72,11 @@ pub fn ago(t: Option<SystemTime>) -> String {
     }
 }
 
+/// Not changed for a month: a project nobody has built or installed into lately.
+pub fn is_stale(t: Option<SystemTime>) -> bool {
+    t.and_then(|t| SystemTime::now().duration_since(t).ok()).is_some_and(|d| d.as_secs() >= 30 * 86_400)
+}
+
 /// 1234 as "1,234".
 pub fn fmt_count(n: usize) -> String {
     let s = n.to_string();
@@ -806,6 +811,8 @@ pub fn clean_popup(app: &mut App, ctx: &egui::Context, st: &mut CleanState) -> b
     let fs = app.cfg.font_size;
     let small = fs - 1.5;
     let mut trash = k.enter && !st.checked.is_empty();
+    let mut delete = false;
+    let mut stale = false;
     let mut cancel = false;
     let mut toggle: Option<usize> = None;
     let list_max = pp::fit_list(ctx, 440.0, 190.0);
@@ -813,7 +820,7 @@ pub fn clean_popup(app: &mut App, ctx: &egui::Context, st: &mut CleanState) -> b
     let chosen_size: u64 = st.items.iter().filter(|f| st.checked.contains(&f.path)).filter_map(|f| f.size).sum();
     let all_size: u64 = st.items.iter().filter_map(|f| f.size).sum();
     pp::centered(ctx, "clean builds", 700.0, &pal, |ui| {
-        let sub = format!("In {}. Checked folders go to the trash; a build or an install makes them again.", pp::home_short(&st.root));
+        let sub = format!("In {}. A build or an install makes checked folders again.", pp::home_short(&st.root));
         pp::dialog_title(ui, "Clean build folders", Some(&sub), &pal);
         ui.add_space(8.0);
         let row_h = (fs * 1.35 + small * 1.35 + 14.0).round();
@@ -862,13 +869,28 @@ pub fn clean_popup(app: &mut App, ctx: &egui::Context, st: &mut CleanState) -> b
         } else {
             format!("{} {}, {}", st.items.len(), if st.items.len() == 1 { "folder" } else { "folders" }, crate::fsx::fmt_size(all_size))
         };
-        ui.label(egui::RichText::new(status).size(small).color(pal.text_dim));
-        pp::hints(ui, &[("Space", "check"), ("Ctrl+A", "all"), ("Enter", "move to trash"), ("Esc", "close")], &pal);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(status).size(small).color(pal.text_dim));
+            // The folders of projects nobody has built in a month: the usual ones to go.
+            let old = st.items.iter().filter(|f| is_stale(f.modified)).count();
+            if st.done && old > 0 {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let b = ui.add(egui::Button::new(egui::RichText::new(format!("Check the {old} untouched for a month")).size(small).color(pal.accent)).frame(false));
+                    crate::ui::note_control(ui, b.rect, "clean stale");
+                    stale = b.on_hover_text("Ctrl+M").clicked();
+                });
+            }
+        });
+        pp::hints(ui, &[("Space", "check"), ("Ctrl+A", "all"), ("Ctrl+M", "a month old"), ("Enter", "move to trash"), ("Shift+Delete", "delete"), ("Esc", "close")], &pal);
         pp::dialog_buttons(ui, |ui| {
             let label = if chosen == 0 { "Move to Trash".to_string() } else { format!("Move {} to Trash", crate::fsx::fmt_size(chosen_size)) };
             let b = pp::primary_button(ui, &label, chosen > 0, &pal);
             crate::ui::note_control(ui, b.rect, "clean trash");
             trash |= b.clicked();
+            // The trash keeps what it holds on the disk: deleting is what frees the room.
+            let d = ui.add_enabled(chosen > 0, egui::Button::new(egui::RichText::new("Delete").color(if chosen > 0 { pal.danger } else { pal.text_dim })).fill(pal.card()).stroke(Stroke::new(1.0, pal.card_line())).min_size(vec2(72.0, 0.0)));
+            crate::ui::note_control(ui, d.rect, "clean delete");
+            delete |= d.on_hover_text("Delete for good, freeing the space now (Shift+Delete)").clicked();
             let c = pp::plain_button(ui, "Cancel", &pal);
             crate::ui::note_control(ui, c.rect, "clean cancel");
             cancel = c.clicked();
@@ -882,7 +904,19 @@ pub fn clean_popup(app: &mut App, ctx: &egui::Context, st: &mut CleanState) -> b
             }
         }
     }
+    if stale || (take(ctx, Modifiers::COMMAND, Key::M) && st.done) {
+        st.checked = st.items.iter().filter(|f| is_stale(f.modified)).map(|f| f.path.clone()).collect();
+    }
     if cancel {
+        return false;
+    }
+    if (delete || take(ctx, Modifiers::SHIFT, Key::Delete)) && !st.checked.is_empty() {
+        let paths: Vec<PathBuf> = st.items.iter().filter(|f| st.checked.contains(&f.path)).map(|f| f.path.clone()).collect();
+        let size: u64 = st.items.iter().filter(|f| st.checked.contains(&f.path)).filter_map(|f| f.size).sum();
+        let what = if paths.len() == 1 { format!("“{}”", crate::project::relative(&paths[0], &st.root)) } else { format!("{} folders", paths.len()) };
+        app.popup = Popup::confirm(format!("Delete {what} ({}) for good? This can't be undone; a build or an install makes them again.", crate::fsx::fmt_size(size)), "Delete", Box::new(move |app: &mut App| {
+            app.actions.push(Action::StartJob(crate::ops::OpKind::Delete { paths }));
+        }));
         return false;
     }
     if trash && !st.checked.is_empty() {
