@@ -157,6 +157,7 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             items.push(Item::cmd(Cmd::ConnectServer));
         } else if !in_trash && t.archive.is_none() {
             items.push(Item::cmd(Cmd::FindDuplicates));
+            items.push(Item::cmd(Cmd::SpaceUsed));
         }
         if in_trash {
             items.push(Item::sep());

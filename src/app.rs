@@ -1135,6 +1135,8 @@ impl App {
                 }
                 if let OpKind::Trash { paths } = &j.kind {
                     self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Trashed(paths.clone()) });
+                    // The folders they left are smaller now.
+                    finished_dirs.extend(paths.iter().filter_map(|p| p.parent().map(Path::to_path_buf)));
                 }
             }
         }
@@ -1807,6 +1809,7 @@ impl App {
                 None => self.toast("Find Duplicates needs a folder"),
             },
             Cmd::PreviousVersions => crate::versions::open(self),
+            Cmd::SpaceUsed => crate::spaceuse::open(self),
             Cmd::CleanBuilds => match crate::devtools::target_dir(self) {
                 Some(d) => self.popup = crate::devtools::clean(&ctx, d),
                 None => self.toast("Clean Build Folders needs a folder"),

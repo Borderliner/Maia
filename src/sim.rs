@@ -1017,7 +1017,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(141) {
+    match rng.below(142) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1428,6 +1428,29 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 }
             }
             s.idle(1 + rng.below(5));
+        }
+        141 => {
+            // Show Space Used: walked by keys and clicks, into folders and back, some
+            // checked and trashed (asked first) or left, sometimes shown in Maia.
+            if rng.below(2) == 0 {
+                s.cmd(Cmd::SpaceUsed);
+            } else {
+                let (x, y) = p(rng);
+                s.act(&format!("click {x:.0} {y:.0} right"));
+                s.act("text space used");
+                s.act("key Enter");
+            }
+            s.idle(2 + rng.below(20));
+            for _ in 0..rng.below(8) {
+                if !matches!(s.app.popup, Popup::SpaceUsed(_)) {
+                    break;
+                }
+                match rng.below(5) {
+                    0 => click_control_at(s, rng.pick(&["space row", "space show", "space trash", "space trash cancel", "space close"])),
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "Enter", "Backspace", "space", "Delete", "End", "PageDown", "Escape"]))),
+                }
+                s.idle(rng.below(4));
+            }
         }
         121 => {
             // Sharing: code blocks, a web link or .gitignore, from the palette or a menu.
@@ -7955,6 +7978,107 @@ mod journeys {
         assert!(versions_page(&s).is_none(), "gone with another file under the cursor");
         crate::versions::FAKE.with(|f| *f.borrow_mut() = None);
         report("versions", &s);
+    }
+
+    fn space(s: &Sim) -> &crate::spaceuse::State {
+        match &s.app.popup {
+            Popup::SpaceUsed(st) => st,
+            _ => s.fail("Show Space Used is not open"),
+        }
+    }
+
+    fn space_names(s: &Sim) -> Vec<String> {
+        let st = space(s);
+        st.order.iter().map(|&k| st.items[k as usize].entry.name.clone()).collect()
+    }
+
+    /// Show Space Used from the folder's menu: biggest first as the sizes come in, each
+    /// with its bar; into a folder and back to it, never above where it started; two
+    /// items trashed after asking, gone from the list and brought back by Undo; a file
+    /// shown in its folder.
+    #[test]
+    fn space_used_biggest_first() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("space");
+        let d = home.join("Disk");
+        crate::tests::space_fixture(&d);
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        let list = s.app.panels[&s.app.active].list_rect;
+        s.act(&format!("click {:.0} {:.0} right", list.center().x, list.bottom() - 40.0));
+        s.idle(2);
+        assert!(some_text(&s, "Show Space Used"), "in the folder's menu");
+        s.click_text("Show Space Used");
+        wait_until(&mut s, "every size counted", 10, |s| !space(s).counting());
+        s.idle(3);
+        assert_eq!(space_names(&s), ["Big", "movie.mkv", "Small", "big-link", "Empty"]);
+        assert!(some_text(&s, "488 KB") && some_text(&s, "391 KB") && some_text(&s, "10 B"), "each size beside its bar");
+        assert!(s.texts.iter().any(|(_, t)| t.ends_with("Disk · 879 KB")), "where, and how much in all");
+        look(&mut s, "space used");
+        s.shot("space-used-graphite");
+        // Into Big, and back with the cursor on it.
+        s.act("key Enter");
+        wait_until(&mut s, "Big read", 10, |s| space(s).dir == d.join("Big") && !space(s).counting());
+        assert_eq!(space_names(&s), ["a.bin", "Sub"]);
+        s.act("key Backspace");
+        wait_until(&mut s, "back up", 10, |s| space(s).dir == d && !space(s).counting());
+        assert_eq!(space(&s).sel, 0, "on the folder it came from");
+        s.act("key Backspace");
+        assert_eq!(space(&s).dir, d, "never above where it started");
+        assert!(some_text(&s, "Space used was opened in Disk: it goes no higher"));
+        // A click on a folder opens it too.
+        let r = s.text_rect("Small");
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        wait_until(&mut s, "Small read", 10, |s| space(s).dir == d.join("Small"));
+        s.act("key Backspace");
+        wait_until(&mut s, "back up again", 10, |s| space(s).dir == d && !space(s).counting());
+        // The movie and Small checked, trashed after asking.
+        assert_eq!(space(&s).sel, 2, "back on Small");
+        s.act("key Home");
+        s.act("key ArrowDown");
+        s.act("key Space");
+        s.act("key ArrowDown");
+        s.act("key Space");
+        assert_eq!(space(&s).checked.len(), 2);
+        s.act("key Delete");
+        assert!(space(&s).confirm, "asks first");
+        assert!(some_text(&s, "Move 2 items (391 KB) to the trash?"), "{:?}", s.texts.iter().filter(|t| t.1.starts_with("Move")).collect::<Vec<_>>());
+        look(&mut s, "space used asking");
+        s.shot("space-used-confirm-graphite");
+        s.act("key Enter");
+        wait_until(&mut s, "trashed", 10, |_| !d.join("movie.mkv").exists() && !d.join("Small").exists());
+        assert_eq!(space_names(&s), ["Big", "big-link", "Empty"], "gone from the list");
+        // A file shown in its folder.
+        s.act("key Home");
+        s.act("key Enter");
+        wait_until(&mut s, "Big read once more", 10, |s| space(s).dir == d.join("Big") && !space(s).counting());
+        click_control(&mut s, "space show");
+        s.settle();
+        assert!(!s.popup_open());
+        assert_eq!(s.tab().path, d.join("Big"));
+        assert_eq!(s.tab().cursor.map(|c| s.tab().entries[c as usize].name.clone()).as_deref(), Some("a.bin"), "selected in its folder");
+        wait_until(&mut s, "undo offered", 10, |s| s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Trashed(_))));
+        s.act("key ctrl+z");
+        wait_until(&mut s, "undone", 10, |_| d.join("movie.mkv").exists() && d.join("Small/c.txt").exists());
+        // From the palette, in a small window and at another view.
+        go(&mut s, &d);
+        palette_run(&mut s, "Show Space Used");
+        wait_until(&mut s, "counted again", 10, |s| !space(s).counting());
+        s.resize(520.0, 340.0);
+        look(&mut s, "space used small");
+        s.shot("space-used-small-graphite");
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        s.resize(1280.0, 800.0);
+        go(&mut s, &d.join("Empty"));
+        palette_run(&mut s, "Show Space Used");
+        wait_until(&mut s, "an empty folder read", 10, |s| !space(s).counting());
+        assert!(some_text(&s, "This folder is empty"));
+        s.act("key Escape");
+        report("space used", &s);
     }
 
     #[test]

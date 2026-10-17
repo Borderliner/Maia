@@ -60,6 +60,7 @@ mod sidebar;
 mod signals;
 mod sqlite;
 mod single;
+mod spaceuse;
 mod svg;
 mod syntax;
 mod tags;

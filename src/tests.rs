@@ -5462,6 +5462,40 @@ pub fn snapshot_fixture(d: &Path) -> (PathBuf, String) {
     (file, table)
 }
 
+/// A folder for Show Space Used: a folder of 500,000 bytes in two levels, a file of
+/// 400,000, a folder of 10 bytes, an empty one, and a link to the big folder.
+pub fn space_fixture(d: &Path) {
+    std::fs::create_dir_all(d.join("Big/Sub")).unwrap();
+    std::fs::write(d.join("Big/a.bin"), vec![1u8; 300_000]).unwrap();
+    std::fs::write(d.join("Big/Sub/b.bin"), vec![2u8; 200_000]).unwrap();
+    std::fs::write(d.join("movie.mkv"), vec![3u8; 400_000]).unwrap();
+    std::fs::create_dir_all(d.join("Small")).unwrap();
+    std::fs::write(d.join("Small/c.txt"), "ten bytes!").unwrap();
+    std::fs::create_dir_all(d.join("Empty")).unwrap();
+    let _ = std::os::unix::fs::symlink(d.join("Big"), d.join("big-link"));
+}
+
+#[test]
+fn space_used_lists_biggest_first_as_sizes_land() {
+    use crate::spaceuse::State;
+    let d = tmpdir("space");
+    space_fixture(&d);
+    let ctx = egui::Context::default();
+    let mut stats = crate::stats::Stats::new(ctx.clone());
+    let mut st = State::new(d.clone(), &ctx);
+    let t0 = Instant::now();
+    while st.counting() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "sizes never came");
+        stats.pump();
+        st.pump(&mut stats, &ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let shown: Vec<(&str, Option<u64>)> = st.order.iter().map(|&k| (st.items[k as usize].entry.name.as_str(), st.items[k as usize].size)).collect();
+    assert_eq!(shown, vec![("Big", Some(500_000)), ("movie.mkv", Some(400_000)), ("Small", Some(10)), ("big-link", Some(0)), ("Empty", Some(0))], "folders by everything under them, a link by itself");
+    assert_eq!(st.total(), 900_010);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 #[test]
 fn mountinfo_lines_read_with_their_subvolumes() {
     use crate::versions::parse_mountinfo;

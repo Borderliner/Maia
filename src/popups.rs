@@ -197,6 +197,7 @@ pub enum Popup {
     Duplicates(crate::dupes::State),
     BatchRename(crate::batchname::State),
     Print(Box<crate::sendto::PrintState>),
+    SpaceUsed(Box<crate::spaceuse::State>),
 }
 
 /// The branch menu, its lists read on a worker as it opens.
@@ -294,6 +295,7 @@ impl Popup {
             Popup::Duplicates(..) => "Duplicates",
             Popup::BatchRename(..) => "BatchRename",
             Popup::Print(..) => "Print",
+            Popup::SpaceUsed(..) => "SpaceUsed",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -436,7 +438,7 @@ pub(crate) struct Keys {
     right: bool,
     alt_left: bool,
     alt_right: bool,
-    backspace: bool,
+    pub backspace: bool,
     pub page_up: bool,
     pub page_down: bool,
 }
@@ -843,6 +845,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::Duplicates(st) => crate::dupes::popup(app, ctx, st),
         Popup::BatchRename(st) => crate::batchname::popup(app, ctx, st),
         Popup::Print(st) => crate::sendto::dialog(app, ctx, st),
+        Popup::SpaceUsed(st) => crate::spaceuse::popup(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -1307,7 +1310,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::GitIgnoreExt => t.archive.is_none() && crate::gitstatus::repo_for(&t.path).is_some() && crate::share::shared_ext(t.target_entries().iter().map(|e| (e.path.as_path(), e.is_dir))).is_some(),
         Cmd::CodeSearch | Cmd::FindTodos => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::RunTask => !tab::is_computer(&t.path) && t.archive.is_none(),
-        Cmd::CleanBuilds | Cmd::FindDuplicates => !tab::is_computer(&t.path) && t.archive.is_none(),
+        Cmd::CleanBuilds | Cmd::FindDuplicates | Cmd::SpaceUsed => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::PreviousVersions => t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()) && matches!(t.target_entries().as_slice(), [e] if !e.is_dir),
         Cmd::CopyPathLine => p.line_hint.as_ref().is_some_and(|h| t.target_entries().iter().any(|e| e.path == h.0)),
         Cmd::OpenTabInWindow => p.tabs.len() > 0,
