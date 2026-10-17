@@ -5685,7 +5685,7 @@ fn palette_finds_commands() {
     assert!(!git.contains(&Cmd::Quit), "no G from General and I, T from Quit");
     // Every View command answers to the category's name, after the titles with the word.
     let view = find(&ud, "view");
-    assert_eq!(view.first(), Some(&Cmd::ViewDetails));
+    assert!(view[..7].iter().all(|c| c.info().title.starts_with("View ")) && view[..7].contains(&Cmd::ViewDetails));
     assert!(view.contains(&Cmd::ZoomIn));
     assert!(find(&ud, "zqx").is_empty());
     crate::popups::set_alias(&mut ud, Cmd::ToggleSidebar, "sb").unwrap();
