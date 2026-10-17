@@ -4309,6 +4309,11 @@ mod journeys {
         s.idle(3);
         assert!(ctl(&s, "Gruvbox").is_some(), "found by its line");
         s.act("key ctrl+a");
+        s.act("text monokai pro");
+        s.idle(3);
+        assert_eq!(shown(&s), 2, "Monokai Pro and its light one");
+        assert!(ctl(&s, "Monokai Pro").is_some() && ctl(&s, "Monokai Pro Light").is_some());
+        s.act("key ctrl+a");
         s.act("text zzzz");
         s.idle(3);
         assert!(shown(&s) == 0 && s.texts.iter().any(|(_, t)| t == "No theme matches"));
