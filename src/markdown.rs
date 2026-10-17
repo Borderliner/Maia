@@ -1098,6 +1098,9 @@ struct Laid {
     anchors: Vec<(String, f32)>,
     /// The next block to lay out; one past the end once all are.
     next: usize,
+    /// How full egui's glyph atlas was. It only fills, until egui clears it and starts
+    /// over; then these galleys point at glyphs that are gone and must be laid out anew.
+    atlas: f32,
 }
 
 impl View {
@@ -1463,8 +1466,12 @@ pub fn view(ui: &mut Ui, body: Rect, v: &mut View, size: f32, pal: &Palette, spa
         .collect();
     let loaded = pics.iter().filter(|p| p.is_some()).count() as u32;
     let key = (w.round() as u32, (size * 10.0) as u32, (spacing * 100.0) as u32, pal.text.to_array(), pal.accent.to_array(), loaded);
-    if v.laid.as_ref().is_none_or(|l| l.key != key) {
-        v.laid = Some(Laid { key, pieces: vec![], height: 0.0, anchors: vec![], next: 0 });
+    let atlas = ui.fonts(|f| f.font_atlas_fill_ratio());
+    if v.laid.as_ref().is_none_or(|l| l.key != key || atlas < l.atlas) {
+        v.laid = Some(Laid { key, pieces: vec![], height: 0.0, anchors: vec![], next: 0, atlas });
+    }
+    if let Some(l) = v.laid.as_mut() {
+        l.atlas = atlas;
     }
     // Laid out from the top a few milliseconds a frame: a long document shows its start
     // at once and the rest follows, without a stalled frame.
