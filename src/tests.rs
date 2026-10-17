@@ -5406,3 +5406,28 @@ fn picture_fixes_with_imagemagick() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The palette's search over the real commands: a whole title first, words started in
+/// any order, letters from the starts of words, the category's name, an alias typed in
+/// full ahead of everything; scattered letters find nothing.
+#[test]
+fn palette_finds_commands() {
+    use crate::commands::Cmd;
+    use crate::popups::find_commands;
+    let mut ud = crate::config::UserData::with_defaults();
+    let find = |ud: &crate::config::UserData, q: &str| find_commands(ud, q);
+    assert_eq!(find(&ud, "Toggle Hidden Files").first(), Some(&Cmd::ToggleHidden));
+    assert_eq!(find(&ud, "hid tog"), vec![Cmd::ToggleHidden]);
+    assert_eq!(find(&ud, "tohi").first(), Some(&Cmd::ToggleHidden));
+    assert_eq!(&find(&ud, "sort size")[..3], &[Cmd::SortSize, Cmd::SortSizeAsc, Cmd::SortSizeDesc]);
+    let git = find(&ud, "git");
+    assert_eq!(&git[..3], &[Cmd::GitBranches, Cmd::GitHistory, Cmd::GitChanges]);
+    assert!(!git.contains(&Cmd::Quit), "no G from General and I, T from Quit");
+    // Every View command answers to the category's name, after the titles with the word.
+    let view = find(&ud, "view");
+    assert_eq!(view.first(), Some(&Cmd::ViewDetails));
+    assert!(view.contains(&Cmd::ZoomIn));
+    assert!(find(&ud, "zqx").is_empty());
+    crate::popups::set_alias(&mut ud, Cmd::ToggleSidebar, "sb").unwrap();
+    assert_eq!(find(&ud, "SB").first(), Some(&Cmd::ToggleSidebar));
+}

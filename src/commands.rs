@@ -93,6 +93,24 @@ impl Cat {
             Cat::Misc => "General",
         }
     }
+
+    /// The name the simulations click its place in the palette by.
+    pub fn control(self) -> &'static str {
+        match self {
+            Cat::Quick => "category Quick",
+            Cat::Folder => "category Navigate",
+            Cat::Tabs => "category Tabs",
+            Cat::Panels => "category Panels",
+            Cat::View => "category View",
+            Cat::Sort => "category Sort",
+            Cat::Group => "category Group By",
+            Cat::Inspector => "category Inspector",
+            Cat::Files => "category Files",
+            Cat::Selection => "category Selection",
+            Cat::Layouts => "category Layouts",
+            Cat::Misc => "category General",
+        }
+    }
 }
 
 macro_rules! commands {

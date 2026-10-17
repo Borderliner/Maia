@@ -61,6 +61,10 @@ pub struct PaletteState {
     pub capture: Option<Capture>,
     pub conflict: Option<(Cmd, Binding, Cmd)>,
     focus: bool,
+    /// The category picked on the left; None lists them all.
+    pub cat: Option<Cat>,
+    scroll: bool,
+    top: bool,
 }
 
 pub struct OptState {
@@ -317,7 +321,7 @@ impl Popup {
         Popup::GoTo(GoToState { input, last: None, sel: 0, items: vec![], focus: true, dir_cache: None, dir_job: None, snap_gen: 0, back: vec![], fwd: vec![], highlight: None })
     }
     pub fn palette() -> Popup {
-        Popup::Palette(PaletteState { query: String::new(), sel: 0, capture: None, conflict: None, focus: true })
+        Popup::Palette(PaletteState { query: String::new(), sel: 0, capture: None, conflict: None, focus: true, cat: None, scroll: false, top: true })
     }
     pub fn options() -> Popup {
         Popup::Options(OptState { query: String::new(), focus: true, sel: 0, scroll_to_sel: false, section: None, keyed: false, search_id: None, cursor_end: false, top: true })
@@ -1425,267 +1429,463 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
         return true;
     }
     // ---------------- list
+    // Shift+Tab before the plain keys, which would take it for Tab.
+    let (prev_cat, next_cat, quick_key) = ctx.input_mut(|i| {
+        (
+            i.consume_key(Modifiers::SHIFT, Key::Tab) | i.consume_key(Modifiers::CTRL, Key::PageUp),
+            i.consume_key(Modifiers::CTRL, Key::PageDown),
+            i.consume_key(Modifiers::CTRL, Key::D),
+        )
+    });
     let k = take_keys(ctx);
     if k.esc {
         return false;
     }
-    enum PRow {
-        Header(Cat, bool),
-        Cmd(Cmd, Option<Cat>),
-    }
+    let next_cat = next_cat || k.tab;
     let q = fuzzy::Query::new(&st.query);
-    let mut rows: Vec<PRow> = vec![];
-    if q.is_empty() {
-        for cat in Cat::ORDER {
-            let collapsed = app.ud.collapsed_groups.iter().any(|g| g == cat.name());
-            let cmds: Vec<Cmd> = if cat == Cat::Quick {
-                app.ud.quick.iter().filter_map(|id| Cmd::from_id(id)).collect()
-            } else {
-                ALL.iter().copied().filter(|c| c.info().cat == cat).collect()
-            };
-            if cmds.is_empty() {
-                continue;
-            }
-            rows.push(PRow::Header(cat, collapsed));
-            if !collapsed {
-                rows.extend(cmds.into_iter().map(|c| PRow::Cmd(c, None)));
-            }
-        }
-    } else {
-        let alias_hits: Vec<Cmd> = app.ud.aliases.iter().filter(|(_, a)| a.eq_ignore_ascii_case(st.query.trim())).filter_map(|(id, _)| Cmd::from_id(id)).collect();
-        let mut scored: Vec<(i32, Cmd)> = ALL
-            .iter()
-            .filter_map(|&c| {
-                let i = c.info();
-                let ts = fuzzy::score(&q, &i.title.to_lowercase()).map(|s| s + 100);
-                let cs = fuzzy::score(&q, &format!("{} {}", i.cat.name(), i.title).to_lowercase()).map(|s| s + 50);
-                let ds = fuzzy::score(&q, &i.desc.to_lowercase());
-                [ts, cs, ds].into_iter().flatten().max().map(|s| (s, c))
-            })
-            .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
-        for c in alias_hits {
-            rows.push(PRow::Cmd(c, Some(c.info().cat)));
-        }
-        for (_, c) in scored {
-            if !rows.iter().any(|r| matches!(r, PRow::Cmd(x, _) if *x == c)) {
-                rows.push(PRow::Cmd(c, Some(c.info().cat)));
-            }
-        }
-    }
-    let n = rows.len();
-    // Category rows are selectable too (Enter folds or unfolds them).
-    step(&mut st.sel, n, &k, |_| false);
-    let mut run: Option<Cmd> = None;
-    let mut toggle_group: Option<Cat> = None;
-    let mut star: Option<Cmd> = None;
-    let mut add_key: Option<Cmd> = None;
-    let mut remove: Option<(Cmd, Binding)> = None;
-    let mut reset: Option<Cmd> = None;
-    // F2 names the selected command's alias, as it renames a file.
-    let mut alias: Option<Cmd> = match rows.get(st.sel) {
-        Some(PRow::Cmd(c, _)) if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F2)) => Some(*c),
-        _ => None,
+    let searching = !q.is_empty();
+    let hits = if searching { find_commands(&app.ud, &st.query) } else { vec![] };
+    let quick: Vec<Cmd> = app.ud.quick.iter().filter_map(|id| Cmd::from_id(id)).collect();
+    let in_cat = |c: Cmd, cat: Cat| if cat == Cat::Quick { quick.contains(&c) } else { c.info().cat == cat };
+    let count = |cat: Option<Cat>| match cat {
+        None => hits.len(),
+        Some(cat) => hits.iter().filter(|&&c| in_cat(c, cat)).count(),
     };
-    if k.enter {
-        match rows.get(st.sel) {
-            Some(PRow::Cmd(c, _)) => run = Some(*c),
-            Some(PRow::Header(cat, _)) => toggle_group = Some(*cat),
-            None => {}
+    // The left column: everything, then each category. Tab steps through it, past the
+    // ones a search leaves empty.
+    let rail: Vec<Option<Cat>> = std::iter::once(None).chain(Cat::ORDER.into_iter().map(Some)).collect();
+    if prev_cat || next_cat {
+        let open: Vec<Option<Cat>> = rail.iter().copied().filter(|&r| r.is_none() || !searching || count(r) > 0).collect();
+        let i = open.iter().position(|&r| r == st.cat).unwrap_or(0) as isize;
+        st.cat = open[(i + if next_cat { 1 } else { -1 }).rem_euclid(open.len() as isize) as usize];
+        st.sel = 0;
+        st.top = true;
+    }
+    // What the list shows, as headed groups (an empty heading has none).
+    let mut groups: Vec<(&str, Vec<Cmd>)> = vec![];
+    match (searching, st.cat) {
+        (true, cat) => groups.push(("", hits.iter().copied().filter(|&c| cat.is_none_or(|cat| in_cat(c, cat))).collect())),
+        (false, Some(cat)) => groups.push(("", ALL.iter().copied().filter(|&c| in_cat(c, cat)).collect())),
+        (false, None) => {
+            groups.push(("Recent", app.ud.recent_cmds.iter().filter_map(|id| Cmd::from_id(id)).collect()));
+            groups.push(("Quick", quick.clone()));
+            for cat in Cat::ORDER.into_iter().filter(|&c| c != Cat::Quick) {
+                groups.push((cat.name(), ALL.iter().copied().filter(|c| c.info().cat == cat).collect()));
+            }
         }
     }
+    groups.retain(|g| !g.1.is_empty());
+    let flat: Vec<Cmd> = groups.iter().flat_map(|g| g.1.iter().copied()).collect();
+    let before = st.sel;
+    step(&mut st.sel, flat.len(), &k, |_| false);
+    if st.sel != before || k.up || k.down {
+        st.scroll = true;
+    }
+    let chosen = flat.get(st.sel).copied();
+    let mut act: Option<(Cmd, RowAct)> = None;
+    // F2 names the selected command's alias, as it renames a file.
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F2)) {
+        act = chosen.map(|c| (c, RowAct::Alias));
+    } else if quick_key {
+        act = chosen.map(|c| (c, RowAct::Star));
+    } else if k.ctrl_enter {
+        act = chosen.map(|c| (c, RowAct::AddKey));
+    } else if k.enter {
+        act = chosen.map(|c| (c, RowAct::Run));
+    }
+    let compact = app.cfg.compact_lists;
+    let row_h = if compact { 28.0 } else { 34.0 };
+    let card_fill = mix(pal.raised, pal.bg, 0.45);
+    let card_line = pal.border.gamma_multiply(0.8);
     let mut close = false;
-    let (_, rect) = centered(ctx, "palette", 640.0, &pal, |ui| {
-        ui.horizontal(|ui| {
-            let before = st.query.clone();
-            let w = ui.available_width() - 58.0;
-            ui.scope(|ui| {
-                ui.set_width(w);
-                search_field(ui, &mut st.query, "Select a command…", &mut st.focus, &pal, Glyph::Search);
+    let mut toggle_compact = false;
+    let mut go_cat: Option<Option<Cat>> = None;
+    let mut shown: Option<Cmd> = None;
+    // One size whatever is listed, so the window does not jump while typing or
+    // between categories; it shrinks with the window.
+    let screen = ctx.content_rect();
+    let top = popup_top(screen);
+    let w = 760f32.min(screen.width() - 24.0).round();
+    let h = 540f32.min(screen.height() - top - 12.0).max(160.0).round();
+    let pos = pos2((screen.center().x - w / 2.0).round(), screen.top() + top);
+    note_layer(Id::new("palette"));
+    let area = egui::Area::new(Id::new("palette")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+        popup_frame(&pal).show(ui, |ui| {
+            let (_, inner) = ui.allocate_space(vec2(w - 16.0, h - 16.0));
+            let top_down = egui::Layout::top_down(egui::Align::Min);
+            let mut head = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(top_down));
+            head.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                if crate::ui::glyph_button(ui, Glyph::Close, "Close (Esc)", true, &pal).clicked() {
+                    close = true;
+                }
+                let cb = compact_button(ui, compact, &pal);
+                crate::ui::note_control(ui, cb.rect, "compact rows");
+                if cb.clicked() {
+                    toggle_compact = true;
+                }
+                let before = st.query.clone();
+                let fw = (ui.available_width() - 4.0).floor();
+                ui.allocate_ui_with_layout(vec2(fw, 0.0), top_down, |ui| {
+                    ui.set_width(fw);
+                    search_field(ui, &mut st.query, "Select a command…", &mut st.focus, &pal, Glyph::Search);
+                });
+                if st.query != before {
+                    st.sel = 0;
+                    st.top = true;
+                }
             });
-            if st.query != before {
-                st.sel = 0;
-            }
-            if compact_button(ui, app.cfg.compact_lists, &pal).clicked() {
-                toggle_compact = true;
-            }
-            if crate::ui::glyph_button(ui, Glyph::Close, "Close (Esc)", true, &pal).clicked() {
-                close = true;
-            }
-        });
-        egui::ScrollArea::vertical().max_height(fit_list(ctx, 460.0, 110.0)).auto_shrink([false, true]).show(ui, |ui| {
-            for (i, r) in rows.iter().enumerate() {
-                match r {
-                    PRow::Header(cat, collapsed) => {
-                        // Category row: icon and name on the left, fold chevron on the right.
-                        let resp = row(ui, if app.cfg.compact_lists { 28.0 } else { 32.0 }, i == st.sel, &pal, |ui, r| {
-                            let col = if i == st.sel { pal.on_sel() } else { pal.text };
-                            paint_cat_glyph(ui.painter(), Rect::from_center_size(pos2(r.left() + 13.0, r.center().y), Vec2::splat(13.0)), *cat, if i == st.sel { col } else { pal.text_dim });
-                            ui.painter().text(pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, cat.name(), FontId::proportional(13.0), col);
-                            let c = pos2(r.right() - 16.0, r.center().y);
-                            if *collapsed {
-                                paint_glyph(ui.painter(), Rect::from_center_size(c, Vec2::splat(9.0)), Glyph::ChevronRight, pal.text_dim);
-                            } else {
-                                ui.painter().add(egui::Shape::line(vec![c + vec2(-3.5, -1.5), c + vec2(0.0, 2.0), c + vec2(3.5, -1.5)], Stroke::new(1.3, pal.text_dim)));
+            let narrow = inner.width() < 600.0;
+            let foot = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 22.0), inner.max);
+            let keys: &[(&str, &str)] = if narrow {
+                &[("↑↓", "move"), ("Tab", "category"), ("Enter", "run"), ("Esc", "close")]
+            } else {
+                &[("↑↓", "move"), ("Tab", "category"), ("Enter", "run"), ("Ctrl+D", "quick"), ("Ctrl+Enter", "add hotkey"), ("F2", "alias"), ("Esc", "close")]
+            };
+            hint_row(ui, foot, keys, &pal);
+            let about = Rect::from_min_max(pos2(inner.left(), foot.top() - 26.0), pos2(inner.right(), foot.top() - 4.0));
+            let rule = about.top().round() - 0.5;
+            ui.painter().line_segment([pos2(inner.left(), rule), pos2(inner.right(), rule)], Stroke::new(1.0, pal.border));
+            let body = Rect::from_min_max(pos2(inner.left(), head.min_rect().bottom().round() + 2.0), pos2(inner.right(), rule - 6.0));
+            // A narrow window keeps only the categories' glyphs.
+            let side = Rect::from_min_max(body.min, pos2(body.left() + if narrow { 36.0 } else { 168.0 }, body.bottom()));
+            let lx = side.right().round() + 6.5;
+            ui.painter().line_segment([pos2(lx, body.top()), pos2(lx, body.bottom())], Stroke::new(1.0, pal.border));
+            let main = Rect::from_min_max(pos2(lx + 7.5, body.top()), body.max);
+            let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(side).layout(top_down));
+            egui::ScrollArea::vertical().id_salt("palette categories").max_height(side.height()).auto_shrink([false, false]).show(&mut sui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for &rc in &rail {
+                    let on = rc == st.cat;
+                    let n = count(rc);
+                    // While searching, categories without a match step back.
+                    let quiet = searching && n == 0;
+                    let name = rc.map_or("All", |c| c.name());
+                    let resp = row(ui, 30.0, on, &pal, |ui, r| {
+                        let faint = pal.text_dim.gamma_multiply(0.55);
+                        let (gc, tc) = if on { (pal.on_sel(), pal.on_sel()) } else if quiet { (faint, faint) } else { (pal.text_dim, pal.text) };
+                        let gx = if narrow { r.center().x } else { r.left() + 16.0 };
+                        let gr = Rect::from_center_size(pos2(gx.round(), r.center().y.round()), Vec2::splat(13.0));
+                        match rc {
+                            Some(c) => paint_cat_glyph(ui.painter(), gr, c, gc),
+                            None => paint_glyph(ui.painter(), gr, Glyph::List, gc),
+                        }
+                        if !narrow {
+                            let mut right = r.right() - 8.0;
+                            if searching && n > 0 {
+                                let ng = ui.painter().layout_no_wrap(n.to_string(), FontId::proportional(11.0), if on { pal.on_sel_dim() } else { pal.text_dim });
+                                right -= ng.size().x;
+                                ui.painter().galley(pos2(right, (r.center().y - ng.size().y / 2.0).round()), ng, pal.text_dim);
+                                right -= 6.0;
                             }
-                        });
-                        if resp.clicked() {
-                            toggle_group = Some(*cat);
+                            let g = crate::listing::elided(ui, name, FontId::proportional(13.0), right - r.left() - 34.0, tc);
+                            ui.painter().galley(pos2(r.left() + 34.0, (r.center().y - g.size().y / 2.0).round()), g, tc);
                         }
-                    }
-                    PRow::Cmd(c, cat_prefix) => {
-                        let info = c.info();
-                        let sel = i == st.sel;
-                        let enabled = applicable(app, *c);
-                        let starred = app.ud.quick.iter().any(|q| q == info.id);
-                        let chips = app.keymap.bindings(*c).to_vec();
-                        let overridden = app.cfg.hotkeys.contains_key(info.id);
-                        let compact = app.cfg.compact_lists;
-                        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), if compact { 28.0 } else { 40.0 }), Sense::click());
-                        let hovered = resp.hovered() || ui.rect_contains_pointer(r);
-                        if sel {
-                            ui.painter().rect_filled(r, CornerRadius::same(6), pal.selected);
-                        } else if hovered {
-                            ui.painter().rect_filled(r, CornerRadius::same(6), pal.hover);
-                        }
-                        if sel && (k.up || k.down || k.page_down || k.page_up) {
-                            resp.scroll_to_me(None);
-                        }
-                        // The dim grey and the accent sink into a saturated selection.
-                        let (dim, acc) = if sel { (pal.on_sel_dim(), pal.on_sel()) } else { (pal.text_dim, pal.accent) };
-                        let tcol = if !enabled { dim.gamma_multiply(0.7) } else if sel { pal.on_sel() } else { pal.text };
-                        // Search results carry a category column (icon, name, ›) before the title.
-                        let mut tx = r.left() + 10.0;
-                        if let Some(cat) = cat_prefix {
-                            let cy = r.center().y;
-                            paint_cat_glyph(ui.painter(), Rect::from_center_size(pos2(r.left() + 13.0, cy), Vec2::splat(12.0)), *cat, dim);
-                            let cg = crate::listing::elided(ui, cat.name(), FontId::proportional(12.0), 70.0, dim);
-                            ui.painter().galley(pos2(r.left() + 28.0, cy - cg.size().y / 2.0), cg, dim);
-                            paint_glyph(ui.painter(), Rect::from_center_size(pos2(r.left() + 108.0, cy), Vec2::splat(8.0)), Glyph::ChevronRight, dim);
-                            tx = r.left() + 122.0;
-                        }
-                        let mut job = highlight_job(info.title, &q, FontId::proportional(13.5), tcol, acc);
-                        if let Some(a) = app.ud.aliases.get(info.id) {
-                            job.append(&format!("“{a}”"), 8.0, egui::TextFormat { font_id: FontId::proportional(12.0), color: dim, ..Default::default() });
-                        }
-                        let g = ui.fonts_mut(|f| f.layout_job(job));
-                        if compact {
-                            ui.painter().galley(pos2(tx, r.center().y - g.size().y / 2.0), g, tcol);
-                        } else {
-                            ui.painter().galley(pos2(tx, r.top() + 4.0), g, tcol);
-                            // Matches are highlighted in the description too.
-                            let mut dj = highlight_job(info.desc, &q, FontId::proportional(11.5), dim, acc.gamma_multiply(0.85));
-                            dj.wrap = egui::text::TextWrapping { max_width: (r.right() - tx) * 0.7, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-                            let dg = ui.fonts_mut(|f| f.layout_job(dj));
-                            ui.painter().galley(pos2(tx, r.top() + 22.0), dg, dim);
-                        }
-                        // Right side: chips, then (on hover/selection) + and ☆.
-                        let mut x = r.right() - 8.0;
-                        for b in chips.iter().rev() {
-                            let label = commands::binding_to_string(b);
-                            let w = crate::ui::paint_chip(ui.painter(), pos2(x, r.center().y), &label, &pal);
-                            let cr = Rect::from_min_max(pos2(x - w, r.center().y - 9.0), pos2(x, r.center().y + 9.0));
-                            let cresp = ui.interact(cr, Id::new(("chip", i, &label)), Sense::click()).on_hover_text("Click to remove this hotkey");
-                            if cresp.clicked() {
-                                remove = Some((*c, b.clone()));
-                            }
-                            x -= w + 4.0;
-                        }
-                        if sel || hovered {
-                            if overridden {
-                                let rr = Rect::from_center_size(pos2(x - 10.0, r.center().y), Vec2::splat(20.0));
-                                let rresp = ui.interact(rr, Id::new(("reset", i)), Sense::click()).on_hover_text("Reset hotkeys to default");
-                                paint_glyph(ui.painter(), rr.shrink(3.0), Glyph::Refresh, if rresp.hovered() { tcol } else { dim });
-                                if rresp.clicked() {
-                                    reset = Some(*c);
-                                }
-                                x -= 24.0;
-                            }
-                            let pr = Rect::from_center_size(pos2(x - 10.0, r.center().y), Vec2::splat(20.0));
-                            let presp = ui.interact(pr, Id::new(("addkey", i)), Sense::click()).on_hover_text("Add a hotkey");
-                            if presp.hovered() {
-                                ui.painter().rect_filled(pr, CornerRadius::same(4), pal.raised);
-                            }
-                            paint_glyph(ui.painter(), pr.shrink(4.0), Glyph::Plus, dim);
-                            if presp.clicked() {
-                                add_key = Some(*c);
-                            }
-                            x -= 24.0;
-                            let ag = ui.painter().layout_no_wrap("alias".into(), FontId::proportional(11.0), dim);
-                            let ar = Rect::from_min_max(pos2(x - ag.size().x - 8.0, r.center().y - 10.0), pos2(x, r.center().y + 10.0));
-                            crate::ui::note_control(ui, ar, "alias button");
-                            let aresp = ui.interact(ar, Id::new(("alias", i)), Sense::click()).on_hover_text("Set the alias that finds this command (F2)");
-                            if aresp.hovered() {
-                                ui.painter().rect_filled(ar, CornerRadius::same(4), pal.raised);
-                            }
-                            ui.painter().galley(pos2(ar.left() + 4.0, r.center().y - ag.size().y / 2.0), ag, dim);
-                            if aresp.clicked() {
-                                alias = Some(*c);
-                            }
-                            x = ar.left() - 4.0;
-                            let sr = Rect::from_center_size(pos2(x - 10.0, r.center().y), Vec2::splat(20.0));
-                            let sresp = ui.interact(sr, Id::new(("star", i)), Sense::click()).on_hover_text(if starred { "Remove from Quick" } else { "Add to Quick" });
-                            crate::ui::star(ui.painter(), sr.center(), 6.5, if starred { acc } else { dim }, starred);
-                            if sresp.clicked() {
-                                star = Some(*c);
-                            }
-                        } else if starred {
-                            crate::ui::star(ui.painter(), pos2(x - 10.0, r.center().y), 5.0, pal.accent.gamma_multiply(0.7), true);
-                        }
-                        if resp.clicked() && remove.is_none() && add_key.is_none() && star.is_none() && reset.is_none() && alias.is_none() {
-                            run = Some(*c);
-                        }
+                    });
+                    crate::ui::note_control(ui, resp.rect, rc.map_or("category All", |c| c.control()));
+                    let resp = if narrow { resp.on_hover_text(name) } else { resp };
+                    if resp.clicked() {
+                        go_cat = Some(rc);
                     }
                 }
+            });
+            let mut mui = ui.new_child(egui::UiBuilder::new().max_rect(main).layout(top_down));
+            // Back to the top by scrolling there: a jump would lose to a scroll still
+            // under way from the keys before.
+            let mut top = std::mem::take(&mut st.top);
+            egui::ScrollArea::vertical().id_salt("palette list").max_height(main.height()).auto_shrink([false, false]).show(&mut mui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                // Room on the right for the scroll bar.
+                let cw = (ui.available_width() - 10.0).floor();
+                let mut vi = 0;
+                for (gi, (heading, cmds)) in groups.iter().enumerate() {
+                    if gi > 0 {
+                        ui.add_space(12.0);
+                    }
+                    if !heading.is_empty() {
+                        let (hr, _) = ui.allocate_exact_size(vec2(cw, 20.0), Sense::hover());
+                        ui.painter().text(pos2(hr.left() + 4.0, hr.center().y - 1.0), Align2::LEFT_CENTER, *heading, FontId::proportional(11.5), pal.text_dim);
+                        if std::mem::take(&mut top) {
+                            ui.scroll_to_rect(hr, Some(egui::Align::TOP));
+                            st.scroll = false;
+                        }
+                    }
+                    let (card, _) = ui.allocate_exact_size(vec2(cw, cmds.len() as f32 * row_h), Sense::hover());
+                    if std::mem::take(&mut top) {
+                        ui.scroll_to_rect(card, Some(egui::Align::TOP));
+                        st.scroll = false;
+                    }
+                    ui.painter().rect(card, CornerRadius::same(8), card_fill, Stroke::new(1.0, card_line), StrokeKind::Inside);
+                    for (j, &c) in cmds.iter().enumerate() {
+                        let r = Rect::from_min_size(card.min + vec2(0.0, j as f32 * row_h), vec2(cw, row_h));
+                        let sel = vi == st.sel;
+                        if sel && std::mem::take(&mut st.scroll) {
+                            ui.scroll_to_rect(r, None);
+                        }
+                        let look = CmdLook { sel, first: j == 0, cat: searching && st.cat.is_none(), compact };
+                        let (a, hovered) = palette_row(ui, app, c, r, vi, &look, &q, &pal);
+                        if hovered {
+                            shown = Some(c);
+                        }
+                        if let Some(a) = a {
+                            if matches!(a, RowAct::Run) {
+                                st.sel = vi;
+                            }
+                            act = Some((c, a));
+                        }
+                        vi += 1;
+                    }
+                }
+                if flat.is_empty() {
+                    ui.add_space(28.0);
+                    let msg = if searching { "No command matches" } else { "Star a command, or press Ctrl+D on it, to keep it here." };
+                    ui.vertical_centered(|ui| ui.label(egui::RichText::new(msg).size(12.5).color(pal.text_dim)));
+                }
+                ui.add_space(6.0);
+            });
+            st.scroll = false;
+            // What the command under the pointer, or else the selected one, does.
+            if let Some(c) = shown.or(chosen) {
+                let mut dj = highlight_job(c.info().desc, &q, FontId::proportional(12.0), pal.text_dim, pal.accent.gamma_multiply(0.85));
+                dj.wrap = egui::text::TextWrapping { max_width: about.width() - 8.0, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+                let dg = ui.fonts_mut(|f| f.layout_job(dj));
+                ui.painter().galley(pos2(about.left() + 4.0, (about.center().y - dg.size().y / 2.0).round()), dg, pal.text_dim);
             }
         });
-        hints(ui, &[("↑↓", "navigate"), ("Enter", "run"), ("☆", "quick"), ("+", "add hotkey"), ("F2", "alias"), ("Esc", "close")], &pal);
     });
+    let rect = area.response.rect;
+    crate::ui::note_popup(rect);
+    if let Some(rc) = go_cat {
+        st.cat = rc;
+        st.sel = 0;
+        st.top = true;
+    }
+    // A click anywhere in it leaves the keyboard with the search, so typing goes on.
+    if ctx.input(|i| i.pointer.any_click()) && ctx.pointer_interact_pos().is_some_and(|p| rect.contains(p)) {
+        st.focus = true;
+    }
     if toggle_compact {
         app.cfg.compact_lists = !app.cfg.compact_lists;
         app.set_config_changed();
     }
-    if let Some(cat) = toggle_group {
-        let name = cat.name().to_string();
-        if let Some(i) = app.ud.collapsed_groups.iter().position(|g| *g == name) {
-            app.ud.collapsed_groups.remove(i);
-        } else {
-            app.ud.collapsed_groups.push(name);
+    match act {
+        Some((c, RowAct::Star)) => {
+            let id = c.info().id.to_string();
+            if let Some(i) = app.ud.quick.iter().position(|q| *q == id) {
+                app.ud.quick.remove(i);
+            } else {
+                app.ud.quick.push(id);
+            }
+            app.ud_dirty = true;
         }
-        app.ud_dirty = true;
-    }
-    if let Some(c) = star {
-        let id = c.info().id.to_string();
-        if let Some(i) = app.ud.quick.iter().position(|q| *q == id) {
-            app.ud.quick.remove(i);
-        } else {
-            app.ud.quick.push(id);
+        Some((c, RowAct::Alias)) => {
+            let text = app.ud.aliases.get(c.info().id).cloned().unwrap_or_default();
+            edit_alias(app, c, text, format!("Alias for “{}” (empty removes it)", c.info().title));
+            return false;
         }
-        app.ud_dirty = true;
-    }
-    if let Some(c) = alias {
-        let text = app.ud.aliases.get(c.info().id).cloned().unwrap_or_default();
-        edit_alias(app, c, text, format!("Alias for “{}” (empty removes it)", c.info().title));
-        return false;
-    }
-    if let Some(c) = add_key {
-        st.capture = Some(Capture { cmd: c, seq: vec![], last: Instant::now() });
-        return true;
-    }
-    if let Some((c, b)) = remove {
-        remove_binding(app, c, &b);
-    }
-    if let Some(c) = reset {
-        app.cfg.hotkeys.remove(c.info().id);
-        app.set_config_changed();
-    }
-    if let Some(c) = run {
-        if applicable(app, c) {
-            app.actions.push(Action::Cmd(c));
+        Some((c, RowAct::AddKey)) => {
+            st.capture = Some(Capture { cmd: c, seq: vec![], last: Instant::now() });
+            return true;
         }
-        return false;
+        Some((c, RowAct::Remove(b))) => remove_binding(app, c, &b),
+        Some((c, RowAct::Reset)) => {
+            app.cfg.hotkeys.remove(c.info().id);
+            app.set_config_changed();
+        }
+        Some((c, RowAct::Run)) => {
+            if applicable(app, c) {
+                let id = c.info().id.to_string();
+                app.ud.recent_cmds.retain(|r| *r != id);
+                app.ud.recent_cmds.insert(0, id);
+                app.ud.recent_cmds.truncate(5);
+                app.ud_dirty = true;
+                app.actions.push(Action::Cmd(c));
+            }
+            return false;
+        }
+        None => {}
     }
     !(close || clicked_outside(ctx, rect))
+}
+
+/// What a click on a palette row (or its key) asks for.
+enum RowAct {
+    Run,
+    Star,
+    Alias,
+    AddKey,
+    Remove(Binding),
+    Reset,
+}
+
+struct CmdLook {
+    sel: bool,
+    first: bool,
+    /// Search results across every category name theirs.
+    cat: bool,
+    compact: bool,
+}
+
+/// One command in the palette: its title (and alias) on the left, its hotkeys on the
+/// right, and under the pointer or the selection the star, alias and add-hotkey
+/// buttons beside them. Returns what was clicked and whether the pointer is over it.
+#[allow(clippy::too_many_arguments)]
+fn palette_row(ui: &mut Ui, app: &App, c: Cmd, r: Rect, i: usize, look: &CmdLook, q: &fuzzy::Query, pal: &Palette) -> (Option<RowAct>, bool) {
+    let info = c.info();
+    let enabled = applicable(app, c);
+    let starred = app.ud.quick.iter().any(|q| q == info.id);
+    let overridden = app.cfg.hotkeys.contains_key(info.id);
+    if !look.first {
+        let y = r.top().round() + 0.5;
+        ui.painter().line_segment([pos2(r.left() + 12.0, y), pos2(r.right() - 12.0, y)], Stroke::new(1.0, pal.border.gamma_multiply(0.7)));
+    }
+    let resp = ui.interact(r, Id::new(("palette row", i)), Sense::click());
+    let hovered = resp.hovered() || ui.rect_contains_pointer(r);
+    let inside = r.shrink(2.0);
+    if look.sel {
+        ui.painter().rect_filled(inside, CornerRadius::same(6), pal.selected);
+    } else if hovered {
+        ui.painter().rect_filled(inside, CornerRadius::same(6), pal.hover);
+    }
+    // The dim grey and the accent sink into a saturated selection.
+    let (dim, acc) = if look.sel { (pal.on_sel_dim(), pal.on_sel()) } else { (pal.text_dim, pal.accent) };
+    let tcol = if !enabled { dim.gamma_multiply(0.7) } else if look.sel { pal.on_sel() } else { pal.text };
+    let cy = r.center().y;
+    let mut out = None;
+    // Right to left: hotkeys, then the row's buttons while it is pointed at or chosen.
+    let mut x = r.right() - 10.0;
+    for b in app.keymap.bindings(c).iter().rev() {
+        let label = commands::binding_to_string(b);
+        let w = crate::ui::paint_chip(ui.painter(), pos2(x, cy), &label, pal);
+        let cr = Rect::from_min_max(pos2(x - w, cy - 9.0), pos2(x, cy + 9.0));
+        if ui.interact(cr, Id::new(("chip", i, &label)), Sense::click()).on_hover_text("Click to remove this hotkey").clicked() {
+            out = Some(RowAct::Remove(b.clone()));
+        }
+        x -= w + 4.0;
+    }
+    if look.sel || hovered {
+        if overridden {
+            let rr = Rect::from_center_size(pos2(x - 10.0, cy), Vec2::splat(20.0));
+            let rresp = ui.interact(rr, Id::new(("reset", i)), Sense::click()).on_hover_text("Reset hotkeys to default");
+            paint_glyph(ui.painter(), rr.shrink(3.0), Glyph::Refresh, if rresp.hovered() { tcol } else { dim });
+            if rresp.clicked() {
+                out = Some(RowAct::Reset);
+            }
+            x -= 24.0;
+        }
+        let pr = Rect::from_center_size(pos2(x - 10.0, cy), Vec2::splat(20.0));
+        let presp = ui.interact(pr, Id::new(("addkey", i)), Sense::click()).on_hover_text("Add a hotkey (Ctrl+Enter)");
+        if presp.hovered() {
+            ui.painter().rect_filled(pr, CornerRadius::same(4), pal.raised);
+        }
+        paint_glyph(ui.painter(), pr.shrink(4.0), Glyph::Plus, dim);
+        if presp.clicked() {
+            out = Some(RowAct::AddKey);
+        }
+        x -= 24.0;
+        let ag = ui.painter().layout_no_wrap("alias".into(), FontId::proportional(11.0), dim);
+        let ar = Rect::from_min_max(pos2(x - ag.size().x - 8.0, cy - 10.0), pos2(x, cy + 10.0));
+        crate::ui::note_control(ui, ar, "alias button");
+        let aresp = ui.interact(ar, Id::new(("alias", i)), Sense::click()).on_hover_text("Set the alias that finds this command (F2)");
+        if aresp.hovered() {
+            ui.painter().rect_filled(ar, CornerRadius::same(4), pal.raised);
+        }
+        ui.painter().galley(pos2(ar.left() + 4.0, cy - ag.size().y / 2.0), ag, dim);
+        if aresp.clicked() {
+            out = Some(RowAct::Alias);
+        }
+        x = ar.left() - 4.0;
+        let sr = Rect::from_center_size(pos2(x - 10.0, cy), Vec2::splat(20.0));
+        crate::ui::note_control(ui, sr, "star button");
+        let sresp = ui.interact(sr, Id::new(("star", i)), Sense::click()).on_hover_text(if starred { "Remove from Quick (Ctrl+D)" } else { "Add to Quick (Ctrl+D)" });
+        crate::ui::star(ui.painter(), sr.center(), 6.5, if starred { acc } else { dim }, starred);
+        if sresp.clicked() {
+            out = Some(RowAct::Star);
+        }
+        x -= 22.0;
+    } else if starred {
+        crate::ui::star(ui.painter(), pos2(x - 10.0, cy), 5.0, pal.accent.gamma_multiply(0.7), true);
+        x -= 22.0;
+    }
+    // The title takes what is left, cut short before the buttons.
+    let tx = r.left() + 12.0;
+    let room = (x - 8.0 - tx).max(24.0);
+    let font = FontId::proportional(if look.compact { 13.0 } else { 13.5 });
+    let mut job = highlight_job(info.title, q, font, tcol, acc);
+    if let Some(a) = app.ud.aliases.get(info.id) {
+        job.append(&format!("“{a}”"), 8.0, egui::TextFormat { font_id: FontId::proportional(12.0), color: dim, ..Default::default() });
+    }
+    job.wrap = egui::text::TextWrapping { max_width: room, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let g = ui.fonts_mut(|f| f.layout_job(job));
+    let tw = g.size().x;
+    ui.painter().galley(pos2(tx, (cy - g.size().y / 2.0).round()), g, tcol);
+    if look.cat && tw + 60.0 < room {
+        let cg = crate::listing::elided(ui, info.cat.name(), FontId::proportional(11.5), room - tw - 12.0, dim);
+        ui.painter().galley(pos2(tx + tw + 10.0, (cy - cg.size().y / 2.0).round()), cg, dim);
+    }
+    if out.is_none() && resp.clicked() {
+        out = Some(RowAct::Run);
+    }
+    (out, hovered)
+}
+
+/// Commands matching `query`, best first. An alias typed in full comes first, then the
+/// title (whole, prefix, every word started, a word, substring, then letters taken
+/// from the starts of its words, "tohi" for Toggle Hidden), then the category's name
+/// with the title, then a word of the description. Scattered letters match nothing:
+/// "git" found Quit through the G of General.
+pub(crate) fn find_commands(ud: &crate::config::UserData, query: &str) -> Vec<Cmd> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return vec![];
+    }
+    let words: Vec<&str> = needle.split_whitespace().collect();
+    let letters: Vec<char> = needle.chars().filter(|c| !c.is_whitespace()).collect();
+    let split = |t: &str| -> Vec<String> { t.split(|ch: char| !ch.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_string).collect() };
+    let all_started = |tw: &[String]| words.iter().all(|w| tw.iter().any(|x| x.starts_with(w)));
+    let mut ranked: Vec<(i32, usize, Cmd)> = ALL
+        .iter()
+        .enumerate()
+        .filter_map(|(n, &c)| {
+            let i = c.info();
+            let t = i.title.to_lowercase();
+            let tw = split(&t);
+            let r = if ud.aliases.get(i.id).is_some_and(|a| a.eq_ignore_ascii_case(&needle)) {
+                5000
+            } else if t == needle {
+                4000
+            } else if t.starts_with(&needle) {
+                3000
+            } else if words.len() > 1 && all_started(&tw) {
+                2700
+            } else if tw.iter().any(|x| x.starts_with(&needle)) {
+                2500
+            } else if t.contains(&needle) {
+                2000
+            } else if word_starts(&letters, &tw) {
+                1000
+            } else if all_started(&[split(&i.cat.name().to_lowercase()), tw].concat()) {
+                700
+            } else if split(&i.desc.to_lowercase()).iter().any(|x| x.starts_with(&needle)) || (words.len() > 1 && i.desc.to_lowercase().contains(&needle)) {
+                500
+            } else {
+                return None;
+            };
+            Some((r, n, c))
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    ranked.into_iter().map(|(_, _, c)| c).collect()
+}
+
+/// Whether `q` is the start of one word of `words`, then of a later one, and so on.
+fn word_starts(q: &[char], words: &[String]) -> bool {
+    if q.is_empty() {
+        return true;
+    }
+    words.iter().enumerate().any(|(wi, w)| {
+        let w: Vec<char> = w.chars().collect();
+        (1..=q.len().min(w.len())).rev().any(|len| w[..len] == q[..len] && word_starts(&q[len..], &words[wi + 1..]))
+    })
 }
 
 /// Set, change or (with empty text) clear a command's alias. An alias another command
