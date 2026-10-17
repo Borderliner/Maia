@@ -1,10 +1,16 @@
 # Maia
 
 A fast, keyboard-first file manager for Linux, written in Rust with egui. One binary
-of about 3 MB, drawn on the GPU, with split panels, tabs, live filtering, previews and
+of about 4 MB, drawn on the GPU, with split panels, tabs, live filtering, previews and
 background file operations.
 
-![Maia](docs/maia.png)
+![Maia: a project's source files beside its git history](docs/maia.webp)
+
+<p align="center">
+  <a href="https://buymeacoffee.com/e_gurl">
+    <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Support Maia on Buy Me a Coffee" width="217" height="60">
+  </a>
+</p>
 
 ## Install
 
