@@ -7394,6 +7394,11 @@ mod journeys {
                 shot_still(&mut s, "print-dialog-large");
             }
         }
+        // A short window: the dialog scrolls rather than lose its buttons.
+        for (w, h) in [(520.0, 340.0), (640.0, 480.0), (1280.0, 800.0)] {
+            s.resize(w, h);
+            look(&mut s, &format!("print dialog at {w}x{h}"));
+        }
         s.act("key ArrowUp");
         assert!(matches!(&s.app.popup, Popup::Print(st) if st.sel == 0));
         click_control(&mut s, "more copies");
@@ -7560,9 +7565,11 @@ mod journeys {
         assert_eq!(shown("photo (cropped).jpg"), Some([w, h]));
         assert_eq!(launched().len(), n, "Enter cropped, it opened nothing");
         assert!(inspector(&s).crop.is_none());
+        wait_until(&mut s, "the cropped copy selected", 10, |s| s.tab().target_entries().first().is_some_and(|e| e.name == "photo (cropped).jpg"));
         // Cancelled with Escape; left by moving on.
         select_path(&mut s, &d.join("photo.jpg"));
         palette_run(&mut s, "Crop…");
+        assert!(inspector(&s).crop.as_ref().is_some_and(|c| c.path == d.join("photo.jpg")));
         s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", c.x - 40.0, c.y - 40.0, c.x + 40.0, c.y + 40.0));
         for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
             s.app.cfg.font_size = font;
@@ -7570,6 +7577,19 @@ mod journeys {
             s.idle(3);
             look(&mut s, &format!("crop at font {font}, spacing {spacing}"));
         }
+        // A small window, the inspector docked below, a light theme: the crop stays on
+        // the picture and its line in the footer.
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        for (w, h) in [(640.0, 480.0), (520.0, 340.0)] {
+            s.resize(w, h);
+            look(&mut s, &format!("crop at {w}x{h}"));
+        }
+        s.app.cfg.inspector_layout = crate::config::InspectorLayout::Bottom;
+        s.resize(900.0, 700.0);
+        look(&mut s, "crop docked below");
+        assert!(inspector(&s).crop.is_some());
+        s.shot("crop-light-bottom");
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
         s.act("key Escape");
         assert!(inspector(&s).crop.is_none());
         assert!(!d.join("photo (cropped) (1).jpg").exists());

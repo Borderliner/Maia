@@ -218,6 +218,11 @@ pub fn run(app: &mut crate::app::App, cmd: crate::commands::Cmd) {
     use crate::commands::Cmd;
     let ctx = app.ctx.clone();
     let files: Vec<PathBuf> = app.tab().target_entries().iter().filter(|e| !e.is_dir).map(|e| e.path.clone()).collect();
+    // Files inside an archive aren't on the disk for another program to read.
+    if app.tab().archive.is_some() {
+        app.toast("Extract the archive first");
+        return;
+    }
     match cmd {
         Cmd::SetWallpaper => {
             let [path] = files.as_slice() else {
@@ -239,10 +244,11 @@ pub fn run(app: &mut crate::app::App, cmd: crate::commands::Cmd) {
         }
         Cmd::RotateLeft | Cmd::RotateRight | Cmd::ResizeHalf | Cmd::ResizeQuarter | Cmd::ResizeFit | Cmd::ResizeCustom | Cmd::CropPicture => {
             let pics: Vec<PathBuf> = files.into_iter().filter(|p| crate::picfix::is_picture(&p.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default())).collect();
-            if pics.is_empty() {
+            if pics.is_empty() || app.tab().path.starts_with(crate::sidebar::trash_dir()) {
                 app.toast("Select pictures");
                 return;
             }
+
             let Some((tools, prog)) = imagemagick() else {
                 app.toast("Changing pictures needs ImageMagick");
                 return;

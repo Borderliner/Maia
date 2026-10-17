@@ -280,7 +280,7 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         items.push(Item::labeled(Cmd::Rename, if single { "Rename" } else { "Rename All (inline)" }));
         items.push(Item::cmd(Cmd::Duplicate));
         // Pictures, with ImageMagick to change them.
-        if ents.iter().all(|e| !e.1 && crate::picfix::is_picture(&e.3)) && crate::drives::Tools::current().is_some_and(|t| crate::picfix::magick(&t).is_some()) {
+        if !in_trash && ents.iter().all(|e| !e.1 && crate::picfix::is_picture(&e.3)) && crate::drives::Tools::current().is_some_and(|t| crate::picfix::magick(&t).is_some()) {
             let mut kids = vec![
                 Item::labeled(Cmd::RotateLeft, "Rotate left"),
                 Item::labeled(Cmd::RotateRight, "Rotate right"),
