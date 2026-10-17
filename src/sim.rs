@@ -2244,8 +2244,8 @@ mod journeys {
         s.act("move -50 -50");
         s.settle();
         s.idle(2);
-        // Toasts and job cards float over the list by design.
-        s.check_overlap = !s.popup_open() && s.app.toast.is_none() && s.app.jobs.is_empty();
+        // Toasts, job cards and letter tags float over the list by design.
+        s.check_overlap = !s.popup_open() && s.app.toast.is_none() && s.app.jobs.is_empty() && s.app.hints.is_none();
         s.idle(2);
         s.check_overlap = false;
     }
@@ -10085,6 +10085,107 @@ mod journeys {
         assert_eq!(s.app.panels.len(), panels, "no workspace for a new tab");
         assert_eq!(s.tab().path, b);
         report("workspaces", &s);
+    }
+
+    /// Click by letters: every control tagged; a file row's tag selects it, a capital last
+    /// letter right-clicks (its menu opens); with the menu open only the menu's items are
+    /// tagged; Escape, or letters that match nothing, give up without clicking.
+    #[test]
+    fn click_by_letters() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("hints");
+        let d = home.join("Documents");
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.idle(2);
+        s.act("key ctrl+j");
+        let tags = |s: &Sim| s.app.hints.as_ref().map(|h| h.targets.clone()).unwrap_or_default();
+        assert!(tags(&s).len() > 15, "rows, tabs, buttons: {}", tags(&s).len());
+        let at = |s: &Sim, label: &str| {
+            let r = s.text_rect(label);
+            tags(s).iter().find(|(t, _)| t.contains(r.center())).map(|(_, n)| n.clone()).unwrap_or_else(|| s.fail(&format!("no tag on {label}")))
+        };
+        look(&mut s, "letter tags");
+        s.idle(2);
+        s.shot("click-by-letters");
+        let tag = at(&s, "notes.txt");
+        s.act(&format!("text {tag}"));
+        s.settle();
+        assert!(s.app.hints.is_none(), "done once a tag is whole");
+        assert_eq!(s.tab().cursor_path(), Some(d.join("notes.txt")), "the row clicked");
+        // A capital last letter: a right-click, the file's menu.
+        s.act("key ctrl+j");
+        let tag = at(&s, "report.md");
+        let (head, last) = tag.split_at(tag.len() - 1);
+        s.act(&format!("text {head}{}", last.to_uppercase()));
+        s.settle();
+        assert!(matches!(s.app.popup, Popup::Ctx(_)), "the menu opened");
+        // In the menu: only its items.
+        s.act("key ctrl+j");
+        let menu = s.ctx.memory(|m| m.area_rect(egui::Id::new("ctxmenu"))).unwrap_or_else(|| s.fail("the menu's rectangle"));
+        assert!(!tags(&s).is_empty() && tags(&s).iter().all(|(r, _)| menu.expand(12.0).contains(r.center())), "the menu's items only");
+        look(&mut s, "letter tags in a menu");
+        s.act("key Escape");
+        assert!(s.app.hints.is_none() && matches!(s.app.popup, Popup::Ctx(_)), "Escape leaves the tags, not the menu");
+        s.act("key Escape");
+        // Letters that match nothing: nothing clicked.
+        let cur = s.tab().cursor_path();
+        s.act("key ctrl+j");
+        s.act("text 99");
+        s.settle();
+        assert!(s.app.hints.is_none() && s.tab().cursor_path() == cur && !s.popup_open());
+        report("click by letters", &s);
+    }
+
+    /// Marks: Ctrl+M and a letter marks the file under the cursor (or the folder), Ctrl+'
+    /// and the letter goes back, selecting the file; the list goes by Enter too, Delete
+    /// forgets one, and they are kept with the user's data.
+    #[test]
+    fn marks_set_and_gone_back_to() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("marks");
+        let d = home.join("Documents");
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.click_text("notes.txt");
+        s.act("key ctrl+m");
+        assert!(matches!(s.app.popup, Popup::Marks(_)));
+        s.idle(2);
+        look(&mut s, "set a mark");
+        s.act("text n");
+        assert_eq!(s.app.ud.marks.get("n"), Some(&d.join("notes.txt")));
+        go(&mut s, &d.join("Taxes"));
+        s.act("key ctrl+m");
+        s.act("text t");
+        assert_eq!(s.app.ud.marks.get("t"), Some(&d.join("Taxes")), "a folder under the cursor: this folder");
+        go(&mut s, &home);
+        s.act("key ctrl+Quote");
+        assert!(matches!(s.app.popup, Popup::Marks(_)));
+        s.idle(3);
+        look(&mut s, "go to a mark");
+        s.shot("marks");
+        s.act("text n");
+        s.settle();
+        assert_eq!(s.tab().path, d);
+        assert_eq!(s.tab().cursor_path(), Some(d.join("notes.txt")), "the file selected");
+        // By the list: down to t, Enter.
+        go(&mut s, &home);
+        s.act("key ctrl+Quote");
+        s.act("key ArrowDown");
+        s.act("key Enter");
+        s.settle();
+        assert_eq!(s.tab().path, d.join("Taxes"));
+        // Forgotten.
+        s.act("key ctrl+Quote");
+        s.act("key Delete");
+        assert_eq!(s.app.ud.marks.len(), 1);
+        s.act("key Escape");
+        let ctx = s.ctx.clone();
+        s.app.save_all(&ctx);
+        assert!(crate::config::load_userdata().marks.contains_key("t"), "kept with the user's data");
+        report("marks", &s);
     }
 
     /// What's Using This… from a folder's menu lists a `sleep` this test started working

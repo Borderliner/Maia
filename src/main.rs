@@ -62,6 +62,8 @@ mod project;
 mod projects;
 mod quickopen;
 mod undohist;
+mod hints;
+mod marks;
 mod query;
 mod rename;
 mod runner;

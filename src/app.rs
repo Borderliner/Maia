@@ -176,6 +176,8 @@ pub struct App {
     /// Input to add to the next frame (pointer state the system took over during drag
     /// and drop, and drags from other apps).
     pub inject: Vec<egui::Event>,
+    /// Letter tags on every control, while choosing one by its letters.
+    pub hints: Option<crate::hints::Hints>,
     /// A system drag is over the window: Some(true) when it is Maia's own, carried out
     /// and back in.
     pub ext_drag: Option<bool>,
@@ -300,6 +302,7 @@ impl App {
             drive_jobs: vec![],
             drives_seen: 0,
             inject: vec![],
+            hints: None,
             ext_drag: None,
             ext_drop: None,
             requests: None,
@@ -1011,6 +1014,7 @@ impl App {
             self.theme_applied = t;
         }
         self.pump(&ctx);
+        crate::hints::input(self, &ctx);
         self.handle_input(&ctx);
         self.draw(&ctx);
         self.process_actions(&ctx);
@@ -1350,6 +1354,11 @@ impl App {
                 if let Event::Key { key, pressed: true, modifiers, .. } = ev {
                     let c = Chord::from_key(*key, *modifiers);
                     let (hit, _) = self.keymap.lookup(&[c]);
+                    if matches!(hit, Some(Cmd::Hints)) {
+                        self.actions.push(Action::Cmd(Cmd::Hints));
+                        ctx.input_mut(|i| i.consume_key(*modifiers, *key));
+                        continue;
+                    }
                     if matches!(hit, Some(Cmd::Palette) | Some(Cmd::GoTo) | Some(Cmd::Options)) {
                         if self.popup.kind_cmd() == hit {
                             self.popup = Popup::None;
@@ -2629,6 +2638,12 @@ impl App {
                 self.undo_last();
             }
             Cmd::UndoHistory => self.popup = Popup::UndoHistory(crate::undohist::State { sel: 0 }),
+            Cmd::Hints => crate::hints::start(self, &ctx),
+            Cmd::SetMark => match crate::marks::here(self) {
+                Some(_) => self.popup = Popup::Marks(crate::marks::State { set: true, sel: 0 }),
+                None => self.toast("Nothing here to mark"),
+            },
+            Cmd::GoToMark => self.popup = Popup::Marks(crate::marks::State { set: false, sel: 0 }),
         }
     }
 

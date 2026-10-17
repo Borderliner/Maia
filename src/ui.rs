@@ -434,6 +434,7 @@ impl App {
         self.jobs_overlay(&ctx);
         crate::shelf::drop_spot(self, &ctx);
         crate::popups::draw(self, &ctx);
+        crate::hints::draw(self, &ctx);
         self.window_edges(&ctx);
         // Files dragged past the window's edge carry on as a system drag, into other
         // apps (the button is still held, so the system can take over the pointer).

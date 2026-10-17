@@ -149,6 +149,8 @@ commands! {
     OpenTerminal, "open_terminal", Folder, "Open Terminal Here", "Start your terminal in the current folder.", ["Ctrl+Shift+Backtick"];
     RecentProjects, "recent_projects", Folder, "Recent Projects", "Open one of the git repositories in your home folder, the ones you were in last first.", ["Ctrl+Alt+P"];
     QuickOpen, "quick_open", Folder, "Quick Open", "Find any file in this project by a few letters of its path.", ["Ctrl+O"];
+    SetMark, "set_mark", Folder, "Set Mark…", "Give this place a letter: the file under the cursor, or the folder.", ["Ctrl+M"];
+    GoToMark, "go_to_mark", Folder, "Go To Mark…", "Go back to a place marked with a letter.", ["Ctrl+Quote"];
     RunTask, "run_task", Folder, "Run Task…", "Run a script, target or recipe of this project in your terminal.", ["Ctrl+Shift+B"];
     ToggleBookmark, "toggle_bookmark", Folder, "Toggle Bookmark", "Add or remove the current folder (or selection) from bookmarks.", ["Ctrl+D"];
     OpenLinkTarget, "open_link_target", Folder, "Open Link Target Location", "Go to the folder containing a symlink's target.", [];
@@ -344,6 +346,7 @@ commands! {
     MainMenu, "main_menu", Misc, "Main Menu", "Open the main menu.", ["F10"];
     QuickMenu, "quick_menu", Misc, "Quick Menu", "Your starred commands in a small menu.", [];
     NewWindow, "new_window", Misc, "New Window", "Open another window.", [];
+    Hints, "click_by_letters", Misc, "Click By Letters", "Tag every control with letters; type a tag to click it, a capital last letter to right-click.", ["Ctrl+J"];
     Quit, "quit", Misc, "Quit", "Close this window.", ["Ctrl+Q"];
     FontBigger, "font_bigger", Misc, "Increase Font Size", "Make text larger.", ["Ctrl+Shift+Equals"];
     FontSmaller, "font_smaller", Misc, "Decrease Font Size", "Make text smaller.", ["Ctrl+Shift+Minus"];
@@ -422,6 +425,7 @@ fn key_display(k: Key) -> &'static str {
         Key::Comma => ",",
         Key::Period => ".",
         Key::Slash => "/",
+        Key::Quote => "'",
         _ => k.name(),
     }
 }

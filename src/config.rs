@@ -546,6 +546,8 @@ pub struct UserData {
     pub recent_cmds: Vec<String>,
     /// Each git project's tabs and panels as they were left, by the project's top folder.
     pub workspaces: HashMap<PathBuf, LayoutSnap>,
+    /// Places by a letter (Ctrl+M to set, Ctrl+' to go).
+    pub marks: BTreeMap<String, PathBuf>,
     pub layouts: BTreeMap<String, LayoutSnap>,
     pub views: HashMap<PathBuf, SavedView>,
     pub default_view: Option<ViewSettings>,
