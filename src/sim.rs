@@ -9955,6 +9955,76 @@ mod journeys {
         report("quick open", &s);
     }
 
+    /// Undo History from its key: the changes newest first with what they were and when;
+    /// a row chosen takes back it and everything after it, newest first, and leaves the
+    /// older ones; nothing left says so.
+    #[test]
+    fn undo_history_takes_back_several() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("undohist");
+        let d = home.join("Documents");
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        let rename = |s: &mut Sim, find: &str, to: &str| {
+            s.act(&format!("text {find}"));
+            s.act("key F2");
+            s.act("key ctrl+a");
+            s.act(&format!("text {to}"));
+            s.act("key Enter");
+            s.settle();
+            // The letters typed to find it stay in the filter until Escape.
+            s.act("key Escape");
+            s.settle();
+        };
+        rename(&mut s, "notes", "a.txt");
+        rename(&mut s, "report", "b.md");
+        assert!(d.join("a.txt").exists() && d.join("b.md").exists(), "each rename on the file typed, not one selected before");
+        s.click_text("budget 2026.csv");
+        s.act("key Delete");
+        if s.popup_open() {
+            s.act("key Enter");
+        }
+        wait_until(&mut s, "trashed", 20, |s| s.app.undo.len() == 3 && !d.join("budget 2026.csv").exists());
+        s.act("key ctrl+alt+z");
+        assert!(matches!(s.app.popup, Popup::UndoHistory(_)));
+        s.idle(3);
+        assert!(some_text(&s, "Moved to the trash · 1 item") && some_text(&s, "Renamed · 1 item"));
+        assert!(some_text(&s, "today"), "when");
+        look(&mut s, "undo history");
+        s.idle(10);
+        s.shot("undo-history");
+        // The second newest: it and the trash go back, the first rename stays.
+        s.act("key ArrowDown");
+        s.idle(2);
+        assert!(some_text(&s, "Undo 2 changes"));
+        s.shot("undo-history-two");
+        s.act("key Enter");
+        s.settle();
+        assert!(!s.popup_open());
+        assert!(d.join("budget 2026.csv").exists() && d.join("report.md").exists() && !d.join("b.md").exists(), "both taken back");
+        assert!(d.join("a.txt").exists() && !d.join("notes.txt").exists(), "the older one stays");
+        assert_eq!(s.app.undo.len(), 1);
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0 == "Undid 2 changes"));
+        // The button and a click; then nothing left.
+        s.act("key ctrl+alt+z");
+        s.idle(2);
+        click_control(&mut s, "undo back");
+        s.settle();
+        assert!(d.join("notes.txt").exists() && s.app.undo.is_empty());
+        s.act("key ctrl+alt+z");
+        s.idle(2);
+        assert!(some_text(&s, "Nothing to undo yet"));
+        for (w, h) in [(520.0, 340.0), (1280.0, 800.0)] {
+            s.resize(w, h);
+            s.idle(3);
+            look(&mut s, &format!("undo history at {w}x{h}"));
+        }
+        click_control(&mut s, "undo close");
+        assert!(!s.popup_open());
+        report("undo history", &s);
+    }
+
     /// What's Using This… from a folder's menu lists a `sleep` this test started working
     /// in it, as the user's own, with its PID; Stop asks first, then ends it and the list
     /// empties. One that ignores SIGTERM is still there a few seconds later and is offered

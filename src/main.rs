@@ -61,6 +61,7 @@ mod popups;
 mod project;
 mod projects;
 mod quickopen;
+mod undohist;
 mod query;
 mod rename;
 mod runner;

@@ -63,6 +63,47 @@ pub struct UndoEntry {
     pub kind: UndoKind,
 }
 
+/// What Undo can take back, the newest last, each with when it was done.
+#[derive(Default)]
+pub struct UndoStack {
+    items: Vec<UndoEntry>,
+    at: Vec<std::time::SystemTime>,
+}
+
+impl UndoStack {
+    pub fn push(&mut self, e: UndoEntry) {
+        self.items.push(e);
+        self.at.push(std::time::SystemTime::now());
+    }
+
+    pub fn pop(&mut self) -> Option<UndoEntry> {
+        self.at.pop();
+        self.items.pop()
+    }
+
+    /// When the change at `i` (counted from the oldest) was made.
+    pub fn when(&self, i: usize) -> Option<std::time::SystemTime> {
+        self.at.get(i).copied()
+    }
+}
+
+impl std::ops::Deref for UndoStack {
+    type Target = [UndoEntry];
+    fn deref(&self) -> &[UndoEntry] {
+        &self.items
+    }
+}
+
+impl UndoKind {
+    /// How many files or folders the change touched.
+    pub fn count(&self) -> usize {
+        match self {
+            UndoKind::Rename(v) | UndoKind::Move(v) | UndoKind::Sorted(v, _) => v.len(),
+            UndoKind::Created(v) | UndoKind::Trashed(v) | UndoKind::Replaced(v) => v.len(),
+        }
+    }
+}
+
 pub enum UndoKind {
     Rename(Vec<(PathBuf, PathBuf)>),
     Move(Vec<(PathBuf, PathBuf)>),
@@ -106,7 +147,7 @@ pub struct App {
     pub ud_mtime: Option<std::time::SystemTime>,
     pub save_session: bool,
     pub jump_buf: (String, Instant),
-    pub undo: Vec<UndoEntry>,
+    pub undo: UndoStack,
     pub theme_applied: (theme::ThemeName, f32, f32, bool, bool),
     pub ctx: egui::Context,
     pub fresh: bool,
@@ -242,7 +283,7 @@ impl App {
             ud_mtime: config::mtime(&config::userdata_path()),
             save_session: paths.is_empty(),
             jump_buf: (String::new(), Instant::now()),
-            undo: vec![],
+            undo: UndoStack::default(),
             theme_applied: (cfg.theme, cfg.font_size, cfg.spacing, cfg.animations, cfg.syntax_theme),
             ctx: ctx.clone(),
             fresh: true,
@@ -2562,7 +2603,10 @@ impl App {
                 Err(e) => self.toast(format!("Uninstall failed: {e}")),
             },
             Cmd::About => self.popup = Popup::About,
-            Cmd::Undo => self.undo_last(),
+            Cmd::Undo => {
+                self.undo_last();
+            }
+            Cmd::UndoHistory => self.popup = Popup::UndoHistory(crate::undohist::State { sel: 0 }),
         }
     }
 
@@ -2783,10 +2827,11 @@ impl App {
         self.tab().reload();
     }
 
-    fn undo_last(&mut self) {
+    /// Take back the latest change; false when some of it couldn't be.
+    pub fn undo_last(&mut self) -> bool {
         let Some(u) = self.undo.pop() else {
             self.toast("Nothing to undo");
-            return;
+            return true;
         };
         let mut errs = 0;
         let mut moved_back = ops::Changed::default();
@@ -2853,6 +2898,7 @@ impl App {
         } else {
             self.toast(format!("Undid “{}”", u.label));
         }
+        errs == 0
     }
 
     // ---------------------------------------------------------------- actions
