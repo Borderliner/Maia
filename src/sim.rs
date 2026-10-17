@@ -1052,7 +1052,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(154) {
+    match rng.below(159) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1627,6 +1627,71 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                     _ => s.act(rng.pick(&["key Escape", "key Enter"])),
                 }
             }
+            s.act("key Escape");
+        }
+        154 => {
+            // Quick Open: a few letters, then a row shown, opened in a tab, or let go.
+            s.act("key ctrl+o");
+            s.idle(2);
+            s.act(&format!("text {}", rng.pick(&["main", "md", "zz", "a", "rs"])));
+            s.idle(2);
+            s.act(rng.pick(&["key ArrowDown", "key Enter", "key ctrl+Enter", "key Escape"]));
+            s.act("key Escape");
+        }
+        155 => {
+            // Undo History: a row chosen and taken back, or closed.
+            s.act("key ctrl+alt+z");
+            for _ in 0..rng.below(3) {
+                s.act("key ArrowDown");
+            }
+            match rng.below(3) {
+                0 => s.act("key Enter"),
+                1 => click_control_at(s, "undo close"),
+                _ => s.act("key Escape"),
+            }
+        }
+        156 => {
+            // Letter tags: one or two letters (a tag, a capital, or nothing), or Escape.
+            s.act("key ctrl+j");
+            match rng.below(4) {
+                0 => s.act("key Escape"),
+                1 => s.act(&format!("text {}", rng.pick(&["a", "sa", "S", "zq"]))),
+                _ => {
+                    let tag = s.app.hints.as_ref().and_then(|h| h.targets.get(rng.below(h.targets.len().max(1)) as usize).map(|t| t.1.clone()));
+                    s.act(&format!("text {}", tag.unwrap_or_else(|| "q".into())));
+                }
+            }
+            s.act("key Escape");
+        }
+        157 => {
+            // Marks: set one, go to one, forget one.
+            match rng.below(3) {
+                0 => {
+                    s.act("key ctrl+m");
+                    s.act(&format!("text {}", rng.pick(&["a", "b", "n"])));
+                }
+                1 => {
+                    s.act("key ctrl+Quote");
+                    s.act(&format!("text {}", rng.pick(&["a", "b", "x"])));
+                }
+                _ => {
+                    s.act("key ctrl+Quote");
+                    s.act(rng.pick(&["key Delete", "key ArrowDown", "key Enter"]));
+                }
+            }
+            s.act("key Escape");
+        }
+        158 => {
+            // Recent Projects: the unsaved switch by key or click, then opened or let go.
+            s.act("key ctrl+alt+p");
+            s.idle(2);
+            match rng.below(3) {
+                0 => s.act("key Tab"),
+                1 => click_control_at(s, rng.pick(&["unsaved projects", "all projects"])),
+                _ => {}
+            }
+            s.idle(2);
+            s.act(rng.pick(&["key Escape", "key Enter", "key ctrl+Enter"]));
             s.act("key Escape");
         }
         122 => {
