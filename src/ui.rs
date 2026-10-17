@@ -293,11 +293,14 @@ impl App {
         let pal = self.pal;
         // ------------------------------------------------ sidebar (full height)
         if self.sidebar {
+            // A narrow window keeps room beside it for the title bar's window buttons and
+            // tab list; a wide sidebar left them on top of each other.
+            let most = 420f32.min(ctx.content_rect().width() - 230.0).max(150.0);
             let r = egui::SidePanel::left("sidebar")
                 .resizable(true)
                 .show_separator_line(false)
                 .default_width(self.sidebar_width)
-                .width_range(150.0..=420.0)
+                .width_range(150.0..=most)
                 .frame(egui::Frame::NONE.fill(pal.sidebar))
                 .show(&ctx, |ui| crate::sidebar::sidebar(self, ui));
             self.sidebar_width = r.response.rect.width();
