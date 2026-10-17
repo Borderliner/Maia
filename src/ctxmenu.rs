@@ -302,6 +302,12 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             }
             items.push(Item::sub("picture", "Picture", kids));
         }
+        // Below what was there before it, so long menus keep their places.
+        if let [(_, false, _, ext)] = ents.as_slice() {
+            if crate::viewer::is_picture(ext) {
+                items.push(Item::cmd(Cmd::ViewPictures));
+            }
+        }
         if crate::archive::available() {
             if ents.iter().any(|e| !e.1 && crate::archive::is_archive(&e.0.to_string_lossy())) {
                 items.push(Item::cmd(Cmd::ExtractHere));

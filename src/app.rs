@@ -1810,6 +1810,7 @@ impl App {
             },
             Cmd::PreviousVersions => crate::versions::open(self),
             Cmd::SpaceUsed => crate::spaceuse::open(self),
+            Cmd::ViewPictures => crate::viewer::open(self),
             Cmd::CleanBuilds => match crate::devtools::target_dir(self) {
                 Some(d) => self.popup = crate::devtools::clean(&ctx, d),
                 None => self.toast("Clean Build Folders needs a folder"),
@@ -2865,6 +2866,8 @@ impl App {
             } else {
                 self.navigate(panel, e.path);
             }
+        } else if self.cfg.picture_viewer && crate::viewer::is_picture(e.ext()) && self.active == panel && crate::viewer::open_at(self, Some(e.path.clone())) {
+            // Shown in Maia's own viewer, as Options asks.
         } else if e.ext() == "desktop" || !e.is_executable() {
             self.actions.push(Action::OpenFile(e.path));
         } else {

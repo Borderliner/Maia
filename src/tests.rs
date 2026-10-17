@@ -3155,13 +3155,15 @@ fn every_option_has_one_section() {
         Opt::Editor => 56,
         Opt::IgnoredFiles => 57,
         Opt::TrashAge => 58,
+        Opt::PictureViewer => 61,
     };
-    let mut seen = vec![0; 59];
+    let numbered: Vec<usize> = (0..59).chain([61]).collect();
+    let mut seen = vec![0; 64];
     for o in OPTS {
         seen[index(o.0)] += 1;
     }
     for (i, n) in seen.iter().enumerate() {
-        assert_eq!(*n, 1, "option {i} listed {n} times");
+        assert_eq!(*n, numbered.contains(&i) as usize, "option {i} listed {n} times");
     }
     // Sections in the order of the left column, each a block; groups never split.
     let order: Vec<Section> = OPTS.iter().map(|o| o.1).fold(vec![], |mut v, s| {
@@ -5493,6 +5495,64 @@ fn space_used_lists_biggest_first_as_sizes_land() {
     let shown: Vec<(&str, Option<u64>)> = st.order.iter().map(|&k| (st.items[k as usize].entry.name.as_str(), st.items[k as usize].size)).collect();
     assert_eq!(shown, vec![("Big", Some(500_000)), ("movie.mkv", Some(400_000)), ("Small", Some(10)), ("big-link", Some(0)), ("Empty", Some(0))], "folders by everything under them, a link by itself");
     assert_eq!(st.total(), 900_010);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn picture_viewer_steps_fits_and_fades_its_name() {
+    use crate::viewer::{Pic, State, fit_scale, is_picture};
+    assert!(["jpg", "jpeg", "png", "webp", "gif", "bmp", "svg"].iter().all(|e| is_picture(e)));
+    assert!(!is_picture("txt") && !is_picture("mp4") && !is_picture("pdf"));
+    let pics: Vec<Pic> = (0..3).map(|i| Pic { path: PathBuf::from(format!("/p/{i}.png")), name: format!("{i}.png"), modified: None }).collect();
+    let mut st = State::new(1, pics, 1, 10.0);
+    assert_eq!(st.label_alpha(11.0, true), 1.0, "shown while the pointer has just moved");
+    assert!((st.label_alpha(12.2, true) - 0.5).abs() < 1e-3, "fading out");
+    assert_eq!(st.label_alpha(13.0, true), 0.0, "then gone");
+    assert_eq!(st.label_alpha(12.1, false), 0.0, "without animations it goes at once");
+    st.zoom = 3.0;
+    st.go(2, 20.0, true);
+    assert_eq!((st.at, st.zoom, st.fading_from()), (2, 1.0, Some(1)), "the next fits the window, the last fading out");
+    st.go(5, 21.0, true);
+    assert_eq!(st.at, 2, "no picture past the last");
+    st.go(0, 22.0, false);
+    assert_eq!((st.at, st.fading_from()), (0, None), "no fade without animations");
+    let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 500.0));
+    assert_eq!(fit_scale(area, [4000, 1000]), 0.25, "a wide picture by its width");
+    assert_eq!(fit_scale(area, [1000, 2000]), 0.25, "a tall one by its height");
+    assert_eq!(fit_scale(area, [40, 30]), 1.0, "a small one never blown up");
+}
+
+/// A photograph turned on its side by its EXIF tag reaches the viewer upright: the
+/// thumbnail cache's decode, as the viewer asks for it.
+#[test]
+fn viewer_pictures_decode_upright_off_the_frame() {
+    let d = tmpdir("viewer-exif");
+    // A JPEG 64 × 32 as stored whose tag says it is turned a quarter (orientation 6).
+    let Some(t) = imagemagick_tools(&d.join("bin")) else { return };
+    let src = d.join("wide.png");
+    std::fs::write(&src, png_bytes(64, 32, 2)).unwrap();
+    let jpg = d.join("side.jpg");
+    let ok = std::process::Command::new(t.join("magick")).arg(&src).arg(&jpg).status().is_ok_and(|s| s.success());
+    if !ok {
+        return;
+    }
+    let tagged = with_exif_orientation(&std::fs::read(&jpg).unwrap(), 6);
+    std::fs::write(&jpg, tagged).unwrap();
+    let ctx = egui::Context::default();
+    let mut thumbs = crate::thumbs::Thumbs::new(ctx.clone(), 1);
+    let mtime = std::fs::metadata(&jpg).unwrap().modified().ok();
+    let t0 = Instant::now();
+    let dims = loop {
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            thumbs.pump(ctx);
+        });
+        if let Some(l) = thumbs.get(&jpg, mtime, 1600.0) {
+            break (l.dims, l.tex.size());
+        }
+        assert!(t0.elapsed() < Duration::from_secs(10) && !thumbs.failed(&jpg), "never decoded");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(dims, ([32, 64], [32, 64]), "upright, at its full size: 1600 px asked for, the bucket above it");
     let _ = std::fs::remove_dir_all(&d);
 }
 

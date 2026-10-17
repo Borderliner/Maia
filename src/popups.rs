@@ -198,6 +198,8 @@ pub enum Popup {
     BatchRename(crate::batchname::State),
     Print(Box<crate::sendto::PrintState>),
     SpaceUsed(Box<crate::spaceuse::State>),
+    /// Pictures full window.
+    Viewer(Box<crate::viewer::State>),
 }
 
 /// The branch menu, its lists read on a worker as it opens.
@@ -296,6 +298,7 @@ impl Popup {
             Popup::BatchRename(..) => "BatchRename",
             Popup::Print(..) => "Print",
             Popup::SpaceUsed(..) => "SpaceUsed",
+            Popup::Viewer(..) => "Viewer",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -846,6 +849,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::BatchRename(st) => crate::batchname::popup(app, ctx, st),
         Popup::Print(st) => crate::sendto::dialog(app, ctx, st),
         Popup::SpaceUsed(st) => crate::spaceuse::popup(app, ctx, st),
+        Popup::Viewer(st) => crate::viewer::draw(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -1310,7 +1314,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::GitIgnoreExt => t.archive.is_none() && crate::gitstatus::repo_for(&t.path).is_some() && crate::share::shared_ext(t.target_entries().iter().map(|e| (e.path.as_path(), e.is_dir))).is_some(),
         Cmd::CodeSearch | Cmd::FindTodos => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::RunTask => !tab::is_computer(&t.path) && t.archive.is_none(),
-        Cmd::CleanBuilds | Cmd::FindDuplicates | Cmd::SpaceUsed => !tab::is_computer(&t.path) && t.archive.is_none(),
+        Cmd::CleanBuilds | Cmd::FindDuplicates | Cmd::SpaceUsed | Cmd::ViewPictures => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::PreviousVersions => t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()) && matches!(t.target_entries().as_slice(), [e] if !e.is_dir),
         Cmd::CopyPathLine => p.line_hint.as_ref().is_some_and(|h| t.target_entries().iter().any(|e| e.path == h.0)),
         Cmd::OpenTabInWindow => p.tabs.len() > 0,
@@ -1784,6 +1788,7 @@ pub(crate) enum Opt {
     SingleClickFolders,
     OpenFoldersNewTab,
     DblClickParent,
+    PictureViewer,
     ReverseScroll,
     CharKey,
     MiddleClick,
@@ -1919,6 +1924,7 @@ pub(crate) const OPTS: &[(Opt, Section, &str, &str, &str)] = &[
     (Opt::ActOnPress, Section::Mouse, "Clicks", "Act on press", "Select on mouse down, not on release."),
     (Opt::OpenFoldersNewTab, Section::Mouse, "Clicks", "Open folders in new tab", "Double-clicked folders open in a new tab."),
     (Opt::DblClickParent, Section::Mouse, "Clicks", "Double-click background goes up", "Double-click empty space for the parent."),
+    (Opt::PictureViewer, Section::Mouse, "Clicks", "Open pictures in Maia's viewer", "Enter and double-click show them full window."),
     (Opt::MiddleClick, Section::Mouse, "Clicks", "Middle-click on folder", "Open it in a split or a new tab."),
     (Opt::SelectionBoxes, Section::Mouse, "Clicks", "Selection boxes", "Checkboxes for picking several items."),
     (Opt::ReverseScroll, Section::Mouse, "Scrolling", "Reverse scroll direction", "Invert the mouse wheel."),
@@ -2187,6 +2193,7 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
         Opt::SingleClickFolders => f!(single_click_folders_only),
         Opt::OpenFoldersNewTab => f!(open_folders_new_tab),
         Opt::DblClickParent => f!(dblclick_bg_parent),
+        Opt::PictureViewer => f!(picture_viewer),
         Opt::ReverseScroll => f!(reverse_scroll),
         Opt::CharKey => f!(char_key_action),
         Opt::MiddleClick => f!(middle_click),
@@ -2314,6 +2321,7 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         Opt::SingleClickFolders => toggle(ui, &mut c.single_click_folders_only, &pal),
         Opt::OpenFoldersNewTab => toggle(ui, &mut c.open_folders_new_tab, &pal),
         Opt::DblClickParent => toggle(ui, &mut c.dblclick_bg_parent, &pal),
+        Opt::PictureViewer => toggle(ui, &mut c.picture_viewer, &pal),
         Opt::ReverseScroll => toggle(ui, &mut c.reverse_scroll, &pal),
         Opt::CharKey => choice(ui, "charkey", &mut c.char_key_action, &[(CharKeyAction::TriggerHotkey, "Hotkeys, else filter"), (CharKeyAction::Filter, "Filter"), (CharKeyAction::Jump, "Jump to name")]),
         Opt::MiddleClick => choice(ui, "middle", &mut c.middle_click, &[(MiddleClick::OpenInSplit, "Open in split"), (MiddleClick::OpenInNewTab, "Open in new tab")]),
@@ -5281,6 +5289,7 @@ fn opt_flip(c: &mut crate::config::Config, o: Opt) -> bool {
         Opt::SingleClickFolders => &mut c.single_click_folders_only,
         Opt::OpenFoldersNewTab => &mut c.open_folders_new_tab,
         Opt::DblClickParent => &mut c.dblclick_bg_parent,
+        Opt::PictureViewer => &mut c.picture_viewer,
         Opt::ReverseScroll => &mut c.reverse_scroll,
         Opt::SingleInstance => &mut c.single_instance,
         Opt::Meaning => &mut c.semantic_search,

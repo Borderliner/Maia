@@ -209,6 +209,8 @@ pub struct Config {
     /// Pictures are read too, by how they look.
     pub semantic_pictures: bool,
     pub dblclick_bg_parent: bool,
+    /// Enter and a double-click show pictures in Maia's own viewer, not their app.
+    pub picture_viewer: bool,
     pub reverse_scroll: bool,
     pub char_key_action: CharKeyAction,
     pub middle_click: MiddleClick,
@@ -281,6 +283,7 @@ impl Default for Config {
             semantic_folders: "~/Documents".into(),
             semantic_pictures: true,
             dblclick_bg_parent: false,
+            picture_viewer: false,
             reverse_scroll: false,
             char_key_action: CharKeyAction::TriggerHotkey,
             middle_click: MiddleClick::OpenInSplit,

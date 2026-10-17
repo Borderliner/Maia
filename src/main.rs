@@ -11,6 +11,7 @@ mod batchname;
 mod buildclean;
 mod update;
 mod versions;
+mod viewer;
 mod wallpaper;
 mod clipboard;
 mod commands;

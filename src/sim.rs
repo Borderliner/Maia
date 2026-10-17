@@ -1017,7 +1017,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(142) {
+    match rng.below(144) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1450,6 +1450,55 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                     _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "Enter", "Backspace", "space", "Delete", "End", "PageDown", "Escape"]))),
                 }
                 s.idle(rng.below(4));
+            }
+        }
+        142 => {
+            // The picture viewer, often among the trip's pictures: keys, the wheel, drags,
+            // clicks on its buttons, a slideshow left running a while, then Escape or not.
+            let pics = root().join("home").read_dir().ok().and_then(|r| r.flatten().map(|d| d.path().join("Pictures/Trip")).find(|p| p.is_dir()));
+            if let Some(dir) = pics.filter(|_| rng.below(3) > 0) {
+                s.act("key ctrl+p");
+                s.act(&format!("text {}", dir.join(format!("img{:02}.png", rng.below(12))).display()));
+                s.act("key Enter");
+                s.settle();
+            }
+            match rng.below(3) {
+                0 => s.act("key F3"),
+                1 => s.cmd(Cmd::ViewPictures),
+                _ => {
+                    let (x, y) = p(rng);
+                    s.act(&format!("click {x:.0} {y:.0} right"));
+                    s.act("text view pictures");
+                    s.act("key Enter");
+                }
+            }
+            for _ in 0..rng.below(10) {
+                if !matches!(s.app.popup, Popup::Viewer(_)) {
+                    break;
+                }
+                match rng.below(6) {
+                    0 => {
+                        let (x, y) = p(rng);
+                        s.act(&format!("scroll {x:.0} {y:.0} {:.1}", rng.f(-10.0, 10.0)));
+                    }
+                    1 => {
+                        let ((x, y), (x2, y2)) = (p(rng), p(rng));
+                        s.act(&format!("drag {x:.0} {y:.0} {x2:.0} {y2:.0}"));
+                    }
+                    2 => click_control_at(s, rng.pick(&["viewer next", "viewer previous", "viewer close"])),
+                    3 => s.idle(rng.below(300)),
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowRight", "ArrowLeft", "Space", "Plus", "Minus", "0", "1", "Home", "End", "Escape"]))),
+                }
+            }
+        }
+        143 => {
+            // Pictures sent to the viewer by Enter and double-clicks, or not.
+            s.app.cfg.picture_viewer = rng.below(2) == 0;
+            let (x, y) = p(rng);
+            s.act(&format!("{} {x:.0} {y:.0}", rng.pick(&["dclick", "click"])));
+            s.act(rng.pick(&["key Enter", "key ArrowRight", "key Escape"]));
+            if matches!(s.app.popup, Popup::Viewer(_)) && rng.below(2) == 0 {
+                s.act("key Escape");
             }
         }
         121 => {
@@ -8079,6 +8128,150 @@ mod journeys {
         assert!(some_text(&s, "This folder is empty"));
         s.act("key Escape");
         report("space used", &s);
+    }
+
+    fn viewer(s: &Sim) -> &crate::viewer::State {
+        match &s.app.popup {
+            Popup::Viewer(v) => v,
+            _ => s.fail("the picture viewer is not open"),
+        }
+    }
+
+    /// The picture viewer: F3 from a picture, the neighbours decoded ahead, Left and
+    /// Right in the listing's order, zoom by keys, wheel and double-click, a drag that
+    /// pans, a slideshow with its fade, nothing drawn while it rests, Escape leaving the
+    /// cursor on the last picture; Enter and double-click opening the picture's app until
+    /// Options says otherwise; a broken picture said so; a small window.
+    #[test]
+    fn picture_viewer_full_window() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("viewer");
+        let trip = home.join("Pictures/Trip");
+        png_file(&trip.join("panorama.png"), 2400, 1200, 7);
+        let mut s = Sim::new(&trip, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        let pic = |s: &Sim| viewer(s).current().map(|p| p.name.clone()).unwrap_or_default();
+        select_path(&mut s, &trip.join("img03.png"));
+        s.act("key F3");
+        assert_eq!(pic(&s), "img03.png");
+        assert_eq!(viewer(&s).pics.len(), 13, "every picture in the folder");
+        wait_until(&mut s, "the picture decoded", 10, |s| s.app.thumbs.dims(&trip.join("img03.png")).is_some());
+        wait_until(&mut s, "its neighbours decoded ahead", 10, |s| s.app.thumbs.dims(&trip.join("img02.png")).is_some() && s.app.thumbs.dims(&trip.join("img04.png")).is_some());
+        assert!(s.app.thumbs.dims(&trip.join("img08.png")).is_none(), "and no further");
+        s.idle(2);
+        assert!(some_text(&s, "img03.png") && some_text(&s, "4 / 13"), "the name and where it is");
+        shot_still(&mut s, "viewer-graphite");
+        s.act("key ArrowRight");
+        assert_eq!(pic(&s), "img04.png");
+        s.act("key ArrowLeft");
+        s.act("key ArrowLeft");
+        assert_eq!(pic(&s), "img02.png");
+        s.act("key End");
+        assert_eq!(pic(&s), "panorama.png");
+        s.act("key ArrowRight");
+        assert_eq!(pic(&s), "panorama.png", "the last stays the last");
+        wait_until(&mut s, "the panorama decoded", 10, |s| s.app.thumbs.dims(&trip.join("panorama.png")).is_some());
+        s.idle(2);
+        // Zoom: one to one, fit, a step, the wheel; a drag moves a zoomed picture.
+        s.act("key 1");
+        let one = viewer(&s).zoom;
+        assert!(one > 1.1, "one pixel for one is bigger than fitting: {one}");
+        shot_still(&mut s, "viewer-zoomed-graphite");
+        s.act("drag 640 400 500 300");
+        assert!(viewer(&s).pan != Vec2::ZERO, "dragged");
+        s.act("key 0");
+        assert_eq!((viewer(&s).zoom, viewer(&s).pan), (1.0, Vec2::ZERO));
+        s.act("drag 640 400 500 300");
+        assert_eq!(viewer(&s).pan, Vec2::ZERO, "a picture that fits doesn't move");
+        s.act("key Plus");
+        assert!((viewer(&s).zoom - 1.25).abs() < 1e-3);
+        s.act("scroll 640 400 -5");
+        // The wheel's scroll eases out over a few frames.
+        s.idle(60);
+        assert!(viewer(&s).zoom < 1.25, "the wheel zooms out");
+        s.act("dclick 640 400");
+        assert_eq!(viewer(&s).zoom, 1.0, "a double-click fits it again");
+        s.idle(40);
+        s.act("dclick 640 400");
+        assert!((viewer(&s).zoom - one).abs() < 1e-3, "and then shows it one to one");
+        s.act("key 0");
+        // A slideshow: on to the next by itself, round to the first, with a fade.
+        s.act("key Space");
+        assert!(viewer(&s).playing);
+        assert!(s.repaint <= std::time::Duration::from_secs_f64(crate::viewer::SLIDE), "the timer runs while it plays: {:?}", s.repaint);
+        s.idle(250);
+        assert_eq!(pic(&s), "img00.png", "round to the first");
+        s.act("key Space");
+        assert!(!viewer(&s).playing);
+        s.idle(200);
+        // Memory goes back to the system two seconds (real ones) after decodes settle:
+        // that one wake is the app's, not the viewer's.
+        std::thread::sleep(std::time::Duration::from_millis(2200));
+        s.idle(3);
+        assert_eq!(s.repaint, std::time::Duration::MAX, "nothing repaints while the viewer rests");
+        assert!(!some_text(&s, "1 / 13"), "the name gone once the pointer rests");
+        s.act("move 300 300");
+        assert!(some_text(&s, "1 / 13"), "back when it moves");
+        s.act("key ArrowRight");
+        assert_eq!(viewer(&s).fading_from(), Some(0), "a quiet fade between pictures");
+        s.app.cfg.animations = false;
+        s.act("key ArrowRight");
+        assert_eq!(viewer(&s).fading_from(), None, "none without animations");
+        s.app.cfg.animations = true;
+        // Escape: the cursor on the picture last shown.
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        assert_eq!(s.tab().cursor.map(|c| s.tab().entries[c as usize].name.clone()).as_deref(), Some("img02.png"));
+        // From the picture's menu.
+        let row = row_text(&s, "img07.png");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        s.click_text("View Pictures");
+        assert_eq!(pic(&s), "img07.png");
+        s.act("key Escape");
+        // Enter and double-click open the picture's app by default.
+        let n = crate::mime::LAUNCHED.lock().unwrap().len();
+        select_path(&mut s, &trip.join("img05.png"));
+        s.act("key Enter");
+        assert!(!s.popup_open(), "not the viewer");
+        assert!(crate::mime::LAUNCHED.lock().unwrap().len() > n, "its app");
+        // Options can send them to the viewer.
+        s.act("key ctrl+Comma");
+        s.act("text pictures in maia");
+        s.act("key Enter");
+        s.act("key Escape");
+        assert!(s.app.cfg.picture_viewer, "switched on in Options");
+        select_path(&mut s, &trip.join("img05.png"));
+        s.act("key Enter");
+        assert_eq!(pic(&s), "img05.png", "Enter shows it here");
+        s.act("key Escape");
+        s.idle(30);
+        let row = row_text(&s, "img06.png");
+        s.act(&format!("dclick {:.0} {:.0}", row.center().x, row.center().y));
+        assert_eq!(pic(&s), "img06.png", "so does a double-click");
+        s.act("key Escape");
+        // A broken picture.
+        go(&mut s, &home.join("Pictures"));
+        select_path(&mut s, &home.join("Pictures/broken.png"));
+        s.cmd(ViewPictures);
+        wait_until(&mut s, "the broken one tried", 10, |s| s.app.thumbs.failed(&home.join("Pictures/broken.png")));
+        s.idle(2);
+        assert!(some_text(&s, "Can't show this picture"));
+        s.resize(520.0, 340.0);
+        s.act("key ArrowLeft");
+        s.act("move 200 200");
+        s.idle(3);
+        s.shot("viewer-small-graphite");
+        s.act("key Escape");
+        look(&mut s, "after the viewer, small");
+        s.resize(1280.0, 800.0);
+        go(&mut s, &home.join("Documents"));
+        s.cmd(ViewPictures);
+        assert!(!s.popup_open() && toast_is(&s, "No pictures here"));
+        report("viewer", &s);
     }
 
     #[test]
