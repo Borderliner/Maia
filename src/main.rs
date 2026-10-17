@@ -44,6 +44,7 @@ mod office;
 mod ollama;
 mod ops;
 mod panel;
+mod picfix;
 mod popups;
 mod project;
 mod query;

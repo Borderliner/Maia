@@ -5152,3 +5152,127 @@ fn print_reads_cups_printers() {
     assert_eq!(printers(&t).names.len(), 2);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// `jpeg` with an EXIF block saying it is stored turned (`orient`, 1 to 8), as a camera
+/// held upright writes it.
+pub(crate) fn with_exif_orientation(jpeg: &[u8], orient: u16) -> Vec<u8> {
+    let mut tiff = b"MM\x00\x2a\x00\x00\x00\x08".to_vec();
+    tiff.extend_from_slice(&1u16.to_be_bytes());
+    tiff.extend_from_slice(&0x0112u16.to_be_bytes());
+    tiff.extend_from_slice(&3u16.to_be_bytes());
+    tiff.extend_from_slice(&1u32.to_be_bytes());
+    tiff.extend_from_slice(&orient.to_be_bytes());
+    tiff.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+    let mut app1 = b"Exif\x00\x00".to_vec();
+    app1.extend_from_slice(&tiff);
+    let mut out = jpeg[..2].to_vec();
+    out.extend_from_slice(&[0xff, 0xe1]);
+    out.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&app1);
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+/// The real ImageMagick on the PATH, as a stand-in folder holding only it (and none).
+pub(crate) fn imagemagick_tools(dir: &Path) -> Option<PathBuf> {
+    let real = std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join("magick")).find(|m| m.is_file()))?;
+    std::fs::create_dir_all(dir).unwrap();
+    let _ = std::os::unix::fs::symlink(real, dir.join("magick"));
+    Some(dir.to_path_buf())
+}
+
+/// Picture fixes through the real ImageMagick on real files: a photo stored turned (EXIF
+/// orientation 6) measured upright, turned right in place with its original in the
+/// trash, turned again without a second copy there, and put back by Undo byte for
+/// byte; copies at half, within a box and a longer side, named by their size and never
+/// over another file; a smaller picture left alone by Fit; a crop of the upright
+/// picture; a name ImageMagick would misread; a broken file refused with nothing
+/// changed. Sizes as typed.
+#[test]
+fn picture_fixes_with_imagemagick() {
+    use crate::picfix::{Size, crop, crop_px, cropped_name, dims, magick, parse_size, resize, resized_name, rotate, target, undo_replaced};
+    assert_eq!(parse_size("1280"), Some(Size::Long(1280)));
+    for s in ["1280 × 720", "1280x720", "1280 X 720", "1280*720", " 1280 720 "] {
+        assert_eq!(parse_size(s), Some(Size::Within(1280, 720)), "{s:?}");
+    }
+    assert_eq!(parse_size("50%"), Some(Size::Scale(0.5)));
+    assert_eq!(parse_size("12.5 %"), Some(Size::Scale(0.125)));
+    for s in ["", "0", "big", "1x2x3", "-5", "40000", "0%"] {
+        assert_eq!(parse_size(s), None, "{s:?}");
+    }
+    assert_eq!(target([4032, 3024], Size::Fit(1920)), Some([1920, 1440]));
+    assert_eq!(target([1000, 800], Size::Fit(1920)), None, "already within");
+    assert_eq!(target([4032, 3024], Size::Scale(0.25)), Some([1008, 756]));
+    assert_eq!(target([300, 200], Size::Long(600)), Some([600, 400]), "a longer side asked for grows it");
+    assert_eq!(target([300, 200], Size::Within(100, 100)), Some([100, 67]));
+    assert_eq!(target([300, 200], Size::Scale(1.0)), None);
+    assert_eq!(resized_name("photo.jpg", [1920, 1440]), "photo (1920 px).jpg");
+    assert_eq!(resized_name("scan.v2.png", [600, 800]), "scan.v2 (800 px).png");
+    assert_eq!(cropped_name("photo.jpg"), "photo (cropped).jpg");
+    assert_eq!(cropped_name("README"), "README (cropped)");
+    assert_eq!(crop_px(egui::Rect::from_min_max(egui::pos2(0.25, 0.0), egui::pos2(0.75, 0.5)), [20, 40]), Some([5, 0, 10, 20]));
+    assert_eq!(crop_px(egui::Rect::from_min_max(egui::pos2(0.5, 0.5), egui::pos2(0.51, 0.9)), [20, 40]), None, "under a pixel wide");
+    let d = tmpdir("picfix");
+    let Some(fake) = imagemagick_tools(&d.join("tools")) else {
+        eprintln!("picture fixes: no ImageMagick, skipped");
+        return;
+    };
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(d.join("none")));
+    assert_eq!(magick(&crate::drives::Tools::current().unwrap()), None);
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    let prog = magick(&t).unwrap();
+    // A photo 40 × 20 as stored, upright 20 × 40.
+    let raw = d.join("raw.jpg");
+    assert!(std::process::Command::new(fake.join("magick")).args(["-size", "40x20", "xc:#c84"]).arg(&raw).status().unwrap().success());
+    let photo = d.join("photo.jpg");
+    let original = with_exif_orientation(&std::fs::read(&raw).unwrap(), 6);
+    std::fs::write(&photo, &original).unwrap();
+    let shown = |p: &Path| crate::imgdec::load(p, 64).map(|x| x.1);
+    assert_eq!(shown(&photo), Some([20, 40]));
+    assert_eq!(dims(&t, prog, &photo).unwrap(), [20, 40], "measured upright");
+    let trashed = |p: &Path| crate::trashcan::list().into_iter().filter(|it| it.original == p).count();
+    rotate(&t, prog, &photo, true, false).unwrap();
+    assert_eq!(shown(&photo), Some([40, 20]), "turned right from upright, no orientation left to apply twice");
+    assert_eq!(trashed(&photo), 1, "the original kept in the trash");
+    rotate(&t, prog, &photo, true, true).unwrap();
+    assert_eq!(shown(&photo), Some([20, 40]));
+    assert_eq!(trashed(&photo), 1, "a second turn keeps no second copy");
+    assert!(!d.join(".photo.jpg.part").exists());
+    assert_eq!(undo_replaced(&[photo.clone()]), 0);
+    assert_eq!(std::fs::read(&photo).unwrap(), original, "the original back, byte for byte");
+    // Copies.
+    let big = d.join("big.png");
+    std::fs::write(&big, png_bytes(400, 300, 3)).unwrap();
+    let half = resize(&t, prog, &big, Size::Scale(0.5)).unwrap().unwrap();
+    assert_eq!(half, d.join("big (200 px).png"));
+    assert_eq!(shown(&half), Some([200, 150]));
+    assert_eq!(resize(&t, prog, &big, Size::Fit(1920)).unwrap(), None);
+    let boxed = resize(&t, prog, &big, Size::Within(100, 100)).unwrap().unwrap();
+    assert_eq!((boxed.file_name().unwrap().to_str().unwrap(), shown(&boxed)), ("big (100 px).png", Some([100, 75])));
+    let again = resize(&t, prog, &big, Size::Scale(0.5)).unwrap().unwrap();
+    assert_eq!(again, d.join("big (200 px) (1).png"), "never over the first copy");
+    let long = resize(&t, prog, &photo, Size::Long(80)).unwrap().unwrap();
+    assert_eq!((long.file_name().unwrap().to_str().unwrap(), shown(&long)), ("photo (80 px).jpg", Some([40, 80])), "resized upright");
+    // A crop of the upright picture.
+    let c = crop(&t, prog, &photo, egui::Rect::from_min_max(egui::pos2(0.25, 0.0), egui::pos2(0.75, 0.5))).unwrap();
+    assert_eq!((c.file_name().unwrap().to_str().unwrap(), shown(&c)), ("photo (cropped).jpg", Some([10, 20])));
+    // A name with brackets and a colon.
+    let odd = d.join("shot [1]: png.png");
+    std::fs::write(&odd, png_bytes(30, 10, 1)).unwrap();
+    rotate(&t, prog, &odd, false, false).unwrap();
+    assert_eq!(shown(&odd), Some([10, 30]));
+    // Broken: refused, nothing changed or trashed.
+    let broken = d.join("broken.png");
+    std::fs::write(&broken, b"\x89PNG\r\n\x1a\nnot really").unwrap();
+    assert!(rotate(&t, prog, &broken, true, false).is_err());
+    assert_eq!(std::fs::read(&broken).unwrap(), b"\x89PNG\r\n\x1a\nnot really");
+    assert_eq!(trashed(&broken), 0);
+    assert!(!d.join(".broken.png.part").exists());
+    assert!(resize(&t, prog, &broken, Size::Scale(0.5)).is_err());
+    for it in crate::trashcan::list().into_iter().filter(|it| it.original.starts_with(&d)) {
+        let _ = crate::trashcan::purge(&it);
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

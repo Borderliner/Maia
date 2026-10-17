@@ -60,6 +60,7 @@ These are optional. Maia works without them and uses them when they are there:
 | `pdfinfo`, `pdftoppm` (poppler) | PDF pages in the inspector |
 | `soffice` (LibreOffice) | Word, Excel, PowerPoint and OpenDocument files in the inspector, with poppler |
 | `udisksctl` (udisks2), `lsblk` | mounting, unmounting and ejecting drives |
+| `magick` or `convert` (ImageMagick) | turning, resizing and cropping pictures |
 | `xdg-email` (xdg-utils) | Email: files attached to a new message in your mail app |
 | `lp`, `lpstat` (CUPS) | Print |
 | desktop thumbnailers | thumbnails for other formats, shared with your other apps |
@@ -93,7 +94,10 @@ Every binding can be changed from the command palette.
 
 An archive opens like a folder; right-click it for Extract Here, or right-click files
 for Compress. Set As Wallpaper, in a picture's menu, works on GNOME, KDE, XFCE,
-Cinnamon, MATE, sway, Hyprland (with hyprpaper or swww) and Noctalia. Connect To Server (in the menu, or type an `smb://`, `sftp://` or
+Cinnamon, MATE, sway, Hyprland (with hyprpaper or swww) and Noctalia. Its Picture menu
+turns pictures in place (Undo brings the original back from the trash) and saves
+smaller copies beside them; Crop works in the inspector: drag over what to keep and
+press Enter. Connect To Server (in the menu, or type an `smb://`, `sftp://` or
 `ftp://` address into Go To) opens network shares, which then stay in the sidebar's
 Network section. Right-click files for Tags to give them colour labels or named tags
 (kept on the files as extended attributes, which other programs can read). In a git

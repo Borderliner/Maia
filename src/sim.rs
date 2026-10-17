@@ -1017,7 +1017,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(133) {
+    match rng.below(134) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1364,6 +1364,43 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 }
                 s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
             }
+        }
+        133 => {
+            // A picture turned, resized or cropped (the real ImageMagick), from a menu or
+            // the palette; a crop dragged out and saved or let go.
+            let pics = root().join("home").read_dir().ok().and_then(|r| r.flatten().map(|d| d.path().join("Pictures/Trip")).find(|p| p.is_dir()));
+            if let Some(dir) = pics.filter(|_| rng.below(4) > 0) {
+                s.act("key ctrl+p");
+                s.act(&format!("text {}", dir.join(format!("img{:02}.png", rng.below(12))).display()));
+                s.act("key Enter");
+                s.settle();
+            }
+            match rng.below(3) {
+                0 => s.cmd(*rng.pick(&[Cmd::RotateLeft, Cmd::RotateRight, Cmd::ResizeHalf, Cmd::ResizeQuarter, Cmd::ResizeFit, Cmd::ResizeCustom])),
+                1 => {
+                    let (x, y) = p(rng);
+                    s.act(&format!("click {x:.0} {y:.0} right"));
+                    s.act(&format!("text {}", rng.pick(&["rotate", "half", "quarter", "1920", "other size", "crop"])));
+                    s.act("key Enter");
+                }
+                _ => s.cmd(Cmd::CropPicture),
+            }
+            s.idle(2);
+            if matches!(s.app.popup, Popup::Prompt { .. }) {
+                s.act("key ctrl+a");
+                s.act(&format!("text {}", rng.pick(&["50%", "64", "40 × 30", "nonsense", "0"])));
+                s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
+            }
+            let ir = s.app.panels.get(&s.app.active).and_then(|p| p.inspector_rect);
+            if let Some(ir) = ir.filter(|_| s.app.panels[&s.app.active].inspector.as_ref().is_some_and(|i| i.crop.is_some())) {
+                for _ in 0..1 + rng.below(3) {
+                    let (x0, y0) = (rng.f(ir.left(), ir.right()), rng.f(ir.top(), ir.bottom()));
+                    let (x1, y1) = (rng.f(ir.left(), ir.right()), rng.f(ir.top(), ir.bottom()));
+                    s.act(&format!("drag {x0:.0} {y0:.0} {x1:.0} {y1:.0}"));
+                }
+                s.act(&format!("key {}", rng.pick(&["Enter", "Escape", "ArrowDown"])));
+            }
+            s.idle(1 + rng.below(10));
         }
         121 => {
             // Sharing: code blocks, a web link or .gitignore, from the palette or a menu.
@@ -7394,6 +7431,156 @@ mod journeys {
         report("email-print", &s);
     }
 
+    /// Picture fixes with the real ImageMagick: offered in a picture's menu only; a
+    /// photo stored turned turned right in place, again from the palette, and Undo
+    /// bringing the original back byte for byte; copies fitted within 1920 px and at a
+    /// typed size, selected as they land; a crop dragged on the inspector's picture,
+    /// moved and stretched, saved with Enter at the size the footer said, and one
+    /// cancelled with Escape; at other font sizes and Spacing.
+    #[test]
+    fn picture_fixes() {
+        if !sandboxed() {
+            return;
+        }
+        let d = root().join("home/picfix");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let Some(fake) = crate::tests::imagemagick_tools(&root().join("picfix-tools")) else { return };
+        let raw = root().join("raw.jpg");
+        assert!(std::process::Command::new(fake.join("magick")).args(["-size", "400x240", "gradient:#e94-#36c"]).arg(&raw).status().unwrap().success());
+        let original = crate::tests::with_exif_orientation(&std::fs::read(&raw).unwrap(), 6);
+        std::fs::write(d.join("photo.jpg"), &original).unwrap();
+        png_file(&d.join("big.png"), 2400, 1600, 6);
+        std::fs::write(d.join("notes.txt"), "not a picture").unwrap();
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.cmd(ToggleInspector);
+        s.settle();
+        let shown = |name: &str| crate::imgdec::load(&d.join(name), 64).map(|x| x.1);
+        let right = |s: &mut Sim, name: &str| {
+            select_path(s, &d.join(name));
+            let row = row_text(s, name);
+            s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+            s.idle(2);
+        };
+        // Only for pictures.
+        right(&mut s, "notes.txt");
+        assert!(!some_text(&s, "Picture"));
+        s.act("key Escape");
+        // Turned right in place, from the menu.
+        assert_eq!(shown("photo.jpg"), Some([240, 400]));
+        right(&mut s, "photo.jpg");
+        s.click_text("Picture");
+        s.idle(2);
+        for t in ["Rotate left", "Rotate right", "Resize", "Crop…"] {
+            assert!(some_text(&s, t), "{t}");
+        }
+        s.click_text("Resize");
+        s.idle(2);
+        assert!(some_text(&s, "Fit within 1920 px") && some_text(&s, "Other size…"));
+        look(&mut s, "the picture menu");
+        shot_still(&mut s, "picture-menu");
+        s.click_text("Rotate right");
+        wait_until(&mut s, "the turn", 15, |s| s.app.undo.last().is_some_and(|u| u.label == "Rotate photo.jpg"));
+        assert_eq!(shown("photo.jpg"), Some([400, 240]));
+        let undos = s.app.undo.len();
+        palette_run(&mut s, "Rotate Right");
+        wait_until(&mut s, "the second turn", 15, |_| shown("photo.jpg") == Some([240, 400]));
+        s.idle(2);
+        assert_eq!(s.app.undo.len(), undos, "one Undo for both turns");
+        assert_eq!(crate::trashcan::list().into_iter().filter(|it| it.original == d.join("photo.jpg")).count(), 1);
+        s.act("key ctrl+z");
+        s.settle();
+        assert_eq!(std::fs::read(d.join("photo.jpg")).unwrap(), original, "the original back");
+        // Copies, selected as they land.
+        right(&mut s, "big.png");
+        s.click_text("Picture");
+        s.idle(1);
+        s.click_text("Resize");
+        s.idle(1);
+        s.click_text("Fit within 1920 px");
+        wait_until(&mut s, "the fitted copy", 15, |s| toast_is(s, "Saved big (1920 px).png"));
+        wait_until(&mut s, "the copy selected", 10, |s| s.tab().target_entries().first().is_some_and(|e| e.name == "big (1920 px).png"));
+        assert_eq!(shown("big (1920 px).png"), Some([1920, 1280]));
+        select_path(&mut s, &d.join("big.png"));
+        wait_until(&mut s, "big.png shown", 10, |s| s.app.thumbs.dims(&d.join("big.png")).is_some());
+        palette_run(&mut s, "Resize To…");
+        s.idle(2);
+        assert!(matches!(&s.app.popup, Popup::Prompt { text, .. } if text == "2400 × 1600"), "its own size to start from");
+        look(&mut s, "the size prompt");
+        shot_still(&mut s, "resize-prompt");
+        s.act("key ctrl+a");
+        s.act("text 25%");
+        s.act("key Enter");
+        wait_until(&mut s, "the quarter copy", 15, |s| toast_is(s, "Saved big (600 px).png"));
+        palette_run(&mut s, "Resize To…");
+        s.act("key ctrl+a");
+        s.act("text huge");
+        s.act("key Enter");
+        assert!(toast_is(&s, "Type a size such as 1280, 1280 × 720 or 50%"));
+        s.app.toast = None;
+        // A crop, drawn, moved and stretched, saved with Enter.
+        let n = launched().len();
+        right(&mut s, "photo.jpg");
+        s.click_text("Picture");
+        s.idle(1);
+        s.click_text("Crop…");
+        wait_until(&mut s, "the picture", 10, |s| some_text(s, "Drag over the part to keep"));
+        look(&mut s, "crop started");
+        s.shot("crop-start");
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
+        let c = pos2(ir.center().x, ir.top() + 30.0 + (ir.height() - 30.0) / 2.0);
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", c.x - 80.0, c.y - 120.0, c.x + 60.0, c.y + 100.0));
+        s.idle(2);
+        let sel = |s: &Sim| inspector(s).crop.as_ref().and_then(|c| c.sel);
+        let first = sel(&s).unwrap_or_else(|| s.fail("a crop drawn"));
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", c.x, c.y, c.x + 20.0, c.y + 10.0));
+        s.idle(2);
+        let moved = sel(&s).unwrap();
+        assert!((moved.width() - first.width()).abs() < 1e-4 && moved.min.x > first.min.x, "moved, same size: {first:?} -> {moved:?}");
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", c.x + 80.0, c.y, c.x + 120.0, c.y));
+        s.idle(2);
+        let wide = sel(&s).unwrap();
+        assert!(wide.max.x > moved.max.x && wide.min.x == moved.min.x, "stretched by its right edge: {moved:?} -> {wide:?}");
+        let [_, _, w, h] = crate::picfix::crop_px(wide, [240, 400]).unwrap();
+        let hint = format!("{w} × {h}  ·  Enter to crop");
+        assert!(some_text(&s, &hint), "the footer says {hint:?}");
+        look(&mut s, "crop drawn");
+        s.shot("crop-drawn");
+        s.act("key Enter");
+        wait_until(&mut s, "the cropped copy", 15, |s| toast_is(s, "Saved photo (cropped).jpg"));
+        assert_eq!(shown("photo (cropped).jpg"), Some([w, h]));
+        assert_eq!(launched().len(), n, "Enter cropped, it opened nothing");
+        assert!(inspector(&s).crop.is_none());
+        // Cancelled with Escape; left by moving on.
+        select_path(&mut s, &d.join("photo.jpg"));
+        palette_run(&mut s, "Crop…");
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", c.x - 40.0, c.y - 40.0, c.x + 40.0, c.y + 40.0));
+        for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
+            s.app.cfg.font_size = font;
+            s.app.cfg.spacing = spacing;
+            s.idle(3);
+            look(&mut s, &format!("crop at font {font}, spacing {spacing}"));
+        }
+        s.act("key Escape");
+        assert!(inspector(&s).crop.is_none());
+        assert!(!d.join("photo (cropped) (1).jpg").exists());
+        palette_run(&mut s, "Crop…");
+        assert!(inspector(&s).crop.is_some());
+        select_path(&mut s, &d.join("notes.txt"));
+        s.idle(2);
+        assert!(inspector(&s).crop.is_none(), "another file: no crop");
+        report("picfix", &s);
+    }
+
     #[test]
     fn monkey_sessions() {
         if !sandboxed() {
@@ -7438,6 +7625,8 @@ mod journeys {
             for t in ["gsettings", "plasma-apply-wallpaperimage", "noctalia"] {
                 crate::tests::fake_tool(&drv, t, "exit 0");
             }
+            // ImageMagick, the real one.
+            let _ = crate::tests::imagemagick_tools(&drv);
             // A mail opener and CUPS with two printers.
             crate::tests::fake_tool(&drv, "xdg-email", "exit 0");
             crate::tests::fake_tool(&drv, "lpstat", "case \"$1\" in -e) printf 'Office_Laser\\nHP_ENVY_6000\\n';; -d) echo 'system default destination: HP_ENVY_6000';; esac");

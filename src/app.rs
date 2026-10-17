@@ -64,6 +64,8 @@ pub enum UndoKind {
     Move(Vec<(PathBuf, PathBuf)>),
     Created(Vec<PathBuf>),
     Trashed(Vec<PathBuf>),
+    /// Pictures changed in place, their originals in the trash.
+    Replaced(Vec<PathBuf>),
 }
 
 pub struct App {
@@ -2043,7 +2045,7 @@ impl App {
                     Err(e) => ShareDone { copy: None, open: vec![], toast: format!("Couldn't make a link: {e}"), rescan: None },
                 });
             }
-            Cmd::SetWallpaper | Cmd::Email | Cmd::Print => crate::errands::run(self, cmd),
+            Cmd::SetWallpaper | Cmd::Email | Cmd::Print | Cmd::RotateLeft | Cmd::RotateRight | Cmd::ResizeHalf | Cmd::ResizeQuarter | Cmd::ResizeFit | Cmd::ResizeCustom | Cmd::CropPicture => crate::errands::run(self, cmd),
             Cmd::CompareFiles => {
                 let files: Vec<PathBuf> = self.tab().target_entries().iter().filter(|e| !e.is_dir).map(|e| e.path.clone()).collect();
                 let [a, b] = files.as_slice() else {
@@ -2612,6 +2614,7 @@ impl App {
                 }
                 errs += best.values().filter(|it| crate::trashcan::restore(it).is_err()).count();
             }
+            UndoKind::Replaced(paths) => errs += crate::picfix::undo_replaced(paths),
         }
         for p in self.panels.values_mut() {
             p.tab_mut().reload();

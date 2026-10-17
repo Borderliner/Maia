@@ -162,6 +162,8 @@ pub struct Inspector {
     pub env_all: bool,
     /// Two files compared, shown instead of the preview while one of them is selected.
     pub compare: Option<Box<crate::filediff::Compare>>,
+    /// A crop being drawn on the picture shown.
+    pub crop: Option<crate::picfix::Crop>,
 }
 
 /// Test-only views of the preview state (simulations check behaviour, not pixels).
@@ -301,8 +303,12 @@ impl Inspector {
         }
     }
 
-    /// Keys a clicked data tree or database list takes while it has the keyboard.
+    /// Keys a clicked data tree or database list takes while it has the keyboard; a
+    /// crop takes Enter and Escape.
     pub fn takes(&self, k: egui::Key) -> bool {
+        if self.crop.is_some() && matches!(k, egui::Key::Enter | egui::Key::Escape) {
+            return true;
+        }
         match &self.content {
             Content::Text { rich: Some(r), .. } => matches!(&**r, Rich::Data(t) if t.takes(k)),
             Content::Sqlite(v) => v.takes(k),
@@ -311,6 +317,14 @@ impl Inspector {
     }
 
     pub fn key(&mut self, k: egui::Key) {
+        if let Some(c) = self.crop.as_mut() {
+            match k {
+                egui::Key::Enter => c.save = c.sel.is_some(),
+                egui::Key::Escape => self.crop = None,
+                _ => {}
+            }
+            return;
+        }
         match &mut self.content {
             Content::Text { rich: Some(r), .. } => {
                 if let Rich::Data(t) = &mut **r {
@@ -370,6 +384,7 @@ impl Default for Inspector {
             era: 0,
             env_all: false,
             compare: None,
+            crop: None,
         }
     }
 }
@@ -786,6 +801,10 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         ins.compare = None;
     }
     ui.painter().rect_filled(rect, CornerRadius::ZERO, pal.bg);
+    // A crop belongs to the picture it was started on.
+    if ins.crop.as_ref().is_some_and(|c| target.as_ref().map(|e| &e.path) != Some(&c.path)) {
+        ins.crop = None;
+    }
     let key = target.as_ref().map(|e| (e.path.clone(), e.modified));
     if key != ins.current {
         let same = ins.current.as_ref().map(|c| &c.0) == key.as_ref().map(|k| &k.0) && key.is_some();
@@ -1430,7 +1449,8 @@ fn image_view(ui: &mut Ui, body: Rect, e: &Entry, ins: &mut Inspector, env: &mut
             }
         }
     }
-    if resp.dragged() {
+    // While cropping, a drag draws the crop instead of moving the picture.
+    if resp.dragged() && ins.crop.is_none() {
         ins.pan += resp.drag_delta();
     }
     if resp.double_clicked() {
@@ -1474,9 +1494,15 @@ fn image_view(ui: &mut Ui, body: Rect, e: &Entry, ins: &mut Inspector, env: &mut
         let to_m = |p: Pos2| pos2(mr.left() + (p.x - img_rect.left()) / size.x * mw, mr.top() + (p.y - img_rect.top()) / size.y * mh);
         painter.rect_stroke(Rect::from_min_max(to_m(vis.min), to_m(vis.max)), CornerRadius::ZERO, Stroke::new(1.5, pal.accent), StrokeKind::Middle);
     }
+    if let Some(c) = ins.crop.as_mut() {
+        c.ui(ui, &resp, img_rect, clip, &pal);
+    }
     // Footer zoom %
     let pct = scale * ppp * 100.0;
-    let label = format!("{} × {}  ·  {:.0}%", dims[0], dims[1], pct);
+    let label = match &ins.crop {
+        Some(c) => c.hint(dims),
+        None => format!("{} × {}  ·  {:.0}%", dims[0], dims[1], pct),
+    };
     let g = ui.painter().layout_no_wrap(label, FontId::proportional(11.5), pal.text_dim);
     let r = Rect::from_min_size(pos2(body.right() - g.size().x - 18.0, body.bottom() - 24.0), g.size() + vec2(10.0, 6.0));
     ui.painter().rect_filled(r, CornerRadius::same(4), pal.raised.gamma_multiply(0.9));

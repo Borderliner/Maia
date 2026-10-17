@@ -71,14 +71,17 @@ impl Runner {
 /// Run a program to its end and return what it printed, or the first line of what it
 /// said went wrong. Killed after `timeout`; dies with Maia.
 pub fn output(c: Command, timeout: Duration) -> Result<Vec<u8>, String> {
-    output_to(c, timeout, None)
+    output_io(c, timeout, None, None)
 }
 
-/// `output`, with what it prints written to `out` instead.
-pub fn output_to(c: Command, timeout: Duration, out: Option<std::fs::File>) -> Result<Vec<u8>, String> {
+/// `output`, reading `input` and with what it prints written to `out` instead.
+pub fn output_io(c: Command, timeout: Duration, input: Option<std::fs::File>, out: Option<std::fs::File>) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let mut c = crate::media::tool_cmd(c);
     c.stderr(Stdio::piped());
+    if let Some(f) = input {
+        c.stdin(Stdio::from(f));
+    }
     match out {
         Some(f) => c.stdout(Stdio::from(f)),
         None => c.stdout(Stdio::piped()),
@@ -117,8 +120,23 @@ pub fn output_to(c: Command, timeout: Duration, out: Option<std::fs::File>) -> R
 }
 
 /// Hand finished jobs' results to the app: the toast, Undo, fresh previews of changed
-/// files and the new file selected.
+/// files and the new file selected. A crop finished with Enter starts here.
 pub fn pump(app: &mut crate::app::App) {
+    let crops: Vec<(PathBuf, egui::Rect)> = app
+        .panels
+        .values_mut()
+        .filter_map(|p| p.inspector.as_mut())
+        .filter(|i| i.crop.as_ref().is_some_and(|c| c.save))
+        .filter_map(|i| i.crop.take().and_then(|c| Some((c.path, c.sel?))))
+        .collect();
+    for (path, sel) in crops {
+        let Some((tools, prog)) = imagemagick() else { continue };
+        let ctx = app.ctx.clone();
+        app.errands.run(&ctx, move || match crate::picfix::crop(&tools, prog, &path, sel) {
+            Ok(dest) => Done { toast: format!("Saved {}", name(&dest)), undo: Some(crate::app::UndoEntry { label: format!("Crop {}", name(&path)), kind: crate::app::UndoKind::Created(vec![dest.clone()]) }), changed: vec![], select: Some(dest) },
+            Err(e) => Done::say(format!("Couldn't crop {}: {e}", name(&path))),
+        });
+    }
     while let Some(d) = app.errands.poll() {
         for p in &d.changed {
             app.thumbs.invalidate(p);
@@ -147,6 +165,54 @@ pub fn pump(app: &mut crate::app::App) {
     }
 }
 
+fn name(p: &std::path::Path) -> String {
+    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// ImageMagick, through the tools this app may run.
+fn imagemagick() -> Option<(crate::drives::Tools, &'static str)> {
+    let t = crate::drives::Tools::current()?;
+    let p = crate::picfix::magick(&t)?;
+    Some((t, p))
+}
+
+/// "photo.jpg", or "3 pictures".
+fn what(paths: &[PathBuf]) -> String {
+    match paths {
+        [p] => name(p),
+        ps => format!("{} pictures", ps.len()),
+    }
+}
+
+/// Copies of `pics` at `size`, beside them.
+fn resize(app: &mut crate::app::App, pics: Vec<PathBuf>, size: crate::picfix::Size) {
+    let Some((tools, prog)) = imagemagick() else {
+        app.toast("Changing pictures needs ImageMagick");
+        return;
+    };
+    let ctx = app.ctx.clone();
+    app.errands.run(&ctx, move || {
+        let (mut made, mut err) = (vec![], None);
+        for p in &pics {
+            match crate::picfix::resize(&tools, prog, p, size) {
+                Ok(Some(d)) => made.push(d),
+                Ok(None) => {}
+                Err(e) => err = Some(format!("Couldn't resize {}: {e}", name(p))),
+            }
+        }
+        let toast = match (err, made.as_slice()) {
+            (Some(e), _) => e,
+            (None, [one]) => format!("Saved {}", name(one)),
+            (None, []) if matches!(size, crate::picfix::Size::Fit(_)) => format!("{} already within 1920 px", if pics.len() == 1 { "It's" } else { "They're" }),
+            (None, []) => format!("{} already that size", if pics.len() == 1 { "It's" } else { "They're" }),
+            (None, many) => format!("Saved {} resized copies", many.len()),
+        };
+        let undo = (!made.is_empty()).then(|| crate::app::UndoEntry { label: format!("Resize {}", what(&pics)), kind: crate::app::UndoKind::Created(made.clone()) });
+        let select = (made.len() == 1).then(|| made[0].clone());
+        Done { toast, undo, changed: vec![], select }
+    });
+}
+
 /// The commands that hand work to another program.
 pub fn run(app: &mut crate::app::App, cmd: crate::commands::Cmd) {
     use crate::commands::Cmd;
@@ -170,6 +236,68 @@ pub fn run(app: &mut crate::app::App, cmd: crate::commands::Cmd) {
                     Err(e) => Done::say(e),
                 }
             });
+        }
+        Cmd::RotateLeft | Cmd::RotateRight | Cmd::ResizeHalf | Cmd::ResizeQuarter | Cmd::ResizeFit | Cmd::ResizeCustom | Cmd::CropPicture => {
+            let pics: Vec<PathBuf> = files.into_iter().filter(|p| crate::picfix::is_picture(&p.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default())).collect();
+            if pics.is_empty() {
+                app.toast("Select pictures");
+                return;
+            }
+            let Some((tools, prog)) = imagemagick() else {
+                app.toast("Changing pictures needs ImageMagick");
+                return;
+            };
+            match cmd {
+                Cmd::RotateLeft | Cmd::RotateRight => {
+                    // Another turn of the same pictures: their originals are in the
+                    // trash already, and one Undo goes back to them.
+                    let again = matches!(app.undo.last(), Some(crate::app::UndoEntry { kind: crate::app::UndoKind::Replaced(p), .. }) if *p == pics);
+                    let right = cmd == Cmd::RotateRight;
+                    app.errands.run(&ctx, move || {
+                        let (mut done, mut err) = (vec![], None);
+                        for p in &pics {
+                            match crate::picfix::rotate(&tools, prog, p, right, again) {
+                                Ok(()) => done.push(p.clone()),
+                                Err(e) => err = Some(format!("Couldn't turn {}: {e}", name(p))),
+                            }
+                        }
+                        let undo = (!again && !done.is_empty()).then(|| crate::app::UndoEntry { label: format!("Rotate {}", what(&done)), kind: crate::app::UndoKind::Replaced(done.clone()) });
+                        Done { toast: err.unwrap_or_default(), undo, changed: done, select: None }
+                    });
+                }
+                Cmd::ResizeHalf => resize(app, pics, crate::picfix::Size::Scale(0.5)),
+                Cmd::ResizeQuarter => resize(app, pics, crate::picfix::Size::Scale(0.25)),
+                Cmd::ResizeFit => resize(app, pics, crate::picfix::Size::Fit(1920)),
+                Cmd::ResizeCustom => {
+                    // The picture's own size to start from, when it has been shown.
+                    let start = match pics.as_slice() {
+                        [p] => app.thumbs.dims(p).map(|[w, h]| format!("{w} × {h}")).unwrap_or_default(),
+                        _ => String::new(),
+                    };
+                    app.popup = crate::popups::Popup::prompt(
+                        "Resize to a longer side, width × height or a percentage",
+                        start,
+                        Box::new(move |app: &mut crate::app::App, text: String| match crate::picfix::parse_size(&text) {
+                            Some(size) => resize(app, pics, size),
+                            None => app.toast("Type a size such as 1280, 1280 × 720 or 50%"),
+                        }),
+                    );
+                }
+                _ => {
+                    let path = pics[0].clone();
+                    let id = app.active;
+                    let Some(p) = app.panels.get_mut(&id) else { return };
+                    // The preview follows the cursor: put it on the picture.
+                    let t = p.tab_mut();
+                    if let Some(i) = t.entries.iter().position(|e| e.path == path) {
+                        t.cursor = Some(i as u32);
+                    }
+                    let ins = p.inspector.get_or_insert_with(crate::inspector::Inspector::default);
+                    ins.git = None;
+                    ins.compare = None;
+                    ins.crop = Some(crate::picfix::Crop::new(path));
+                }
+            }
         }
         Cmd::Email => match crate::sendto::email(&files) {
             Ok(()) => app.toast("Opening a new email"),

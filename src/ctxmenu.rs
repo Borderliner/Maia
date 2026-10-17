@@ -279,6 +279,23 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         items.push(Item::sep());
         items.push(Item::labeled(Cmd::Rename, if single { "Rename" } else { "Rename All (inline)" }));
         items.push(Item::cmd(Cmd::Duplicate));
+        // Pictures, with ImageMagick to change them.
+        if ents.iter().all(|e| !e.1 && crate::picfix::is_picture(&e.3)) && crate::drives::Tools::current().is_some_and(|t| crate::picfix::magick(&t).is_some()) {
+            let mut kids = vec![
+                Item::labeled(Cmd::RotateLeft, "Rotate left"),
+                Item::labeled(Cmd::RotateRight, "Rotate right"),
+                Item::sub("resize", "Resize", vec![
+                    Item::labeled(Cmd::ResizeHalf, "Half size"),
+                    Item::labeled(Cmd::ResizeQuarter, "Quarter size"),
+                    Item::labeled(Cmd::ResizeFit, "Fit within 1920 px"),
+                    Item::labeled(Cmd::ResizeCustom, "Other size…"),
+                ]),
+            ];
+            if single && crate::picfix::can_crop(&ents[0].3) {
+                kids.push(Item::labeled(Cmd::CropPicture, "Crop…"));
+            }
+            items.push(Item::sub("picture", "Picture", kids));
+        }
         if crate::archive::available() {
             if ents.iter().any(|e| !e.1 && crate::archive::is_archive(&e.0.to_string_lossy())) {
                 items.push(Item::cmd(Cmd::ExtractHere));
