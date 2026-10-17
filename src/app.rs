@@ -711,7 +711,16 @@ impl App {
                 (Op::Mount, Ok(_)) => self.toast(format!("Mounted {name}")),
                 (Op::Unmount, Ok(_)) => self.toast(format!("Unmounted {name}")),
                 (Op::Eject, Ok(_)) => self.toast(format!("{name} can be safely removed")),
-                (op, Err(e)) => self.toast(format!("Couldn't {} {name}: {e}", op.verb())),
+                (op, Err(e)) => {
+                    let msg = format!("Couldn't {} {name}: {e}", op.verb());
+                    // Something has the drive open: say what, unless a dialog is up. The
+                    // list says why it opened; a toast as well would say it twice.
+                    if crate::holders::says_busy(&e) && !job.drive.mounts.is_empty() && matches!(self.popup, Popup::None) {
+                        self.popup = crate::holders::open(&self.ctx, crate::holders::What::Paths(job.drive.mounts.clone()), Some(msg));
+                    } else {
+                        self.toast(msg);
+                    }
+                }
             }
         }
     }
@@ -1801,6 +1810,18 @@ impl App {
                 }
             }
             Cmd::RecentProjects => self.popup = crate::projects::open(self, &ctx),
+            Cmd::WhatsUsing => {
+                let t = self.tab();
+                let mut paths: Vec<PathBuf> = t.target_entries().iter().filter(|e| tab::drive_dev(&e.path).is_none()).map(|e| e.path.clone()).collect();
+                if paths.is_empty() && !tab::is_computer(&t.path) {
+                    paths.push(t.path.clone());
+                }
+                match paths.is_empty() {
+                    true => self.toast("Select what to look for"),
+                    false => self.popup = crate::holders::open(&ctx, crate::holders::What::Paths(paths), None),
+                }
+            }
+            Cmd::WhatsUsingPort => self.popup = crate::holders::open(&ctx, crate::holders::What::Ports, None),
             Cmd::FindDuplicates => match crate::devtools::target_dir(self) {
                 Some(d) => self.popup = crate::dupes::open(&ctx, d),
                 None => self.toast("Find Duplicates needs a folder"),

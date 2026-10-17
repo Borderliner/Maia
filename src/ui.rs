@@ -1603,7 +1603,15 @@ impl App {
                             let n = p.errors.len();
                             let errs = p.errors.clone();
                             let denied = p.denied.clone();
+                            let busy = p.busy.clone();
                             drop(p);
+                            if done && !busy.is_empty() {
+                                let b = ui.add(egui::Button::new(egui::RichText::new("What's Using It").small()));
+                                note_control(ui, b.rect, "job holders");
+                                if b.clicked() {
+                                    self.actions.push(Action::Open(crate::holders::open(ctx, crate::holders::What::Paths(busy), None)));
+                                }
+                            }
                             // Refused for lack of permission: offer the same again as administrator.
                             let task = match &j.kind {
                                 crate::ops::OpKind::Copy { dest, .. } if done && !denied.is_empty() => Some(crate::admin::Task::Copy { srcs: denied, dest: dest.clone() }),

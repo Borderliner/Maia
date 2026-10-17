@@ -31,6 +31,7 @@ mod gitchanges;
 mod gitlog;
 mod gitstatus;
 mod gitwork;
+mod holders;
 mod icons;
 mod imgdec;
 mod inspector;

@@ -1017,7 +1017,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(136) {
+    match rng.below(138) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1621,6 +1621,50 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.act(&format!("key {}", rng.pick(&["Enter", "ctrl+Enter", "Escape", "Escape"])));
             }
             s.settle();
+        }
+        136 => {
+            // What's Using This…: on the selection or the folder, from the palette or a
+            // menu; rows walked, Stop asked and answered either way, refreshed.
+            match rng.below(2) {
+                0 => s.cmd(Cmd::WhatsUsing),
+                _ => {
+                    let (x, y) = p(rng);
+                    s.act(&format!("click {x:.0} {y:.0} right"));
+                    s.act("text using");
+                    s.act("key Enter");
+                }
+            }
+            s.idle(2 + rng.below(10));
+            for _ in 0..1 + rng.below(5) {
+                if !matches!(s.app.popup, Popup::Holders(_)) {
+                    break;
+                }
+                match rng.below(4) {
+                    0 => click_control_at(s, rng.pick(&["holder stop", "holder confirm", "holder cancel", "holder refresh", "holder close"])),
+                    1 => s.act("key ctrl+r"),
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "Enter", "Escape"]))),
+                }
+                s.idle(1 + rng.below(8));
+            }
+            if matches!(s.app.popup, Popup::Holders(_)) && rng.below(2) == 0 {
+                s.act("key Escape");
+                s.act("key Escape");
+            }
+        }
+        137 => {
+            // What's Using a Port…: a number or a name typed, rows walked, Stop or not.
+            s.cmd(Cmd::WhatsUsingPort);
+            s.idle(2 + rng.below(10));
+            for _ in 0..rng.below(5) {
+                match rng.below(3) {
+                    0 => s.act(&format!("text {}", rng.pick(&["8", "80", "443", "5353", "sleep", "x"]))),
+                    1 => click_control_at(s, rng.pick(&["holder stop", "holder cancel", "holder refresh"])),
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "Backspace", "Enter", "Escape"]))),
+                }
+            }
+            if matches!(s.app.popup, Popup::Holders(_)) {
+                s.act(&format!("key {}", rng.pick(&["Escape", "Escape", "Enter"])));
+            }
         }
         _ => {
             s.note("idle".into());
@@ -3039,7 +3083,8 @@ mod journeys {
         let r = sidebar_text(&s, "Busy Stick").unwrap_or_else(|| s.fail("busy stick in the sidebar"));
         s.act(&format!("move {:.0} {:.0}", r.center().x, r.center().y));
         click_control(&mut s, "eject button");
-        wait_until(&mut s, "eject refused", 10, |s| toast_is(s, "Couldn't eject Busy Stick: Target is busy"));
+        wait_until(&mut s, "eject refused, saying what holds it", 10, |s| matches!(&s.app.popup, Popup::Holders(h) if h.why.as_deref() == Some("Couldn't eject Busy Stick: Target is busy")));
+        s.act("key Escape");
         assert!(s.tab().entries.iter().any(|e| e.name == "Busy Stick"));
         look(&mut s, "after a refused eject");
 
@@ -7947,6 +7992,170 @@ mod journeys {
         s.act("key Escape");
         assert!(!s.popup_open());
         report("recent projects", &s);
+    }
+
+    /// What's Using This… from a folder's menu lists a `sleep` this test started working
+    /// in it, as the user's own, with its PID; Stop asks first, then ends it and the list
+    /// empties. One that ignores SIGTERM is still there a few seconds later and is offered
+    /// Force Stop, asked again. What's Using a Port… lists a port only a child of the
+    /// test listens on, found by its number, and stops it. A move that hit a busy file
+    /// offers the list from its card, a refused eject opens it. Nothing the test didn't
+    /// start is ever signalled.
+    #[test]
+    fn whats_using_files_and_ports() {
+        if !sandboxed() {
+            return;
+        }
+        use std::process::{Command, Stdio};
+        struct Kids(Vec<std::process::Child>);
+        impl Drop for Kids {
+            fn drop(&mut self) {
+                for c in &mut self.0 {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+            }
+        }
+        let mut kids = Kids(vec![]);
+        let spawn = |cmd: &mut Command, kids: &mut Kids| -> u32 {
+            let c = cmd.stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+            let pid = c.id();
+            crate::holders::OURS.lock().unwrap().push(pid);
+            kids.0.push(c);
+            // Until it is sleep, not the fork on its way there.
+            let t0 = Instant::now();
+            while crate::holders::info(pid).is_none_or(|p| p.name != "sleep") && t0.elapsed().as_secs() < 5 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            pid
+        };
+        let refused = crate::holders::REFUSED.lock().unwrap().len();
+        let dr = fake_drives("holders");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(dr.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let d = root().join("home/holders");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("Photos")).unwrap();
+        std::fs::write(d.join("notes.txt"), "words\n").unwrap();
+        let a = spawn(Command::new("sleep").arg("120").current_dir(d.join("Photos")).stdin(Stdio::null()), &mut kids);
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        fn st(s: &Sim) -> &crate::holders::State {
+            match &s.app.popup {
+                Popup::Holders(h) => h,
+                _ => s.fail("What's Using is not open"),
+            }
+        }
+        let r = list_text(&s, "Photos");
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(2);
+        s.act("text using");
+        s.idle(1);
+        assert!(some_text(&s, "What's Using This…"), "in the folder's menu");
+        s.act("key Enter");
+        wait_until(&mut s, "the processes read", 10, |s| st(s).scanned);
+        let rows: Vec<(u32, String, Option<crate::holders::Hold>)> = st(&s).rows.iter().map(|r| (r.proc.as_ref().map_or(0, |p| p.pid), r.proc.as_ref().map(|p| p.name.clone()).unwrap_or_default(), r.hold.clone())).collect();
+        assert_eq!(rows, [(a, "sleep".to_string(), Some(crate::holders::Hold::Inside(d.join("Photos"))))]);
+        assert!(some_text(&s, "What's using “Photos”") && some_text(&s, "Yours") && some_text(&s, "sleep"));
+        assert!(some_text(&s, &format!("PID {a} · working in it")), "the PID, and how, from the folder asked about");
+        look(&mut s, "what's using a folder");
+        s.idle(12);
+        s.shot("whats-using");
+        click_control(&mut s, "holder stop");
+        assert!(some_text(&s, &format!("Stop sleep ({a})? It may lose what it hasn't saved.")), "asks first");
+        assert!(alive(a), "not before the answer");
+        click_control(&mut s, "holder confirm");
+        wait_until(&mut s, "stopped", 10, |_| !alive(a));
+        wait_until(&mut s, "the list read again", 10, |s| st(s).scanned && st(s).rows.is_empty() && st(s).said.is_some());
+        assert!(some_text(&s, &format!("Stopped sleep ({a})")));
+        assert!(some_text(&s, "Nothing of yours is using it. Other users' programs can only be seen with administrator access."));
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        // Ignores SIGTERM, with the notes open on its input: Force Stop, asked again.
+        let b = spawn(Command::new("sh").args(["-c", "trap '' TERM; exec sleep 120"]).current_dir(&d).stdin(std::fs::File::open(d.join("notes.txt")).unwrap()), &mut kids);
+        s.cmd(Refresh);
+        s.settle();
+        select_path(&mut s, &d.join("notes.txt"));
+        palette_run(&mut s, "What's Using This");
+        wait_until(&mut s, "the holder of the notes", 10, |s| st(s).scanned && st(s).rows.iter().any(|r| r.proc.as_ref().is_some_and(|p| p.pid == b)));
+        assert_eq!(st(&s).rows[0].hold, Some(crate::holders::Hold::Open(d.join("notes.txt"))));
+        assert!(some_text(&s, &format!("PID {b} · has it open")));
+        s.act("key Enter");
+        assert!(some_text(&s, &format!("Stop sleep ({b})? It may lose what it hasn't saved.")));
+        s.act("key Enter");
+        wait_until(&mut s, "still running after SIGTERM", 10, |s| st(s).stubborn.iter().any(|p| p.pid == b));
+        assert!(alive(b));
+        s.idle(2);
+        assert!(some_text(&s, &format!("Force sleep ({b}) to stop? Anything it hasn't saved is lost.")), "offered, asked first");
+        look(&mut s, "force stop");
+        s.idle(12);
+        s.shot("whats-using-force");
+        s.act("key Enter");
+        wait_until(&mut s, "forced", 10, |_| !alive(b));
+        s.act("key Escape");
+        // A port only a child of the test listens on.
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hp = held.local_addr().unwrap().port();
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&held);
+        let mut cmd = Command::new("sleep");
+        cmd.arg("120");
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut cmd, move || if libc::dup2(fd, 200) < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+        }
+        let c = spawn(&mut cmd, &mut kids);
+        drop(held);
+        palette_run(&mut s, "What's Using a Port");
+        wait_until(&mut s, "the ports read", 10, |s| st(s).scanned && st(s).rows.iter().any(|r| r.port.as_ref().is_some_and(|p| p.port == hp)));
+        s.act(&format!("text {hp}"));
+        s.idle(2);
+        let shown = st(&s).shown();
+        assert_eq!(shown.len(), 1, "found by its number");
+        assert_eq!(st(&s).rows[shown[0]].proc.as_ref().map(|p| p.pid), Some(c));
+        assert!(some_text(&s, &hp.to_string()) && some_text(&s, "TCP · 127.0.0.1") && some_text(&s, &format!("PID {c}")));
+        look(&mut s, "what's using a port");
+        s.idle(12);
+        s.shot("whats-using-port");
+        s.act("key Enter");
+        s.act("key Enter");
+        wait_until(&mut s, "the listener stopped", 10, |_| !alive(c));
+        wait_until(&mut s, "the port gone", 10, |s| st(s).scanned && !st(s).rows.iter().any(|r| r.port.as_ref().is_some_and(|p| p.port == hp)));
+        assert!(some_text(&s, "Nothing is listening on a port"), "nothing else listens in the sandbox");
+        s.act("key Escape");
+        // A move that something was using: its card offers the list.
+        let progress = std::sync::Arc::new(std::sync::Mutex::new(crate::ops::Progress { total_items: 1, done_items: 1, finished: true, errors: vec![format!("{}: Device or resource busy (os error 16)", d.join("Photos").display())], busy: vec![d.join("Photos")], ..Default::default() }));
+        s.app.jobs.push(crate::ops::Job { id: 9998, label: "Moving 1 item".into(), kind: crate::ops::OpKind::Move { srcs: vec![d.join("Photos")], dest: d.join("Elsewhere"), decide: Default::default() }, progress, cancel: Default::default(), pause: Default::default(), started: Instant::now(), finished_at: None, show_errors: false });
+        s.idle(3);
+        click_control(&mut s, "job holders");
+        assert!(matches!(&st(&s).what, crate::holders::What::Paths(p) if *p == [d.join("Photos")]));
+        s.act("key Escape");
+        s.app.jobs.clear();
+        // A refused eject says what holds the stick.
+        let stick = dr.join("media/Busy Stick");
+        let e = spawn(Command::new("sleep").arg("120").current_dir(&stick).stdin(Stdio::null()), &mut kids);
+        s.settle();
+        let r = sidebar_text(&s, "Busy Stick").unwrap_or_else(|| s.fail("the busy stick in the sidebar"));
+        s.act(&format!("move {:.0} {:.0}", r.center().x, r.center().y));
+        click_control(&mut s, "eject button");
+        wait_until(&mut s, "the eject refused", 10, |s| matches!(&s.app.popup, Popup::Holders(_)) && st(s).scanned);
+        assert_eq!(st(&s).why.as_deref(), Some("Couldn't eject Busy Stick: Target is busy"));
+        assert!(st(&s).rows.iter().any(|r| r.proc.as_ref().is_some_and(|p| p.pid == e)), "the sleep inside it");
+        look(&mut s, "what's using a busy stick");
+        s.idle(12);
+        s.shot("whats-using-busy");
+        for (w, h) in [(520.0, 340.0), (640.0, 480.0), (1280.0, 800.0)] {
+            s.resize(w, h);
+            look(&mut s, &format!("what's using at {w}x{h}"));
+        }
+        s.act("key Escape");
+        assert_eq!(crate::holders::REFUSED.lock().unwrap().len(), refused, "nothing else was signalled");
+        drop(kids);
+        report("whats using", &s);
     }
 
     #[test]

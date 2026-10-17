@@ -5496,3 +5496,136 @@ fn projects_changes_asked_of_git() {
     assert_eq!(has_changes(&d.join("nowhere")), None);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// What's using a path, against processes this test starts: a `sleep` working in a
+/// folder with a file open on its input, and a copy of `sleep` run from inside the
+/// folder. Each is found with how it holds it; stopping one ends it, one that ignores
+/// SIGTERM outlasts it and is ended by SIGKILL; nothing else is ever signalled.
+#[test]
+fn holders_of_files_and_folders() {
+    use crate::holders::{Hold, OURS, REFUSED, alive, holding, info, stop};
+    let Some(sleep) = ["/usr/bin/sleep", "/bin/sleep"].iter().map(PathBuf::from).find(|p| p.exists()) else { return };
+    let d = tmpdir("holders");
+    touch(&d.join("Photos/beach.jpg"), "jpeg");
+    touch(&d.join("notes.txt"), "words\n");
+    touch(&d.join("other.txt"), "else\n");
+    std::fs::create_dir_all(d.join("bin")).unwrap();
+    std::fs::copy(&sleep, d.join("bin/napper")).unwrap();
+    let mut a = std::process::Command::new(&sleep).arg("30").current_dir(d.join("Photos")).stdin(std::fs::File::open(d.join("notes.txt")).unwrap()).spawn().unwrap();
+    // A child another test forks while the copy is being written holds it open for
+    // writing until it runs its own program: "text file busy" for a moment.
+    let napper = || std::process::Command::new(d.join("bin/napper")).arg("30").current_dir(&d).stdin(std::process::Stdio::null()).spawn();
+    let mut tries = 0;
+    let mut b = loop {
+        match napper() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            r => break r.unwrap(),
+        }
+    };
+    OURS.lock().unwrap().extend([a.id(), b.id()]);
+    let pids = [a.id(), b.id(), std::process::id()];
+    let t0 = Instant::now();
+    while (info(a.id()).is_none_or(|p| p.name != "sleep") || info(b.id()).is_none_or(|p| p.name != "napper")) && t0.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pa = info(a.id()).unwrap();
+    assert_eq!(pa.name, "sleep");
+    assert!(pa.mine());
+    let of = |paths: &[PathBuf]| -> Vec<(u32, Hold)> { holding(paths, &pids).into_iter().map(|(p, h)| (p.pid, h)).collect() };
+    assert_eq!(of(&[d.join("Photos")]), [(a.id(), Hold::Inside(d.join("Photos")))]);
+    assert_eq!(of(&[d.join("notes.txt")]), [(a.id(), Hold::Open(d.join("notes.txt")))]);
+    assert_eq!(of(&[d.join("bin")]), [(b.id(), Hold::Runs(d.join("bin/napper")))]);
+    assert!(of(&[d.join("other.txt")]).is_empty());
+    let both = of(&[d.clone()]);
+    assert_eq!(both.len(), 2, "{both:?}");
+    assert_eq!(info(b.id()).unwrap().name, "napper");
+    // Stopped: SIGTERM ends it (a zombie until reaped counts as gone).
+    assert!(stop(&pa, libc::SIGTERM, Duration::from_secs(3)));
+    let _ = a.wait();
+    assert!(!alive(&pa));
+    // A process ignoring SIGTERM is still there; SIGKILL ends it.
+    let mut c = std::process::Command::new("sh").args(["-c", "trap '' TERM; exec sleep 30"]).current_dir(&d).spawn().unwrap();
+    OURS.lock().unwrap().push(c.id());
+    let t0 = Instant::now();
+    while info(c.id()).is_none_or(|p| p.name != "sleep") && t0.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pc = info(c.id()).unwrap();
+    assert!(!stop(&pc, libc::SIGTERM, Duration::from_millis(600)), "outlasts SIGTERM");
+    assert!(alive(&pc));
+    assert!(stop(&pc, libc::SIGKILL, Duration::from_secs(2)));
+    let _ = c.wait();
+    // Anything the test didn't start is never signalled, Maia's own process included.
+    let me = info(std::process::id()).unwrap();
+    assert!(!stop(&me, libc::SIGTERM, Duration::from_millis(100)));
+    assert!(REFUSED.lock().unwrap().contains(&(std::process::id(), libc::SIGTERM)));
+    // A PID that went to another process isn't signalled either.
+    let pb = info(b.id()).unwrap();
+    let stale = crate::holders::Proc { start: pb.start + 1, ..pb.clone() };
+    assert!(stop(&stale, libc::SIGTERM, Duration::from_millis(100)), "the one asked about is gone");
+    assert!(alive(&pb), "and the one there now is left alone");
+    assert!(stop(&pb, libc::SIGTERM, Duration::from_secs(3)));
+    let _ = b.wait();
+    assert!(crate::holders::is_busy(&std::io::Error::from_raw_os_error(libc::EBUSY)));
+    assert!(!crate::holders::is_busy(&std::io::Error::from_raw_os_error(libc::EACCES)));
+    assert!(crate::holders::says_busy("Error unmounting /dev/sdx1: GDBus.Error:org.freedesktop.UDisks2.Error.DeviceBusy: Error unmounting /dev/sdx1: target is busy"));
+    assert!(!crate::holders::says_busy("Wrong fs type, bad option"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Ports from the kernel's own tables: a TCP listener and a UDP socket bound by this test
+/// are listed with their numbers and addresses, a connected socket isn't; the owner is
+/// found through the socket's inode, and a port held by a child only is the child's. Then
+/// captured lines: IPv6 any, a v4 address mapped into v6, a socket that isn't listening.
+#[test]
+fn ports_and_their_owners() {
+    use crate::holders::{OURS, listening, parse_table, socket_owners, stop};
+    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let (tp, up) = (tcp.local_addr().unwrap().port(), udp.local_addr().unwrap().port());
+    let client = std::net::TcpStream::connect(("127.0.0.1", tp)).unwrap();
+    let cp = client.local_addr().unwrap().port();
+    let all = listening();
+    let t = all.iter().find(|p| p.port == tp && p.tcp).unwrap_or_else(|| panic!("{tp} not in {all:?}"));
+    assert_eq!(t.addr, std::net::IpAddr::from([127, 0, 0, 1]));
+    assert!(all.iter().any(|p| p.port == up && !p.tcp), "udp {up}");
+    assert!(!all.iter().any(|p| p.port == cp), "a connection isn't a listener");
+    let me = std::process::id();
+    let owners = socket_owners(&HashSet::from([t.inode]), &[me]);
+    assert_eq!(owners.get(&t.inode), Some(&vec![me]));
+    // Handed to a child and closed here: the child's alone.
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let hp = held.local_addr().unwrap().port();
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    // Only this child gets it: the listener stays close-on-exec for any other.
+    let fd = held.as_raw_fd();
+    let mut cmd = std::process::Command::new("sleep");
+    cmd.arg("30");
+    unsafe {
+        cmd.pre_exec(move || if libc::dup2(fd, 200) < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+    }
+    let mut child = cmd.spawn().unwrap();
+    drop(held);
+    OURS.lock().unwrap().push(child.id());
+    let port = listening().into_iter().find(|p| p.port == hp).expect("still listening in the child");
+    let owners = socket_owners(&HashSet::from([port.inode]), &[me, child.id()]);
+    assert_eq!(owners.get(&port.inode), Some(&vec![child.id()]));
+    let proc = crate::holders::info(child.id()).unwrap();
+    assert!(stop(&proc, libc::SIGTERM, Duration::from_secs(3)));
+    let _ = child.wait();
+    assert!(!listening().iter().any(|p| p.port == hp), "gone with it");
+    let captured6 = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 00000000000000000000000000000000:1F90 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 52345 1 0000000000000000 100 0 0 10 0\n   1: 0000000000000000FFFF00000100007F:0050 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 52346 1 0000000000000000 100 0 0 10 0\n   2: 0000000000000000FFFF00000100007F:A3B2 0000000000000000FFFF00000100007F:1F90 01 00000000:00000000 00:00000000 00000000  1000        0 52347 1 0000000000000000 20 4 30 10 -1\n";
+    let v = parse_table(captured6, true);
+    assert_eq!(v.len(), 2);
+    assert_eq!((v[0].port, v[0].addr, v[0].uid, v[0].inode), (8080, std::net::IpAddr::from(std::net::Ipv6Addr::UNSPECIFIED), 1000, 52345));
+    assert_eq!((v[1].port, v[1].addr, v[1].uid), (80, std::net::IpAddr::from([127, 0, 0, 1]), 0));
+    let captured_udp = "   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n  981: 00000000:14E9 00000000:0000 07 00000000:00000000 00:00000000 00000000   975        0 9921 2 0000000000000000 0\n  982: 0100A8C0:D2A1 0101A8C0:0035 01 00000000:00000000 00:00000000 00000000  1000        0 9922 2 0000000000000000 0\n";
+    let v = parse_table(captured_udp, false);
+    assert_eq!(v.len(), 1, "the connected one is left out");
+    assert_eq!((v[0].port, v[0].addr), (5353, std::net::IpAddr::from([0, 0, 0, 0])));
+    drop((tcp, udp, client));
+}

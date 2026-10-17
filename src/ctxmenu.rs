@@ -194,6 +194,7 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         }
         if !mounted.is_empty() {
             items.push(Item::sep());
+            items.push(Item::cmd(Cmd::WhatsUsing));
             items.push(Item::cmd(Cmd::Properties));
         }
     } else {
@@ -333,6 +334,9 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         }
         if all_dirs {
             items.push(Item::cmd(Cmd::ToggleBookmark));
+        }
+        if !in_trash {
+            items.push(Item::cmd(Cmd::WhatsUsing));
         }
         items.push(Item::cmd(Cmd::Properties));
     }
