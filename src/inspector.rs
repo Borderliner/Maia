@@ -36,6 +36,8 @@ enum Content {
     Folder(Vec<Entry>),
     Volume,
     Pdf(Box<PdfView>),
+    /// An office document LibreOffice is turning into a PDF to show.
+    Office(Box<crate::office::Conversion>),
     Media(Box<MediaView>),
     Other,
 }
@@ -169,6 +171,17 @@ impl Inspector {
     pub fn pdf_state(&self) -> Option<(usize, Option<usize>, Option<(usize, u32)>)> {
         match &self.content {
             Content::Pdf(v) => Some((v.page, v.pages, v.shown)),
+            _ => None,
+        }
+    }
+    /// An office document waiting for LibreOffice.
+    pub fn office_pending(&self) -> bool {
+        matches!(self.content, Content::Office(_))
+    }
+    /// The file a PDF preview shows (an office document's converted copy).
+    pub fn pdf_path(&self) -> Option<&Path> {
+        match &self.content {
+            Content::Pdf(v) => Some(&v.path),
             _ => None,
         }
     }
@@ -441,14 +454,16 @@ impl Inspector {
         if !e.is_dir {
             let mime = crate::mime::mime_db().for_name(&e.name, false, false);
             if (e.ext() == "pdf" || mime == "application/pdf") && crate::media::have("pdftoppm") {
-                let (tx, rx) = std::sync::mpsc::channel();
-                let (path, ctx) = (e.path.clone(), ctx.clone());
-                std::thread::spawn(move || {
-                    let _ = tx.send(crate::media::pdf_pages(&path));
-                    ctx.request_repaint();
-                });
-                self.set(Content::Pdf(Box::new(PdfView { path: e.path.clone(), pages: None, pages_rx: Some(rx), page: 1, tex: None, shown: None, job: None, failed: false })));
+                self.set(pdf_content(e.path.clone(), ctx));
                 return;
+            }
+            // Before thumbnails: a desktop thumbnailer can picture the first page, but
+            // the PDF shows every one.
+            if crate::office::is_office(e.ext()) && crate::media::have("pdftoppm") {
+                if let Some((t, prog)) = crate::drives::Tools::current().and_then(|t| crate::office::program(&t).map(|p| (t, p))) {
+                    self.set(Content::Office(Box::new(crate::office::Conversion::start(t, prog, e.path.clone(), e.size, e.modified, ctx))));
+                    return;
+                }
             }
             if (mime.starts_with("video/") || mime.starts_with("audio/")) && crate::media::have("ffprobe") {
                 let (tx, rx) = std::sync::mpsc::channel();
@@ -537,6 +552,17 @@ impl Inspector {
             }
         }
     }
+}
+
+/// A PDF's preview, its pages counted on a worker.
+fn pdf_content(path: PathBuf, ctx: &egui::Context) -> Content {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (p, ctx) = (path.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(crate::media::pdf_pages(&p));
+        ctx.request_repaint();
+    });
+    Content::Pdf(Box::new(PdfView { path, pages: None, pages_rx: Some(rx), page: 1, tex: None, shown: None, job: None, failed: false }))
 }
 
 /// What a text file's preview becomes, by its name.
@@ -788,6 +814,14 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         }
     }
     ins.poll();
+    if let Content::Office(c) = &ins.content {
+        match c.rx.try_recv() {
+            Ok(Ok(pdf)) => ins.set(pdf_content(pdf, ui.ctx())),
+            Ok(Err(why)) => ins.set(Content::Note(why)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => ins.set(Content::Note("Can't preview this document".into())),
+            Err(_) => {}
+        }
+    }
     ins.pump_tail(target.as_ref(), ui.ctx());
     if let Some((rx, e)) = &ins.extracting {
         if let Ok(got) = rx.try_recv() {
@@ -1003,6 +1037,10 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             pdf_view(&mut bui, body, v, &pal);
             return;
         }
+        Content::Office(_) => {
+            bui.painter().text(body.center(), Align2::CENTER_CENTER, "Preparing preview…", FontId::proportional(12.5), pal.text_dim);
+            return;
+        }
         Content::Media(v) => {
             media_view(&mut bui, body, &e, v, env);
             return;
@@ -1022,7 +1060,7 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         }
     }
     match &ins.content {
-        Content::Pdf(_) | Content::Media(_) | Content::Text { .. } | Content::Sqlite(_) => {}
+        Content::Pdf(_) | Content::Office(_) | Content::Media(_) | Content::Text { .. } | Content::Sqlite(_) => {}
         Content::Image => image_view(&mut bui, body, &e, ins, env),
         Content::Binary(bytes) => {
             let mut lines = vec!["Binary file: first 4 KB shown as hex".to_string(), String::new()];

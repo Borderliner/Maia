@@ -4884,3 +4884,113 @@ fn compare_two_files() {
     assert!(!crate::inspector::is_patch(".patch") && !crate::inspector::is_patch("patch.txt"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A stand-in for LibreOffice: it logs its arguments, writes a two-page PDF (a real one,
+/// poppler reads it) named as LibreOffice names its output, fails on a "broken" file and
+/// sleeps on a "slow" one, its sleep's pid written down so a test can see it killed.
+pub(crate) fn fake_soffice(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("sample.pdf"), crate::sim::sample_pdf(&["0.2 0.4 0.8", "0.8 0.3 0.2"])).unwrap();
+    let script = r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "$*" >> "$D/soffice.log"
+out=""; prev=""
+for a; do [ "$prev" = --outdir ] && out="$a"; prev="$a"; last="$a"; done
+case "$last" in
+*slow*) sleep 30 & echo $! > "$D/sleep.pid"; wait; exit 0;;
+*broken*) exit 1;;
+esac
+name=$(basename "$last")
+cp "$D/sample.pdf" "$out/${name%.*}.pdf"
+"#;
+    let p = dir.join("soffice");
+    std::fs::write(&p, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Whether a process is gone (or only a zombie waiting to be reaped), after up to 3 s.
+pub(crate) fn process_gone(pid: &str) -> bool {
+    let t0 = std::time::Instant::now();
+    while t0.elapsed().as_secs() < 3 {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => return true,
+            Ok(s) if s.rsplit_once(')').is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')) => return true,
+            _ => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+    false
+}
+
+/// Office documents through LibreOffice (a stand-in that writes a real PDF): converted
+/// once into the cache with a profile of Maia's own, read back the second time without
+/// starting it, again when the file changes; a file it can't read refused; a slow one
+/// killed with its children, when the preview goes away and at the time limit.
+#[test]
+fn office_documents_convert_to_pdf_once() {
+    use crate::office::{TIMEOUT, cached, convert, is_office, program};
+    let d = tmpdir("office");
+    let fake = d.join("tools");
+    fake_soffice(&fake);
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(d.join("none")));
+    assert_eq!(program(&crate::drives::Tools::current().unwrap()), None, "no LibreOffice: no conversion");
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    assert_eq!(program(&t), Some("soffice"));
+    for x in ["docx", "doc", "odt", "rtf", "xlsx", "xls", "ods", "pptx", "ppt", "odp"] {
+        assert!(is_office(x), "{x}");
+    }
+    assert!(!is_office("pdf") && !is_office("txt") && !is_office("docm"));
+    let src = d.join("Q3 report.v2.docx");
+    touch(&src, "PK not really a document");
+    let meta = |p: &Path| std::fs::metadata(p).map(|m| (m.len(), m.modified().ok())).unwrap();
+    let (size, mtime) = meta(&src);
+    let log = || std::fs::read_to_string(fake.join("soffice.log")).unwrap_or_default();
+    let pdf = convert(&t, "soffice", &src, size, mtime, TIMEOUT, &|| false).unwrap();
+    assert_eq!(pdf, cached(&src, size, mtime));
+    assert!(std::fs::read(&pdf).unwrap().starts_with(b"%PDF-1.4"));
+    if crate::media::have("pdfinfo") {
+        assert_eq!(crate::media::pdf_pages(&pdf), Some(2), "the PDF reads");
+    }
+    let args = log();
+    assert_eq!(args.lines().count(), 1);
+    let profile = crate::clipboard::path_to_uri(&crate::office::cache_dir().join("profile"));
+    assert!(args.starts_with(&format!("-env:UserInstallation={profile} --headless --norestore --nolockcheck --convert-to pdf --outdir ")), "{args}");
+    assert!(args.trim_end().ends_with(&src.display().to_string()), "{args}");
+    assert!(profile.starts_with("file:///") && !profile.contains("/.config/libreoffice"));
+    // The second look: from the cache, LibreOffice not started.
+    assert_eq!(convert(&t, "soffice", &src, size, mtime, TIMEOUT, &|| false).unwrap(), pdf);
+    assert_eq!(log().lines().count(), 1);
+    // Changed: converted again, to a file of its own.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&src, "PK a longer document than before").unwrap();
+    let (size2, mtime2) = meta(&src);
+    let pdf2 = convert(&t, "soffice", &src, size2, mtime2, TIMEOUT, &|| false).unwrap();
+    assert_ne!(pdf2, pdf);
+    assert_eq!(log().lines().count(), 2);
+    let stage = crate::office::cache_dir().join(format!(".part-{}", pdf2.file_stem().unwrap().to_string_lossy()));
+    assert!(!stage.exists(), "the staging folder is gone");
+    let broken = d.join("broken.xlsx");
+    touch(&broken, "x");
+    let (bs, bm) = meta(&broken);
+    assert_eq!(convert(&t, "soffice", &broken, bs, bm, TIMEOUT, &|| false).unwrap_err(), "Can't preview this document");
+    // Slow: stopped (the preview went away), then timed out; LibreOffice's children die too.
+    let slow = d.join("slow.pptx");
+    touch(&slow, "x");
+    let (ss, sm) = meta(&slow);
+    let t0 = std::time::Instant::now();
+    let r = convert(&t, "soffice", &slow, ss, sm, TIMEOUT, &|| t0.elapsed().as_millis() > 400);
+    assert!(r.is_err() && t0.elapsed().as_secs() < 5);
+    let pid = std::fs::read_to_string(fake.join("sleep.pid")).unwrap();
+    assert!(process_gone(pid.trim()), "the child's child was killed");
+    let _ = std::fs::remove_file(fake.join("sleep.pid"));
+    let t0 = std::time::Instant::now();
+    let r = convert(&t, "soffice", &slow, ss, sm, std::time::Duration::from_millis(500), &|| false);
+    assert_eq!(r.unwrap_err(), "LibreOffice took too long to read this document");
+    assert!(t0.elapsed().as_secs() < 5);
+    let pid = std::fs::read_to_string(fake.join("sleep.pid")).unwrap();
+    assert!(process_gone(pid.trim()));
+    assert!(!cached(&slow, ss, sm).exists());
+    let _ = std::fs::remove_dir_all(&d);
+}

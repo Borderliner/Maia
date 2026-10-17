@@ -38,6 +38,7 @@ mod lucide_map;
 mod mime;
 mod namefind;
 mod network;
+mod office;
 mod ollama;
 mod ops;
 mod panel;

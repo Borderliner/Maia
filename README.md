@@ -58,6 +58,7 @@ These are optional. Maia works without them and uses them when they are there:
 | `ollama` | search by meaning, if you turn it on (it fetches a ~860 MB model only when you ask); `ollama-vulkan` lets it use the graphics card |
 | `ffmpeg`, `ffprobe`, `ffplay` | video and audio previews and thumbnails |
 | `pdfinfo`, `pdftoppm` (poppler) | PDF pages in the inspector |
+| `soffice` (LibreOffice) | Word, Excel, PowerPoint and OpenDocument files in the inspector, with poppler |
 | `udisksctl` (udisks2), `lsblk` | mounting, unmounting and ejecting drives |
 | desktop thumbnailers | thumbnails for other formats, shared with your other apps |
 

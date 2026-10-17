@@ -429,9 +429,15 @@ pub fn media_fixture(name: &str) -> PathBuf {
     png_file(&d.join("photo.png"), 320, 200, 5);
     std::fs::write(d.join("drawing.svg"), r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48" viewBox="0 0 64 48"><rect width="64" height="48" fill="#2a7"/><circle cx="32" cy="24" r="16" fill="#fc3"/></svg>"##).unwrap();
     std::fs::write(d.join("broken.mp4"), b"\x00\x00\x00\x18ftypmp42 this is not a video").unwrap();
-    // Minimal valid PDF: three A6 pages, each a differently coloured rectangle.
-    let colors = ["0.2 0.4 0.8", "0.8 0.3 0.2", "0.2 0.7 0.3"];
-    let mut objs = vec!["<< /Type /Catalog /Pages 2 0 R >>".to_string(), "<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3 >>".to_string()];
+    std::fs::write(d.join("doc.pdf"), sample_pdf(&["0.2 0.4 0.8", "0.8 0.3 0.2", "0.2 0.7 0.3"])).unwrap();
+    d
+}
+
+/// A minimal valid PDF written by hand: one A6 page per colour ("r g b"), each a
+/// rectangle filled with it.
+pub fn sample_pdf(colors: &[&str]) -> String {
+    let kids: Vec<String> = (0..colors.len()).map(|k| format!("{} 0 R", 3 + 2 * k)).collect();
+    let mut objs = vec!["<< /Type /Catalog /Pages 2 0 R >>".to_string(), format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), colors.len())];
     for (k, c) in colors.iter().enumerate() {
         let stream = format!("{c} rg 20 20 250 380 re f");
         objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 298 420] /Contents {} 0 R >>", 4 + 2 * k));
@@ -449,8 +455,7 @@ pub fn media_fixture(name: &str) -> PathBuf {
         pdf.push_str(&format!("{o:010} 00000 n \n"));
     }
     pdf.push_str(&format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1));
-    std::fs::write(d.join("doc.pdf"), pdf).unwrap();
-    d
+    pdf
 }
 
 pub struct Sim {
@@ -1012,7 +1017,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(122) {
+    match rng.below(131) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1295,6 +1300,25 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
             if matches!(s.app.popup, Popup::Confirm { .. }) {
                 s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
+            }
+        }
+        130 => {
+            // An office document previewed through the stand-in LibreOffice, then left at
+            // once (its conversion killed) or after a page or two.
+            let dir = root().join("home").read_dir().ok().and_then(|r| r.flatten().map(|d| d.path().join("Documents/Office")).find(|p| p.is_dir()));
+            if let Some(dir) = dir {
+                let f = *rng.pick(&["plan.docx", "sheet.ods", "slow deck.odp", "broken.pptx"]);
+                s.act("key ctrl+p");
+                s.act(&format!("text {}", dir.join(f).display()));
+                s.act("key Enter");
+                s.settle();
+                if s.app.panels.get(&s.app.active).is_some_and(|p| p.inspector.is_none()) {
+                    s.cmd(Cmd::ToggleInspector);
+                }
+                s.idle(1 + rng.below(30));
+                if rng.below(2) == 0 {
+                    s.act("key PageDown");
+                }
             }
         }
         121 => {
@@ -7037,6 +7061,101 @@ mod journeys {
         report("devprev", &s);
     }
 
+    /// Office documents in the inspector, through a stand-in for LibreOffice: a slow one
+    /// says it is being prepared and its conversion dies when the user moves on; a
+    /// document shows as its PDF with its pages; the second look is the cached PDF,
+    /// LibreOffice not started again; one it can't read says so under its name; and
+    /// without LibreOffice nothing is converted.
+    #[test]
+    fn office_previews() {
+        if !sandboxed() || !crate::media::have("pdftoppm") {
+            return;
+        }
+        let d = root().join("home/office");
+        let _ = std::fs::remove_dir_all(&d);
+        for f in ["Q3 report.docx", "budget.xlsx", "slow talk.odp", "broken.pptx", "notes.txt"] {
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(f), format!("not really {f}")).unwrap();
+        }
+        let fake = root().join("office-tools");
+        let _ = std::fs::remove_dir_all(&fake);
+        crate::tests::fake_soffice(&fake);
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.cmd(ToggleInspector);
+        s.settle();
+        let log = || std::fs::read_to_string(fake.join("soffice.log")).unwrap_or_default().lines().count();
+        // Slow: a quiet line while LibreOffice works, and nothing else moves.
+        select_path(&mut s, &d.join("slow talk.odp"));
+        wait_until(&mut s, "the slow conversion", 10, |_| fake.join("sleep.pid").exists());
+        assert!(inspector(&s).office_pending());
+        s.idle(2);
+        assert!(some_text(&s, "Preparing preview…"));
+        look(&mut s, "office preparing");
+        s.shot("office-preparing");
+        let pid = std::fs::read_to_string(fake.join("sleep.pid")).unwrap();
+        // Moving on kills it.
+        select_path(&mut s, &d.join("Q3 report.docx"));
+        assert!(crate::tests::process_gone(pid.trim()), "the slow conversion was killed");
+        wait_until(&mut s, "the document's pages", 20, |s| inspector(s).pdf_state().is_some_and(|(p, n, shown)| p == 1 && n == Some(2) && shown.is_some_and(|x| x.0 == 1)));
+        let e = s.tab().entries.iter().find(|e| e.name == "Q3 report.docx").unwrap().clone();
+        assert_eq!(inspector(&s).pdf_path(), Some(crate::office::cached(&e.path, e.size, e.modified).as_path()));
+        assert!(!some_text(&s, "Preparing preview…"));
+        toolbar_centred(&mut s, "office", &["1 / 2"]);
+        look(&mut s, "office preview");
+        s.shot("office-preview");
+        let list = s.app.panels[&s.app.active].list_rect;
+        s.act(&format!("move {:.0} {:.0}", list.right() + 150.0, list.center().y));
+        s.act("key PageDown");
+        wait_until(&mut s, "page 2", 20, |s| inspector(s).pdf_state().is_some_and(|(p, _, shown)| p == 2 && shown.is_some_and(|x| x.0 == 2)));
+        s.act("move -50 -50");
+        // The second look: the cached PDF straight away, LibreOffice not run.
+        let runs = log();
+        select_path(&mut s, &d.join("notes.txt"));
+        wait_until(&mut s, "the text", 10, |s| inspector(s).text_lines().is_some());
+        select_path(&mut s, &d.join("Q3 report.docx"));
+        wait_until(&mut s, "the cached pages", 3, |s| inspector(s).pdf_state().is_some_and(|(_, n, _)| n == Some(2)));
+        assert_eq!(log(), runs, "not converted again");
+        // A spreadsheet the same way; a deck LibreOffice can't read.
+        select_path(&mut s, &d.join("budget.xlsx"));
+        wait_until(&mut s, "the spreadsheet's pages", 20, |s| inspector(s).pdf_state().is_some_and(|(_, n, shown)| n == Some(2) && shown.is_some()));
+        select_path(&mut s, &d.join("broken.pptx"));
+        wait_until(&mut s, "the refusal", 20, |s| inspector(s).note() == Some("Can't preview this document"));
+        s.idle(2);
+        assert!(some_text(&s, "Can't preview this document") && some_text(&s, "broken.pptx"));
+        look(&mut s, "office refused");
+        s.shot("office-refused");
+        // At other font sizes and Spacing the toolbar keeps its place.
+        select_path(&mut s, &d.join("Q3 report.docx"));
+        wait_until(&mut s, "the pages again", 10, |s| inspector(s).pdf_state().is_some_and(|(_, n, shown)| n == Some(2) && shown.is_some()));
+        for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0)] {
+            s.app.cfg.font_size = font;
+            s.app.cfg.spacing = spacing;
+            s.idle(3);
+            toolbar_centred(&mut s, &format!("office at font {font}, spacing {spacing}"), &["1 / 2"]);
+            look(&mut s, &format!("office at font {font}, spacing {spacing}"));
+        }
+        // No LibreOffice: as before, nothing converted.
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(root().join("office-none")));
+        let runs = log();
+        std::fs::write(d.join("new.odt"), "fresh").unwrap();
+        s.cmd(Refresh);
+        wait_until(&mut s, "the new document listed", 10, |s| s.tab().entries.iter().any(|e| e.name == "new.odt"));
+        select_path(&mut s, &d.join("new.odt"));
+        s.settle();
+        assert!(!inspector(&s).office_pending() && inspector(&s).pdf_state().is_none());
+        assert_eq!(log(), runs);
+        report("office", &s);
+    }
+
     #[test]
     fn monkey_sessions() {
         if !sandboxed() {
@@ -7074,6 +7193,12 @@ mod journeys {
             }
             for sub in ["gvfs", "netmounts"] {
                 let _ = std::fs::create_dir_all(drv.join(sub));
+            }
+            // Office documents, converted by a stand-in for LibreOffice.
+            crate::tests::fake_soffice(&drv);
+            for f in ["plan.docx", "sheet.ods", "slow deck.odp", "broken.pptx"] {
+                let _ = std::fs::create_dir_all(home.join("Documents/Office"));
+                let _ = std::fs::write(home.join("Documents/Office").join(f), "not really an office file");
             }
             crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(drv));
             // An archive to wander into.
