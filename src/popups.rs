@@ -204,6 +204,9 @@ pub enum Popup {
     Duplicates(crate::dupes::State),
     BatchRename(crate::batchname::State),
     Print(Box<crate::sendto::PrintState>),
+    Projects(crate::projects::State),
+    Holders(Box<crate::holders::State>),
+    SmartEdit(crate::smart::Edit),
 }
 
 /// The branch menu, its lists read on a worker as it opens.
@@ -302,6 +305,9 @@ impl Popup {
             Popup::Duplicates(..) => "Duplicates",
             Popup::BatchRename(..) => "BatchRename",
             Popup::Print(..) => "Print",
+            Popup::Projects(..) => "Projects",
+            Popup::Holders(..) => "Holders",
+            Popup::SmartEdit(..) => "SmartEdit",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -852,6 +858,9 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::Duplicates(st) => crate::dupes::popup(app, ctx, st),
         Popup::BatchRename(st) => crate::batchname::popup(app, ctx, st),
         Popup::Print(st) => crate::sendto::dialog(app, ctx, st),
+        Popup::Projects(st) => crate::projects::popup(app, ctx, st),
+        Popup::Holders(st) => crate::holders::popup(app, ctx, st),
+        Popup::SmartEdit(st) => crate::smart::popup(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -1318,6 +1327,8 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::CodeSearch | Cmd::FindTodos => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::RunTask => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::CleanBuilds | Cmd::FindDuplicates => !tab::is_computer(&t.path) && t.archive.is_none(),
+        Cmd::SaveSmart => !t.filter.trim().is_empty() && !t.content.on && t.smart.is_none() && !tab::is_computer(&t.path) && t.archive.is_none(),
+        Cmd::WhatsUsing => t.archive.is_none() && (!tab::is_computer(&t.path) || t.target_entries().iter().any(|e| tab::drive_dev(&e.path).is_none())),
         Cmd::CopyPathLine => p.line_hint.as_ref().is_some_and(|h| t.target_entries().iter().any(|e| e.path == h.0)),
         Cmd::OpenTabInWindow => p.tabs.len() > 0,
         Cmd::GroupDeleted | Cmd::GroupOriginal => crate::trashcan::is_trash_files(&t.path),

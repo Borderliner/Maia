@@ -61,6 +61,8 @@ pub struct Progress {
     pub produced: Vec<(PathBuf, PathBuf)>,
     /// Items refused for lack of permission (offered again as administrator).
     pub denied: Vec<PathBuf>,
+    /// Items something else was using (what holds them is offered).
+    pub busy: Vec<PathBuf>,
     /// An archive that wants a password (or refused the one given): asked for, then the
     /// job runs again.
     pub password: Option<(PathBuf, bool)>,
@@ -145,6 +147,9 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                         if crate::admin::denied(&e) {
                             g.denied.push(s.clone());
                         }
+                        if crate::holders::is_busy(&e) {
+                            g.busy.push(s.clone());
+                        }
                         g.errors.push(format!("{}: {e}", s.display()));
                     }
                 }
@@ -185,6 +190,9 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                         if crate::admin::denied(&e) {
                             g.denied.push(s.clone());
                         }
+                        if crate::holders::is_busy(&e) {
+                            g.busy.push(s.clone());
+                        }
                         g.errors.push(format!("{}: {e}", s.display()));
                     }
                 }
@@ -200,7 +208,11 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 }
                 p.lock().unwrap().current = name_of(s);
                 if let Err(e) = crate::trashcan::delete(s) {
-                    p.lock().unwrap().errors.push(format!("{}: {e}", s.display()));
+                    let mut g = p.lock().unwrap();
+                    if crate::holders::is_busy(&e) {
+                        g.busy.push(s.clone());
+                    }
+                    g.errors.push(format!("{}: {e}", s.display()));
                 }
                 p.lock().unwrap().done_items += 1;
                 ctx.request_repaint();
@@ -242,6 +254,9 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                     let mut g = p.lock().unwrap();
                     if crate::admin::denied(&e) {
                         g.denied.push(s.clone());
+                    }
+                    if crate::holders::is_busy(&e) {
+                        g.busy.push(s.clone());
                     }
                     g.errors.push(format!("{}: {e}", s.display()));
                 }

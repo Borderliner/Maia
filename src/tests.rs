@@ -4679,8 +4679,9 @@ fn followed_file_appends_rotates_and_stops() {
     std::fs::write(&p, "rotated and longer than before\n").unwrap();
     let (reset, data) = wait("rotation");
     assert!(reset && data.ends_with(b"rotated and longer than before\n"));
-    // Dropped: the worker ends (its thread finishes; nothing more is read).
-    let threads = || std::fs::read_dir("/proc/self/task").map(|r| r.count()).unwrap_or(0);
+    // Dropped: the worker ends (its thread finishes; nothing more is read). Only threads
+    // by its name are counted: tests running beside this one start and end their own.
+    let threads = || std::fs::read_dir("/proc/self/task").map(|r| r.flatten().filter(|t| std::fs::read_to_string(t.path().join("comm")).is_ok_and(|c| c.trim() == "follow")).count()).unwrap_or(0);
     let before = threads();
     drop(tail);
     let t0 = Instant::now();
@@ -5687,4 +5688,319 @@ fn palette_finds_commands() {
     assert!(find(&ud, "zqx").is_empty());
     crate::popups::set_alias(&mut ud, Cmd::ToggleSidebar, "sb").unwrap();
     assert_eq!(find(&ud, "SB").first(), Some(&Cmd::ToggleSidebar));
+}
+
+/// Recent Projects on a real home folder: repositories found at any sensible depth, a
+/// work tree's `.git` file followed to its branch, nothing found inside a repository,
+/// in hidden or installed-package folders, through links or deeper than five levels;
+/// the branch read from HEAD, detached ones as a short commit; the last visited first,
+/// then by git's own activity; the list kept in the cache and read back.
+#[test]
+fn projects_found_ranked_and_cached() {
+    use crate::projects::{branch_of, find, load_cache, rank, read, save_cache};
+    let h = tmpdir("projects");
+    let repo = |p: &str, head: &str| {
+        touch(&h.join(p).join(".git/HEAD"), head);
+        touch(&h.join(p).join(".git/index"), "");
+    };
+    repo("Code/maia", "ref: refs/heads/main\n");
+    repo("Work/client/site", "3f2a9c41d7e8b0a1c2d3e4f5a6b7c8d9e0f1a2b3\n");
+    repo("Code/maia/vendor/lib", "ref: refs/heads/main\n");
+    repo(".hidden/secret", "ref: refs/heads/main\n");
+    touch(&h.join("web/package.json"), "{}\n");
+    repo("web/node_modules/pkg", "ref: refs/heads/main\n");
+    repo("a/b/c/d/e/f/deep", "ref: refs/heads/main\n");
+    repo("src/github.com/ana/tool", "ref: refs/heads/fix/menu\n");
+    // A second work tree of maia: its .git is a file naming the real one.
+    touch(&h.join("Code/maia/.git/worktrees/spike/HEAD"), "ref: refs/heads/spike\n");
+    touch(&h.join("Code/spike/.git"), &format!("gitdir: {}\n", h.join("Code/maia/.git/worktrees/spike").display()));
+    std::os::unix::fs::symlink(h.join("Code"), h.join("Code link")).unwrap();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let mut found: Vec<String> = find(&h, &stop).iter().map(|p| crate::project::relative(p, &h)).collect();
+    found.sort();
+    assert_eq!(found, ["Code/maia", "Code/spike", "Work/client/site", "src/github.com/ana/tool"]);
+    assert_eq!(branch_of("ref: refs/heads/fix/menu\n"), "fix/menu");
+    assert_eq!(branch_of("3f2a9c41d7e8b0a1c2d3e4f5a6b7c8d9e0f1a2b3\n"), "3f2a9c4");
+    assert_eq!(read(&h.join("Code/spike")).unwrap().branch, "spike", "a work tree's own branch");
+    assert_eq!(read(&h.join("Work/client/site")).unwrap().branch, "3f2a9c4");
+    assert!(read(&h.join("web")).is_none());
+    // Activity: the site was committed to last; maia an hour ago, the tool a day ago.
+    let ago = |p: &str, secs: u64| {
+        let t = std::time::SystemTime::now() - Duration::from_secs(secs);
+        for f in ["HEAD", "index"] {
+            let f = std::fs::File::options().write(true).open(h.join(p).join(".git").join(f));
+            if let Ok(f) = f {
+                f.set_modified(t).unwrap();
+            }
+        }
+    };
+    ago("Code/maia", 3600);
+    ago("src/github.com/ana/tool", 86_400);
+    ago("Work/client/site", 60);
+    std::fs::File::options().write(true).open(h.join("Code/maia/.git/worktrees/spike/HEAD")).unwrap().set_modified(std::time::SystemTime::now() - Duration::from_secs(7 * 86_400)).unwrap();
+    let all: Vec<_> = find(&h, &stop).iter().filter_map(|p| read(p)).collect();
+    let names = |v: &[crate::projects::Project]| v.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&rank(all.clone(), &[])), ["site", "maia", "tool", "spike"], "by activity");
+    // Visited: the tool's subfolder last, maia before it; the rest by activity after them.
+    let recents = vec![h.join("src/github.com/ana/tool/src"), h.join("Documents"), h.join("Code/maia")];
+    assert_eq!(names(&rank(all.clone(), &recents)), ["tool", "maia", "site", "spike"]);
+    // The cache: the roots, in order, read back.
+    let cache = h.join("cache/maia/projects.txt");
+    let roots: Vec<PathBuf> = rank(all, &recents).iter().map(|p| p.root.clone()).collect();
+    save_cache(&cache, &roots).unwrap();
+    assert_eq!(load_cache(&cache), roots);
+    assert!(load_cache(&h.join("cache/none.txt")).is_empty());
+    let _ = std::fs::remove_dir_all(&h);
+}
+
+/// Uncommitted changes asked of git itself: a clean work tree has none; an untracked
+/// file, an edit and a staged file each count.
+#[test]
+fn projects_changes_asked_of_git() {
+    use crate::projects::has_changes;
+    if !crate::media::have("git") {
+        return;
+    }
+    let d = tmpdir("project-changes");
+    touch(&d.join("README"), "hello\n");
+    git(&d, &["init", "-q"]);
+    git(&d, &["add", "."]);
+    git(&d, &["commit", "-q", "-m", "first"]);
+    assert_eq!(has_changes(&d), Some(false));
+    touch(&d.join("new.txt"), "x\n");
+    assert_eq!(has_changes(&d), Some(true), "untracked");
+    std::fs::remove_file(d.join("new.txt")).unwrap();
+    touch(&d.join("README"), "hello again\n");
+    assert_eq!(has_changes(&d), Some(true), "edited");
+    git(&d, &["add", "README"]);
+    assert_eq!(has_changes(&d), Some(true), "staged");
+    git(&d, &["commit", "-q", "-m", "second"]);
+    assert_eq!(has_changes(&d), Some(false));
+    assert_eq!(has_changes(&d.join("nowhere")), None);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// What's using a path, against processes this test starts: a `sleep` working in a
+/// folder with a file open on its input, and a copy of `sleep` run from inside the
+/// folder. Each is found with how it holds it; stopping one ends it, one that ignores
+/// SIGTERM outlasts it and is ended by SIGKILL; nothing else is ever signalled.
+#[test]
+fn holders_of_files_and_folders() {
+    use crate::holders::{Hold, OURS, REFUSED, alive, holding, info, stop};
+    let Some(sleep) = ["/usr/bin/sleep", "/bin/sleep"].iter().map(PathBuf::from).find(|p| p.exists()) else { return };
+    let d = tmpdir("holders");
+    touch(&d.join("Photos/beach.jpg"), "jpeg");
+    touch(&d.join("notes.txt"), "words\n");
+    touch(&d.join("other.txt"), "else\n");
+    std::fs::create_dir_all(d.join("bin")).unwrap();
+    std::fs::copy(&sleep, d.join("bin/napper")).unwrap();
+    let mut a = std::process::Command::new(&sleep).arg("30").current_dir(d.join("Photos")).stdin(std::fs::File::open(d.join("notes.txt")).unwrap()).spawn().unwrap();
+    // A child another test forks while the copy is being written holds it open for
+    // writing until it runs its own program: "text file busy" for a moment.
+    let napper = || std::process::Command::new(d.join("bin/napper")).arg("30").current_dir(&d).stdin(std::process::Stdio::null()).spawn();
+    let mut tries = 0;
+    let mut b = loop {
+        match napper() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            r => break r.unwrap(),
+        }
+    };
+    OURS.lock().unwrap().extend([a.id(), b.id()]);
+    let pids = [a.id(), b.id(), std::process::id()];
+    let t0 = Instant::now();
+    while (info(a.id()).is_none_or(|p| p.name != "sleep") || info(b.id()).is_none_or(|p| p.name != "napper")) && t0.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pa = info(a.id()).unwrap();
+    assert_eq!(pa.name, "sleep");
+    assert!(pa.mine());
+    let of = |paths: &[PathBuf]| -> Vec<(u32, Hold)> { holding(paths, &pids).into_iter().map(|(p, h)| (p.pid, h)).collect() };
+    assert_eq!(of(&[d.join("Photos")]), [(a.id(), Hold::Inside(d.join("Photos")))]);
+    assert_eq!(of(&[d.join("notes.txt")]), [(a.id(), Hold::Open(d.join("notes.txt")))]);
+    assert_eq!(of(&[d.join("bin")]), [(b.id(), Hold::Runs(d.join("bin/napper")))]);
+    assert!(of(&[d.join("other.txt")]).is_empty());
+    let both = of(&[d.clone()]);
+    assert_eq!(both.len(), 2, "{both:?}");
+    assert_eq!(info(b.id()).unwrap().name, "napper");
+    // Stopped: SIGTERM ends it (a zombie until reaped counts as gone).
+    assert!(stop(&pa, libc::SIGTERM, Duration::from_secs(3)));
+    let _ = a.wait();
+    assert!(!alive(&pa));
+    // A process ignoring SIGTERM is still there; SIGKILL ends it.
+    let mut c = std::process::Command::new("sh").args(["-c", "trap '' TERM; exec sleep 30"]).current_dir(&d).spawn().unwrap();
+    OURS.lock().unwrap().push(c.id());
+    let t0 = Instant::now();
+    while info(c.id()).is_none_or(|p| p.name != "sleep") && t0.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pc = info(c.id()).unwrap();
+    assert!(!stop(&pc, libc::SIGTERM, Duration::from_millis(600)), "outlasts SIGTERM");
+    assert!(alive(&pc));
+    assert!(stop(&pc, libc::SIGKILL, Duration::from_secs(2)));
+    let _ = c.wait();
+    // Anything the test didn't start is never signalled, Maia's own process included.
+    let me = info(std::process::id()).unwrap();
+    assert!(!stop(&me, libc::SIGTERM, Duration::from_millis(100)));
+    assert!(REFUSED.lock().unwrap().contains(&(std::process::id(), libc::SIGTERM)));
+    // A PID that went to another process isn't signalled either.
+    let pb = info(b.id()).unwrap();
+    let stale = crate::holders::Proc { start: pb.start + 1, ..pb.clone() };
+    assert!(stop(&stale, libc::SIGTERM, Duration::from_millis(100)), "the one asked about is gone");
+    assert!(alive(&pb), "and the one there now is left alone");
+    assert!(stop(&pb, libc::SIGTERM, Duration::from_secs(3)));
+    let _ = b.wait();
+    assert!(crate::holders::is_busy(&std::io::Error::from_raw_os_error(libc::EBUSY)));
+    assert!(!crate::holders::is_busy(&std::io::Error::from_raw_os_error(libc::EACCES)));
+    assert!(crate::holders::says_busy("Error unmounting /dev/sdx1: GDBus.Error:org.freedesktop.UDisks2.Error.DeviceBusy: Error unmounting /dev/sdx1: target is busy"));
+    assert!(!crate::holders::says_busy("Wrong fs type, bad option"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Ports from the kernel's own tables: a TCP listener and a UDP socket bound by this test
+/// are listed with their numbers and addresses, a connected socket isn't; the owner is
+/// found through the socket's inode, and a port held by a child only is the child's. Then
+/// captured lines: IPv6 any, a v4 address mapped into v6, a socket that isn't listening.
+#[test]
+fn ports_and_their_owners() {
+    use crate::holders::{OURS, listening, parse_table, socket_owners, stop};
+    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let (tp, up) = (tcp.local_addr().unwrap().port(), udp.local_addr().unwrap().port());
+    let client = std::net::TcpStream::connect(("127.0.0.1", tp)).unwrap();
+    let cp = client.local_addr().unwrap().port();
+    let all = listening();
+    let t = all.iter().find(|p| p.port == tp && p.tcp).unwrap_or_else(|| panic!("{tp} not in {all:?}"));
+    assert_eq!(t.addr, std::net::IpAddr::from([127, 0, 0, 1]));
+    assert!(all.iter().any(|p| p.port == up && !p.tcp), "udp {up}");
+    assert!(!all.iter().any(|p| p.port == cp), "a connection isn't a listener");
+    let me = std::process::id();
+    let owners = socket_owners(&HashSet::from([t.inode]), &[me]);
+    assert_eq!(owners.get(&t.inode), Some(&vec![me]));
+    // Handed to a child and closed here: the child's alone.
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let hp = held.local_addr().unwrap().port();
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    // Only this child gets it: the listener stays close-on-exec for any other.
+    let fd = held.as_raw_fd();
+    let mut cmd = std::process::Command::new("sleep");
+    cmd.arg("30");
+    unsafe {
+        cmd.pre_exec(move || if libc::dup2(fd, 200) < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+    }
+    let mut child = cmd.spawn().unwrap();
+    drop(held);
+    OURS.lock().unwrap().push(child.id());
+    let port = listening().into_iter().find(|p| p.port == hp).expect("still listening in the child");
+    let owners = socket_owners(&HashSet::from([port.inode]), &[me, child.id()]);
+    assert_eq!(owners.get(&port.inode), Some(&vec![child.id()]));
+    let proc = crate::holders::info(child.id()).unwrap();
+    assert!(stop(&proc, libc::SIGTERM, Duration::from_secs(3)));
+    let _ = child.wait();
+    assert!(!listening().iter().any(|p| p.port == hp), "gone with it");
+    let captured6 = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 00000000000000000000000000000000:1F90 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 52345 1 0000000000000000 100 0 0 10 0\n   1: 0000000000000000FFFF00000100007F:0050 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 52346 1 0000000000000000 100 0 0 10 0\n   2: 0000000000000000FFFF00000100007F:A3B2 0000000000000000FFFF00000100007F:1F90 01 00000000:00000000 00:00000000 00000000  1000        0 52347 1 0000000000000000 20 4 30 10 -1\n";
+    let v = parse_table(captured6, true);
+    assert_eq!(v.len(), 2);
+    assert_eq!((v[0].port, v[0].addr, v[0].uid, v[0].inode), (8080, std::net::IpAddr::from(std::net::Ipv6Addr::UNSPECIFIED), 1000, 52345));
+    assert_eq!((v[1].port, v[1].addr, v[1].uid), (80, std::net::IpAddr::from([127, 0, 0, 1]), 0));
+    let captured_udp = "   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n  981: 00000000:14E9 00000000:0000 07 00000000:00000000 00:00000000 00000000   975        0 9921 2 0000000000000000 0\n  982: 0100A8C0:D2A1 0101A8C0:0035 01 00000000:00000000 00:00000000 00000000  1000        0 9922 2 0000000000000000 0\n";
+    let v = parse_table(captured_udp, false);
+    assert_eq!(v.len(), 1, "the connected one is left out");
+    assert_eq!((v[0].port, v[0].addr), (5353, std::net::IpAddr::from([0, 0, 0, 0])));
+    drop((tcp, udp, client));
+}
+
+/// Smart folders: names by part or by pattern, kinds, age and size, tested on a real
+/// folder: hidden folders, installed packages and links left out; a search's filter
+/// turned into one; sizes as people write them; the dialog's fields checked; and kept in
+/// the user data file, where an older file without them still loads and a kind from a
+/// later version doesn't stop it loading.
+#[test]
+fn smart_folders_find_what_they_say() {
+    use crate::smart::{SmartFolder, glob, parse_bytes, search};
+    let d = tmpdir("smart");
+    let old = std::time::SystemTime::now() - Duration::from_secs(86_400 * 90);
+    let file = |p: &str, len: usize, aged: bool| {
+        let p = d.join(p);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, vec![b'x'; len]).unwrap();
+        if aged {
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+        }
+    };
+    file("Invoices/2026/invoice-031.pdf", 2_000_000, false);
+    file("Invoices/2026/Invoice-030.PDF", 1000, false);
+    file("Invoices/2025/invoice-001.pdf", 3_000_000, true);
+    file("Invoices/notes.txt", 10, false);
+    file("Photos/IMG_0001.jpg", 500_000, false);
+    file("Photos/IMG_0002.png", 400_000, true);
+    file("Photos/holiday.mp4", 9_000_000, false);
+    file(".cache/invoice-cached.pdf", 10, false);
+    file("web/package.json", 2, false);
+    file("web/node_modules/pdfjs/invoice-test.pdf", 10, false);
+    std::fs::create_dir_all(d.join("Photos/invoice-folder.pdf")).unwrap();
+    std::os::unix::fs::symlink(d.join("Invoices"), d.join("Links")).unwrap();
+    let found = |sf: &SmartFolder| -> Vec<String> {
+        let mut v = vec![];
+        let (stop, cut) = (std::sync::atomic::AtomicBool::new(false), std::sync::atomic::AtomicBool::new(false));
+        search(sf, &mut |b| {
+            v.extend(b.into_iter().map(|e| e.rel().map(|r| r.into_owned()).unwrap_or_default()));
+            true
+        }, &stop, &cut);
+        v.sort();
+        v
+    };
+    let sf = |has: &str, kinds: &[&str], days: Option<u32>, bigger: Option<u64>| SmartFolder { id: 1, name: "x".into(), root: d.clone(), name_has: has.into(), kinds: kinds.iter().map(|k| k.to_string()).collect(), days, bigger };
+    assert_eq!(found(&sf("invoice", &[], None, None)), ["Invoices/2025/invoice-001.pdf", "Invoices/2026/Invoice-030.PDF", "Invoices/2026/invoice-031.pdf"], "any case; no folders, hidden, installed or linked copies");
+    assert_eq!(found(&sf("invoice-0??.pdf", &[], None, None)), ["Invoices/2025/invoice-001.pdf", "Invoices/2026/Invoice-030.PDF", "Invoices/2026/invoice-031.pdf"]);
+    assert_eq!(found(&sf("IMG_*", &[], None, None)), ["Photos/IMG_0001.jpg", "Photos/IMG_0002.png"]);
+    assert_eq!(found(&sf("", &["pictures"], None, None)), ["Photos/IMG_0001.jpg", "Photos/IMG_0002.png"]);
+    assert_eq!(found(&sf("", &["pictures", "videos"], Some(30), None)), ["Photos/IMG_0001.jpg", "Photos/holiday.mp4"], "the old picture left out");
+    assert_eq!(found(&sf("", &["pdfs"], Some(30), Some(1_000_000))), ["Invoices/2026/invoice-031.pdf"]);
+    assert_eq!(found(&sf("", &["documents"], None, None)).len(), 4, "the PDFs and the notes");
+    assert_eq!(found(&sf("", &["code"], None, None)), ["web/package.json"], "not the installed package's");
+    assert!(glob(&"a*b?c".chars().collect::<Vec<_>>(), &"axxbyc".chars().collect::<Vec<_>>()));
+    assert!(!glob(&"a*b?c".chars().collect::<Vec<_>>(), &"axxbc".chars().collect::<Vec<_>>()));
+    assert!(glob(&"*".chars().collect::<Vec<_>>(), &[]));
+    // From a search in the filter.
+    let from = crate::smart::from_filter(&d, "invoice size>1M modified<30d");
+    assert_eq!((from.name.as_str(), from.name_has.as_str(), from.bigger, from.days), ("invoice", "invoice", Some(1 << 20), Some(30)));
+    assert_eq!(found(&from), ["Invoices/2026/invoice-031.pdf"]);
+    assert_eq!(crate::smart::from_filter(&d.join("Photos"), "size>=2k").name, "Photos");
+    assert_eq!(parse_bytes("10 MB"), Some(10 << 20));
+    assert_eq!(parse_bytes("1.5G"), Some(1_610_612_736));
+    assert_eq!(parse_bytes("500k"), Some(512_000));
+    assert_eq!(parse_bytes("lots"), None);
+    // The dialog's fields.
+    let crate::popups::Popup::SmartEdit(mut e) = crate::smart::edit(&sf("invoice", &["pdfs"], Some(30), Some(10 << 20)), true) else { panic!() };
+    assert_eq!((e.days.as_str(), e.bigger.as_str()), ("30", "10.0 MB"));
+    assert_eq!(e.build().unwrap(), SmartFolder { name: "x".into(), ..sf("invoice", &["pdfs"], Some(30), Some(10 << 20)) });
+    e.days = "soon".into();
+    assert!(e.build().unwrap_err().starts_with("Days"));
+    e.days.clear();
+    e.bigger = "big".into();
+    assert!(e.build().unwrap_err().starts_with("Size"));
+    e.bigger.clear();
+    e.root = d.join("nowhere").display().to_string();
+    assert!(e.build().unwrap_err().starts_with("There is no folder"));
+    e.root = d.display().to_string();
+    e.name = "  ".into();
+    assert!(e.build().is_err());
+    // Kept in the user data file; older files load.
+    let path = d.join("userdata.json");
+    let mut ud = crate::config::UserData::with_defaults();
+    ud.smart.push(sf("invoice", &["pdfs"], Some(30), None));
+    crate::config::save_json(&path, &ud).unwrap();
+    let back: crate::config::UserData = crate::config::load_json(&path);
+    assert_eq!(back.smart, ud.smart);
+    std::fs::write(&path, r#"{"bookmarks": ["/tmp"], "recents": []}"#).unwrap();
+    let older: crate::config::UserData = crate::config::load_json(&path);
+    assert_eq!((older.bookmarks.len(), older.smart.len()), (1, 0));
+    std::fs::write(&path, r#"{"bookmarks": ["/tmp"], "smart": [{"id": 4, "name": "Scans", "root": "/tmp", "kinds": ["pdfs", "holograms"], "colour": "red"}]}"#).unwrap();
+    let later: crate::config::UserData = crate::config::load_json(&path);
+    assert_eq!((later.bookmarks.len(), later.smart[0].name.as_str(), later.smart[0].kinds.len()), (1, "Scans", 2));
+    let _ = std::fs::remove_dir_all(&d);
 }

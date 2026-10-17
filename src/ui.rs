@@ -944,7 +944,8 @@ impl App {
         let crumbs_rect = Rect::from_min_size(ui.cursor().min, vec2(crumbs_w, 26.0));
         let crumbs_rect = Rect::from_center_size(pos2(crumbs_rect.center().x, rect.center().y), crumbs_rect.size());
         ui.allocate_rect(crumbs_rect, Sense::hover());
-        self.breadcrumbs(ui, id, crumbs_rect, &path, flatten);
+        let smart = self.panels[&id].tab().smart.as_ref().map(|s| s.name.clone());
+        self.breadcrumbs(ui, id, crumbs_rect, &path, flatten, smart);
         let (r, resp) = ui.allocate_exact_size(vec2(menu_w, 24.0), Sense::click());
         if resp.hovered() {
             ui.painter().rect_filled(r, CornerRadius::same(5), pal.hover);
@@ -962,7 +963,7 @@ impl App {
         }
     }
 
-    fn breadcrumbs(&mut self, ui: &mut Ui, id: u64, rect: Rect, path: &Path, flatten: bool) {
+    fn breadcrumbs(&mut self, ui: &mut Ui, id: u64, rect: Rect, path: &Path, flatten: bool, smart: Option<String>) {
         let pal = self.pal;
         let font = FontId::proportional(self.cfg.font_size);
         // Empty space → GoTo with the current path.
@@ -978,7 +979,10 @@ impl App {
             self.popup = Popup::path_menu(id, path.to_path_buf(), ui.ctx().pointer_interact_pos().unwrap_or(rect.left_bottom()));
         }
         if !self.cfg.breadcrumbs {
-            let s = if tab::is_computer(path) { "Computer".into() } else { path.display().to_string() };
+            let mut s = if tab::is_computer(path) { "Computer".into() } else { path.display().to_string() };
+            if let Some(n) = &smart {
+                s = format!("{s} › {n}");
+            }
             let g = listing::elided(ui, &s, font, rect.width() - 12.0, pal.text);
             ui.painter().galley(pos2(rect.left() + 6.0, rect.center().y - g.size().y / 2.0), g, pal.text);
             return;
@@ -1020,7 +1024,10 @@ impl App {
             }
             segs.insert(0, ("Computer".into(), PathBuf::from(tab::COMPUTER)));
         }
-        if flatten {
+        // A smart folder reads as one more step below the folder it searches.
+        if let Some(name) = smart {
+            segs.push((name, path.to_path_buf()));
+        } else if flatten {
             if let Some(last) = segs.last_mut() {
                 last.0.push_str(" […]");
             }
@@ -1609,7 +1616,15 @@ impl App {
                             let n = p.errors.len();
                             let errs = p.errors.clone();
                             let denied = p.denied.clone();
+                            let busy = p.busy.clone();
                             drop(p);
+                            if done && !busy.is_empty() {
+                                let b = ui.add(egui::Button::new(egui::RichText::new("What's Using It").small()));
+                                note_control(ui, b.rect, "job holders");
+                                if b.clicked() {
+                                    self.actions.push(Action::Open(crate::holders::open(ctx, crate::holders::What::Paths(busy), None)));
+                                }
+                            }
                             // Refused for lack of permission: offer the same again as administrator.
                             let task = match &j.kind {
                                 crate::ops::OpKind::Copy { dest, .. } if done && !denied.is_empty() => Some(crate::admin::Task::Copy { srcs: denied, dest: dest.clone() }),

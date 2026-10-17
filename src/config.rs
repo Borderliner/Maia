@@ -500,6 +500,8 @@ pub struct TabSnap {
     pub path: PathBuf,
     pub view: ViewSettings,
     pub flatten: bool,
+    /// The smart folder shown, by its id.
+    pub smart: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -546,6 +548,8 @@ pub struct UserData {
     pub sidebar_collapsed: Vec<String>,
     /// Network addresses connected to before, newest first (no passwords).
     pub servers: Vec<String>,
+    /// Saved searches, in the sidebar's order.
+    pub smart: Vec<crate::smart::SmartFolder>,
 }
 
 impl UserData {

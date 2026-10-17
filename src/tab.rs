@@ -88,6 +88,8 @@ pub struct Tab {
     /// without marking the tab dirty, and unfolded folders' rows must come and go with it.
     pub built_tree: bool,
     pub flatten: bool,
+    /// The smart folder this flattened listing shows, which only its matches are walked for.
+    pub smart: Option<crate::smart::SmartFolder>,
     pub walk: Option<Walk>,
     pub loading: Option<Receiver<Listing>>,
     pub error: Option<String>,
@@ -197,6 +199,7 @@ impl Tab {
             last_filter: String::new(),
             built_tree: false,
             flatten: false,
+            smart: None,
             walk: None,
             loading: None,
             error: None,
@@ -256,6 +259,9 @@ impl Tab {
     }
 
     pub fn title(&self) -> String {
+        if let Some(s) = &self.smart {
+            return s.name.clone();
+        }
         let base = if is_computer(&self.path) {
             "Computer".to_string()
         } else if self.path == Path::new("/") {
@@ -336,7 +342,10 @@ impl Tab {
         self.rows.clear();
         self.group_labels.clear();
         // Walk everything; hidden filtering happens in the view so toggles stay instant.
-        self.walk = Some(fsx::walk_async(self.path.clone(), true, self.ctx.clone()));
+        self.walk = Some(match &self.smart {
+            Some(s) => crate::smart::walk(s.clone(), self.ctx.clone()),
+            None => fsx::walk_async(self.path.clone(), true, self.ctx.clone()),
+        });
         self.walk_started = Some(std::time::Instant::now());
         self.walk_secs = None;
         self.pending_restore = Some(HistState { path: self.path.clone(), cursor: cur, selected: sel, scroll: self.current_scroll });
@@ -608,6 +617,7 @@ impl Tab {
     fn go(&mut self, path: PathBuf, restore: Option<HistState>, settings: Option<(ViewSettings, Option<SaveScope>)>) {
         self.path = path;
         self.flatten = false;
+        self.smart = None;
         self.expand_all_on = false;
         self.expand_rec.clear();
         self.filter.clear();
@@ -656,7 +666,8 @@ impl Tab {
     }
 
     pub fn back(&mut self, settings: impl Fn(&Path) -> Option<(ViewSettings, Option<SaveScope>)>) {
-        if self.flatten {
+        // A smart folder was opened from somewhere: back there, not to its plain folder.
+        if self.flatten && (self.smart.is_none() || !self.can_back()) {
             self.set_flatten(false);
             return;
         }
@@ -707,6 +718,24 @@ impl Tab {
             return;
         }
         self.flatten = on;
+        self.smart = None;
+        self.reload();
+    }
+
+    /// Show a smart folder: its folder, flattened to the files that match.
+    pub fn open_smart(&mut self, sf: crate::smart::SmartFolder, settings: Option<(ViewSettings, Option<SaveScope>)>) {
+        if self.path != sf.root || self.flatten {
+            self.navigate(sf.root.clone(), settings);
+        } else {
+            // Saved from this folder's own search: the search is the smart folder now.
+            self.filter.clear();
+            self.last_filter.clear();
+            self.selected.clear();
+            self.cursor = None;
+            self.anchor = None;
+        }
+        self.smart = Some(sf);
+        self.flatten = true;
         self.reload();
     }
 

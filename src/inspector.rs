@@ -2042,7 +2042,7 @@ fn volume_view(ui: &mut Ui, body: Rect, e: &Entry, v: Option<&tab::VolInfo>, pal
 }
 
 /// Login name for a uid (from /etc/passwd), or the number.
-fn user_name(uid: u32) -> String {
+pub(crate) fn user_name(uid: u32) -> String {
     std::fs::read_to_string("/etc/passwd")
         .ok()
         .and_then(|s| s.lines().find_map(|l| {

@@ -146,6 +146,7 @@ commands! {
     OpenInRightSplit, "open_in_right_split", Folder, "Open In Right Split", "Open the selected folder in a new panel to the right.", ["Ctrl+Alt+Right"];
     OpenInBottomSplit, "open_in_bottom_split", Folder, "Open In Bottom Split", "Open the selected folder in a new panel below.", ["Ctrl+Alt+Down"];
     OpenTerminal, "open_terminal", Folder, "Open Terminal Here", "Start your terminal in the current folder.", ["Ctrl+Shift+Backtick"];
+    RecentProjects, "recent_projects", Folder, "Recent Projects", "Open one of the git repositories in your home folder, the ones you were in last first.", ["Ctrl+Alt+P"];
     RunTask, "run_task", Folder, "Run Task…", "Run a script, target or recipe of this project in your terminal.", ["Ctrl+Shift+B"];
     ToggleBookmark, "toggle_bookmark", Folder, "Toggle Bookmark", "Add or remove the current folder (or selection) from bookmarks.", ["Ctrl+D"];
     OpenLinkTarget, "open_link_target", Folder, "Open Link Target Location", "Go to the folder containing a symlink's target.", [];
@@ -190,6 +191,8 @@ commands! {
     FocusFilter, "focus_filter", View, "Focus Filter", "Put the cursor in the filter box.", ["Ctrl+F"];
     MeaningSearch, "search_meaning", View, "Search Everywhere", "Find files and folders in your home folder by name, and by what they are about with search by meaning on.", ["Ctrl+K"];
     ContentSearch, "search_contents", View, "Search File Contents", "Switch the filter between file names and the text inside files.", ["Ctrl+Shift+F"];
+    SaveSmart, "save_smart_folder", View, "Save As Smart Folder…", "Keep this folder's search in the sidebar, searched again each time it opens.", [];
+    NewSmart, "new_smart_folder", View, "New Smart Folder…", "A saved search in the sidebar: a folder and what to find in it, by name, kind, date or size.", [];
     CodeSearch, "search_code", View, "Search Code", "Find text in this project's files, by word, case or regular expression.", ["Ctrl+Alt+F"];
     FindTodos, "find_todos", View, "Find TODOs", "List every TODO, FIXME, HACK and XXX comment in this project.", [];
     TypesFilter, "types_filter", View, "Filter By Type", "Choose which file types are shown.", ["Alt+T"];
@@ -285,6 +288,7 @@ commands! {
     Duplicate, "duplicate", Files, "Duplicate", "Make copies of the selection in the same folder.", ["Ctrl+Shift+D"];
     OpenWith, "open_with", Files, "Open With…", "Pick an application to open the selection with.", [];
     OpenInEditor, "open_in_editor", Files, "Open In Editor", "Open the selected files in your code editor (chosen in Options).", ["F4"];
+    WhatsUsing, "whats_using", Files, "What's Using This…", "List the programs that have the selection open or work inside it, and stop your own.", [];
     FindDuplicates, "find_duplicates", Files, "Find Duplicates…", "Find files with the same contents under this folder, whatever their names, and trash the extra copies.", [];
     CleanBuilds, "clean_build_folders", Files, "Clean Build Folders…", "Find build output and installed packages under this folder and trash the ones you pick.", [];
     ContextMenu, "context_menu", Files, "Context Menu", "Open the action menu at the file cursor.", ["Shift+F10"];
@@ -308,6 +312,7 @@ commands! {
 
     Palette, "palette", Misc, "Command Palette", "Search every command and assign hotkeys.", ["Ctrl+Shift+P"];
     Options, "options", Misc, "Options", "Change appearance, behavior and defaults.", ["Ctrl+Comma"];
+    WhatsUsingPort, "whats_using_port", Misc, "What's Using a Port…", "List the network ports programs listen on, whose they are, and stop your own.", [];
     CheckUpdates, "check_updates", Misc, "Check for Updates", "Ask GitHub whether a newer Maia is out, and update from Options.", [];
     ChooseTheme, "choose_theme", Misc, "Choose Theme", "See every color theme side by side, with its code colors, and pick one.", [];
     MainMenu, "main_menu", Misc, "Main Menu", "Open the main menu.", ["F10"];
