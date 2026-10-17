@@ -215,6 +215,14 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         if any_file || single {
             items.push(Item::cmd(Cmd::OpenInEditor));
         }
+        if crate::gitstatus::repo_for(&here).is_some() {
+            items.push(Item::cmd(Cmd::OpenWebLink));
+        }
+        if let [a, b] = ents.as_slice() {
+            if !a.1 && !b.1 {
+                items.push(Item::cmd(Cmd::CompareFiles));
+            }
+        }
         items.push(Item::cmd(Cmd::OpenInNewTab));
         items.push(Item::cmd(Cmd::OpenInRightSplit));
         items.push(Item::cmd(Cmd::OpenInBottomSplit));

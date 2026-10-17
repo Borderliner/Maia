@@ -1300,13 +1300,13 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
         121 => {
             // Sharing: code blocks, a web link or .gitignore, from the palette or a menu.
             match rng.below(4) {
-                0 => s.cmd(Cmd::CopyCodeBlocks),
-                1 => s.cmd(Cmd::CopyWebLink),
+                0 => s.cmd(*rng.pick(&[Cmd::CopyCodeBlocks, Cmd::CompareFiles])),
+                1 => s.cmd(*rng.pick(&[Cmd::CopyWebLink, Cmd::OpenWebLink])),
                 2 => s.cmd(*rng.pick(&[Cmd::GitIgnore, Cmd::GitIgnoreExt])),
                 _ => {
                     let (x, y) = p(rng);
                     s.act(&format!("click {x:.0} {y:.0} right"));
-                    s.act(&format!("text {}", rng.pick(&["code blocks", "web link", "this file", "all *", "gitignore"])));
+                    s.act(&format!("text {}", rng.pick(&["code blocks", "web link", "this file", "all *", "gitignore", "compare"])));
                     s.act("key Enter");
                 }
             }
@@ -6151,7 +6151,7 @@ mod journeys {
         s.act(&format!("click {:.0} {:.0} ctrl", r.center().x, r.center().y));
         s.settle();
         let n = s.copied.len();
-        menu(&mut s, "main.rs", "web link");
+        menu(&mut s, "main.rs", "copy web link");
         wait_until(&mut s, "the line's link", 10, |s| s.copied.len() > n);
         assert_eq!(s.copied.last().unwrap(), &format!("https://github.com/acme/app/blob/{sha}/src/main.rs#L5"));
         // Ignoring a file, then every file like another.
@@ -6163,6 +6163,14 @@ mod journeys {
         let row = row_text(&s, "scratch.txt");
         s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
         s.idle(2);
+        // A long menu in a short window scrolls.
+        for _ in 0..20 {
+            if some_text(&s, "Add to .gitignore") {
+                break;
+            }
+            s.act(&format!("scroll {:.0} {:.0} -3", row.center().x + 120.0, s.size.y / 2.0));
+            s.idle(2);
+        }
         let at = s.text_rect("Add to .gitignore").center();
         s.act(&format!("click {:.0} {:.0}", at.x, at.y));
         s.idle(2);
@@ -6188,10 +6196,81 @@ mod journeys {
         report("share", &s);
     }
 
+    /// Compare Files from the menu of two selected files: git's diff in the inspector with
+    /// its counts, kept while either file is selected and left for the preview after;
+    /// not offered for one file. A patch file previewed. Open Web Link hands the link
+    /// to the browser.
+    #[test]
+    fn compare_files_and_open_links() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let home = fixture("compare");
+        let app = dev_fixture(&home);
+        std::fs::create_dir_all(app.join("config")).unwrap();
+        std::fs::write(app.join("config/dev.toml"), "port = 8080\nworkers = 4\nlog = \"debug\"\n").unwrap();
+        std::fs::write(app.join("config/prod.toml"), "port = 9090\nworkers = 4\nlog = \"warn\"\ncache = true\n").unwrap();
+        std::fs::write(app.join("fix.patch"), "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,3 @@\n pub fn haystack() -> Vec<u8> {\n-    // HACK: a needle in a haystack\n+    // a needle in a haystack\n     vec![]\n").unwrap();
+        let g = |args: &[&str]| crate::tests::git(&app, args);
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "Start"]);
+        g(&["remote", "add", "origin", "https://codeberg.org/ana/app.git"]);
+        let mut s = Sim::new(&app.join("config"), vec2(1280.0, 800.0));
+        wait_until(&mut s, "the repository", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
+        // One file: nothing to compare with.
+        reveal(&mut s, "dev.toml");
+        let row = row_text(&s, "dev.toml");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        assert!(!some_text(&s, "Compare Files"));
+        s.act("key Escape");
+        s.act("key ctrl+a");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        assert!(some_text(&s, "Compare Files"));
+        s.click_text("Compare Files");
+        let got = |s: &Sim| inspector(s).compare.as_ref().and_then(|c| c.got.as_ref().map(|g| g.as_ref().map(|d| (d.added, d.removed)).map_err(|e| e.clone())));
+        wait_until(&mut s, "the comparison", 10, |s| got(s).is_some());
+        assert_eq!(got(&s), Some(Ok((3, 2))));
+        s.idle(3);
+        for t in ["dev.toml → prod.toml", "+3", "−2", "-port = 8080", "+port = 9090", "+cache = true"] {
+            assert!(some_text(&s, t), "{t:?} shown");
+        }
+        assert!(s.texts.iter().any(|(_, t)| t.trim() == "workers = 4"), "the line both have, unmarked");
+        look(&mut s, "comparison");
+        s.shot("compare-files");
+        s.act("key ArrowDown");
+        s.idle(2);
+        assert!(inspector(&s).compare.is_some(), "kept on the other file of the two");
+        // Somewhere else: the preview again.
+        go(&mut s, &app);
+        s.idle(2);
+        assert!(inspector(&s).compare.is_none());
+        reveal(&mut s, "fix.patch");
+        wait_until(&mut s, "the patch", 10, |s| inspector(s).text_lines().is_some());
+        s.idle(3);
+        assert!(some_text(&s, "+    // a needle in a haystack"));
+        look(&mut s, "patch");
+        s.shot("patch-preview");
+        // The file on its forge, in the browser.
+        go(&mut s, &app.join("src"));
+        wait_until(&mut s, "the folder's repository", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
+        reveal(&mut s, "main.rs");
+        let n = launched().len();
+        palette_run(&mut s, "Open Web Link");
+        wait_until(&mut s, "the browser", 10, |_| launched().len() > n);
+        let sha = String::from_utf8_lossy(&std::process::Command::new("git").arg("-C").arg(&app).args(["rev-parse", "HEAD"]).output().unwrap().stdout).trim().to_string();
+        assert!(launched().last().unwrap().contains(&format!("https://codeberg.org/ana/app/src/commit/{sha}/src/main.rs")), "{:?}", launched().last());
+        assert!(toast_is(&s, "Opened in the browser; this commit isn't pushed, so the link won't open until it is"), "{:?}", s.app.toast);
+        report("compare", &s);
+    }
+
     /// Select the listed item named `label`, which scrolls it into view.
     fn reveal(s: &mut Sim, label: &str) {
         let p = s.tab().entries.iter().find(|e| e.name == label).map(|e| e.path.clone()).unwrap_or_else(|| s.fail(&format!("{label:?} not listed")));
         select_path(s, &p);
+        let id = s.app.active;
+        s.app.panels.get_mut(&id).unwrap().tab_mut().scroll_to_cursor = true;
         s.settle();
     }
 

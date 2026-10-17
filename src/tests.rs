@@ -4853,3 +4853,34 @@ fn share_gitignore_lines() {
     assert_eq!(shared_ext([(p("/a/x.log").as_path(), true)].into_iter()), None);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Compare Files on real files with git's diff: what changed from the first file to the
+/// second, counted; the same files said to be the same; binary files and a missing one
+/// refused with a reason; the title naming the folders when the names match.
+#[test]
+fn compare_two_files() {
+    use crate::filediff::{Compare, diff, parse};
+    let d = tmpdir("compare-files");
+    touch(&d.join("a/config.toml"), "port = 8080\nworkers = 4\nlog = \"info\"\n");
+    touch(&d.join("b/config.toml"), "port = 9090\nworkers = 4\nlog = \"info\"\ncache = true\n");
+    touch(&d.join("copy.toml"), "port = 8080\nworkers = 4\nlog = \"info\"\n");
+    std::fs::write(d.join("x.bin"), b"\x00\x01\x02").unwrap();
+    std::fs::write(d.join("y.bin"), b"\x00\x01\x03").unwrap();
+    let r = diff(&d.join("a/config.toml"), &d.join("b/config.toml")).unwrap();
+    assert_eq!(r.lines, ["@@ -1,3 +1,4 @@", "-port = 8080", "+port = 9090", " workers = 4", " log = \"info\"", "+cache = true"]);
+    assert_eq!((r.added, r.removed, r.truncated), (2, 1, false));
+    assert_eq!(diff(&d.join("a/config.toml"), &d.join("copy.toml")).unwrap(), Default::default(), "the same");
+    assert_eq!(diff(&d.join("x.bin"), &d.join("y.bin")).unwrap_err(), "They're binary files, and they differ");
+    assert!(diff(&d.join("a/config.toml"), &d.join("gone.toml")).is_err());
+    // git's header (the file names) is left out; a long diff stops with a line saying so.
+    let long: String = format!("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1,60000 @@\n{}", "+x\n".repeat(60_000));
+    let p = parse(&long).unwrap();
+    assert!(p.truncated && p.lines.len() == 50_001 && p.lines[0].starts_with("@@"));
+    assert_eq!(p.lines.last().map(String::as_str), Some("… the diff goes on past 50,000 lines"));
+    let ctx = egui::Context::default();
+    assert_eq!(Compare::start(d.join("a/config.toml"), d.join("b/config.toml"), &ctx).title(), "a/config.toml → b/config.toml");
+    assert_eq!(Compare::start(d.join("a/config.toml"), d.join("copy.toml"), &ctx).title(), "config.toml → copy.toml");
+    assert!(crate::inspector::is_patch("fix.patch") && crate::inspector::is_patch("A.DIFF"));
+    assert!(!crate::inspector::is_patch(".patch") && !crate::inspector::is_patch("patch.txt"));
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -20,6 +20,7 @@ mod devtools;
 mod drives;
 mod editor;
 mod ctxmenu;
+mod filediff;
 mod fsx;
 mod fuzzy;
 mod gitchanges;

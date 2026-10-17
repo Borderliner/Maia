@@ -158,6 +158,8 @@ pub struct Inspector {
     era: u64,
     /// A `.env` preview shows every value.
     pub env_all: bool,
+    /// Two files compared, shown instead of the preview while one of them is selected.
+    pub compare: Option<Box<crate::filediff::Compare>>,
 }
 
 /// Test-only views of the preview state (simulations check behaviour, not pixels).
@@ -354,6 +356,7 @@ impl Default for Inspector {
             filtered: None,
             era: 0,
             env_all: false,
+            compare: None,
         }
     }
 }
@@ -396,6 +399,7 @@ impl Inspector {
         self.current = None;
         self.pending = None;
         self.git = Some(Box::new(h));
+        self.compare = None;
     }
 
     /// Start showing `e`. Anything that touches the disk (folder listings, file contents)
@@ -746,6 +750,14 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             close_history(panel);
         }
         return;
+    }
+    if let Some(c) = ins.compare.as_mut() {
+        // Moving to another item leaves the comparison for its preview.
+        let on = target.as_ref().is_none_or(|e| e.path == c.a || e.path == c.b);
+        if on && crate::filediff::view(ui, rect, c, &mut ins.wrap_code, env) {
+            return;
+        }
+        ins.compare = None;
     }
     ui.painter().rect_filled(rect, CornerRadius::ZERO, pal.bg);
     let key = target.as_ref().map(|e| (e.path.clone(), e.modified));
@@ -1305,7 +1317,12 @@ fn text_body(ui: &mut Ui, body: Rect, ins: &mut Inspector, e: &Entry, env: &mut 
     let mark = ins.goto.as_mut().filter(|g| !filtered && Some(&g.0) == here && g.1 as usize > skip).map(|g| (g.1 as usize - 1 - skip, &mut g.2));
     let opts = TextOpts { blame, first: if filtered { 0 } else { ins.first_line }, stick: ins.follow, to_end: std::mem::take(&mut ins.to_end), mark };
     let spans = if filtered { None } else { spans.as_deref() };
-    text_view_ex(ui, body, shown, *truncated && !filtered, spans, ins.line_numbers, wrapped, size, &pal, false, spacing, opts)
+    text_view_ex(ui, body, shown, *truncated && !filtered, spans, ins.line_numbers, wrapped, size, &pal, is_patch(&e.name), spacing, opts)
+}
+
+/// A diff or patch file, shown tinted like the history's diffs.
+pub(crate) fn is_patch(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(stem, x)| !stem.is_empty() && (x.eq_ignore_ascii_case("diff") || x.eq_ignore_ascii_case("patch")))
 }
 
 /// Close the history, and the inspector with it when it was opened for the history.
@@ -1837,8 +1854,10 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
                 }
             }
             // A diff: added and removed lines tinted (every row of them when wrapped),
-            // hunk headers dimmed.
-            let mark = if diff { line.as_bytes().first().copied() } else { None };
+            // hunk headers dimmed, and the file names (a "---" line with its "+++"
+            // after it) dimmed with them rather than read as a line taken out and one put in.
+            let names = diff && ((line.starts_with("--- ") && lines.get(li + 1).is_some_and(|n| n.starts_with("+++ "))) || (line.starts_with("+++ ") && li > 0 && lines[li - 1].starts_with("--- ")));
+            let mark = if names { Some(b'@') } else if diff { line.as_bytes().first().copied() } else { None };
             let tint = match mark {
                 Some(b'+') => crate::gitstatus::GREEN,
                 Some(b'-') => pal.danger,

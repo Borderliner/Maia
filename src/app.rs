@@ -162,6 +162,8 @@ pub struct App {
 /// work tree to read again.
 struct ShareDone {
     copy: Option<String>,
+    /// Addresses to open in the browser.
+    open: Vec<String>,
     toast: String,
     rescan: Option<PathBuf>,
 }
@@ -499,6 +501,12 @@ impl App {
                     self.shares.remove(i);
                     if let Some(t) = done.copy {
                         ctx.copy_text(t);
+                    }
+                    for u in &done.open {
+                        if let Err(e) = crate::mime::open_uri(u) {
+                            self.toast(format!("Couldn't open the link: {e}"));
+                            return;
+                        }
                     }
                     if let Some(root) = done.rescan {
                         crate::gitstatus::rescan(&root);
@@ -1995,7 +2003,7 @@ impl App {
                     let first = &paths[0];
                     let root = crate::project::root(if first.is_dir() { first } else { first.parent().unwrap_or(first) });
                     let b = crate::share::code_blocks(&paths, &root);
-                    ShareDone { copy: (b.files > 0).then(|| b.text.clone()), toast: b.note(), rescan: None }
+                    ShareDone { copy: (b.files > 0).then(|| b.text.clone()), open: vec![], toast: b.note(), rescan: None }
                 });
             }
             Cmd::CopyWebLink => {
@@ -2008,12 +2016,39 @@ impl App {
                     let toast = match crate::share::web_links(&ents, hint) {
                         Ok((links, caution)) => {
                             let what = if ents.len() == 1 { "Copied the link".to_string() } else { format!("Copied {} links", ents.len()) };
-                            return ShareDone { copy: Some(links), toast: caution.map_or(what.clone(), |c| format!("{what}; {c}")), rescan: None };
+                            return ShareDone { copy: Some(links), open: vec![], toast: caution.map_or(what.clone(), |c| format!("{what}; {c}")), rescan: None };
                         }
                         Err(e) => format!("Couldn't make a link: {e}"),
                     };
-                    ShareDone { copy: None, toast, rescan: None }
+                    ShareDone { copy: None, open: vec![], toast, rescan: None }
                 });
+            }
+            Cmd::OpenWebLink => {
+                let mut ents: Vec<(PathBuf, bool)> = self.tab().target_entries().iter().map(|e| (e.path.clone(), e.is_dir)).collect();
+                if ents.is_empty() {
+                    ents = vec![(self.panel().path(), true)];
+                }
+                // A handful of tabs at most, however many are selected.
+                ents.truncate(5);
+                let hint = self.panel().line_hint.clone();
+                self.share(&ctx, move || match crate::share::web_links(&ents, hint) {
+                    Ok((links, caution)) => {
+                        let toast = caution.map_or_else(|| "Opened in the browser".to_string(), |c| format!("Opened in the browser; {c}"));
+                        ShareDone { copy: None, open: links.lines().map(String::from).collect(), toast, rescan: None }
+                    }
+                    Err(e) => ShareDone { copy: None, open: vec![], toast: format!("Couldn't make a link: {e}"), rescan: None },
+                });
+            }
+            Cmd::CompareFiles => {
+                let files: Vec<PathBuf> = self.tab().target_entries().iter().filter(|e| !e.is_dir).map(|e| e.path.clone()).collect();
+                let [a, b] = files.as_slice() else {
+                    self.toast("Select two files to compare");
+                    return;
+                };
+                let c = crate::filediff::Compare::start(a.clone(), b.clone(), &ctx);
+                let ins = self.panel().inspector.get_or_insert_with(Inspector::default);
+                ins.git = None;
+                ins.compare = Some(Box::new(c));
             }
             Cmd::GitIgnore | Cmd::GitIgnoreExt => {
                 let Some(root) = crate::gitstatus::repo_for(&self.tab().path).map(|r| r.root.clone()) else {
@@ -2042,7 +2077,7 @@ impl App {
                         Ok((added, tracked)) => crate::share::ignore_note(&lines, added, &tracked),
                         Err(e) => e,
                     };
-                    ShareDone { copy: None, toast, rescan: Some(root) }
+                    ShareDone { copy: None, open: vec![], toast, rescan: Some(root) }
                 });
             }
             Cmd::CopyPathLine => {
