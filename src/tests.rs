@@ -229,6 +229,65 @@ fn copy_move_merge_and_conflicts() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// A finished move takes what it moved out of every listing that showed it, whichever
+/// tab it is in: a plain listing and a tree are read again, a flattened one drops the
+/// rows at once, the destination shows them, and a listing it did not touch stays put.
+/// A tab whose own folder was moved away moves up.
+#[test]
+fn finished_move_updates_every_listing() {
+    let ctx = egui::Context::default();
+    let d = tmpdir("moved-away");
+    let (from, to) = (d.join("from"), d.join("to"));
+    for f in ["a.txt", "b.txt", "sub/c.txt", "sub/d.txt", "deep/e.txt"] {
+        touch(&from.join(f), f);
+    }
+    touch(&d.join("elsewhere/x.txt"), "x");
+    std::fs::create_dir_all(&to).unwrap();
+    let stats = HashMap::new();
+    let tab = |p: &Path| Tab::new(1, p.to_path_buf(), ViewSettings::default(), ctx.clone());
+    let (mut plain, mut flat, mut tree, mut dest, mut other, mut deep) = (tab(&from), tab(&from), tab(&from), tab(&to), tab(&d.join("elsewhere")), tab(&from.join("deep")));
+    flat.set_flatten(true);
+    tree.settings.zoom = 0.1;
+    for t in [&mut plain, &mut flat, &mut tree, &mut dest, &mut other, &mut deep] {
+        pump(t, &stats);
+    }
+    tree.toggle_expand(&from.join("sub"));
+    pump(&mut tree, &stats);
+    let shows = |t: &Tab, p: &Path| t.view.iter().any(|&i| t.entries[i as usize].path == p);
+    assert!(shows(&plain, &from.join("a.txt")) && shows(&flat, &from.join("sub/c.txt")) && shows(&tree, &from.join("sub/c.txt")));
+    // Cut a.txt, sub/c.txt and the folder deep, pasted into `to`.
+    let srcs = vec![from.join("a.txt"), from.join("sub/c.txt"), from.join("deep")];
+    let j = ops::spawn(1, OpKind::Move { srcs: srcs.clone(), dest: to.clone(), decide: HashMap::new() }, ctx.clone());
+    wait_job(&j);
+    let c = ops::Changed::of(&j.kind, &j.progress.lock().unwrap());
+    assert_eq!(c, ops::Changed { arrived: vec![to.clone()], left: vec![from.clone(), from.join("sub")], gone: srcs.clone() });
+    for t in [&mut plain, &mut flat, &mut tree, &mut dest, &mut other, &mut deep] {
+        t.changed(&c);
+    }
+    assert!(!flat.is_loading() && !other.is_loading(), "nothing arrived under them: no walk, no read");
+    assert!(plain.is_loading() && dest.is_loading(), "the folders it left and reached are read again");
+    let recents = HashSet::new();
+    let vc = ViewCtx { show_hidden: false, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, stats: &stats };
+    flat.rebuild(&vc);
+    assert!(!shows(&flat, &from.join("a.txt")) && !shows(&flat, &from.join("sub/c.txt")) && !shows(&flat, &from.join("deep/e.txt")), "a flattened listing drops what went at once");
+    assert!(shows(&flat, &from.join("b.txt")) && shows(&flat, &from.join("sub/d.txt")));
+    for t in [&mut plain, &mut tree, &mut dest, &mut deep] {
+        pump(t, &stats);
+    }
+    assert!(!shows(&plain, &from.join("a.txt")) && !shows(&plain, &from.join("deep")) && shows(&plain, &from.join("b.txt")));
+    assert!(!shows(&tree, &from.join("sub/c.txt")) && shows(&tree, &from.join("sub/d.txt")), "the unfolded folder is read again");
+    assert!(shows(&dest, &to.join("a.txt")) && shows(&dest, &to.join("c.txt")) && shows(&dest, &to.join("deep")));
+    assert!(deep.gone, "the tab inside the folder that moved finds it gone");
+    // Moving them back (Undo) lands them in a flattened listing by walking it again.
+    let c = ops::Changed::moved(&[(to.join("a.txt"), from.join("a.txt"))]);
+    std::fs::rename(to.join("a.txt"), from.join("a.txt")).unwrap();
+    flat.changed(&c);
+    assert!(flat.is_loading(), "something arrived under it");
+    pump(&mut flat, &stats);
+    assert!(shows(&flat, &from.join("a.txt")) && !shows(&flat, &from.join("sub/c.txt")));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 fn pump(t: &mut Tab, stats: &HashMap<PathBuf, crate::stats::DirStats>) {
     let recents = HashSet::new();
     let ctx = ViewCtx { show_hidden: false, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, stats };

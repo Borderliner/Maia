@@ -80,6 +80,8 @@ pub struct Progress {
     pub within: Option<f32>,
     /// Folders the job made, outermost first.
     pub made: Vec<PathBuf>,
+    /// Paths no longer where they were: moved away, trashed or deleted.
+    pub gone: Vec<PathBuf>,
 }
 
 pub struct Job {
@@ -224,12 +226,15 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                     break;
                 }
                 p.lock().unwrap().current = name_of(s);
-                if let Err(e) = crate::trashcan::delete(s) {
-                    let mut g = p.lock().unwrap();
-                    if crate::holders::is_busy(&e) {
-                        g.busy.push(s.clone());
+                match crate::trashcan::delete(s) {
+                    Ok(()) => p.lock().unwrap().gone.push(s.clone()),
+                    Err(e) => {
+                        let mut g = p.lock().unwrap();
+                        if crate::holders::is_busy(&e) {
+                            g.busy.push(s.clone());
+                        }
+                        g.errors.push(format!("{}: {e}", s.display()));
                     }
-                    g.errors.push(format!("{}: {e}", s.display()));
                 }
                 p.lock().unwrap().done_items += 1;
                 ctx.request_repaint();
@@ -238,7 +243,16 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
         OpKind::Admin { task, tools } => {
             p.lock().unwrap().total_items = 1;
             match crate::admin::run(tools, task) {
-                Ok(()) => p.lock().unwrap().done_items = 1,
+                Ok(()) => {
+                    use crate::admin::Task;
+                    let mut g = p.lock().unwrap();
+                    g.done_items = 1;
+                    match task {
+                        Task::Move { srcs: v, .. } | Task::Delete { paths: v } => g.gone.extend(v.iter().cloned()),
+                        Task::Rename { from, .. } => g.gone.push(from.clone()),
+                        _ => {}
+                    }
+                }
                 Err(e) => p.lock().unwrap().errors.push(e),
             }
         }
@@ -272,20 +286,88 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                     break;
                 }
                 p.lock().unwrap().current = name_of(s);
-                if let Err(e) = remove_tree(s) {
-                    let mut g = p.lock().unwrap();
-                    if crate::admin::denied(&e) {
-                        g.denied.push(s.clone());
+                match remove_tree(s) {
+                    Ok(()) => p.lock().unwrap().gone.push(s.clone()),
+                    Err(e) => {
+                        let mut g = p.lock().unwrap();
+                        if crate::admin::denied(&e) {
+                            g.denied.push(s.clone());
+                        }
+                        if crate::holders::is_busy(&e) {
+                            g.busy.push(s.clone());
+                        }
+                        g.errors.push(format!("{}: {e}", s.display()));
                     }
-                    if crate::holders::is_busy(&e) {
-                        g.busy.push(s.clone());
-                    }
-                    g.errors.push(format!("{}: {e}", s.display()));
                 }
                 p.lock().unwrap().done_items += 1;
                 ctx.request_repaint();
             }
         }
+    }
+}
+
+/// What a finished job changed, for every listing that shows it.
+#[derive(Default, Debug, PartialEq)]
+pub struct Changed {
+    /// Folders things arrived in.
+    pub arrived: Vec<PathBuf>,
+    /// Folders things left.
+    pub left: Vec<PathBuf>,
+    /// Paths no longer where they were.
+    pub gone: Vec<PathBuf>,
+}
+
+impl Changed {
+    fn add(v: &mut Vec<PathBuf>, d: Option<&Path>) {
+        if let Some(d) = d.filter(|d| !v.iter().any(|x| x == d)) {
+            v.push(d.to_path_buf());
+        }
+    }
+
+    /// Every folder whose contents changed.
+    pub fn dirs(&self) -> impl Iterator<Item = &PathBuf> {
+        self.arrived.iter().chain(self.left.iter().filter(|d| !self.arrived.contains(d)))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.arrived.is_empty() && self.left.is_empty()
+    }
+
+    /// Things moved from `pairs`' first paths to their second.
+    pub fn moved(pairs: &[(PathBuf, PathBuf)]) -> Changed {
+        let mut c = Changed::default();
+        for (from, to) in pairs {
+            Changed::add(&mut c.left, from.parent());
+            Changed::add(&mut c.arrived, to.parent());
+            c.gone.push(from.clone());
+        }
+        c
+    }
+
+    /// What a job of `kind` changed, by what it recorded as it went.
+    pub fn of(kind: &OpKind, p: &Progress) -> Changed {
+        use crate::admin::Task;
+        let mut c = Changed { gone: p.gone.clone(), ..Default::default() };
+        let parents = |v: &mut Vec<PathBuf>, paths: &[PathBuf]| paths.iter().for_each(|s| Changed::add(v, s.parent()));
+        match kind {
+            OpKind::Copy { dest, .. } | OpKind::Extract { dest, .. } | OpKind::Admin { task: Task::Copy { dest, .. }, .. } => c.arrived.push(dest.clone()),
+            OpKind::Move { srcs, dest, .. } | OpKind::Admin { task: Task::Move { srcs, dest }, .. } => {
+                c.arrived.push(dest.clone());
+                parents(&mut c.left, srcs);
+            }
+            OpKind::Sort { moves, .. } => {
+                for (s, d) in moves {
+                    Changed::add(&mut c.left, s.parent());
+                    Changed::add(&mut c.arrived, Some(d));
+                }
+            }
+            OpKind::Trash { paths } | OpKind::Delete { paths } | OpKind::Admin { task: Task::Delete { paths }, .. } => parents(&mut c.left, paths),
+            OpKind::Compress { out, .. } => Changed::add(&mut c.arrived, out.parent()),
+            OpKind::Convert { srcs, .. } => Changed::add(&mut c.arrived, srcs.first().and_then(|s| s.parent())),
+            OpKind::Admin { task: Task::NewFolder(p) | Task::NewFile(p), .. } => Changed::add(&mut c.arrived, p.parent()),
+            OpKind::Admin { task: Task::Rename { from, .. }, .. } => Changed::add(&mut c.arrived, from.parent()),
+        }
+        c
     }
 }
 
@@ -312,7 +394,11 @@ fn move_one(s: &PathBuf, dest: &Path, policy: Conflict, p: &Mutex<Progress>, can
         Err(e) => Err(e),
     };
     match r {
-        Ok(()) => p.lock().unwrap().produced.push((s.clone(), dst)),
+        Ok(()) => {
+            let mut g = p.lock().unwrap();
+            g.gone.push(s.clone());
+            g.produced.push((s.clone(), dst));
+        }
         Err(e) => {
             let mut g = p.lock().unwrap();
             if crate::admin::denied(&e) {

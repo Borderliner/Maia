@@ -1169,30 +1169,13 @@ impl App {
             }
         }
         // Jobs: mark finished, drop after a moment.
-        let mut finished_dirs = vec![];
+        let mut changes: Vec<ops::Changed> = vec![];
         let mut pw_job = None;
-        let mut admin_dirs: Vec<PathBuf> = vec![];
         for j in &mut self.jobs {
             if j.finished_at.is_none() && j.progress.lock().unwrap().finished {
                 j.finished_at = Some(Instant::now());
-                match &j.kind {
-                    OpKind::Copy { dest, .. } | OpKind::Move { dest, .. } | OpKind::Extract { dest, .. } => finished_dirs.push(dest.clone()),
-                    OpKind::Compress { out, .. } => finished_dirs.extend(out.parent().map(Path::to_path_buf)),
-                    OpKind::Convert { srcs, .. } => finished_dirs.extend(srcs.first().and_then(|s| s.parent()).map(Path::to_path_buf)),
-                    // Done by another process: show the result now rather than wait for the watcher.
-                    OpKind::Admin { task, .. } => {
-                        use crate::admin::Task;
-                        let dirs: Vec<PathBuf> = match task {
-                            Task::Copy { dest, .. } | Task::Move { dest, .. } => vec![dest.clone()],
-                            Task::Delete { paths } => paths.iter().filter_map(|p| p.parent().map(Path::to_path_buf)).collect(),
-                            Task::NewFolder(p) | Task::NewFile(p) | Task::Rename { from: p, .. } => p.parent().map(Path::to_path_buf).into_iter().collect(),
-                        };
-                        admin_dirs.extend(dirs.iter().cloned());
-                        finished_dirs.extend(dirs);
-                    }
-                    _ => {}
-                }
                 let p = j.progress.lock().unwrap();
+                changes.push(ops::Changed::of(&j.kind, &p));
                 if let Some((archive, wrong)) = &p.password {
                     pw_job = Some((archive.clone(), *wrong, j.kind.clone(), j.id));
                 }
@@ -1201,12 +1184,11 @@ impl App {
                         self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Move(p.produced.clone()) });
                     }
                 }
-                if let OpKind::Sort { moves, .. } = &j.kind {
+                if let OpKind::Sort { .. } = j.kind {
                     if !p.produced.is_empty() || !p.made.is_empty() {
                         let label = j.label.replacen("Tidying", "Tidy", 1);
                         self.undo.push(UndoEntry { label, kind: UndoKind::Sorted(p.produced.clone(), p.made.clone()) });
                     }
-                    finished_dirs.extend(moves.first().and_then(|m| m.0.parent()).map(Path::to_path_buf));
                 }
                 if let OpKind::Copy { .. } | OpKind::Extract { .. } | OpKind::Compress { .. } | OpKind::Convert { .. } = j.kind {
                     if !p.produced.is_empty() {
@@ -1219,8 +1201,6 @@ impl App {
                 }
                 if let OpKind::Trash { paths } = &j.kind {
                     self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Trashed(paths.clone()) });
-                    // The folders they left are smaller now.
-                    finished_dirs.extend(paths.iter().filter_map(|p| p.parent().map(Path::to_path_buf)));
                 }
             }
         }
@@ -1229,15 +1209,8 @@ impl App {
             self.jobs.retain(|j| j.id != id);
             self.popup = Popup::ArchivePassword(crate::popups::PasswordState { archive, retry: Some(crate::popups::Retry::Job(kind)), text: String::new(), wrong });
         }
-        for d in finished_dirs {
-            self.stats.invalidate(&d);
-        }
-        for p in self.panels.values_mut() {
-            for t in &mut p.tabs {
-                if admin_dirs.contains(&t.path) {
-                    t.reload();
-                }
-            }
+        for c in &changes {
+            self.show_changed(c);
         }
         self.jobs.retain(|j| match j.finished_at {
             Some(t) => {
@@ -2773,6 +2746,20 @@ impl App {
         }
     }
 
+    /// Every tab that shows what changed reads it again, front or not, and the folders'
+    /// sizes are counted again.
+    fn show_changed(&mut self, c: &ops::Changed) {
+        if c.is_empty() {
+            return;
+        }
+        for d in c.dirs() {
+            self.stats.invalidate(d);
+        }
+        for t in self.panels.values_mut().flat_map(|p| p.tabs.iter_mut()) {
+            t.changed(c);
+        }
+    }
+
     pub fn start_job(&mut self, kind: OpKind) {
         let id = self.alloc_id();
         self.jobs.push(ops::spawn(id, kind, self.ctx.clone()));
@@ -2801,6 +2788,7 @@ impl App {
             return;
         };
         let mut errs = 0;
+        let mut moved_back = ops::Changed::default();
         match &u.kind {
             UndoKind::Rename(pairs) => {
                 let plan: Vec<(PathBuf, String)> = pairs
@@ -2810,11 +2798,15 @@ impl App {
                 errs = crate::rename::apply(&plan).len();
             }
             UndoKind::Move(pairs) => {
+                let mut back = vec![];
                 for (src, dst) in pairs {
                     if std::fs::symlink_metadata(src).is_ok() || std::fs::rename(dst, src).is_err() {
                         errs += 1;
+                    } else {
+                        back.push((dst.clone(), src.clone()));
                     }
                 }
+                moved_back = ops::Changed::moved(&back);
             }
             UndoKind::Created(paths) => {
                 errs += paths.iter().filter(|p| crate::trashcan::delete(p).is_err()).count();
@@ -2831,19 +2823,29 @@ impl App {
             }
             UndoKind::Replaced(paths) => errs += crate::picfix::undo_replaced(paths),
             UndoKind::Sorted(pairs, made) => {
+                let mut back = vec![];
                 for (src, dst) in pairs {
                     if std::fs::symlink_metadata(src).is_ok() || std::fs::rename(dst, src).is_err() {
                         errs += 1;
+                    } else {
+                        back.push((dst.clone(), src.clone()));
                     }
                 }
+                moved_back = ops::Changed::moved(&back);
                 // Innermost first; one something else was put into stays.
                 for d in made.iter().rev() {
-                    let _ = std::fs::remove_dir(d);
+                    if std::fs::remove_dir(d).is_ok() {
+                        moved_back.gone.push(d.clone());
+                    }
                 }
             }
         }
-        for p in self.panels.values_mut() {
-            p.tab_mut().reload();
+        if moved_back.is_empty() {
+            for p in self.panels.values_mut() {
+                p.tab_mut().reload();
+            }
+        } else {
+            self.show_changed(&moved_back);
         }
         if errs > 0 {
             self.toast(format!("Undo “{}” partly failed", u.label));
