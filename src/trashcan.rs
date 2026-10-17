@@ -202,6 +202,31 @@ pub fn info_for(files_dir: &Path) -> std::collections::HashMap<PathBuf, (PathBuf
     m
 }
 
+/// Remove for good what was trashed before `cutoff` in the trash folders `dirs`. An item
+/// whose date can't be read stays. Returns how many went.
+pub fn empty_older(dirs: &[PathBuf], cutoff: SystemTime) -> usize {
+    let mut n = 0;
+    for dir in dirs {
+        let files = dir.join("files");
+        for (file, (_, deleted)) in info_for(&files) {
+            if deleted.is_some_and(|d| d < cutoff) {
+                let Some(stem) = file.file_name() else { continue };
+                let info = dir.join("info").join(format!("{}.trashinfo", stem.to_string_lossy()));
+                if purge(&Item { info, file: file.clone(), original: PathBuf::new(), deleted: String::new() }).is_ok() {
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
+/// `empty_older` in every trash folder there is: the home one and each drive's.
+pub fn empty_older_everywhere(days: u32) -> usize {
+    let cutoff = SystemTime::now() - std::time::Duration::from_secs(days as u64 * 86_400);
+    empty_older(&trash_dirs(), cutoff)
+}
+
 /// Is `p` the `files` folder of a trash (home or per-volume)?
 pub fn is_trash_files(p: &Path) -> bool {
     p.file_name().map(|n| n == "files").unwrap_or(false) && p.parent().map(|d| d.join("info").is_dir() && (d == home_trash() || d.file_name().map(|n| n.to_string_lossy().starts_with(".Trash")).unwrap_or(false) || d.parent().map(|pp| pp.ends_with(".Trash")).unwrap_or(false))).unwrap_or(false)

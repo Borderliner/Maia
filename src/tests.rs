@@ -3154,8 +3154,9 @@ fn every_option_has_one_section() {
         Opt::MeaningPictures => 50, Opt::ConfigFile => 51, Opt::ResetAll => 52, Opt::Install => 53, Opt::LineSpacing => 54, Opt::Updates => 55,
         Opt::Editor => 56,
         Opt::IgnoredFiles => 57,
+        Opt::TrashAge => 58,
     };
-    let mut seen = vec![0; 58];
+    let mut seen = vec![0; 59];
     for o in OPTS {
         seen[index(o.0)] += 1;
     }
@@ -4991,3 +4992,25 @@ fn batch_rename_names_and_clashes() {
     assert_eq!(problems(&olds[..1], &empty, &others), [Some("no name")]);
 }
 
+/// Emptying the trash by age on a real trash folder: what was trashed before the cutoff
+/// goes with its .trashinfo, a newer item stays, and one whose date can't be read stays.
+#[test]
+fn trash_emptied_by_age() {
+    let d = tmpdir("trash-age");
+    let t = d.join("Trash");
+    let item = |name: &str, date: &str| {
+        touch(&t.join("files").join(name).join("inside.txt"), "x");
+        touch(&t.join("info").join(format!("{name}.trashinfo")), &format!("[Trash Info]\nPath=/home/someone/{name}\nDeletionDate={date}\n"));
+    };
+    item("old", "2026-08-01T10:00:00");
+    item("new", "2026-10-15T10:00:00");
+    item("undated", "not a date");
+    let cutoff = crate::timefmt::parse_local("2026-09-16T00:00:00").unwrap();
+    assert_eq!(crate::trashcan::empty_older(std::slice::from_ref(&t), cutoff), 1);
+    assert!(!t.join("files/old").exists() && !t.join("info/old.trashinfo").exists());
+    for keep in ["new", "undated"] {
+        assert!(t.join("files").join(keep).join("inside.txt").exists() && t.join("info").join(format!("{keep}.trashinfo")).exists(), "{keep} stays");
+    }
+    assert_eq!(crate::config::Config::default().trash_days, 0, "off unless chosen");
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -1012,7 +1012,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(124) {
+    match rng.below(125) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1335,6 +1335,13 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 }
                 s.act(&format!("key {}", rng.pick(&["Enter", "Escape", "Escape"])));
             }
+        }
+        124 => {
+            // Empty the trash, set and unset from its choice.
+            let before = s.app.cfg.trash_days;
+            s.app.cfg.trash_days = *rng.pick(&[0, 7, 30, 90]);
+            s.idle(2);
+            s.app.cfg.trash_days = before;
         }
         97 => {
             // A drag that leaves the window (handed to the system when it carries files).
@@ -6435,6 +6442,50 @@ mod journeys {
         s.act("key ctrl+z");
         wait_until(&mut s, "undone", 10, |_| ["IMG_2041.jpg", "IMG_2042.jpg", "IMG_2043.jpg"].iter().all(|f| d.join(f).exists()));
         report("batch rename", &s);
+    }
+
+    /// Empty the trash, in Options: off at first, so an old item stays; set to 30 days,
+    /// what was trashed 40 days ago goes for good, with a word, and last week's stays.
+    #[test]
+    fn trash_emptied_after_its_days() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("trashage");
+        let t = root().join("xdg/data/Trash");
+        let item = |name: &str, days: u64| {
+            let when = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400 * days);
+            std::fs::create_dir_all(t.join("files").join(name)).unwrap();
+            std::fs::write(t.join("files").join(name).join("inside.txt"), "x").unwrap();
+            std::fs::create_dir_all(t.join("info")).unwrap();
+            std::fs::write(t.join("info").join(format!("{name}.trashinfo")), format!("[Trash Info]\nPath=/somewhere/{name}\nDeletionDate={}\n", crate::timefmt::format(when, "%Y-%m-%dT%H:%M:%S"))).unwrap();
+        };
+        item("trashage old", 40);
+        item("trashage new", 3);
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.idle(5);
+        assert!(t.join("files/trashage old").exists(), "kept while the option is off");
+        s.app.popup = Popup::options_at(crate::popups::Section::Files);
+        s.idle(2);
+        s.act("text trash");
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, x)| x.ends_with("Empty the trash")), "the option is there");
+        assert!(some_text(&s, "Never"));
+        // On its way to 30 the choice says 7 for a moment: nothing goes then.
+        click_control(&mut s, "choice");
+        s.idle(3);
+        assert_eq!(s.app.cfg.trash_days, 7);
+        assert!(t.join("files/trashage old").exists(), "a choice passed through takes nothing");
+        click_control(&mut s, "choice");
+        s.idle(2);
+        assert_eq!(s.app.cfg.trash_days, 30);
+        look(&mut s, "trash option");
+        s.shot("trash-option");
+        s.act("key Escape");
+        wait_until(&mut s, "the old item gone, once the choice settled", 10, |_| !t.join("files/trashage old").exists() && !t.join("info/trashage old.trashinfo").exists());
+        wait_until(&mut s, "the word", 5, |s| s.app.toast.as_ref().is_some_and(|x| x.0.starts_with("Emptied ") && x.0.ends_with("from the trash, older than 30 days")));
+        assert!(t.join("files/trashage new/inside.txt").exists(), "last week's stays");
+        report("trash age", &s);
     }
 
     /// Select the listed item named `label`, which scrolls it into view.

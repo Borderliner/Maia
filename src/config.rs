@@ -224,6 +224,8 @@ pub struct Config {
     pub editor: String,
     /// Files and folders git ignores: faded, left out, or shown like the rest.
     pub git_ignored: IgnoredFiles,
+    /// Days an item stays in the trash before it goes for good (0: it stays).
+    pub trash_days: u32,
     pub cross_filesystems: bool,
     // Hotkeys: command id -> bindings (overrides defaults when present).
     pub hotkeys: BTreeMap<String, Vec<String>>,
@@ -289,6 +291,7 @@ impl Default for Config {
             github_pictures: false,
             editor: String::new(),
             git_ignored: IgnoredFiles::Dim,
+            trash_days: 0,
             cross_filesystems: false,
             hotkeys: BTreeMap::new(),
             custom_actions: vec![CustomAction {

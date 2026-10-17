@@ -1780,6 +1780,7 @@ pub(crate) enum Opt {
     NewTab,
     GitPictures,
     IgnoredFiles,
+    TrashAge,
     DefaultFm,
     SingleInstance,
     Meaning,
@@ -1900,6 +1901,7 @@ pub(crate) const OPTS: &[(Opt, Section, &str, &str, &str)] = &[
     (Opt::TrackRecents, Section::Files, "Recents", "Remember recents", "Visited folders and opened files."),
     (Opt::HighlightRecents, Section::Files, "Recents", "Highlight recents", "Mark recently used items with a dot."),
     (Opt::RecentsOnTop, Section::Files, "Recents", "Recents on top", "Sort recently used items first."),
+    (Opt::TrashAge, Section::Files, "Trash", "Empty the trash", "What stays longer goes for good. Off unless you choose."),
     (Opt::SingleClick, Section::Mouse, "Clicks", "Single click to open", "Open items with one click."),
     (Opt::SingleClickFolders, Section::Mouse, "Clicks", "Folders only", "Files still open with a double click."),
     (Opt::ActOnPress, Section::Mouse, "Clicks", "Act on press", "Select on mouse down, not on release."),
@@ -2180,6 +2182,7 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
         Opt::Startup => f!(startup),
         Opt::NewTab => f!(new_tab),
         Opt::GitPictures => f!(github_pictures),
+        Opt::TrashAge => f!(trash_days),
         Opt::Editor => f!(editor),
         Opt::IgnoredFiles => f!(git_ignored),
     }
@@ -2258,6 +2261,7 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         Opt::Meaning => toggle(ui, &mut c.semantic_search, &pal),
         Opt::MeaningPictures => toggle(ui, &mut c.semantic_pictures, &pal),
         Opt::GitPictures => toggle(ui, &mut c.github_pictures, &pal),
+        Opt::TrashAge => choice(ui, "trash age", &mut c.trash_days, &[(0, "Never"), (7, "After 7 days"), (30, "After 30 days"), (90, "After 90 days")]),
         Opt::Editor => {
             // Empty is Auto: the hint says what that comes to here.
             let hint = crate::editor::auto_label().map_or("Auto".to_string(), |l| format!("Auto: {l}"));

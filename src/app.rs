@@ -152,6 +152,10 @@ pub struct App {
     pub updater: crate::update::Updater,
     /// Network places being mounted.
     net_jobs: Vec<NetJob>,
+    /// When the trash was last looked through for items past their days, and the days
+    /// it was last set to.
+    trash_aged: Option<Instant>,
+    trash_days: u32,
     /// Copies and .gitignore changes running on threads.
     shares: Vec<std::sync::mpsc::Receiver<ShareDone>>,
     /// How the Connect dialog's last attempt ended: (address, Ok or the reason).
@@ -255,6 +259,8 @@ impl App {
             avatars: crate::avatars::Avatars::new(),
             updater: Default::default(),
             net_jobs: vec![],
+            trash_aged: None,
+            trash_days: cfg.trash_days,
             shares: vec![],
             dialog_result: None,
             cfg,
@@ -532,6 +538,34 @@ impl App {
                 }
             }
         }
+    }
+
+    /// With a number of days chosen, the trash is looked through on a thread when Maia
+    /// starts and every six hours it runs; only frames that happen anyway check. A new
+    /// choice waits until it has been left alone a while: the choice steps through 7
+    /// days on its way to 30, and that must not take what 30 would keep.
+    fn age_trash(&mut self) {
+        const EVERY: Duration = Duration::from_secs(6 * 3600);
+        const SETTLE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 60 });
+        let days = self.cfg.trash_days;
+        if days != self.trash_days {
+            self.trash_days = days;
+            self.trash_aged = Instant::now().checked_sub(EVERY - SETTLE);
+            return;
+        }
+        if days == 0 || self.trash_aged.is_some_and(|t| t.elapsed() < EVERY) {
+            return;
+        }
+        self.trash_aged = Some(Instant::now());
+        let (notes, ctx) = (self.notes.clone(), self.ctx.clone());
+        let _ = std::thread::Builder::new().name("trash age".into()).spawn(move || {
+            let n = crate::trashcan::empty_older_everywhere(days);
+            if n > 0 {
+                notes.lock().unwrap_or_else(|e| e.into_inner()).push(format!("Emptied {n} {} from the trash, older than {days} days", if n == 1 { "item" } else { "items" }));
+                crate::sidebar::invalidate();
+                ctx.request_repaint();
+            }
+        });
     }
 
     fn pump_net(&mut self) {
@@ -882,6 +916,7 @@ impl App {
         self.pump_requests(ctx);
         self.pump_net();
         self.pump_shares(ctx);
+        self.age_trash();
         let notes = std::mem::take(&mut *self.notes.lock().unwrap_or_else(|e| e.into_inner()));
         if let Some(n) = notes.into_iter().last() {
             self.toast(n);
