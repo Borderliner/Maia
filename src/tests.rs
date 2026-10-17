@@ -5406,3 +5406,93 @@ fn picture_fixes_with_imagemagick() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Recent Projects on a real home folder: repositories found at any sensible depth, a
+/// work tree's `.git` file followed to its branch, nothing found inside a repository,
+/// in hidden or installed-package folders, through links or deeper than five levels;
+/// the branch read from HEAD, detached ones as a short commit; the last visited first,
+/// then by git's own activity; the list kept in the cache and read back.
+#[test]
+fn projects_found_ranked_and_cached() {
+    use crate::projects::{branch_of, find, load_cache, rank, read, save_cache};
+    let h = tmpdir("projects");
+    let repo = |p: &str, head: &str| {
+        touch(&h.join(p).join(".git/HEAD"), head);
+        touch(&h.join(p).join(".git/index"), "");
+    };
+    repo("Code/maia", "ref: refs/heads/main\n");
+    repo("Work/client/site", "3f2a9c41d7e8b0a1c2d3e4f5a6b7c8d9e0f1a2b3\n");
+    repo("Code/maia/vendor/lib", "ref: refs/heads/main\n");
+    repo(".hidden/secret", "ref: refs/heads/main\n");
+    touch(&h.join("web/package.json"), "{}\n");
+    repo("web/node_modules/pkg", "ref: refs/heads/main\n");
+    repo("a/b/c/d/e/f/deep", "ref: refs/heads/main\n");
+    repo("src/github.com/ana/tool", "ref: refs/heads/fix/menu\n");
+    // A second work tree of maia: its .git is a file naming the real one.
+    touch(&h.join("Code/maia/.git/worktrees/spike/HEAD"), "ref: refs/heads/spike\n");
+    touch(&h.join("Code/spike/.git"), &format!("gitdir: {}\n", h.join("Code/maia/.git/worktrees/spike").display()));
+    std::os::unix::fs::symlink(h.join("Code"), h.join("Code link")).unwrap();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let mut found: Vec<String> = find(&h, &stop).iter().map(|p| crate::project::relative(p, &h)).collect();
+    found.sort();
+    assert_eq!(found, ["Code/maia", "Code/spike", "Work/client/site", "src/github.com/ana/tool"]);
+    assert_eq!(branch_of("ref: refs/heads/fix/menu\n"), "fix/menu");
+    assert_eq!(branch_of("3f2a9c41d7e8b0a1c2d3e4f5a6b7c8d9e0f1a2b3\n"), "3f2a9c4");
+    assert_eq!(read(&h.join("Code/spike")).unwrap().branch, "spike", "a work tree's own branch");
+    assert_eq!(read(&h.join("Work/client/site")).unwrap().branch, "3f2a9c4");
+    assert!(read(&h.join("web")).is_none());
+    // Activity: the site was committed to last; maia an hour ago, the tool a day ago.
+    let ago = |p: &str, secs: u64| {
+        let t = std::time::SystemTime::now() - Duration::from_secs(secs);
+        for f in ["HEAD", "index"] {
+            let f = std::fs::File::options().write(true).open(h.join(p).join(".git").join(f));
+            if let Ok(f) = f {
+                f.set_modified(t).unwrap();
+            }
+        }
+    };
+    ago("Code/maia", 3600);
+    ago("src/github.com/ana/tool", 86_400);
+    ago("Work/client/site", 60);
+    std::fs::File::options().write(true).open(h.join("Code/maia/.git/worktrees/spike/HEAD")).unwrap().set_modified(std::time::SystemTime::now() - Duration::from_secs(7 * 86_400)).unwrap();
+    let all: Vec<_> = find(&h, &stop).iter().filter_map(|p| read(p)).collect();
+    let names = |v: &[crate::projects::Project]| v.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&rank(all.clone(), &[])), ["site", "maia", "tool", "spike"], "by activity");
+    // Visited: the tool's subfolder last, maia before it; the rest by activity after them.
+    let recents = vec![h.join("src/github.com/ana/tool/src"), h.join("Documents"), h.join("Code/maia")];
+    assert_eq!(names(&rank(all.clone(), &recents)), ["tool", "maia", "site", "spike"]);
+    // The cache: the roots, in order, read back.
+    let cache = h.join("cache/maia/projects.txt");
+    let roots: Vec<PathBuf> = rank(all, &recents).iter().map(|p| p.root.clone()).collect();
+    save_cache(&cache, &roots).unwrap();
+    assert_eq!(load_cache(&cache), roots);
+    assert!(load_cache(&h.join("cache/none.txt")).is_empty());
+    let _ = std::fs::remove_dir_all(&h);
+}
+
+/// Uncommitted changes asked of git itself: a clean work tree has none; an untracked
+/// file, an edit and a staged file each count.
+#[test]
+fn projects_changes_asked_of_git() {
+    use crate::projects::has_changes;
+    if !crate::media::have("git") {
+        return;
+    }
+    let d = tmpdir("project-changes");
+    touch(&d.join("README"), "hello\n");
+    git(&d, &["init", "-q"]);
+    git(&d, &["add", "."]);
+    git(&d, &["commit", "-q", "-m", "first"]);
+    assert_eq!(has_changes(&d), Some(false));
+    touch(&d.join("new.txt"), "x\n");
+    assert_eq!(has_changes(&d), Some(true), "untracked");
+    std::fs::remove_file(d.join("new.txt")).unwrap();
+    touch(&d.join("README"), "hello again\n");
+    assert_eq!(has_changes(&d), Some(true), "edited");
+    git(&d, &["add", "README"]);
+    assert_eq!(has_changes(&d), Some(true), "staged");
+    git(&d, &["commit", "-q", "-m", "second"]);
+    assert_eq!(has_changes(&d), Some(false));
+    assert_eq!(has_changes(&d.join("nowhere")), None);
+    let _ = std::fs::remove_dir_all(&d);
+}

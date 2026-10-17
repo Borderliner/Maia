@@ -49,6 +49,7 @@ mod panel;
 mod picfix;
 mod popups;
 mod project;
+mod projects;
 mod query;
 mod rename;
 mod runner;

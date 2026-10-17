@@ -197,6 +197,7 @@ pub enum Popup {
     Duplicates(crate::dupes::State),
     BatchRename(crate::batchname::State),
     Print(Box<crate::sendto::PrintState>),
+    Projects(crate::projects::State),
 }
 
 /// The branch menu, its lists read on a worker as it opens.
@@ -294,6 +295,7 @@ impl Popup {
             Popup::Duplicates(..) => "Duplicates",
             Popup::BatchRename(..) => "BatchRename",
             Popup::Print(..) => "Print",
+            Popup::Projects(..) => "Projects",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -843,6 +845,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::Duplicates(st) => crate::dupes::popup(app, ctx, st),
         Popup::BatchRename(st) => crate::batchname::popup(app, ctx, st),
         Popup::Print(st) => crate::sendto::dialog(app, ctx, st),
+        Popup::Projects(st) => crate::projects::popup(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {

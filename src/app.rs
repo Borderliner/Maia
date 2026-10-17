@@ -1800,6 +1800,7 @@ impl App {
                     None => self.toast("Select the items to rename"),
                 }
             }
+            Cmd::RecentProjects => self.popup = crate::projects::open(self, &ctx),
             Cmd::FindDuplicates => match crate::devtools::target_dir(self) {
                 Some(d) => self.popup = crate::dupes::open(&ctx, d),
                 None => self.toast("Find Duplicates needs a folder"),

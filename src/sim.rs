@@ -1017,7 +1017,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(129) {
+    match rng.below(136) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1600,6 +1600,27 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 click_control_at(s, "choice");
             }
             s.act("key Escape");
+        }
+        135 => {
+            // Recent Projects: by its key or the palette, narrowed, opened here, in a new
+            // tab, by a click, or let go.
+            if rng.below(2) == 0 {
+                s.act("key ctrl+alt+p");
+            } else {
+                s.cmd(Cmd::RecentProjects);
+            }
+            s.idle(2 + rng.below(30));
+            for _ in 0..rng.below(4) {
+                match rng.below(3) {
+                    0 => s.act(&format!("text {}", rng.pick(&["repo", "code", "app", "project", "zz", "/"]))),
+                    1 => click_control_at(s, "project row"),
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "PageDown", "Backspace"]))),
+                }
+            }
+            if matches!(s.app.popup, Popup::Projects(_)) {
+                s.act(&format!("key {}", rng.pick(&["Enter", "ctrl+Enter", "Escape", "Escape"])));
+            }
+            s.settle();
         }
         _ => {
             s.note("idle".into());
@@ -7822,6 +7843,110 @@ mod journeys {
         s.idle(2);
         assert!(inspector(&s).crop.is_none(), "another file: no crop");
         report("picfix", &s);
+    }
+
+    /// Recent Projects from its key: the git repositories under the home folder, the
+    /// last visited first and the rest by git's own activity, each with its branch and,
+    /// once git has said, a dot for uncommitted changes. Typing narrows; Enter opens one
+    /// here, Ctrl+Enter in a new tab, a click here too. The next time it opens at once,
+    /// with what was found before.
+    #[test]
+    fn recent_projects_open_from_the_list() {
+        if !sandboxed() {
+            return;
+        }
+        let home = root().join("home/projects");
+        let _ = std::fs::remove_dir_all(&home);
+        let (maia, tools, site, old) = (home.join("Code/maia"), home.join("Code/tools"), home.join("Work/site"), home.join("Work/old"));
+        for r in [&maia, &tools] {
+            std::fs::create_dir_all(r.join("src")).unwrap();
+            std::fs::write(r.join("README.md"), "hello\n").unwrap();
+            crate::tests::git(r, &["init", "-q"]);
+            crate::tests::git(r, &["add", "."]);
+            crate::tests::git(r, &["commit", "-q", "-m", "first"]);
+        }
+        std::fs::write(maia.join("README.md"), "changed\n").unwrap();
+        // Never visited: the site committed to a minute ago, the old one a month ago.
+        let fake = |p: &Path, head: &str, age: u64| {
+            std::fs::create_dir_all(p.join(".git")).unwrap();
+            std::fs::write(p.join(".git/HEAD"), head).unwrap();
+            std::fs::write(p.join(".git/index"), "").unwrap();
+            for f in ["HEAD", "index"] {
+                std::fs::File::options().write(true).open(p.join(".git").join(f)).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(age)).unwrap();
+            }
+        };
+        fake(&site, "3f2a9c41d7e8b0a1c2d3e4f5a6b7c8d9e0f1a2b3\n", 60);
+        fake(&old, "ref: refs/heads/legacy\n", 30 * 86_400);
+        std::fs::create_dir_all(home.join("web")).unwrap();
+        std::fs::write(home.join("web/package.json"), "{}\n").unwrap();
+        fake(&home.join("web/node_modules/pkg"), "ref: refs/heads/main\n", 0);
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        // Visited: maia, then tools, the last.
+        let id = s.app.active;
+        for p in [maia.join("src"), tools.clone(), home.clone()] {
+            s.app.navigate(id, p);
+            s.settle();
+        }
+        s.act("key ctrl+alt+p");
+        fn st(s: &Sim) -> &crate::projects::State {
+            match &s.app.popup {
+                Popup::Projects(p) => p,
+                _ => s.fail("Recent Projects is not open"),
+            }
+        }
+        wait_until(&mut s, "the projects found", 20, |s| st(s).done);
+        let mine: Vec<String> = st(&s).items.iter().filter(|p| p.root.starts_with(&home)).map(|p| p.name.clone()).collect();
+        assert_eq!(mine, ["tools", "maia", "site", "old"], "visited first, then by activity; nothing from node_modules");
+        wait_until(&mut s, "git asked", 20, |s| st(s).changes.get(&maia) == Some(&Some(true)) && st(s).changes.get(&tools) == Some(&Some(false)));
+        assert!(some_text(&s, "main"), "the branch");
+        look(&mut s, "recent projects");
+        s.idle(12);
+        s.shot("recent-projects");
+        // Narrowed and opened here.
+        s.act("text site");
+        s.idle(2);
+        let first = |s: &Sim| st(s).shown().first().map(|&i| st(s).items[i].root.clone());
+        assert_eq!(first(&s), Some(site.clone()));
+        assert!(some_text(&s, "3f2a9c4"), "a detached HEAD as its commit");
+        s.act("key Enter");
+        assert!(!s.popup_open());
+        wait_until(&mut s, "the site opened", 10, |s| s.tab().path == site);
+        // Again: at once, from last time; Ctrl+Enter opens a new tab.
+        s.act("key ctrl+alt+p");
+        assert!(st(&s).items.iter().any(|p| p.root == tools), "the list from before, straight away");
+        s.act("text tools");
+        s.idle(2);
+        assert_eq!(first(&s), Some(tools.clone()));
+        let tabs = s.app.panels[&s.app.active].tabs.len();
+        s.act("key ctrl+Enter");
+        s.settle();
+        assert!(!s.popup_open());
+        assert_eq!(s.app.panels[&s.app.active].tabs.len(), tabs + 1);
+        assert_eq!(s.tab().path, tools);
+        // A click opens a row here.
+        s.act("key ctrl+alt+p");
+        s.act("text old");
+        s.idle(2);
+        let want = crate::popups::home_short(&old);
+        let r = s.texts.iter().find(|(_, t)| *t == want).map(|x| x.0).unwrap_or_else(|| s.fail("the old project's row"));
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        wait_until(&mut s, "the old project opened", 10, |s| s.tab().path == old);
+        assert!(!s.popup_open());
+        // Short and narrow windows; nothing by a name.
+        s.act("key ctrl+alt+p");
+        s.act("text zzzqqq");
+        s.idle(2);
+        assert!(some_text(&s, "No project by that name"));
+        s.act("key ctrl+a");
+        s.act("key Backspace");
+        for (w, h) in [(520.0, 340.0), (640.0, 480.0), (1280.0, 800.0)] {
+            s.resize(w, h);
+            look(&mut s, &format!("recent projects at {w}x{h}"));
+        }
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        report("recent projects", &s);
     }
 
     #[test]
