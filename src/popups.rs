@@ -195,6 +195,7 @@ pub enum Popup {
     Tasks(crate::devtools::TasksState),
     CleanBuilds(crate::devtools::CleanState),
     Duplicates(crate::dupes::State),
+    BatchRename(crate::batchname::State),
 }
 
 /// The branch menu, its lists read on a worker as it opens.
@@ -290,6 +291,7 @@ impl Popup {
             Popup::Tasks(..) => "Tasks",
             Popup::CleanBuilds(..) => "CleanBuilds",
             Popup::Duplicates(..) => "Duplicates",
+            Popup::BatchRename(..) => "BatchRename",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -837,6 +839,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::Tasks(st) => crate::devtools::tasks_popup(app, ctx, st),
         Popup::CleanBuilds(st) => crate::devtools::clean_popup(app, ctx, st),
         Popup::Duplicates(st) => crate::dupes::popup(app, ctx, st),
+        Popup::BatchRename(st) => crate::batchname::popup(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -1278,6 +1281,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::RestoreTrash => t.path.starts_with(crate::sidebar::trash_dir()),
         Cmd::Undo => !app.undo.is_empty(),
         Cmd::ReopenTab => !app.closed_tabs.is_empty(),
+        Cmd::BatchRename => t.archive.is_none() && !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),
         Cmd::Rename | Cmd::Copy | Cmd::Cut | Cmd::Trash | Cmd::DeletePermanent | Cmd::Duplicate | Cmd::CreateLink => !t.targets_idx().is_empty(),
         Cmd::LoadLayout | Cmd::DeleteLayout => !app.ud.layouts.is_empty(),
         Cmd::SortFullAsc | Cmd::SortFullDesc => tab::is_computer(&t.path) && !(t.settings.sort == crate::config::SortKey::Usage && t.settings.desc == (c == Cmd::SortFullDesc)),

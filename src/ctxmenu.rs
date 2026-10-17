@@ -268,6 +268,9 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         items.push(Item::sub("copy_as", "Copy as", copy));
         items.push(Item::sep());
         items.push(Item::labeled(Cmd::Rename, if single { "Rename" } else { "Rename All (inline)" }));
+        if !single {
+            items.push(Item::cmd(Cmd::BatchRename));
+        }
         items.push(Item::cmd(Cmd::Duplicate));
         if crate::archive::available() {
             if ents.iter().any(|e| !e.1 && crate::archive::is_archive(&e.0.to_string_lossy())) {

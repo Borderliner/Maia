@@ -15,7 +15,7 @@ use crate::popups::{self as pp, Popup};
 use crate::theme::{self, Glyph, Palette};
 
 /// A small toggle with a text label: accent-filled while on.
-fn chip(ui: &mut Ui, label: &str, on: bool, what: &'static str, tip: &str, pal: &Palette, mono: bool) -> bool {
+pub(crate) fn chip(ui: &mut Ui, label: &str, on: bool, what: &'static str, tip: &str, pal: &Palette, mono: bool) -> bool {
     let font = if mono { FontId::monospace(12.0) } else { FontId::proportional(12.0) };
     let g = ui.painter().layout_no_wrap(label.to_string(), font.clone(), pal.text);
     let w = (g.size().x + 14.0).max(26.0);

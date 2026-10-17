@@ -166,6 +166,8 @@ struct ShareDone {
     open: Vec<String>,
     toast: String,
     rescan: Option<PathBuf>,
+    /// Renames made in a panel's folder: (panel, from and to).
+    renamed: Option<(u64, Vec<(PathBuf, PathBuf)>)>,
 }
 
 /// A network place being mounted, and where to show it once it is.
@@ -511,7 +513,18 @@ impl App {
                     if let Some(root) = done.rescan {
                         crate::gitstatus::rescan(&root);
                     }
-                    self.toast(done.toast);
+                    if let Some((panel, pairs)) = done.renamed.filter(|r| !r.1.is_empty()) {
+                        let label = format!("Rename {} items", pairs.len());
+                        if let Some(t) = self.panels.get_mut(&panel).map(|p| p.tab_mut()) {
+                            let new: Vec<PathBuf> = pairs.iter().map(|p| p.1.clone()).collect();
+                            t.pending_restore = Some(tab::HistState { path: t.path.clone(), cursor: new.first().cloned(), selected: new, scroll: t.current_scroll });
+                            t.reload();
+                        }
+                        self.undo.push(UndoEntry { label, kind: UndoKind::Rename(pairs) });
+                    }
+                    if !done.toast.is_empty() {
+                        self.toast(done.toast);
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => i += 1,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -1739,6 +1752,13 @@ impl App {
                 Some(d) => self.popup = crate::devtools::tasks(&ctx, d),
                 None => self.toast("Run Task needs a folder"),
             },
+            Cmd::BatchRename => {
+                let panel = self.active;
+                match crate::batchname::open(self, panel) {
+                    Some(p) => self.popup = p,
+                    None => self.toast("Select the items to rename"),
+                }
+            }
             Cmd::FindDuplicates => match crate::devtools::target_dir(self) {
                 Some(d) => self.popup = crate::dupes::open(&ctx, d),
                 None => self.toast("Find Duplicates needs a folder"),
@@ -2007,7 +2027,7 @@ impl App {
                     let first = &paths[0];
                     let root = crate::project::root(if first.is_dir() { first } else { first.parent().unwrap_or(first) });
                     let b = crate::share::code_blocks(&paths, &root);
-                    ShareDone { copy: (b.files > 0).then(|| b.text.clone()), open: vec![], toast: b.note(), rescan: None }
+                    ShareDone { copy: (b.files > 0).then(|| b.text.clone()), open: vec![], toast: b.note(), rescan: None, renamed: None }
                 });
             }
             Cmd::CopyWebLink => {
@@ -2020,11 +2040,11 @@ impl App {
                     let toast = match crate::share::web_links(&ents, hint) {
                         Ok((links, caution)) => {
                             let what = if ents.len() == 1 { "Copied the link".to_string() } else { format!("Copied {} links", ents.len()) };
-                            return ShareDone { copy: Some(links), open: vec![], toast: caution.map_or(what.clone(), |c| format!("{what}; {c}")), rescan: None };
+                            return ShareDone { copy: Some(links), open: vec![], toast: caution.map_or(what.clone(), |c| format!("{what}; {c}")), rescan: None, renamed: None };
                         }
                         Err(e) => format!("Couldn't make a link: {e}"),
                     };
-                    ShareDone { copy: None, open: vec![], toast, rescan: None }
+                    ShareDone { copy: None, open: vec![], toast, rescan: None, renamed: None }
                 });
             }
             Cmd::OpenWebLink => {
@@ -2038,9 +2058,9 @@ impl App {
                 self.share(&ctx, move || match crate::share::web_links(&ents, hint) {
                     Ok((links, caution)) => {
                         let toast = caution.map_or_else(|| "Opened in the browser".to_string(), |c| format!("Opened in the browser; {c}"));
-                        ShareDone { copy: None, open: links.lines().map(String::from).collect(), toast, rescan: None }
+                        ShareDone { copy: None, open: links.lines().map(String::from).collect(), toast, rescan: None, renamed: None }
                     }
-                    Err(e) => ShareDone { copy: None, open: vec![], toast: format!("Couldn't make a link: {e}"), rescan: None },
+                    Err(e) => ShareDone { copy: None, open: vec![], toast: format!("Couldn't make a link: {e}"), rescan: None, renamed: None },
                 });
             }
             Cmd::CompareFiles => {
@@ -2081,7 +2101,7 @@ impl App {
                         Ok((added, tracked)) => crate::share::ignore_note(&lines, added, &tracked),
                         Err(e) => e,
                     };
-                    ShareDone { copy: None, open: vec![], toast, rescan: Some(root) }
+                    ShareDone { copy: None, open: vec![], toast, rescan: Some(root), renamed: None }
                 });
             }
             Cmd::CopyPathLine => {
@@ -2898,6 +2918,18 @@ impl App {
                 self.active = self.tree.first_leaf();
             }
         }
+    }
+
+    /// Batch Rename's plan, carried out on a thread; undone in one step.
+    pub fn rename_batch(&mut self, panel: u64, plan: Vec<(PathBuf, String)>) {
+        let ctx = self.ctx.clone();
+        self.share(&ctx, move || {
+            let errors = crate::rename::apply(&plan);
+            // What was renamed is what is now at its new name and gone from its old one.
+            let pairs: Vec<(PathBuf, PathBuf)> = plan.iter().map(|(p, n)| (p.clone(), p.with_file_name(n))).filter(|(a, b)| std::fs::symlink_metadata(b).is_ok() && std::fs::symlink_metadata(a).is_err()).collect();
+            let toast = if errors.is_empty() { format!("Renamed {} {}", pairs.len(), if pairs.len() == 1 { "item" } else { "items" }) } else { errors.join("; ") };
+            ShareDone { copy: None, open: vec![], toast, rescan: None, renamed: Some((panel, pairs)) }
+        });
     }
 
     fn commit_rename(&mut self, panel: u64) {

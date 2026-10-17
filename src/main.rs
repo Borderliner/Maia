@@ -7,6 +7,7 @@ mod codesearch;
 mod archive;
 mod blame;
 mod avatars;
+mod batchname;
 mod buildclean;
 mod update;
 mod clipboard;

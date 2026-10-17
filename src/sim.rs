@@ -1012,7 +1012,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(123) {
+    match rng.below(124) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1322,6 +1322,18 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
             if matches!(s.app.popup, Popup::Confirm { .. }) {
                 s.act("key Escape");
+            }
+        }
+        123 => {
+            // Batch Rename: a pattern, a find, a case, then rename or leave.
+            s.cmd(Cmd::BatchRename);
+            if matches!(s.app.popup, Popup::BatchRename(_)) {
+                s.act(&format!("text {}", rng.pick(&["File ##", "{name} #", "", "x", "###"])));
+                if rng.below(2) == 0 {
+                    click_control_at(s, rng.pick(&["rename find", "rename regex", "rename case upper", "rename case title", "rename match case"]));
+                    s.act(&format!("text {}", rng.pick(&["a", "(", ".", "e"])));
+                }
+                s.act(&format!("key {}", rng.pick(&["Enter", "Escape", "Escape"])));
             }
         }
         97 => {
@@ -3256,6 +3268,14 @@ mod journeys {
             s.idle(10);
         }
         s.click_text("Zip (.zip)");
+        s.idle(5);
+        // A long menu in a short window scrolls: a row under its edge takes no click.
+        if s.popup_open() {
+            let at = s.text_rect("Compress").center();
+            s.act(&format!("scroll {:.0} {:.0} -6", at.x, at.y));
+            s.idle(10);
+            s.click_text("Zip (.zip)");
+        }
         let out = docs.join("Archive.zip");
         wait_until(&mut s, "compressed", 10, |_| out.exists());
         wait_until(&mut s, "job done", 10, |s| s.app.jobs.iter().all(|j| j.finished_at.is_some()));
@@ -6357,6 +6377,64 @@ mod journeys {
         s.act("key Escape");
         s.resize(1280.0, 800.0);
         report("duplicates", &s);
+    }
+
+    /// Batch Rename from the menu of several files: every new name beside its old one, a
+    /// name taken by another file refused with why, a numbered pattern from another
+    /// start renaming them all, the new names selected, and one undo putting them back.
+    #[test]
+    fn batch_rename_with_every_new_name_shown() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("brename");
+        let d = home.join("Trip");
+        std::fs::create_dir_all(&d).unwrap();
+        for f in ["IMG_2041.jpg", "IMG_2042.jpg", "IMG_2043.jpg", "Beach 002.jpg"] {
+            std::fs::write(d.join(f), f).unwrap();
+        }
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.idle(3);
+        let id = s.app.active;
+        {
+            let t = s.app.panels.get_mut(&id).unwrap().tab_mut();
+            let picks: Vec<u32> = t.entries.iter().enumerate().filter(|(_, e)| e.name.starts_with("IMG_")).map(|(i, _)| i as u32).collect();
+            t.selected = picks.iter().copied().collect();
+            t.cursor = picks.first().copied();
+        }
+        s.idle(2);
+        let row = row_text(&s, "IMG_2041.jpg");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        assert!(some_text(&s, "Batch Rename…"));
+        s.click_text("Batch Rename…");
+        assert!(matches!(s.app.popup, Popup::BatchRename(_)));
+        s.idle(2);
+        assert!(some_text(&s, "Rename 3 items") && some_text(&s, "Nothing changes yet"));
+        s.act("text Beach ###");
+        s.idle(2);
+        for t in ["Beach 001.jpg", "Beach 003.jpg", "Beach 002.jpg  (already there)", "1 name can't be used"] {
+            assert!(some_text(&s, t), "{t:?} shown");
+        }
+        s.act("key Enter");
+        assert!(matches!(s.app.popup, Popup::BatchRename(_)), "nothing renamed while a name can't be used");
+        look(&mut s, "batch rename clash");
+        s.shot("batch-rename-clash");
+        click_control(&mut s, "rename start");
+        s.act("key ctrl+a");
+        s.act("text 10");
+        s.idle(2);
+        assert!(some_text(&s, "Beach 010.jpg") && some_text(&s, "3 to rename"));
+        look(&mut s, "batch rename");
+        s.shot("batch-rename");
+        s.act("key Enter");
+        wait_until(&mut s, "renamed", 10, |_| ["Beach 010.jpg", "Beach 011.jpg", "Beach 012.jpg"].iter().all(|f| d.join(f).exists()));
+        assert!(!d.join("IMG_2041.jpg").exists() && d.join("Beach 002.jpg").exists());
+        wait_until(&mut s, "the new names selected", 10, |s| s.tab().selected_paths().len() == 3 && s.tab().selected_paths().iter().all(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("Beach 01"))));
+        assert!(toast_is(&s, "Renamed 3 items"));
+        s.act("key ctrl+z");
+        wait_until(&mut s, "undone", 10, |_| ["IMG_2041.jpg", "IMG_2042.jpg", "IMG_2043.jpg"].iter().all(|f| d.join(f).exists()));
+        report("batch rename", &s);
     }
 
     /// Select the listed item named `label`, which scrolls it into view.

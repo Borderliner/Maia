@@ -248,6 +248,7 @@ commands! {
     GitIgnoreExt, "git_ignore_ext", Files, "Ignore Files Like This", "Ignore every file with the selected file's extension in this repository's .gitignore.", [];
     Trash, "trash", Files, "Move To Trash", "Move the selection to the trash.", ["Delete"];
     DeletePermanent, "delete_permanent", Files, "Delete Permanently", "Delete the selection without using the trash (asks first).", ["Shift+Delete"];
+    BatchRename, "batch_rename", Files, "Batch Rename…", "Rename the selected items together, numbered or found and replaced, seeing every new name first.", [];
     Rename, "rename", Files, "Rename", "Rename in place; with several items selected, edit all names at once.", ["F2"];
     NewFolder, "new_folder", Files, "New Folder", "Create a folder here and start naming it.", ["Ctrl+Shift+N"];
     NewFile, "new_file", Files, "New File", "Create an empty file here and start naming it.", ["Ctrl+Alt+N"];

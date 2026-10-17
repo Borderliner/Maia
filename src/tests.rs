@@ -4934,3 +4934,60 @@ fn duplicates_found_by_contents() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Batch Rename's names: a number padded to the run of #, the old name kept in place of
+/// {name}, find and replace in plain text or with an expression's groups, a change of
+/// case, extensions kept (and none taken from a folder or a dotfile); and the names
+/// that can't be used, each with why.
+#[test]
+fn batch_rename_names_and_clashes() {
+    use crate::batchname::{Case, Rules, names, problems, split};
+    let items: Vec<(String, bool)> = ["IMG_2041.JPG", "IMG_2042.jpg", "beach day.png", "Old photos", ".hidden"].iter().map(|n| (n.to_string(), *n == "Old photos")).collect();
+    assert_eq!(split("IMG_2041.JPG", false), ("IMG_2041", ".JPG"));
+    assert_eq!(split("v1.2", true), ("v1.2", ""), "a folder keeps its dots");
+    assert_eq!(split(".hidden", false), (".hidden", ""));
+    let r = |f: &dyn Fn(&mut Rules)| {
+        let mut r = Rules { start: "1".into(), ..Default::default() };
+        f(&mut r);
+        names(&items, &r).unwrap()
+    };
+    assert_eq!(r(&|_| {}), ["IMG_2041.JPG", "IMG_2042.jpg", "beach day.png", "Old photos", ".hidden"], "nothing asked, nothing changes");
+    assert_eq!(r(&|r| r.name = "Trip ###".into()), ["Trip 001.JPG", "Trip 002.jpg", "Trip 003.png", "Trip 004", "Trip 005"]);
+    assert_eq!(r(&|r| {
+        r.name = "{name} #".into();
+        r.start = "9".into();
+    }), ["IMG_2041 9.JPG", "IMG_2042 10.jpg", "beach day 11.png", "Old photos 12", ".hidden 13"]);
+    assert_eq!(r(&|r| {
+        r.find = "img_".into();
+        r.replace = "Photo ".into();
+    }), ["Photo 2041.JPG", "Photo 2042.jpg", "beach day.png", "Old photos", ".hidden"], "plain text, any case");
+    assert_eq!(r(&|r| {
+        r.find = "img_".into();
+        r.case_sensitive = true;
+    })[0], "IMG_2041.JPG");
+    assert_eq!(r(&|r| {
+        r.find = r"IMG_(\d+)".into();
+        r.replace = "$1 from the camera".into();
+        r.regex = true;
+    })[..2], ["2041 from the camera.JPG", "2042 from the camera.jpg"]);
+    assert_eq!(r(&|r| {
+        r.find = "$".into();
+        r.replace = "$1".into();
+    })[0], "IMG_2041.JPG", "a plain $ is just a $, and is not in the name");
+    assert_eq!(r(&|r| r.case = Case::Title)[..3], ["Img_2041.JPG", "Img_2042.jpg", "Beach Day.png"], "the extension keeps its case");
+    assert_eq!(r(&|r| r.case = Case::Lower)[2], "beach day.png");
+    let mut bad = Rules { find: "(".into(), regex: true, ..Default::default() };
+    assert!(names(&items, &bad).is_err(), "a broken expression says so");
+    bad.regex = false;
+    assert_eq!(names(&items, &bad).unwrap()[0], "IMG_2041.JPG", "as plain text it is just a bracket");
+    // Clashes: two the same, one taken by a file not being renamed, an empty one, a slash.
+    let olds: Vec<(String, bool)> = ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"].iter().map(|n| (n.to_string(), false)).collect();
+    let new: Vec<String> = ["x.txt", "x.txt", "taken.txt", ".txt", "f/g.txt"].iter().map(|n| n.to_string()).collect();
+    let others: std::collections::HashSet<String> = ["taken.txt", "a.txt"].iter().map(|n| n.to_string()).collect();
+    assert_eq!(problems(&olds, &new, &others), [Some("same as another"), Some("same as another"), Some("already there"), None, Some("can't have /")]);
+    // Swapping two names among the renamed is fine.
+    let swap: Vec<String> = ["b.txt", "a.txt"].iter().map(|n| n.to_string()).collect();
+    assert_eq!(problems(&olds[..2], &swap, &others), [None, None]);
+    let empty: Vec<String> = vec!["".to_string()];
+    assert_eq!(problems(&olds[..1], &empty, &others), [Some("no name")]);
+}
+
