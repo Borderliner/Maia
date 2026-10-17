@@ -7073,3 +7073,97 @@ fn locked_archives_open_only_with_their_password() {
     assert!(format!("{:?}", crate::archive::Secret(pw.into())) == "Secret(…)", "never printed");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// ffprobe's own words for the tags of a FLAC (in the file) and an Opus (with its
+/// stream), as captured from it; spellings and cases files use read as one.
+#[test]
+fn music_tags_parsed_from_ffprobe() {
+    use crate::musictags::{parse, track_name};
+    let flac = "format.tags.title=\"T\"\nformat.tags.artist=\"A\"\nformat.tags.album_artist=\"AA\"\nformat.tags.track=\"3/12\"\nformat.tags.date=\"2020\"\nformat.tags.genre=\"Jazz\"\nformat.tags.encoder=\"Lavf63.1.102\"\n";
+    let t = parse(flac);
+    assert_eq!(t.values, ["T", "A", "", "AA", "3/12", "2020", "Jazz"].map(String::from));
+    assert!(!t.cover);
+    let opus = "streams.stream.0.tags.encoder=\"Lavc63.1.102 libopus\"\nstreams.stream.0.tags.TITLE=\"Say \\\"hi\\\"\"\nstreams.stream.0.tags.ALBUMARTIST=\"Band\"\nstreams.stream.0.tags.TRACKNUMBER=\"7\"\nstreams.stream.1.disposition.attached_pic=1\n";
+    let t = parse(opus);
+    assert_eq!((t.get("title"), t.get("album_artist"), t.get("track")), ("Say \"hi\"", "Band", "7"));
+    assert!(t.cover);
+    assert_eq!(track_name("3/12"), "03");
+    assert_eq!(track_name("12"), "12");
+    assert_eq!(track_name("A1"), "A1");
+}
+
+/// Tags written through the real ffmpeg into MP3, FLAC, M4A and Opus: the fields
+/// changed, the others and the sound kept as they were, a cover put in from a picture
+/// and taken out again (Opus has nowhere to keep one); the original in the trash and
+/// back by Undo's own way, byte for byte.
+#[test]
+fn music_tags_written_through_ffmpeg() {
+    use crate::musictags::{Cover, read, write};
+    let d = tmpdir("musictags");
+    let Some(tools) = convert_tools(&d.join("tools")) else { return };
+    let w = d.join("work");
+    std::fs::create_dir_all(&w).unwrap();
+    convert_inputs(&w, &tools);
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(tools.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    let ff = |args: &[&str]| assert!(std::process::Command::new("ffmpeg").args(["-hide_banner", "-loglevel", "error", "-y"]).args(args).current_dir(&w).status().unwrap().success());
+    ff(&["-i", "tone.mp3", "-map", "0:a", "-c:a", "flac", "-metadata", "genre=Drone", "tone.flac"]);
+    ff(&["-i", "tone.mp3", "-map", "0:a", "-c:a", "aac", "tone.m4a"]);
+    ff(&["-i", "tone.mp3", "-map", "0:a", "-c:a", "libopus", "tone.opus"]);
+    ff(&["-f", "lavfi", "-i", "testsrc=size=80x80", "-frames:v", "1", "art.png"]);
+    let sound = |p: &Path| {
+        let o = std::process::Command::new("ffmpeg").args(["-v", "error", "-i"]).arg(p).args(["-map", "0:a", "-f", "md5", "-"]).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    };
+    for f in ["tone.mp3", "tone.flac", "tone.m4a", "tone.opus"] {
+        let p = w.join(f);
+        let before = read(&t, &p).unwrap();
+        let (bytes, audio) = (std::fs::read(&p).unwrap(), sound(&p));
+        write(&t, &p, &[(0, "Evening Tone".into()), (2, "Sine Waves".into()), (4, "4/9".into())], &Cover::Set(w.join("art.png"))).unwrap();
+        let after = read(&t, &p).unwrap();
+        assert_eq!((after.get("title"), after.get("album"), after.get("track")), ("Evening Tone", "Sine Waves", "4/9"), "{f}");
+        assert_eq!(after.get("artist"), before.get("artist"), "{f}: untouched fields kept");
+        assert_eq!(after.get("genre"), before.get("genre"), "{f}");
+        assert_eq!(after.cover, f != "tone.opus", "{f}: the cover");
+        assert_eq!(sound(&p), audio, "{f}: the sound itself untouched");
+        let trashed: Vec<_> = crate::trashcan::list().into_iter().filter(|it| it.original == p).collect();
+        assert_eq!(trashed.len(), 1, "{f}: the original in the trash");
+        assert_eq!(std::fs::read(&trashed[0].file).unwrap(), bytes);
+        if f != "tone.opus" {
+            write(&t, &p, &[], &Cover::Remove).unwrap();
+            assert!(!read(&t, &p).unwrap().cover, "{f}: cover taken out");
+            assert_eq!(read(&t, &p).unwrap().get("title"), "Evening Tone");
+        }
+        // Undo: the newest original back.
+        assert_eq!(crate::picfix::undo_replaced(std::slice::from_ref(&p)), 0);
+        if f == "tone.opus" {
+            assert_eq!(std::fs::read(&p).unwrap(), bytes, "{f}: back as it was");
+        }
+    }
+    assert!(std::fs::read_dir(&w).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().ends_with(".part")));
+    std::fs::write(w.join("fake.mp3"), "ID3 not really").unwrap();
+    assert!(write(&t, &w.join("fake.mp3"), &[(0, "x".into())], &Cover::Keep).is_err());
+    assert_eq!(std::fs::read_to_string(w.join("fake.mp3")).unwrap(), "ID3 not really", "a failed write leaves the file");
+    assert!(write(&t, &w.join("clip.avi"), &[(0, "x".into())], &Cover::Keep).is_err());
+}
+
+/// Batch Rename's tag words: {track} padded, {artist} and {title} filled in, a slash in a
+/// tag never making a folder, a file without tags leaving the words empty.
+#[test]
+fn batch_rename_names_from_music_tags() {
+    use crate::batchname::{Rules, names_with, uses_tags};
+    use crate::musictags::Tags;
+    assert!(uses_tags("{track} {title}") && !uses_tags("{name} ###"));
+    let tag = |title: &str, artist: &str, track: &str| {
+        let mut t = Tags::default();
+        t.values[0] = title.into();
+        t.values[1] = artist.into();
+        t.values[4] = track.into();
+        Some(t)
+    };
+    let items: Vec<(String, bool)> = ["a.mp3", "b.flac", "c.mp3"].iter().map(|n| (n.to_string(), false)).collect();
+    let r = Rules { name: "{track} {artist} - {title}".into(), start: "1".into(), ..Default::default() };
+    let got = names_with(&items, &r, &[tag("Intro", "Band", "1/9"), tag("AC/DC #1", "Them", "10"), None]).unwrap();
+    assert_eq!(got, ["01 Band - Intro.mp3", "10 Them - AC-DC #1.flac", "-.mp3"], "no tags: no stray spaces");
+}

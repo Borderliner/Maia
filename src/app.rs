@@ -1859,6 +1859,7 @@ impl App {
                 None => self.toast("Run Task needs a folder"),
             },
             Cmd::TidyFolder => crate::tidy::open(self),
+            Cmd::EditTags => crate::musictags::open(self),
             Cmd::Timeline => {
                 let panel = self.active;
                 self.open_smart(panel, crate::smart::TIMELINE, false, true);

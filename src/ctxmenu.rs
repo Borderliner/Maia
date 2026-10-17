@@ -347,6 +347,9 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             }
             items.push(Item::sub("compress", "Compress", vec![Item::labeled(Cmd::CompressZip, "Zip (.zip)"), Item::labeled(Cmd::CompressTarGz, "Tar.gz (.tar.gz)"), Item::labeled(Cmd::CompressTarXz, "Tar.xz (.tar.xz)"), Item::labeled(Cmd::Compress7z, "7-Zip (.7z)"), Item::labeled(Cmd::CompressLocked, "With a password…")]));
         }
+        if !in_trash && t.archive.is_none() && crate::musictags::applies(&ents.iter().map(|e| (e.3.as_str(), e.1)).collect::<Vec<_>>()) {
+            items.push(Item::labeled(Cmd::EditTags, "Edit Tags…"));
+        }
         // Files of one kind, into the formats the installed tools write.
         if !in_trash && t.archive.is_none() && ents.iter().all(|e| !e.1) {
             let exts: Vec<&str> = ents.iter().map(|e| e.3.as_str()).collect();

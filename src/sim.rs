@@ -1022,7 +1022,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(151) {
+    match rng.below(152) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2096,6 +2096,28 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                     _ => s.act("key Escape"),
                 }
                 if matches!(s.app.popup, Popup::Lock(_)) {
+                    s.act("key Escape");
+                }
+            }
+        }
+        151 => {
+            // Edit Tags on whatever is selected: fields typed into, the cover chips, then
+            // Save or Escape.
+            s.cmd(Cmd::EditTags);
+            s.idle(2 + rng.below(30));
+            for _ in 0..rng.below(5) {
+                if !matches!(s.app.popup, Popup::MusicTags(_)) {
+                    break;
+                }
+                match rng.below(3) {
+                    0 => click_control_at(s, rng.pick(&["tag title", "tag artist", "tag track", "tag genre", "cover keep", "cover remove", "cover set"])),
+                    1 => s.act(&format!("text {}", rng.pick(&["Song", "3/12", "日本", " "]))),
+                    _ => s.act(&format!("key {}", rng.pick(&["Backspace", "ctrl+a", "Tab"]))),
+                }
+            }
+            if matches!(s.app.popup, Popup::MusicTags(_)) {
+                s.act(rng.pick(&["key Enter", "key Escape"]));
+                if matches!(s.app.popup, Popup::MusicTags(_)) {
                     s.act("key Escape");
                 }
             }
@@ -9171,6 +9193,78 @@ mod journeys {
         wait_until(&mut s, "the walk", 15, |s| !s.tab().is_loading() && s.tab().smart.is_some());
         assert_eq!(s.tab().settings.group, crate::config::GroupBy::Modified);
         report("timeline", &s);
+    }
+
+    /// Music tags: Edit Tags from the menu of two sound files and a picture, the fields
+    /// they share filled in and the one they don't shown as Mixed, a title and an album
+    /// typed, the picture made their cover; saved through ffmpeg, Undo putting both back;
+    /// then Batch Rename naming them by track and title. At other font sizes and Spacing.
+    #[test]
+    fn music_tags_edited_and_used_in_names() {
+        if !sandboxed() {
+            return;
+        }
+        let d = root().join("home/album");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let Some(tools) = crate::tests::convert_tools(&root().join("tags-tools")) else { return };
+        crate::tests::convert_inputs(&d, &tools);
+        let ff = |args: &[&str]| assert!(std::process::Command::new(tools.join("ffmpeg")).args(["-hide_banner", "-loglevel", "error", "-y"]).args(args).current_dir(&d).status().unwrap().success());
+        ff(&["-i", "tone.mp3", "-map", "0:a", "-c:a", "flac", "-metadata", "genre=Drone", "-metadata", "track=2", "second.flac"]);
+        ff(&["-f", "lavfi", "-i", "testsrc=size=80x80", "-frames:v", "1", "art.png"]);
+        let mp3_before = std::fs::read(d.join("tone.mp3")).unwrap();
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(tools.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let t = crate::drives::Tools::current().unwrap();
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.settle();
+        select_names(&mut s, &["tone.mp3", "second.flac", "art.png"]);
+        open_submenu(&mut s, "tone.mp3", "Edit Tags…");
+        wait_until(&mut s, "the tags read", 15, |s| matches!(&s.app.popup, Popup::MusicTags(m) if m.read.is_some()));
+        s.idle(3);
+        for t in ["Tags of 2 files", "Test Tone", "Maia", "Mixed", "Use art.png", "Keep", "Remove"] {
+            assert!(some_text(&s, t), "{t:?} shown");
+        }
+        look(&mut s, "the tags dialog");
+        shot_still(&mut s, "music-tags");
+        click_control(&mut s, "tag title");
+        s.act("key ctrl+a");
+        s.act("text Morning Tone");
+        click_control(&mut s, "tag album");
+        s.act("text Sine Waves");
+        for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
+            s.app.cfg.font_size = font;
+            s.app.cfg.spacing = spacing;
+            s.idle(3);
+            look(&mut s, &format!("the tags dialog at font {font}, spacing {spacing}"));
+        }
+        click_control(&mut s, "tags save");
+        wait_until(&mut s, "saved", 30, |s| toast_is(s, "Saved the tags of 2 files"));
+        for f in ["tone.mp3", "second.flac"] {
+            let got = crate::musictags::read(&t, &d.join(f)).unwrap();
+            assert_eq!((got.get("title"), got.get("album"), got.cover), ("Morning Tone", "Sine Waves", true), "{f}");
+        }
+        assert_eq!(crate::musictags::read(&t, &d.join("second.flac")).unwrap().get("genre"), "Drone", "the mixed field left alone");
+        s.act("key ctrl+z");
+        s.settle();
+        assert_eq!(std::fs::read(d.join("tone.mp3")).unwrap(), mp3_before, "Undo put the original back");
+        // Names from the tags.
+        select_names(&mut s, &["tone.mp3", "second.flac"]);
+        palette_run(&mut s, "Batch Rename…");
+        s.act("text {track} {title}");
+        wait_until(&mut s, "names from the tags", 15, |s| some_text(s, "02 Test Tone.flac"));
+        assert!(some_text(&s, "Test Tone.mp3"), "no track, no number and no space for it");
+        look(&mut s, "names from tags");
+        shot_still(&mut s, "rename-from-tags");
+        s.act("key Escape");
+        report("music tags", &s);
     }
 
     /// Recent Projects from its key: the git repositories under the home folder, the

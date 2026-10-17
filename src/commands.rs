@@ -286,6 +286,7 @@ commands! {
     ClearShelf, "clear_shelf", Files, "Clear Shelf", "Take everything off the shelf; the files stay where they are.", [];
     Trash, "trash", Files, "Move To Trash", "Move the selection to the trash.", ["Delete"];
     DeletePermanent, "delete_permanent", Files, "Delete Permanently", "Delete the selection without using the trash (asks first).", ["Shift+Delete"];
+    EditTags, "edit_tags", Files, "Edit Music Tags…", "Title, artist, album, track, year, genre and cover of the selected sound files; a picture selected with them can be their cover.", [];
     BatchRename, "batch_rename", Files, "Batch Rename…", "Rename the selected items together, numbered or found and replaced, seeing every new name first.", [];
     Rename, "rename", Files, "Rename", "Rename in place; with several items selected, edit all names at once.", ["F2"];
     NewFolder, "new_folder", Files, "New Folder", "Create a folder here and start naming it.", ["Ctrl+Shift+N"];

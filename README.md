@@ -56,7 +56,7 @@ These are optional. Maia works without them and uses them when they are there:
 | `git` | change marks on files in git repositories, their history and blame, staging and committing, branches, the stash, pulling and pushing |
 | `sqlite3` | the tables and first rows of SQLite databases, read-only, in the inspector |
 | `ollama` | search by meaning, if you turn it on (it fetches a ~860 MB model only when you ask); `ollama-vulkan` lets it use the graphics card |
-| `ffmpeg`, `ffprobe`, `ffplay` | video and audio previews and thumbnails; converting sound and video |
+| `ffmpeg`, `ffprobe`, `ffplay` | video and audio previews and thumbnails; converting sound and video; music tags |
 | `pdfinfo`, `pdftoppm` (poppler) | PDF pages in the inspector |
 | `pdflatex` (TeX Live) or `tectonic`, with poppler's `pdftocairo` | formulas in Markdown |
 | `soffice` (LibreOffice) | Word, Excel, PowerPoint and OpenDocument files in the inspector, with poppler |
@@ -116,7 +116,10 @@ Go To) opens network shares, which then stay in the sidebar's Network section. R
 click files for Tags to give them colour labels or named tags (kept on the files as
 extended attributes, which other programs can read). Batch Rename, in the menu of
 several files, numbers them or finds and replaces in their names and shows every new
-name before anything changes. Find Duplicates, in a folder's menu, lists the files under
+name before anything changes; `{artist}`, `{title}`, `{track}` and `{album}` put a song's
+tags in its name. Edit Tags, in the menu of MP3, FLAC, M4A, Ogg and Opus files, changes
+their title, artist, album, track, year and genre, and a picture selected with them
+becomes their cover; the originals go to the trash, so Undo brings them back. Find Duplicates, in a folder's menu, lists the files under
 it with the same contents and moves the extra copies to the trash. Tidy Folder, there
 too, sorts the loose files into Pictures, Documents, Music, Videos, Archives and
 Installers, or the photos and videos into a folder a month by the date they were taken,

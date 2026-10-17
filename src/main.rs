@@ -48,6 +48,7 @@ mod markdown;
 mod media;
 mod lucide_map;
 mod mime;
+mod musictags;
 mod namefind;
 mod network;
 mod office;

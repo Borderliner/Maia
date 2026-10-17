@@ -44,6 +44,18 @@ pub fn split(name: &str, is_dir: bool) -> (&str, &str) {
 /// The new names of `items` (name, is a folder), in their order, or why the rules
 /// can't be used (a broken expression).
 pub fn names(items: &[(String, bool)], r: &Rules) -> Result<Vec<String>, String> {
+    names_with(items, r, &[])
+}
+
+/// The tags a pattern can name: {artist}, {title}, {track}, {album}.
+pub const TAG_WORDS: [&str; 4] = ["{artist}", "{title}", "{track}", "{album}"];
+
+pub fn uses_tags(pattern: &str) -> bool {
+    TAG_WORDS.iter().any(|w| pattern.contains(w))
+}
+
+/// `names`, with each item's music tags (by position) for the words that name them.
+pub fn names_with(items: &[(String, bool)], r: &Rules, tags: &[Option<crate::musictags::Tags>]) -> Result<Vec<String>, String> {
     let start: u64 = r.start.trim().parse().unwrap_or(1);
     let find = if r.find.is_empty() {
         None
@@ -57,7 +69,11 @@ pub fn names(items: &[(String, bool)], r: &Rules) -> Result<Vec<String>, String>
         .enumerate()
         .map(|(i, (old, is_dir))| {
             let (stem, ext) = split(old, *is_dir);
-            let mut base = if r.name.trim().is_empty() { stem.to_string() } else { expand(&r.name, stem, start + i as u64) };
+            let mut base = if r.name.trim().is_empty() { stem.to_string() } else { expand(&r.name, stem, start + i as u64, tags.get(i).and_then(Option::as_ref)) };
+            // A tag a file lacks leaves a gap: no doubled or leading spaces for it.
+            if uses_tags(&r.name) {
+                base = base.split_whitespace().collect::<Vec<_>>().join(" ");
+            }
             if let Some(re) = &find {
                 // Plain text is replaced as typed; an expression's $1 means its first group.
                 base = if r.regex { re.replace_all(&base, r.replace.as_str()).into_owned() } else { re.replace_all(&base, regex_lite::NoExpand(&r.replace)).into_owned() };
@@ -73,8 +89,18 @@ pub fn names(items: &[(String, bool)], r: &Rules) -> Result<Vec<String>, String>
         .collect())
 }
 
-/// `pattern` for one item: each run of `#` its number, padded to the run's length.
-fn expand(pattern: &str, stem: &str, n: u64) -> String {
+/// `pattern` for one item: each run of `#` its number, padded to the run's length, and
+/// its tags where they are named (a slash in one would make a folder: it becomes a dash).
+fn expand(pattern: &str, stem: &str, n: u64, tags: Option<&crate::musictags::Tags>) -> String {
+    let mut pattern = pattern.to_string();
+    for (w, key) in TAG_WORDS.iter().zip(["artist", "title", "track", "album"]) {
+        if pattern.contains(w) {
+            let v = tags.map(|t| t.get(key)).unwrap_or("");
+            let v = if key == "track" { crate::musictags::track_name(v) } else { v.to_string() };
+            // Kept apart from the # and {name} handling below.
+            pattern = pattern.replace(w, &v.replace('/', "-").replace('#', "\u{2}"));
+        }
+    }
     let p = pattern.replace("{name}", "\u{1}");
     let mut out = String::new();
     let mut chars = p.chars().peekable();
@@ -89,6 +115,7 @@ fn expand(pattern: &str, stem: &str, n: u64) -> String {
                 out += &format!("{n:0w$}");
             }
             '\u{1}' => out += stem,
+            '\u{2}' => out.push('#'),
             c => out.push(c),
         }
     }
@@ -146,6 +173,10 @@ pub struct State {
     /// Names in the folder that aren't being renamed (from the listing, not the disk).
     others: HashSet<String>,
     focus: bool,
+    /// The items' music tags, read once a pattern names one.
+    tags: Vec<Option<crate::musictags::Tags>>,
+    tags_rx: Option<std::sync::mpsc::Receiver<Vec<Option<crate::musictags::Tags>>>>,
+    asked_tags: bool,
 }
 
 pub fn open(app: &App, panel: u64) -> Option<Popup> {
@@ -155,7 +186,7 @@ pub fn open(app: &App, panel: u64) -> Option<Popup> {
         return None;
     }
     let others = t.entries.iter().map(|e| e.name.clone()).collect();
-    Some(Popup::BatchRename(State { panel, items, rules: Rules { start: "1".into(), ..Default::default() }, made: None, new: Ok(vec![]), bad: vec![], others, focus: true }))
+    Some(Popup::BatchRename(State { panel, items, rules: Rules { start: "1".into(), ..Default::default() }, made: None, new: Ok(vec![]), bad: vec![], others, focus: true, tags: vec![], tags_rx: None, asked_tags: false }))
 }
 
 impl State {
@@ -169,12 +200,36 @@ impl State {
         self.items.iter().zip(new).filter(|((p, _), n)| p.file_name().is_some_and(|o| o.to_string_lossy() != n.as_str())).map(|((p, _), n)| (p.clone(), n.clone())).collect()
     }
 
-    pub fn refresh(&mut self) {
+    /// Whether the music tags a pattern names are still being read.
+    pub fn reading_tags(&self) -> bool {
+        self.tags_rx.is_some()
+    }
+
+    pub fn refresh(&mut self, ctx: &egui::Context) {
+        if uses_tags(&self.rules.name) && !self.asked_tags {
+            self.asked_tags = true;
+            if let Some(t) = crate::drives::Tools::current().filter(|t| t.has("ffprobe")) {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (files, ctx) = (self.items.iter().map(|i| i.0.clone()).collect::<Vec<_>>(), ctx.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::musictags::for_rename(&t, &files));
+                    ctx.request_repaint();
+                });
+                self.tags_rx = Some(rx);
+            }
+        }
+        if let Some(rx) = &self.tags_rx {
+            if let Ok(t) = rx.try_recv() {
+                self.tags = t;
+                self.tags_rx = None;
+                self.made = None;
+            }
+        }
         if self.made.as_ref() == Some(&self.rules) {
             return;
         }
         let olds = self.olds();
-        self.new = names(&olds, &self.rules);
+        self.new = names_with(&olds, &self.rules, &self.tags);
         self.bad = match &self.new {
             Ok(n) => problems(&olds, n, &self.others),
             Err(_) => vec![],
@@ -191,7 +246,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
     if k.esc {
         return false;
     }
-    st.refresh();
+    st.refresh(ctx);
     let fs = app.cfg.font_size;
     let small = fs - 1.5;
     let plan = st.plan();
@@ -217,7 +272,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         ui.horizontal(|ui| {
             label(ui, "New name");
             let w = (ui.available_width() - label_w - 70.0).max(120.0);
-            let r = field(ui, &mut st.rules.name, "rename name", "Keep the names, or e.g. Trip ### or {name} 2026", w);
+            let r = field(ui, &mut st.rules.name, "rename name", "Keep the names, or e.g. Trip ###, {name} 2026 or {track} {title}", w);
             if st.focus {
                 r.request_focus();
                 st.focus = false;
@@ -276,6 +331,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         });
         ui.add_space(6.0);
         let (status, col) = match &st.new {
+            _ if st.reading_tags() => ("Reading the music tags…".to_string(), pal.text_dim),
             Err(e) => (format!("The expression won't work: {e}"), pal.danger),
             Ok(_) if clashes > 0 => (format!("{clashes} {} can't be used", if clashes == 1 { "name" } else { "names" }), pal.danger),
             Ok(_) if plan.is_empty() => ("Nothing changes yet".to_string(), pal.text_dim),
