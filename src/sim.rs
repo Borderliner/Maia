@@ -8020,6 +8020,10 @@ mod journeys {
         assert!(first.starts_with(d.join("vol/.snapshots/3")));
         look(&mut s, "previous versions");
         s.shot("versions-graphite");
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        look(&mut s, "previous versions, light");
+        s.shot("versions-paper");
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
         // The keys walk the list; each version shows under it.
         s.act("key ArrowDown");
         wait_until(&mut s, "the second version previewed", 10, |s| s.texts.iter().any(|(_, t)| t.trim() == "frist"));
@@ -8127,6 +8131,10 @@ mod journeys {
         assert!(s.texts.iter().any(|(_, t)| t.ends_with("Disk · 879 KB")), "where, and how much in all");
         look(&mut s, "space used");
         s.shot("space-used-graphite");
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        look(&mut s, "space used, light");
+        s.shot("space-used-paper");
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
         // Into Big, and back with the cursor on it.
         s.act("key Enter");
         wait_until(&mut s, "Big read", 10, |s| space(s).dir == d.join("Big") && !space(s).counting());
@@ -8378,6 +8386,10 @@ mod journeys {
         assert!(some_text(&s, "3 items") && some_text(&s, "notes.txt") && some_text(&s, "02 Song.flac"));
         look(&mut s, "shelf with three items");
         s.shot("shelf-graphite");
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        look(&mut s, "shelf, light");
+        s.shot("shelf-paper");
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
         // Copied into Empty, and undone.
         go(&mut s, &home.join("Empty"));
         click_control(&mut s, "shelf copy");
