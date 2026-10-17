@@ -9421,6 +9421,151 @@ mod journeys {
         report("format", &s);
     }
 
+    /// The new surfaces in four themes, a wide and a narrow window and with animations
+    /// off: Convert's menu and its name prompt, a conversion's card, Tidy (with plans
+    /// and with nothing to do), Compress With Password, Edit Tags, Format, the Timeline,
+    /// and the previews of a book, a comic, a font and the ones that can't be shown (a
+    /// broken book, comic and font). Every frame checked; photographed with
+    /// MAIA_SIM_SHOTS.
+    #[test]
+    fn new_surfaces_in_every_theme() {
+        if !sandboxed() || !crate::archive::available() {
+            return;
+        }
+        use crate::theme::ThemeName;
+        let home = root().join("home/surfaces");
+        let _ = std::fs::remove_dir_all(&home);
+        let d = home.join("Mixed");
+        std::fs::create_dir_all(&d).unwrap();
+        let Some(tools) = crate::tests::convert_tools(&root().join("surfaces-tools")) else { return };
+        crate::tests::convert_inputs(&d, &tools);
+        if crate::tests::book_fixture(&d).is_none() {
+            return;
+        }
+        std::fs::copy(crate::tests::sample_font(), d.join("Sample.ttf")).unwrap();
+        std::fs::write(d.join("broken.epub"), "PK not a book").unwrap();
+        std::fs::write(d.join("broken.cbz"), "PK not a comic").unwrap();
+        std::fs::write(d.join("broken.otf"), "not a font").unwrap();
+        std::fs::create_dir_all(home.join("Empty")).unwrap();
+        crate::tests::timeline_fixture(&home.join("Recent"));
+        let ok = std::process::Command::new(tools.join("ffmpeg")).args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=600:size=320x240:rate=30", "-c:v", "mpeg4", "-q:v", "28"]).arg(d.join("long.avi")).status().unwrap().success();
+        assert!(ok);
+        let drv = fake_drives("surfaces");
+        for t in ["magick", "ffmpeg", "ffprobe", "pdfunite", "pdfseparate", "heif-dec"] {
+            let _ = std::os::unix::fs::symlink(std::fs::read_link(tools.join(t)).unwrap(), drv.join(t));
+        }
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(drv.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let shots = std::env::var_os("MAIA_SIM_SHOTS").is_some();
+        let mut first = true;
+        for theme in [ThemeName::Midnight, ThemeName::Paper, ThemeName::Latte, ThemeName::Gruvbox] {
+            for (w, h) in [(1280.0, 800.0), (720.0, 480.0)] {
+                let tag = format!("{}-{w}", theme.label().to_lowercase().replace(' ', ""));
+                let mut s = Sim::new(&d, vec2(w, h));
+                s.app.cfg.theme = theme;
+                s.app.cfg.animations = !first || !shots;
+                s.settle();
+                let snap = |s: &mut Sim, what: &str| {
+                    look(s, &format!("{what} in {tag}"));
+                    if shots {
+                        s.idle(12);
+                        s.shot(&format!("surface-{what}-{tag}"));
+                    }
+                };
+                // Convert: the menu, the PDF's name, a running card.
+                select_names(&mut s, &["clear.png", "turned.jpg"]);
+                let r = row_text(&s, "clear.png");
+                s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+                s.idle(3);
+                s.act("text convert");
+                s.idle(2);
+                assert!(some_text(&s, "Convert › PDF…"), "found by search");
+                snap(&mut s, "convert-menu");
+                s.act("key Escape");
+                s.cmd(ConvertPdf);
+                s.idle(2);
+                assert!(matches!(s.app.popup, Popup::Prompt { .. }));
+                snap(&mut s, "convert-prompt");
+                s.act("key Escape");
+                select_names(&mut s, &["long.avi"]);
+                s.cmd(ConvertWebm);
+                wait_until(&mut s, "the card", 30, |s| s.app.jobs.iter().any(|j| j.progress.lock().unwrap().within.unwrap_or(0.0) > 0.0));
+                s.idle(3);
+                if shots {
+                    s.shot(&format!("surface-convert-card-{tag}"));
+                }
+                for j in &s.app.jobs {
+                    j.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                wait_until(&mut s, "cancelled", 15, |s| s.app.jobs.iter().all(|j| j.progress.lock().unwrap().finished));
+                s.app.jobs.clear();
+                // Tidy, with moves and with none.
+                s.cmd(TidyFolder);
+                wait_until(&mut s, "the plan", 10, |s| matches!(&s.app.popup, Popup::Tidy(t) if t.plans.is_some()));
+                snap(&mut s, "tidy");
+                s.act("key Escape");
+                // Compress With Password, Edit Tags.
+                select_names(&mut s, &["three.pdf", "two.pdf"]);
+                s.cmd(CompressLocked);
+                s.act("text pw");
+                snap(&mut s, "lock");
+                s.act("key Escape");
+                select_names(&mut s, &["tone.mp3", "clear.png"]);
+                s.cmd(EditTags);
+                wait_until(&mut s, "tags read", 15, |s| matches!(&s.app.popup, Popup::MusicTags(m) if m.read.is_some()));
+                snap(&mut s, "tags");
+                s.act("key Escape");
+                // Previews, the good and the broken.
+                s.cmd(ToggleInspector);
+                for (name, what) in [("Lighthouse.epub", "book"), ("Harbour.cbz", "comic"), ("Sample.ttf", "font"), ("broken.epub", "broken-book"), ("broken.cbz", "broken-comic"), ("broken.otf", "broken-font")] {
+                    select_names(&mut s, &[name]);
+                    let t0 = Instant::now();
+                    while t0.elapsed().as_secs() < 10 {
+                        s.idle(1);
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        let i = inspector(&s);
+                        let done = i.rich_name().is_some() || i.note().is_some() || i.font_state().is_some() || i.pdf_state().is_some_and(|p| p.2.is_some()) || (what.starts_with("broken") && t0.elapsed().as_millis() > 1500);
+                        if done {
+                            break;
+                        }
+                    }
+                    snap(&mut s, &format!("preview-{what}"));
+                }
+                s.cmd(ToggleInspector);
+                // Format, from the card's menu in the Computer view.
+                s.cmd(Computer);
+                wait_until(&mut s, "drives", 10, |s| s.tab().entries.iter().any(|e| e.name == "Photo Card"));
+                let r = list_text(&s, "Photo Card");
+                s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+                s.idle(3);
+                menu_pick(&mut s, "Format…");
+                s.idle(2);
+                snap(&mut s, "format");
+                s.act("key Escape");
+                // The Timeline, and Tidy with nothing to do.
+                s.cmd(Timeline);
+                s.settle();
+                snap(&mut s, "timeline");
+                go(&mut s, &home.join("Empty"));
+                s.cmd(TidyFolder);
+                wait_until(&mut s, "the plan", 10, |s| matches!(&s.app.popup, Popup::Tidy(t) if t.plans.is_some()));
+                snap(&mut s, "tidy-empty");
+                s.act("key Escape");
+                report(&format!("surfaces {tag}"), &s);
+                first = false;
+                if !shots {
+                    return;
+                }
+            }
+        }
+    }
+
     /// Recent Projects from its key: the git repositories under the home folder, the
     /// last visited first and the rest by git's own activity, each with its branch and,
     /// once git has said, a dot for uncommitted changes. Typing narrows; Enter opens one
