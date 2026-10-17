@@ -436,11 +436,16 @@ pub fn media_fixture(name: &str) -> PathBuf {
 /// A minimal valid PDF written by hand: one A6 page per colour ("r g b"), each a
 /// rectangle filled with it.
 pub fn sample_pdf(colors: &[&str]) -> String {
+    sized_pdf(colors, [298, 420], [20, 20, 250, 380])
+}
+
+/// Pages `size` points big, each with one rectangle `ink` in its colour.
+pub fn sized_pdf(colors: &[&str], size: [u32; 2], ink: [u32; 4]) -> String {
     let kids: Vec<String> = (0..colors.len()).map(|k| format!("{} 0 R", 3 + 2 * k)).collect();
     let mut objs = vec!["<< /Type /Catalog /Pages 2 0 R >>".to_string(), format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), colors.len())];
     for (k, c) in colors.iter().enumerate() {
-        let stream = format!("{c} rg 20 20 250 380 re f");
-        objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 298 420] /Contents {} 0 R >>", 4 + 2 * k));
+        let stream = format!("{c} rg {} {} {} {} re f", ink[0], ink[1], ink[2], ink[3]);
+        objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents {} 0 R >>", size[0], size[1], 4 + 2 * k));
         objs.push(format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()));
     }
     let mut pdf = String::from("%PDF-1.4\n");
@@ -6591,6 +6596,57 @@ mod journeys {
         wait_until(&mut s, "the word", 5, |s| s.app.toast.as_ref().is_some_and(|x| x.0.starts_with("Emptied ") && x.0.ends_with("from the trash, older than 30 days")));
         assert!(t.join("files/trashage new/inside.txt").exists(), "last week's stays");
         report("trash age", &s);
+    }
+
+    /// Formulas in a Markdown preview: without a TeX they show as written under a word
+    /// saying why; with one (a stand-in pdflatex, the real pdftocairo) they are typeset,
+    /// in a sentence and on lines of their own, and the text flows around them.
+    #[test]
+    fn formulas_in_markdown_previews() {
+        if !sandboxed() || !crate::media::have("pdftocairo") {
+            return;
+        }
+        let home = fixture("formulas");
+        let d = home.join("Notes");
+        std::fs::create_dir_all(&d).unwrap();
+        let md = "# Notes on waves\n\nA wave's speed is $v = f\\lambda$, and its energy grows with $A^2$, so doubling the height gives four times the energy.\n\n$$\n\\frac{\\partial^2 u}{\\partial t^2} = c^2 \\nabla^2 u\n$$\n\nSee also \\(\\omega = 2\\pi f\\).\n";
+        std::fs::write(d.join("waves.md"), md).unwrap();
+        // First without a TeX.
+        // Poppler but no TeX, as on a computer without TeX Live.
+        let empty = root().join("formulas-none");
+        std::fs::create_dir_all(&empty).unwrap();
+        let _ = std::os::unix::fs::symlink("/usr/bin/pdftocairo", empty.join("pdftocairo"));
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(empty.clone()));
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.cmd(ToggleInspector);
+        select_path(&mut s, &d.join("waves.md"));
+        wait_until(&mut s, "the note", 10, |s| inspector(s).markdown().is_some_and(|m| m.maths_state().1.is_some()));
+        s.idle(5);
+        assert!(some_text(&s, "Formulas show as written: install TeX Live to typeset them"));
+        assert!(s.texts.iter().any(|(_, t)| t.contains("$v = f\\lambda$")), "the source in the sentence");
+        look(&mut s, "formulas as written");
+        s.shot("formulas-source");
+        drop(s);
+        // Then with one.
+        let tex = root().join("formulas-tex");
+        crate::tests::fake_tex(&tex);
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(tex.clone()));
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.cmd(ToggleInspector);
+        select_path(&mut s, &d.join("waves.md"));
+        wait_until(&mut s, "typeset", 20, |s| inspector(s).markdown().is_some_and(|m| m.maths_state().0 == 4));
+        s.idle(5);
+        assert!(!s.texts.iter().any(|(_, t)| t.contains("$v = f")), "no source left");
+        assert!(!some_text(&s, "Formulas show as written: install TeX Live to typeset them"));
+        look(&mut s, "formulas typeset");
+        s.shot("formulas-typeset");
+        for (w, h) in [(720.0, 480.0), (520.0, 400.0)] {
+            s.resize(w, h);
+            s.idle(5);
+            look(&mut s, "formulas narrow");
+        }
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        report("formulas", &s);
     }
 
     /// Select the listed item named `label`, which scrolls it into view.
