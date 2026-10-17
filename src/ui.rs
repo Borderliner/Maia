@@ -769,7 +769,9 @@ impl App {
         let rad = if self.cfg.round_corners { 8 } else { 0 };
         ui.painter().rect_filled(rect, CornerRadius::same(rad), pal.panel);
         let mut y = rect.top();
-        if !tabs_in_title {
+        // A split squeezed shorter than its tab strip shows none: the strip would be
+        // drawn over the panel below it.
+        if !tabs_in_title && rect.height() >= TAB_H {
             let r = Rect::from_min_max(pos2(rect.left(), y), pos2(rect.right(), y + TAB_H));
             ui.painter().rect_filled(r, CornerRadius { nw: rad, ne: rad, sw: 0, se: 0 }, pal.chrome);
             let mut child = ui.new_child(UiBuilder::new().max_rect(r.shrink2(vec2(4.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Max)));
