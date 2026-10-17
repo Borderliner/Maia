@@ -1052,7 +1052,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(153) {
+    match rng.below(154) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2184,6 +2184,35 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 }
             }
         }
+        153 => {
+            // Cut what is selected, paste it from another tab or panel, perhaps a folder
+            // up, and come back: once the move is done, no tab lists it where it was.
+            let cut: Vec<PathBuf> = s.tab().targets().into_iter().filter(|p| std::fs::symlink_metadata(p).is_ok()).collect();
+            s.act("key ctrl+x");
+            s.act(rng.pick(&["key ctrl+t", "key Tab", "key ctrl+Tab"]));
+            if rng.below(2) == 0 {
+                s.act("key alt+ArrowUp");
+                s.settle();
+            }
+            s.act("key ctrl+v");
+            if s.popup_open() {
+                s.act(rng.pick(&["key Enter", "key Escape"]));
+            }
+            let t0 = Instant::now();
+            while s.app.jobs.iter().any(|j| j.finished_at.is_none()) && t0.elapsed() < std::time::Duration::from_secs(10) {
+                s.frame(vec![]);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            s.settle();
+            s.act(rng.pick(&["key ctrl+shift+Tab", "key Tab", "key alt+ArrowLeft", "key ctrl+1"]));
+            s.settle();
+            let moved: Vec<&PathBuf> = cut.iter().filter(|p| std::fs::symlink_metadata(p).is_err()).collect();
+            for t in s.app.panels.values().flat_map(|p| p.tabs.iter()).filter(|t| t.rename.is_none()) {
+                if let Some(p) = moved.iter().find(|p| t.view.iter().any(|&i| t.entries[i as usize].path == ***p)) {
+                    s.fail(&format!("{} still listed in {} after it was moved", p.display(), t.path.display()));
+                }
+            }
+        }
         _ => {
             s.note("idle".into());
             s.idle(rng.below(20) + 1);
@@ -2652,6 +2681,149 @@ mod journeys {
         let dupes = std::fs::read_dir(home.join("Documents")).unwrap().flatten().filter(|d| d.file_name().to_string_lossy().starts_with("report")).count();
         assert_eq!(dupes, 2, "duplicate made a second copy");
         report("conflicts", &s);
+    }
+
+    /// The cursor walked onto `name` with the arrow keys.
+    fn cursor_to(s: &mut Sim, name: &str) {
+        s.act("key Home");
+        for _ in 0..60 {
+            let t = s.tab();
+            if t.cursor.and_then(|c| t.entries.get(c as usize)).is_some_and(|e| e.name == name) {
+                return;
+            }
+            s.act("key ArrowDown");
+        }
+        s.fail(&format!("{name} not reached with the arrow keys"));
+    }
+
+    fn lists(t: &crate::tab::Tab, p: &Path) -> bool {
+        t.view.iter().any(|&i| t.entries[i as usize].path == p)
+    }
+
+    /// The front tab of the panel that is not focused.
+    fn other_tab(s: &Sim) -> &crate::tab::Tab {
+        s.app.panels.iter().find(|(id, _)| **id != s.app.active).map(|(_, p)| p.tab()).unwrap_or_else(|| s.fail("a second panel"))
+    }
+
+    /// Ctrl+V, then the files on disk where they were sent.
+    fn paste_lands(s: &mut Sim, landed: &[PathBuf]) {
+        s.act("key ctrl+v");
+        wait_until(s, "the move to finish", 10, |s| landed.iter().all(|p| p.exists()) && s.app.jobs.iter().all(|j| j.finished_at.is_some()));
+        s.settle();
+    }
+
+    /// Cut, paste somewhere else, and the folder the files left stops showing them with
+    /// no refresh: from a tab left behind, within one tab, from the other panel, onto
+    /// another filesystem, out of a flattened listing and a tree, and back again with
+    /// Undo while the tab they return to is behind another.
+    #[test]
+    fn cut_paste_leaves_the_source_current() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("cutpaste");
+        let (from, to, flat, tree) = (home.join("From"), home.join("To"), home.join("Flat"), home.join("Tree"));
+        for f in ["From/a1.txt", "From/a2.txt", "From/a3.txt", "From/b1.txt", "From/c1.txt", "From/keep.txt", "Flat/sub/d1.txt", "Flat/sub/d2.txt", "Tree/inner/e1.txt", "Tree/inner/e2.txt"] {
+            let p = home.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, f).unwrap();
+        }
+        std::fs::create_dir_all(&to).unwrap();
+        // The sandbox's /tmp is a filesystem of its own: a move there copies, then removes.
+        let far = PathBuf::from("/tmp/cutpaste-far");
+        let _ = std::fs::remove_dir_all(&far);
+        std::fs::create_dir_all(&far).unwrap();
+        let mut s = Sim::new(&from, vec2(1280.0, 800.0));
+        let gone_here = |s: &mut Sim, what: &str, names: &[&str]| {
+            wait_until(s, what, 3, |s| names.iter().all(|n| !lists(s.tab(), &from.join(n))));
+            s.act("move -50 -50");
+            s.settle();
+            for n in names {
+                assert!(!some_text_at(s, n), "{n} still drawn: {what}");
+            }
+        };
+        // Two files cut, pasted from a new tab in another folder, then back to the first tab.
+        s.act("key Home");
+        s.act("key shift+ArrowDown");
+        assert_eq!(s.tab().targets(), [from.join("a1.txt"), from.join("a2.txt")]);
+        s.act("key ctrl+x");
+        s.act("key ctrl+t");
+        go(&mut s, &to);
+        paste_lands(&mut s, &[to.join("a1.txt"), to.join("a2.txt")]);
+        s.act("key ctrl+1");
+        assert_eq!(s.tab().path, from);
+        gone_here(&mut s, "the tab left behind drops what was cut from it", &["a1.txt", "a2.txt"]);
+        s.act("key ctrl+2");
+        s.act("key ctrl+w");
+        // Within one tab: there and Back.
+        cursor_to(&mut s, "b1.txt");
+        s.act("key ctrl+x");
+        go(&mut s, &to);
+        paste_lands(&mut s, &[to.join("b1.txt")]);
+        s.act("key alt+ArrowLeft");
+        s.settle();
+        gone_here(&mut s, "Back in the folder", &["b1.txt"]);
+        // Onto another filesystem, from a tab left behind.
+        cursor_to(&mut s, "a3.txt");
+        s.act("key ctrl+x");
+        s.act("key ctrl+t");
+        go(&mut s, &far);
+        paste_lands(&mut s, &[far.join("a3.txt")]);
+        assert!(!from.join("a3.txt").exists(), "copied, then removed");
+        s.act("key ctrl+1");
+        gone_here(&mut s, "moved onto another filesystem", &["a3.txt"]);
+        s.act("key ctrl+2");
+        s.act("key ctrl+w");
+        // From the other panel.
+        s.cmd(SplitRight);
+        go(&mut s, &to);
+        s.act("key Tab");
+        s.settle();
+        assert_eq!(s.tab().path, from);
+        cursor_to(&mut s, "c1.txt");
+        s.act("key ctrl+x");
+        s.act("key Tab");
+        paste_lands(&mut s, &[to.join("c1.txt")]);
+        wait_until(&mut s, "the other panel drops c1.txt", 3, |s| !lists(other_tab(s), &from.join("c1.txt")));
+        assert!(lists(other_tab(&s), &from.join("keep.txt")), "what stayed is still listed");
+        // Out of a flattened listing (Ctrl+E) into the other panel.
+        s.act("key Tab");
+        go(&mut s, &flat);
+        s.act("key ctrl+e");
+        s.settle();
+        assert!(lists(s.tab(), &flat.join("sub/d1.txt")), "flattened");
+        cursor_to(&mut s, "d1.txt");
+        s.act("key ctrl+x");
+        s.act("key Tab");
+        paste_lands(&mut s, &[to.join("d1.txt")]);
+        wait_until(&mut s, "the flattened listing drops d1.txt", 3, |s| !lists(other_tab(s), &flat.join("sub/d1.txt")));
+        assert!(lists(other_tab(&s), &flat.join("sub/d2.txt")) && other_tab(&s).flatten, "still flattened, the rest still there");
+        // Out of a folder unfolded in a tree.
+        s.act("key Tab");
+        go(&mut s, &tree);
+        s.cmd(ViewTree);
+        cursor_to(&mut s, "inner");
+        s.act("key ArrowRight");
+        s.settle();
+        cursor_to(&mut s, "e1.txt");
+        s.act("key ctrl+x");
+        s.act("key Tab");
+        paste_lands(&mut s, &[to.join("e1.txt")]);
+        wait_until(&mut s, "the tree drops e1.txt", 3, |s| !lists(other_tab(s), &tree.join("inner/e1.txt")));
+        assert!(lists(other_tab(&s), &tree.join("inner/e2.txt")));
+        // Undo puts e1.txt back while the tree is behind another tab.
+        s.act("key Tab");
+        s.act("key ctrl+t");
+        s.act("key Tab");
+        s.act("key ctrl+z");
+        s.settle();
+        assert!(tree.join("inner/e1.txt").exists(), "undo moved it back");
+        s.act("key Tab");
+        s.act("key ctrl+1");
+        wait_until(&mut s, "the tree shows e1.txt again", 3, |s| lists(s.tab(), &tree.join("inner/e1.txt")));
+        look(&mut s, "after cut and paste");
+        let _ = std::fs::remove_dir_all(&far);
+        report("cutpaste", &s);
     }
 
     /// Computer (drives) and Trash: every view renders; trashed items list, restore to

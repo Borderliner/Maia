@@ -515,6 +515,69 @@ impl Tab {
         self.tree_loads.push(fsx::list_dir_pooled(dir.to_path_buf(), self.ctx.clone()));
     }
 
+    /// Catch up with a change Maia made itself. The folder watcher only follows the front
+    /// tab of each panel and never a flattened walk, so without this a tab behind
+    /// another or a flattened listing keeps showing what was moved out of it.
+    pub fn changed(&mut self, c: &crate::ops::Changed) {
+        if self.archive.is_some() || is_computer(&self.path) || self.rename.is_some() {
+            return;
+        }
+        if c.gone.iter().any(|g| self.path.starts_with(g)) {
+            // Its own folder went: the plain listing finds that out and moves up.
+            self.flatten = false;
+            self.smart = None;
+            self.reload();
+            return;
+        }
+        if self.forget(&c.gone) {
+            self.dirty = true;
+        }
+        if self.flatten {
+            // What left is already dropped; what arrived can only be found by walking.
+            if c.arrived.iter().any(|d| d.starts_with(&self.path)) {
+                self.reload();
+            }
+        } else if c.dirs().any(|d| *d == self.path) {
+            self.reload();
+        } else if self.tree_active() {
+            let open: Vec<PathBuf> = c.dirs().filter(|d| self.expanded.contains(*d)).cloned().collect();
+            for d in open {
+                self.load_children(&d);
+            }
+        }
+    }
+
+    /// Drop the rows of `gone` and of everything under them, until the listing is read
+    /// again. Returns whether any row went.
+    fn forget(&mut self, gone: &[PathBuf]) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        let gone: HashSet<&[u8]> = gone.iter().filter(|g| g.starts_with(&self.path)).map(|g| g.as_os_str().as_bytes()).collect();
+        if gone.is_empty() {
+            return false;
+        }
+        let root = self.path.as_os_str().len();
+        let mut any = false;
+        for e in self.entries.iter_mut().filter(|e| e.depth != DEAD) {
+            let b = e.path.as_os_str().as_bytes();
+            // The row itself, or a folder above it that went.
+            if gone.contains(b) || b.iter().enumerate().skip(root + 1).any(|(i, &c)| c == b'/' && gone.contains(&b[..i])) {
+                e.depth = DEAD;
+                any = true;
+            }
+        }
+        if any {
+            let dead = |i: &u32| self.entries.get(*i as usize).is_none_or(|e| e.depth == DEAD);
+            self.selected.retain(|i| !dead(i));
+            if self.cursor.as_ref().is_some_and(dead) {
+                self.cursor = None;
+            }
+            if self.anchor.as_ref().is_some_and(dead) {
+                self.anchor = None;
+            }
+        }
+        any
+    }
+
     /// Depth of a direct child of `dir` relative to this tab's folder.
     fn child_depth(&self, dir: &Path) -> u8 {
         dir.strip_prefix(&self.path).map(|r| r.components().count() as u8).unwrap_or(1).clamp(1, DEAD - 1)
