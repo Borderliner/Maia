@@ -6634,7 +6634,7 @@ fn exif_dates_and_places_from_real_photos() {
 #[test]
 fn tidy_plans_by_kind_and_month() {
     use crate::tidy::{Mode, kind_folder, month_folder, read_plans};
-    for (n, k) in [("setup.deb", Some("Installers")), ("Game.AppImage", Some("Installers")), ("yay-12.4-1-x86_64.pkg.tar.zst", Some("Installers")), ("Tool.flatpakref", Some("Installers")), ("photos.tar.gz", Some("Archives")), ("a.ZIP", Some("Archives")), ("IMG_1.JPG", Some("Pictures")), ("scan.heic", Some("Pictures")), ("report.pdf", Some("Documents")), ("notes.txt", Some("Documents")), ("song.flac", Some("Music")), ("clip.MOV", Some("Videos")), ("main.rs", None), ("README", None), (".zip", None)] {
+    for (n, k) in [("setup.deb", Some("Installers")), ("Game.AppImage", Some("Installers")), ("yay-12.4-1-x86_64.pkg.tar.zst", Some("Installers")), ("Tool.flatpakref", Some("Installers")), ("photos.tar.gz", Some("Archives")), ("a.ZIP", Some("Archives")), ("IMG_1.JPG", Some("Pictures")), ("scan.heic", Some("Pictures")), ("report.pdf", Some("Documents")), ("notes.txt", Some("Documents")), ("song.flac", Some("Music")), ("clip.MOV", Some("Videos")), ("main.rs", None), ("README", None), (".zip", None), ("Harbour.cbz", Some("Documents")), ("book.epub", Some("Documents"))] {
         assert_eq!(kind_folder(n), k, "{n}");
     }
     assert_eq!(month_folder(2024, 6), "2024/2024-06");

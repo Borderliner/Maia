@@ -27,6 +27,10 @@ pub fn kind_folder(name: &str) -> Option<&'static str> {
     if matches!(ext, "deb" | "rpm" | "appimage" | "flatpakref" | "flatpakrepo" | "flatpak" | "snap" | "exe" | "msi" | "dmg" | "pkg") || l.contains(".pkg.tar.") {
         return Some("Installers");
     }
+    // A comic is a zip or a rar, but it is read, not unpacked.
+    if matches!(ext, "cbz" | "cbr" | "epub" | "mobi" | "azw3" | "fb2") {
+        return Some("Documents");
+    }
     if crate::archive::is_archive(&l) || matches!(ext, "gz" | "xz" | "bz2" | "zst") {
         return Some("Archives");
     }
