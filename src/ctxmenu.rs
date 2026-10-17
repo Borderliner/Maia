@@ -155,6 +155,8 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         items.push(Item::cmd(Cmd::Refresh));
         if computer {
             items.push(Item::cmd(Cmd::ConnectServer));
+        } else if !in_trash && t.archive.is_none() {
+            items.push(Item::cmd(Cmd::FindDuplicates));
         }
         if in_trash {
             items.push(Item::sep());

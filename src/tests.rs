@@ -4884,3 +4884,53 @@ fn compare_two_files() {
     assert!(!crate::inspector::is_patch(".patch") && !crate::inspector::is_patch("patch.txt"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Find Duplicates on real files: copies found whatever their names and folders, the
+/// oldest first in each set; files of one size but other contents, or alike only in
+/// their first 64 KB, kept apart; hard links to one file, empty files, hidden folders
+/// and installed packages left out; the sets with the most to free first.
+#[test]
+fn duplicates_found_by_contents() {
+    use crate::dupes::{Msg, find};
+    let d = tmpdir("dupes");
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400 * 30);
+    let photo = vec![7u8; 300_000];
+    touch(&d.join("Pictures/beach.jpg"), "");
+    std::fs::write(d.join("Pictures/beach.jpg"), &photo).unwrap();
+    std::fs::File::options().write(true).open(d.join("Pictures/beach.jpg")).unwrap().set_modified(old).unwrap();
+    std::fs::create_dir_all(d.join("Downloads")).unwrap();
+    std::fs::write(d.join("Downloads/IMG_2041.jpg"), &photo).unwrap();
+    std::fs::write(d.join("Downloads/beach (1).jpg"), &photo).unwrap();
+    // The same first 64 KB, then different.
+    let mut other = photo.clone();
+    other[200_000] = 8;
+    std::fs::write(d.join("Downloads/almost.jpg"), &other).unwrap();
+    touch(&d.join("notes.txt"), "same words\n");
+    touch(&d.join("Documents/notes copy.txt"), "same words\n");
+    touch(&d.join("Documents/other.txt"), "else words\n");
+    std::fs::hard_link(d.join("Documents/other.txt"), d.join("Documents/linked.txt")).unwrap();
+    touch(&d.join("empty-a"), "");
+    touch(&d.join("empty-b"), "");
+    touch(&d.join(".cache/notes.txt"), "same words\n");
+    touch(&d.join("web/package.json"), "{}\n");
+    touch(&d.join("web/node_modules/x/notes.txt"), "same words\n");
+    let mut sets = vec![];
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    find(&d, &stop, &mut |m| {
+        if let Msg::Set(s) = m {
+            sets.push(s);
+        }
+    });
+    let names = |s: &crate::dupes::Set| s.files.iter().map(|c| crate::project::relative(&c.path, &d)).collect::<Vec<_>>();
+    assert_eq!(sets.len(), 2, "{:?}", sets.iter().map(names).collect::<Vec<_>>());
+    assert_eq!(names(&sets[0])[0], "Pictures/beach.jpg", "the oldest is kept");
+    let mut rest = names(&sets[0])[1..].to_vec();
+    rest.sort();
+    assert_eq!(rest, ["Downloads/IMG_2041.jpg", "Downloads/beach (1).jpg"]);
+    assert_eq!((sets[0].size, sets[0].spare()), (300_000, 600_000));
+    let mut small = names(&sets[1]);
+    small.sort();
+    assert_eq!(small, ["Documents/notes copy.txt", "notes.txt"], "not the hidden or installed copies");
+    let _ = std::fs::remove_dir_all(&d);
+}
+

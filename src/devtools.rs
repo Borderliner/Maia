@@ -35,7 +35,7 @@ fn chip(ui: &mut Ui, label: &str, on: bool, what: &'static str, tip: &str, pal: 
 }
 
 /// Take a key with these modifiers, and the text it would type when Alt is among them.
-fn take(ctx: &egui::Context, m: Modifiers, k: Key) -> bool {
+pub(crate) fn take(ctx: &egui::Context, m: Modifiers, k: Key) -> bool {
     ctx.input_mut(|i| {
         let hit = i.consume_key(m, k);
         if hit && m.alt {

@@ -1739,6 +1739,10 @@ impl App {
                 Some(d) => self.popup = crate::devtools::tasks(&ctx, d),
                 None => self.toast("Run Task needs a folder"),
             },
+            Cmd::FindDuplicates => match crate::devtools::target_dir(self) {
+                Some(d) => self.popup = crate::dupes::open(&ctx, d),
+                None => self.toast("Find Duplicates needs a folder"),
+            },
             Cmd::CleanBuilds => match crate::devtools::target_dir(self) {
                 Some(d) => self.popup = crate::devtools::clean(&ctx, d),
                 None => self.toast("Clean Build Folders needs a folder"),

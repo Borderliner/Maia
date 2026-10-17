@@ -18,6 +18,7 @@ mod envfile;
 mod config;
 mod devtools;
 mod drives;
+mod dupes;
 mod editor;
 mod ctxmenu;
 mod filediff;

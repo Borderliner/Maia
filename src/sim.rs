@@ -1012,7 +1012,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(122) {
+    match rng.below(123) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1311,6 +1311,18 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 }
             }
             s.idle(1 + rng.below(4));
+        }
+        122 => {
+            // Find Duplicates: wait a little, check some, maybe ask to trash, then leave.
+            s.cmd(Cmd::FindDuplicates);
+            s.idle(3 + rng.below(20));
+            for _ in 0..rng.below(4) {
+                s.act(&format!("key {}", rng.pick(&["Down", "Up", "space", "ctrl+a", "PageDown"])));
+            }
+            s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
+            if matches!(s.app.popup, Popup::Confirm { .. }) {
+                s.act("key Escape");
+            }
         }
         97 => {
             // A drag that leaves the window (handed to the system when it carries files).
@@ -6263,6 +6275,88 @@ mod journeys {
         assert!(launched().last().unwrap().contains(&format!("https://codeberg.org/ana/app/src/commit/{sha}/src/main.rs")), "{:?}", launched().last());
         assert!(toast_is(&s, "Opened in the browser; this commit isn't pushed, so the link won't open until it is"), "{:?}", s.app.toast);
         report("compare", &s);
+    }
+
+    /// Find Duplicates from the folder's menu: the sets as they are found, the most to free
+    /// first and the oldest copy first in each; every copy of a set refused; the extras
+    /// checked, trashed after asking, the oldest copies left, and undone. A folder with
+    /// none says so.
+    #[test]
+    fn find_duplicates_and_trash_the_extras() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("dupes");
+        let d = home.join("Holiday");
+        std::fs::create_dir_all(d.join("Phone")).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400 * 20);
+        let photo = vec![3u8; 500_000];
+        let write = |p: &Path, data: &[u8], aged: bool| {
+            std::fs::write(p, data).unwrap();
+            if aged {
+                std::fs::File::options().write(true).open(p).unwrap().set_modified(old).unwrap();
+            }
+        };
+        write(&d.join("beach.jpg"), &photo, true);
+        write(&d.join("Phone/IMG_0001.jpg"), &photo, false);
+        write(&d.join("beach copy.jpg"), &photo, false);
+        write(&d.join("notes.txt"), b"pack sunscreen\n", true);
+        write(&d.join("Phone/notes (1).txt"), b"pack sunscreen\n", false);
+        write(&d.join("only once.txt"), b"nothing like it\n", false);
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.idle(3);
+        let list = s.app.panels[&s.app.active].list_rect;
+        s.act(&format!("click {:.0} {:.0} right", list.center().x, list.bottom() - 40.0));
+        s.idle(2);
+        assert!(some_text(&s, "Find Duplicates…"), "in the folder's menu");
+        s.click_text("Find Duplicates…");
+        let st = |s: &Sim| match &s.app.popup {
+            Popup::Duplicates(d) => (d.done, d.sets.clone(), d.checked.len()),
+            _ => s.fail("Find Duplicates is not open"),
+        };
+        wait_until(&mut s, "the search", 20, |s| st(s).0);
+        s.idle(3);
+        let sets = st(&s).1;
+        assert_eq!(sets.len(), 2);
+        assert_eq!((sets[0].size, sets[0].files.len()), (500_000, 3), "the most to free first");
+        assert_eq!(sets[0].files[0].path, d.join("beach.jpg"), "the oldest copy first");
+        assert_eq!(sets[1].files[0].path, d.join("notes.txt"));
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with("2 sets of duplicates; ")), "what could be freed");
+        assert!(some_text(&s, "beach.jpg · 3 copies · 488 KB each"), "{:?}", s.texts.iter().filter(|t| t.1.contains("copies")).collect::<Vec<_>>());
+        look(&mut s, "duplicates");
+        s.shot("duplicates");
+        // Both notes checked: refused, the file would be gone.
+        for _ in 0..3 {
+            s.act("key ArrowDown");
+        }
+        s.act("key space");
+        s.act("key ArrowDown");
+        s.act("key space");
+        s.act("key Enter");
+        assert!(matches!(s.app.popup, Popup::Duplicates(_)), "still open");
+        assert!(some_text(&s, "Every copy is checked in 1 set: leave one of each unchecked"));
+        // The extras: every copy but the oldest.
+        click_control(&mut s, "duplicates extras");
+        assert_eq!(st(&s).2, 3);
+        s.act("key Enter");
+        assert!(matches!(s.app.popup, Popup::Confirm { .. }), "asks first");
+        s.act("key Enter");
+        wait_until(&mut s, "the extras trashed", 20, |_| !d.join("beach copy.jpg").exists() && !d.join("Phone/IMG_0001.jpg").exists() && !d.join("Phone/notes (1).txt").exists());
+        assert!(d.join("beach.jpg").exists() && d.join("notes.txt").exists() && d.join("only once.txt").exists());
+        assert!(root().join("xdg/data/Trash/files/beach copy.jpg").exists(), "in the trash, not deleted");
+        wait_until(&mut s, "the trash job done", 20, |s| s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Trashed(_))));
+        s.act("key ctrl+z");
+        wait_until(&mut s, "undone", 20, |_| d.join("beach copy.jpg").exists() && d.join("Phone/notes (1).txt").exists());
+        go(&mut s, &home.join("Empty"));
+        palette_run(&mut s, "Find Duplicates");
+        wait_until(&mut s, "an empty search", 10, |s| st(s).0);
+        s.idle(2);
+        assert!(some_text(&s, "No duplicates here"));
+        s.resize(520.0, 340.0);
+        look(&mut s, "duplicates small");
+        s.act("key Escape");
+        s.resize(1280.0, 800.0);
+        report("duplicates", &s);
     }
 
     /// Select the listed item named `label`, which scrolls it into view.

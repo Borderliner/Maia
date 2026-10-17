@@ -255,6 +255,7 @@ commands! {
     Duplicate, "duplicate", Files, "Duplicate", "Make copies of the selection in the same folder.", ["Ctrl+Shift+D"];
     OpenWith, "open_with", Files, "Open With…", "Pick an application to open the selection with.", [];
     OpenInEditor, "open_in_editor", Files, "Open In Editor", "Open the selected files in your code editor (chosen in Options).", ["F4"];
+    FindDuplicates, "find_duplicates", Files, "Find Duplicates…", "Find files with the same contents under this folder, whatever their names, and trash the extra copies.", [];
     CleanBuilds, "clean_build_folders", Files, "Clean Build Folders…", "Find build output and installed packages under this folder and trash the ones you pick.", [];
     ContextMenu, "context_menu", Files, "Context Menu", "Open the action menu at the file cursor.", ["Shift+F10"];
     RestoreTrash, "restore_trash", Files, "Restore From Trash", "Put trashed items back where they came from.", [];
