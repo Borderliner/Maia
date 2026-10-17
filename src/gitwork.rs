@@ -25,6 +25,8 @@ pub struct Work {
     pub unstaged: Vec<Change>,
     /// The commit HEAD is on; None before the first one.
     pub head: Option<String>,
+    /// A merge or rebase stopped part way.
+    pub doing: Option<crate::gitsync::Doing>,
 }
 
 impl Work {
@@ -133,6 +135,7 @@ pub fn work(root: &Path) -> Option<Work> {
         let n = read(root, &["diff-index", "--cached", "--numstat", "-z", "-M", &base, "--"], 16 << 20).unwrap_or_default();
         crate::gitlog::join_numstat(&mut w.staged, &crate::gitlog::parse_numstat(&n));
     }
+    w.doing = crate::gitsync::doing(root);
     Some(w)
 }
 
@@ -161,6 +164,8 @@ pub struct FileDiff {
     pub note: Option<&'static str>,
     /// Cut at 1 MB.
     pub cut: bool,
+    /// An unmerged file's conflicts, shown in place of its diff.
+    pub conflicts: Vec<crate::gitsync::Conflict>,
 }
 
 impl FileDiff {
@@ -220,6 +225,19 @@ fn highlight(d: &mut FileDiff, path: &str) {
 pub fn file_diff(root: &Path, f: &Change, staged: bool, base: &str) -> FileDiff {
     if f.status == b'?' {
         return untracked_diff(&root.join(&f.path), &f.path);
+    }
+    if f.status == b'U' && !staged {
+        let mut d = FileDiff::default();
+        match std::fs::read_to_string(root.join(&f.path)) {
+            Ok(t) => {
+                d.conflicts = crate::gitsync::conflicts(&t);
+                if d.conflicts.is_empty() {
+                    d.note = Some("No conflicts left: stage it to mark it resolved");
+                }
+            }
+            Err(_) => d.note = Some("Can't read this file as text"),
+        }
+        return d;
     }
     let mut a: Vec<&str> = if staged { vec!["diff-index", "-p", "--cached", "-M", "--no-color", base, "--"] } else { vec!["diff-files", "-p", "--no-color", "--"] };
     a.extend(f.from.as_deref());
@@ -326,6 +344,8 @@ pub struct Refs {
     pub stashes: Vec<Stash>,
     /// The other work trees of this repository.
     pub worktrees: Vec<Worktree>,
+    /// The remotes, by name: with none there is nothing to fetch, pull or push.
+    pub remotes: Vec<String>,
 }
 
 /// `for-each-ref` records: refname, upstream, track and HEAD, NUL between fields.
@@ -394,7 +414,9 @@ pub fn refs(root: &Path) -> Refs {
         })
         .collect();
     let wt = read(root, &["worktree", "list", "--porcelain", "-z"], 1 << 20).unwrap_or_default();
-    Refs { local, remote, stashes, worktrees: parse_worktrees(&wt, root) }
+    let rm = read(root, &["remote"], 1 << 16).unwrap_or_default();
+    let remotes = String::from_utf8_lossy(&rm).lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect();
+    Refs { local, remote, stashes, worktrees: parse_worktrees(&wt, root), remotes }
 }
 
 /// Something to change in a work tree.
@@ -419,19 +441,30 @@ pub enum Op {
     StashApply(Stash),
     StashPop(Stash),
     StashDrop(Stash),
+    Fetch,
+    /// Pull: fast-forward only (None), else merge (false) or rebase (true).
+    Pull(Option<bool>),
+    /// Push, or publish a branch with no upstream; `true` replaces what the remote has.
+    Push(bool),
+    /// One conflict in a file settled.
+    Settle { path: String, at: usize, side: crate::gitsync::Side },
+    /// Finish the merge or rebase in progress, give up on it, or skip a rebase's commit.
+    Continue,
+    Abort,
+    Skip,
 }
 
 impl Op {
     /// Whether the op reads or writes the files themselves (through content filters).
     fn filtered(&self) -> bool {
-        matches!(self, Op::Stage(_) | Op::StageAll | Op::Hunk { staged: false, .. } | Op::Discard(_) | Op::Switch(_) | Op::Track(_) | Op::StashApply(_) | Op::StashPop(_))
+        matches!(self, Op::Stage(_) | Op::StageAll | Op::Hunk { staged: false, .. } | Op::Discard(_) | Op::Switch(_) | Op::Track(_) | Op::StashApply(_) | Op::StashPop(_) | Op::Pull(_) | Op::Continue | Op::Abort | Op::Skip)
     }
 }
 
 pub const FILTERED: &str = "This repository's own settings filter its files, which Maia doesn't run. Use a terminal for this one.";
 
 /// git for a change: guarded, never prompting, never opening an editor.
-fn exec(root: &Path, args: &[&str], input: Option<&[u8]>, timeout: Duration) -> Result<String, String> {
+pub(crate) fn exec(root: &Path, args: &[&str], input: Option<&[u8]>, timeout: Duration) -> Result<String, String> {
     let mut c = crate::media::tool("git");
     c.arg("--literal-pathspecs").args(crate::gitstatus::guard(root)).arg("-C").arg(root).args(["-c", "core.quotePath=false", "-c", "advice.detachedHead=false"]).args(args);
     c.env("GIT_TERMINAL_PROMPT", "0").env("GIT_EDITOR", ":").env("GIT_SEQUENCE_EDITOR", ":").env("GIT_MERGE_AUTOEDIT", "no");
@@ -520,6 +553,10 @@ pub fn run(root: &Path, op: &Op) -> Result<String, String> {
     };
     let one = |paths: &[String]| if paths.len() == 1 { short(&paths[0]).to_string() } else { format!("{} files", paths.len()) };
     match op {
+        // A file in conflict staged with its markers in would commit them.
+        Op::Stage(paths) if paths.iter().any(|p| crate::gitsync::has_markers(&root.join(p)) && read(root, &["ls-files", "-u", "--", p], 4096).is_some_and(|o| !o.is_empty())) => {
+            Err("It still has conflict markers: settle them first.".into())
+        }
         Op::Stage(paths) => call(with(&["add", "-A", "--"], paths), None, quick).map(|_| format!("Staged {}", one(paths))),
         Op::Unstage(paths) if head => call(with(&["restore", "-q", "--staged", "--"], paths), None, quick).map(|_| format!("Unstaged {}", one(paths))),
         Op::Unstage(paths) => call(with(&["rm", "-q", "-r", "-f", "--cached", "--"], paths), None, quick).map(|_| format!("Unstaged {}", one(paths))),
@@ -589,6 +626,13 @@ pub fn run(root: &Path, op: &Op) -> Result<String, String> {
             still(root, s)?;
             exec(root, &["stash", "drop", "-q", &s.sel], None, quick).map(|_| format!("Dropped {}", s.sel))
         }
+        Op::Fetch => crate::gitsync::fetch(root),
+        Op::Pull(how) => crate::gitsync::pull(root, *how),
+        Op::Push(force) => crate::gitsync::push(root, *force),
+        Op::Settle { path, at, side } => crate::gitsync::settle(root, path, *at, *side),
+        Op::Continue => crate::gitsync::go_on(root),
+        Op::Abort => crate::gitsync::abort(root),
+        Op::Skip => crate::gitsync::skip(root),
     }
 }
 
@@ -596,6 +640,8 @@ pub fn run(root: &Path, op: &Op) -> Result<String, String> {
 struct Pending {
     root: PathBuf,
     title: String,
+    /// Said in the status bar while it runs ("Pulling…"), for the slow ones.
+    doing: Option<&'static str>,
     slot: crate::gitlog::Slot<Result<String, String>>,
 }
 
@@ -606,8 +652,19 @@ thread_local! {
 /// Run `op` on a worker; `title` heads its error ("Couldn't switch to docs").
 pub fn start(ctx: &egui::Context, root: &Path, op: Op, title: String) {
     let r = root.to_path_buf();
+    let doing = match &op {
+        Op::Fetch => Some("Fetching…"),
+        Op::Pull(_) => Some("Pulling…"),
+        Op::Push(_) => Some("Pushing…"),
+        _ => None,
+    };
     let slot = crate::gitlog::spawn(ctx, move || run(&r, &op));
-    PENDING.with(|p| p.borrow_mut().push(Pending { root: root.to_path_buf(), title, slot }));
+    PENDING.with(|p| p.borrow_mut().push(Pending { root: root.to_path_buf(), title, doing, slot }));
+}
+
+/// What is being sent or got in the work tree at `root`, for the status bar.
+pub fn busy(root: &Path) -> Option<&'static str> {
+    PENDING.with(|p| p.borrow().iter().find(|x| x.root == root).and_then(|x| x.doing))
 }
 
 /// Changes started with `start` that have finished: (work tree, title, result).

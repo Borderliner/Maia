@@ -1015,7 +1015,27 @@ impl App {
         // Changes started from the branch menu: said once done, and read again.
         for (root, title, r) in crate::gitwork::finished() {
             crate::gitstatus::rescan(&root);
+            use crate::gitsync::{BEHIND, CONFLICTS, DIVERGED};
+            use crate::gitwork::Op;
+            let go = |root: &PathBuf, op: Op, title: &str| -> Option<Box<dyn FnOnce(&mut App)>> {
+                let (root, title) = (root.clone(), title.to_string());
+                Some(Box::new(move |app: &mut App| crate::gitwork::start(&app.ctx, &root, op, title)))
+            };
             match r {
+                Err(e) if e == DIVERGED => {
+                    let choices = vec![("Merge".to_string(), false, go(&root, Op::Pull(Some(false)), "Couldn't merge")), ("Rebase".to_string(), false, go(&root, Op::Pull(Some(true)), "Couldn't rebase"))];
+                    self.popup = Popup::Choose { msg: "This branch and its remote have both moved on".into(), sub: "Merge them into one commit, or put your commits on top of the remote's (rebase).".into(), choices };
+                }
+                Err(e) if e == BEHIND => {
+                    let choices = vec![("Pull first".to_string(), false, go(&root, Op::Pull(None), "Couldn't pull")), ("Replace the remote's".to_string(), true, go(&root, Op::Push(true), "Couldn't push"))];
+                    self.popup = Popup::Choose { msg: "The remote has commits this branch doesn't".into(), sub: "Pull them first, or replace the remote branch with yours. Replacing drops its commits for everyone.".into(), choices };
+                }
+                Err(e) if e == CONFLICTS => {
+                    self.toast("Stopped at conflicts: settle them on the Changes page");
+                    if crate::gitstatus::repo_for(&self.tab().path).is_some_and(|r| r.root == root) {
+                        self.actions.push(Action::Cmd(Cmd::GitChanges));
+                    }
+                }
                 Ok(msg) => self.toast(msg),
                 Err(e) if matches!(self.popup, Popup::None) => self.popup = Popup::notice(title, e),
                 Err(_) => self.toast(title),

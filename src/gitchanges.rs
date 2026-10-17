@@ -321,7 +321,7 @@ impl Changes {
         match k {
             Key::Enter => self.toggle(staged, &f.path),
             Key::Space if !self.busy() => self.queue(stage_op(&f, staged)),
-            Key::Delete if !staged && !self.busy() => actions.push(Action::Open(confirm_discard(panel, f))),
+            Key::Delete if !staged && f.status != b'U' && !self.busy() => actions.push(Action::Open(confirm_discard(panel, f))),
             _ => {}
         }
     }
@@ -420,6 +420,37 @@ enum Act {
     Op(Op),
     Discard(Change),
     Amend(bool),
+    /// Give up on the merge or rebase, once asked.
+    Abort(crate::gitsync::Doing),
+}
+
+/// A side's name as git wrote it after its marker, with a full commit hash cut to the
+/// seven characters git shows ("482874e").
+fn side_label(s: &str) -> String {
+    match s.split_once(' ') {
+        Some((h, rest)) if is_hash(h) => format!("{} {rest}", &h[..7]),
+        _ if is_hash(s) => s[..7].to_string(),
+        _ => s.to_string(),
+    }
+}
+
+fn is_hash(s: &str) -> bool {
+    s.len() >= 12 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A side's name short enough for a button: a commit's hash without its subject, a
+/// long name cut.
+fn side_name(s: &str, or: &str) -> String {
+    let s = side_label(s);
+    let s = s.split_whitespace().next().unwrap_or("");
+    if s.is_empty() {
+        return or.into();
+    }
+    if s.chars().count() > 16 {
+        format!("{}…", s.chars().take(15).collect::<String>())
+    } else {
+        s.into()
+    }
 }
 
 /// The page: the commit box, then the staged and the unstaged files.
@@ -437,6 +468,42 @@ pub fn page(ui: &mut Ui, body: Rect, c: &mut Changes, wrap: bool, env: &mut Env)
     let work = c.work.take();
     ScrollArea::vertical().auto_shrink([false, false]).id_salt("git_changes").show(&mut inner, |ui| {
         ui.add_space(6.0);
+        // A merge or rebase stopped part way: what is left, and the ways out.
+        if let Some(d) = work.as_ref().and_then(|w| w.doing) {
+            let left = work.as_ref().map_or(0, |w| w.unstaged.iter().filter(|f| f.status == b'U').count());
+            egui::Frame::NONE.fill(pal.accent.gamma_multiply(0.12)).stroke(Stroke::new(1.0, pal.accent.gamma_multiply(0.45))).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let what = match left {
+                    0 => format!("{} · nothing left in conflict", d.label()),
+                    1 => format!("{} · 1 file in conflict", d.label()),
+                    n => format!("{} · {n} files in conflict", d.label()),
+                };
+                ui.add(egui::Label::new(egui::RichText::new(what).size(fs - 0.5).color(pal.text)).wrap());
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        let b = crate::popups::primary_button(ui, "Continue", left == 0 && !busy, &pal);
+                        crate::ui::note_control(ui, b.rect, "conflict continue");
+                        let tip = if left == 0 { "Finish it" } else { "Settle every conflict first" };
+                        if b.on_hover_text(tip).on_disabled_hover_text(tip).clicked() {
+                            act = Some(Act::Op(Op::Continue));
+                        }
+                        if d == crate::gitsync::Doing::Rebase {
+                            let s = crate::popups::plain_button(ui, "Skip", &pal);
+                            crate::ui::note_control(ui, s.rect, "conflict skip");
+                            if s.on_hover_text("Leave out the commit it stopped at").clicked() && !busy {
+                                act = Some(Act::Op(Op::Skip));
+                            }
+                        }
+                        let a = crate::popups::plain_button(ui, "Abort", &pal);
+                        crate::ui::note_control(ui, a.rect, "conflict abort");
+                        if a.on_hover_text("Go back to how it was before").clicked() && !busy {
+                            act = Some(Act::Abort(d));
+                        }
+                    });
+                });
+            });
+            ui.add_space(6.0);
+        }
         // The commit box, in a quiet card.
         egui::Frame::NONE.fill(pal.card()).stroke(Stroke::new(1.0, pal.card_line())).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -525,9 +592,14 @@ pub fn page(ui: &mut Ui, body: Rect, c: &mut Changes, wrap: bool, env: &mut Env)
             let n = x.wrapped.get(k).and_then(|w| w.as_ref()).filter(|_| wrap).map_or(lines, |w| w.rows.len());
             (n as f32 * line_h + 12.0).min(cap)
         };
+        // A conflict: its heading, then each side under its name.
+        let side_h = |n: usize| (n.max(1) as f32 * line_h + 12.0).min(cap * 0.5);
+        let label_h = (fs + 6.0).round();
+        let conflict_h = |k: &crate::gitsync::Conflict| row_h + 2.0 * label_h + side_h(k.ours_lines.len()) + side_h(k.theirs_lines.len()) + 10.0;
         let extra = |staged: bool, path: &str| -> f32 {
             let Some(x) = c.inline.iter().find(|x| x.staged == staged && x.path == path) else { return 0.0 };
             match &x.diff {
+                Some(d) if !d.conflicts.is_empty() => d.conflicts.iter().map(|k| conflict_h(k)).sum::<f32>() + 6.0,
                 Some(d) if !d.hunks.is_empty() => d.hunks.iter().enumerate().map(|(k, h)| row_h + hunk_h(x, k, h.lines.len()) + 4.0).sum::<f32>() + 6.0 + if d.cut { row_h } else { 0.0 },
                 _ => row_h + 4.0,
             }
@@ -610,9 +682,12 @@ pub fn page(ui: &mut Ui, body: Rect, c: &mut Changes, wrap: bool, env: &mut Env)
                         act = Some(Act::Op(stage_op(f, false)));
                     }
                     let (tip, glyph) = if f.status == b'?' { ("Move to the trash (Delete)", "trash-2") } else { ("Discard changes (Delete)", "rotate-ccw") };
-                    if row_button(ui, b2, id, tip, "discard file", &pal, |p, r, c| {
-                        crate::theme::paint_lucide(p, r, glyph, c);
-                    }) {
+                    // A file in conflict is settled, not discarded.
+                    if f.status != b'U'
+                        && row_button(ui, b2, id, tip, "discard file", &pal, |p, r, c| {
+                            crate::theme::paint_lucide(p, r, glyph, c);
+                        })
+                    {
                         act = Some(Act::Discard(f.clone()));
                     }
                 }
@@ -669,6 +744,48 @@ pub fn page(ui: &mut Ui, body: Rect, c: &mut Changes, wrap: bool, env: &mut Env)
                     crate::ui::spinner(ui.painter(), pos2(nx + 6.0, hy + row_h / 2.0), 5.0, pal.accent, ui.input(|i| i.time));
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
                 }
+                Some(d) if !d.conflicts.is_empty() => {
+                    let n = d.conflicts.len();
+                    for (k, cf) in d.conflicts.iter().enumerate() {
+                        let head = Rect::from_min_max(pos2(left, hy), pos2(row.right() - 4.0, hy + row_h));
+                        let (ours, theirs) = (side_name(&cf.ours, "ours"), side_name(&cf.theirs, "theirs"));
+                        // Right to left: both, the incoming side, this side.
+                        let mut hr = head.right() - 2.0;
+                        for (label, what, side) in [("Keep both".to_string(), "keep both", crate::gitsync::Side::Both), (format!("Keep {theirs}"), "keep theirs", crate::gitsync::Side::Theirs), (format!("Keep {ours}"), "keep ours", crate::gitsync::Side::Ours)] {
+                            if hr - head.left() < 120.0 {
+                                break;
+                            }
+                            let (hit, l) = text_button(ui, id.with(("conflict", k, what)), hr, head.center().y, &label, what, !busy, &small, &pal);
+                            if hit {
+                                act = Some(Act::Op(Op::Settle { path: f.path.clone(), at: k, side }));
+                            }
+                            hr = l - 4.0;
+                        }
+                        let title = if n == 1 { format!("Line {}", cf.line) } else { format!("{} of {n} · line {}", k + 1, cf.line) };
+                        let g = crate::listing::elided(ui, &title, small.clone(), (hr - head.left() - 8.0).max(8.0), pal.text_dim);
+                        ui.painter().galley(pos2(head.left() + 6.0, head.center().y - g.size().y / 2.0), g, pal.text_dim);
+                        hy = head.bottom();
+                        for (name, lines, col) in [(&cf.ours, &cf.ours_lines, pal.accent), (&cf.theirs, &cf.theirs_lines, crate::gitstatus::GREEN)] {
+                            let lr = Rect::from_min_max(pos2(left + 6.0, hy), pos2(row.right() - 4.0, hy + label_h));
+                            let shown_name = if name.is_empty() { "(unnamed)".to_string() } else { side_label(name) };
+                            let g = crate::listing::elided(ui, &shown_name, small.clone(), lr.width() - 8.0, col);
+                            ui.painter().galley(pos2(lr.left(), lr.center().y - g.size().y / 2.0), g, col);
+                            let bh = side_h(lines.len());
+                            let b = Rect::from_min_max(pos2(left, lr.bottom()), pos2(row.right() - 4.0, lr.bottom() + bh));
+                            hy = b.bottom() + 4.0;
+                            if !ui.is_rect_visible(b) {
+                                continue;
+                            }
+                            ui.painter().rect_filled(b, CornerRadius::same(6), pal.alt);
+                            ui.painter().rect_filled(Rect::from_min_size(b.min, vec2(3.0, b.height())), CornerRadius::same(2), col.gamma_multiply(0.8));
+                            let mut cui = ui.new_child(UiBuilder::new().max_rect(b).id_salt(("wconflict", &f.path, k, name.as_str())));
+                            cui.set_clip_rect(b.intersect(clip));
+                            let shown: Vec<String> = if lines.is_empty() { vec!["(nothing)".into()] } else { lines.clone() };
+                            crate::inspector::text_view(&mut cui, b, &shown, false, None, false, None, code, &pal, false, spacing);
+                        }
+                        hy += 2.0;
+                    }
+                }
                 Some(d) if d.hunks.is_empty() => {
                     ui.painter().text(pos2(nx, hy + row_h / 2.0), Align2::LEFT_CENTER, d.note.unwrap_or("No text changes"), small.clone(), pal.text_dim);
                 }
@@ -714,6 +831,11 @@ pub fn page(ui: &mut Ui, body: Rect, c: &mut Changes, wrap: bool, env: &mut Env)
         Some(Act::Op(op)) => c.queue(op),
         Some(Act::Discard(f)) => env.actions.push(Action::Open(confirm_discard(env.panel_id, f))),
         Some(Act::Amend(on)) => c.set_amend(on, &ctx),
+        Some(Act::Abort(d)) => {
+            let root = c.root.clone();
+            let msg = format!("Stop {} and go back to how things were? What you settled so far is lost.", d.label().to_lowercase());
+            env.actions.push(Action::Open(crate::popups::Popup::confirm(msg, "Abort", Box::new(move |app| crate::gitwork::start(&app.ctx, &root, Op::Abort, "Couldn't abort".into())))));
+        }
         None => {}
     }
 }

@@ -1135,6 +1135,7 @@ impl App {
         };
         let loading = t.is_loading();
         let branch = crate::gitstatus::repo_for(&t.path).map(|r| (r.branch.clone(), r.ahead, r.behind)).filter(|b| !b.0.is_empty());
+        let syncing = crate::gitstatus::repo_for(&t.path).and_then(|r| crate::gitwork::busy(&r.root));
         let mut branch_menu = None;
         let mut chip_at = None;
         let nsel = t.selected.len();
@@ -1274,6 +1275,10 @@ impl App {
                         branch_menu = Some(r);
                     }
                 }
+            }
+            // Beside the branch while it is being pulled or pushed; the answer is a toast.
+            if let Some(what) = syncing.filter(|_| branch.is_some()) {
+                chip(ui, None, what, pal.text_dim, false, "git is talking to the remote");
             }
             if nsel > 1 {
                 let layers = move |p: &egui::Painter, r: Rect| {
