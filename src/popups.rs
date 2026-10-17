@@ -195,6 +195,8 @@ pub enum Popup {
     DropMenu { paths: Vec<PathBuf>, dest: PathBuf, pos: Pos2 },
     Connect(ConnectState),
     ArchivePassword(PasswordState),
+    /// Compress With Password: the format and the password, typed twice.
+    Lock(LockState),
     Meaning(MeaningState),
     /// The theme picker: every theme as a small window, with its code colours.
     Themes,
@@ -266,6 +268,38 @@ pub struct PasswordState {
     pub wrong: bool,
 }
 
+/// What Compress With Password asks before it packs.
+pub struct LockState {
+    pub srcs: Vec<PathBuf>,
+    pub dir: PathBuf,
+    /// 7-Zip rather than zip.
+    pub seven: bool,
+    pub password: String,
+    pub again: String,
+    focus: bool,
+}
+
+impl LockState {
+    pub fn new(srcs: Vec<PathBuf>, dir: PathBuf) -> LockState {
+        LockState { srcs, dir, seven: false, password: String::new(), again: String::new(), focus: true }
+    }
+
+    /// Why Compress can't run yet, if it can't.
+    pub fn problem(&self) -> Option<&'static str> {
+        if self.password.is_empty() {
+            Some("")
+        } else if self.password.contains(['\n', '\r']) {
+            Some("A password on one line")
+        } else if self.again.is_empty() {
+            Some("Type it again to be sure")
+        } else if self.again != self.password {
+            Some("The two passwords differ")
+        } else {
+            None
+        }
+    }
+}
+
 /// Connect to a network place: address, and a login when the server wants one.
 pub struct ConnectState {
     pub uri: String,
@@ -301,6 +335,7 @@ impl Popup {
             Popup::RunExec { .. } => "RunExec",
             Popup::Connect(..) => "Connect",
             Popup::ArchivePassword(..) => "ArchivePassword",
+            Popup::Lock(..) => "Lock",
             Popup::Meaning(..) => "Meaning",
             Popup::Themes => "Themes",
             Popup::CodeSearch(..) => "CodeSearch",
@@ -857,6 +892,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::RunExec { path } => run_exec(app, ctx, path),
         Popup::Connect(st) => connect(app, ctx, st),
         Popup::ArchivePassword(st) => archive_password(app, ctx, st),
+        Popup::Lock(st) => lock(app, ctx, st),
         Popup::Meaning(st) => meaning(app, ctx, st),
         Popup::Themes => themes(app, ctx),
         Popup::CodeSearch(st) => crate::devtools::code_search_popup(app, ctx, st),
@@ -1313,6 +1349,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::RestoreTrash => t.path.starts_with(crate::sidebar::trash_dir()),
         Cmd::Undo => !app.undo.is_empty(),
         Cmd::ReopenTab => !app.closed_tabs.is_empty(),
+        Cmd::CompressLocked => crate::archive::available() && t.archive.is_none() && !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),
         Cmd::BatchRename => t.archive.is_none() && !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),
         Cmd::Rename | Cmd::Copy | Cmd::Cut | Cmd::Trash | Cmd::DeletePermanent | Cmd::Duplicate | Cmd::CreateLink => !t.targets_idx().is_empty(),
         Cmd::LoadLayout | Cmd::DeleteLayout => !app.ud.layouts.is_empty(),
@@ -3434,6 +3471,81 @@ fn archive_password(app: &mut App, ctx: &egui::Context, st: &mut PasswordState) 
             Some(Retry::Open(path)) => app.open_from_archive(path),
             None => {}
         }
+        return false;
+    }
+    !cancel
+}
+
+/// Compress With Password: zip or 7z, the password twice (hidden as typed), then the
+/// usual compress job with the password handed to it.
+fn lock(app: &mut App, ctx: &egui::Context, st: &mut LockState) -> bool {
+    let pal = app.pal;
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        return false;
+    }
+    let ok = st.problem().is_none();
+    // Taken either way: Enter with the passwords not yet agreeing leaves the cursor where
+    // it was rather than send it out of the field.
+    let mut go = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) && ok;
+    let mut cancel = false;
+    let seven_ok = crate::archive::can_lock_7z();
+    let n = st.srcs.len();
+    let what = match st.srcs.as_slice() {
+        [one] => format!("“{}”", one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+        _ => format!("{n} items"),
+    };
+    centered(ctx, "lock archive", 420.0, &pal, |ui| {
+        dialog_title(ui, &format!("Compress {what} with a password"), None, &pal);
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if crate::devtools::chip(ui, "Zip", !st.seven, "lock zip", "A .zip locked with AES-256; the names inside stay readable", &pal, false) {
+                st.seven = false;
+            }
+            if seven_ok && crate::devtools::chip(ui, "7-Zip", st.seven, "lock 7z", "A .7z whose names are locked too", &pal, false) {
+                st.seven = true;
+            }
+        });
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Password").small().color(pal.text_dim));
+        let r = ui.add(egui::TextEdit::singleline(&mut st.password).password(true).desired_width(f32::INFINITY));
+        crate::ui::note_control(ui, r.rect, "lock password");
+        if st.focus {
+            r.request_focus();
+            st.focus = false;
+        }
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Again").small().color(pal.text_dim));
+        let r = ui.add(egui::TextEdit::singleline(&mut st.again).password(true).desired_width(f32::INFINITY));
+        crate::ui::note_control(ui, r.rect, "lock again");
+        match st.problem() {
+            Some(why) if !why.is_empty() && !st.again.is_empty() => {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(why).small().color(pal.danger));
+            }
+            _ => {}
+        }
+        dialog_buttons(ui, |ui| {
+            let b = primary_button(ui, "Compress", ok, &pal);
+            crate::ui::note_control(ui, b.rect, "lock compress");
+            go |= b.clicked() && ok;
+            if plain_button(ui, "Cancel", &pal).clicked() {
+                cancel = true;
+            }
+        });
+    });
+    if go {
+        let ext = if st.seven && seven_ok { "7z" } else { "zip" };
+        let base = match st.srcs.as_slice() {
+            [one] => {
+                let n = one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if one.is_dir() { n } else { Path::new(&n).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or(n) }
+            }
+            _ => "Archive".to_string(),
+        };
+        let out = fsx::unique_dest(&st.dir, &format!("{base}.{ext}"));
+        let password = Some(crate::archive::Secret(std::mem::take(&mut st.password)));
+        st.again.clear();
+        app.actions.push(Action::StartJob(crate::ops::OpKind::Compress { srcs: std::mem::take(&mut st.srcs), out, password }));
         return false;
     }
     !cancel

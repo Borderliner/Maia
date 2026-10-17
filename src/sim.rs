@@ -1022,7 +1022,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(150) {
+    match rng.below(151) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2073,6 +2073,31 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             }
             if rng.below(2) == 0 {
                 s.act(rng.pick(&["key ArrowDown", "key Enter", "key alt+ArrowLeft", "key Backspace"]));
+            }
+        }
+        150 => {
+            // Compress With Password: the dialog typed into, the format switched, the
+            // two fields made to agree or not, then Compress or Escape.
+            s.cmd(Cmd::CompressLocked);
+            for _ in 0..rng.below(6) {
+                if !matches!(s.app.popup, Popup::Lock(_)) {
+                    break;
+                }
+                match rng.below(3) {
+                    0 => click_control_at(s, rng.pick(&["lock zip", "lock 7z", "lock password", "lock again"])),
+                    1 => s.act(&format!("text {}", rng.pick(&["pw", "pw", "ö 1", " "]))),
+                    _ => s.act(&format!("key {}", rng.pick(&["Backspace", "Tab", "ctrl+a"]))),
+                }
+            }
+            if matches!(s.app.popup, Popup::Lock(_)) {
+                match rng.below(3) {
+                    0 => click_control_at(s, "lock compress"),
+                    1 => s.act("key Enter"),
+                    _ => s.act("key Escape"),
+                }
+                if matches!(s.app.popup, Popup::Lock(_)) {
+                    s.act("key Escape");
+                }
             }
         }
         _ => {
@@ -3955,6 +3980,87 @@ mod journeys {
         wait_until(&mut s, "properties shows tags", 5, |s| s.texts.iter().any(|(_, t)| t == "taxes 2025") && s.texts.iter().any(|(_, t)| t == "Tags"));
         s.act("key Escape");
         report("tags", &s);
+    }
+
+    /// Compress With Password, from the Compress menu and the palette: the password
+    /// typed twice (two that differ are said to, and Compress waits), a zip made and
+    /// opened at once like a folder, then a 7z whose names are locked too; each one
+    /// extracted with the password by Maia's own code, and refused without it.
+    #[test]
+    fn compress_with_a_password() {
+        if !sandboxed() || !crate::archive::available() {
+            return;
+        }
+        let home = fixture("lockpack");
+        let d = home.join("Documents");
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.cmd(ViewDetails);
+        s.settle();
+        select_names(&mut s, &["notes.txt", "report.md"]);
+        let r = row_text(&s, "report.md");
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(2);
+        s.act("text with a password");
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t == "Compress › With a password…"), "found by search");
+        s.act("key Enter");
+        s.idle(2);
+        assert!(matches!(s.app.popup, Popup::Lock(_)));
+        assert!(some_text(&s, "Compress 2 items with a password"));
+        s.act("text tide and time");
+        click_control(&mut s, "lock again");
+        s.act("text tide and tim");
+        s.idle(2);
+        assert!(some_text(&s, "The two passwords differ"));
+        s.act("key Enter");
+        assert!(matches!(s.app.popup, Popup::Lock(_)), "Compress waits for the same password twice");
+        look(&mut s, "two passwords that differ");
+        shot_still(&mut s, "lock-differ");
+        s.act("text e");
+        s.idle(2);
+        assert!(!some_text(&s, "The two passwords differ"));
+        look(&mut s, "the password dialog");
+        shot_still(&mut s, "lock-dialog");
+        for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
+            s.app.cfg.font_size = font;
+            s.app.cfg.spacing = spacing;
+            s.idle(3);
+            look(&mut s, &format!("the password dialog at font {font}, spacing {spacing}"));
+        }
+        s.act("key Enter");
+        let zip = d.join("Archive.zip");
+        wait_until(&mut s, "the zip", 30, |s| zip.exists() && s.app.jobs.iter().all(|j| j.progress.lock().unwrap().finished));
+        // Opened like a folder: the password is known for this session.
+        go(&mut s, &zip);
+        wait_until(&mut s, "inside it", 10, |s| s.tab().entries.iter().any(|e| e.name == "notes.txt"));
+        look(&mut s, "inside the locked zip");
+        crate::archive::forget_password(&zip);
+        let out = root().join("lock-out");
+        let e = crate::archive::extract(&zip, &[PathBuf::from("notes.txt")], &out);
+        assert!(e.is_err_and(|e| crate::archive::wants_password(&e)), "locked without the password");
+        crate::archive::set_password(&zip, "tide and time".into());
+        crate::archive::extract(&zip, &[PathBuf::from("notes.txt")], &out).unwrap();
+        assert_eq!(std::fs::read(out.join("notes.txt")).unwrap(), std::fs::read(d.join("notes.txt")).unwrap());
+        // A 7z, from the palette, names locked too.
+        if crate::archive::can_lock_7z() {
+            go(&mut s, &d);
+            select_names(&mut s, &["Taxes"]);
+            palette_run(&mut s, "Compress With Password…");
+            click_control(&mut s, "lock 7z");
+            click_control(&mut s, "lock password");
+            s.act("text 7 seas");
+            click_control(&mut s, "lock again");
+            s.act("text 7 seas");
+            click_control(&mut s, "lock compress");
+            let sz = d.join("Taxes.7z");
+            wait_until(&mut s, "the 7z", 30, |s| sz.exists() && s.app.jobs.iter().all(|j| j.progress.lock().unwrap().finished));
+            crate::archive::forget_password(&sz);
+            assert_eq!(crate::archive::list(&sz).err().as_deref(), Some(crate::archive::NEEDS_PASSWORD), "names locked");
+            crate::archive::set_password(&sz, "7 seas".into());
+            assert!(crate::archive::list(&sz).unwrap().iter().any(|i| i.path == Path::new("Taxes/2025/receipt.pdf")));
+        }
+        report("compress with a password", &s);
     }
 
     /// Password-protected archives: Extract Here asks for the password (a wrong one is

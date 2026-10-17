@@ -2390,6 +2390,15 @@ impl App {
                     crate::convert::start(self, to);
                 }
             }
+            Cmd::CompressLocked => {
+                let t = self.tab();
+                let srcs = t.targets();
+                if t.archive.is_some() || tab::is_computer(&t.path) || srcs.is_empty() {
+                    self.toast("Select what to compress");
+                    return;
+                }
+                self.popup = Popup::Lock(crate::popups::LockState::new(srcs, t.path.clone()));
+            }
             Cmd::CompressZip | Cmd::CompressTarGz | Cmd::CompressTarXz | Cmd::Compress7z => {
                 let t = self.tab();
                 if t.archive.is_some() || tab::is_computer(&t.path) {
@@ -2414,7 +2423,7 @@ impl App {
                     _ => "Archive".to_string(),
                 };
                 let out = fsx::unique_dest(&t.path, &format!("{base}.{ext}"));
-                self.actions.push(Action::StartJob(OpKind::Compress { srcs, out }));
+                self.actions.push(Action::StartJob(OpKind::Compress { srcs, out, password: None }));
             }
             Cmd::CreateLink => {
                 let paths = self.tab().targets();

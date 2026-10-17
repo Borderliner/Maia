@@ -309,6 +309,7 @@ commands! {
     CompressTarGz, "compress_tar_gz", Files, "Compress To Tar.gz", "Pack the selection into a .tar.gz archive.", [];
     CompressTarXz, "compress_tar_xz", Files, "Compress To Tar.xz", "Pack the selection into a .tar.xz archive.", [];
     Compress7z, "compress_7z", Files, "Compress To 7z", "Pack the selection into a .7z archive.", [];
+    CompressLocked, "compress_locked", Files, "Compress With Password…", "Pack the selection into a .zip (AES-256) or a .7z that opens only with the password you type; a 7z hides the names too.", [];
     ConvertJpg, "convert_jpg", Files, "Convert To JPG", "Save a JPG copy of each selected picture beside it, upright and on white where it was see-through.", [];
     ConvertPng, "convert_png", Files, "Convert To PNG", "Save a PNG copy of each selected picture beside it.", [];
     ConvertWebp, "convert_webp", Files, "Convert To WebP", "Save a WebP copy of each selected picture beside it.", [];

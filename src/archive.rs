@@ -48,6 +48,12 @@ pub fn set_password(archive: &Path, pw: String) {
     g.push((archive.to_path_buf(), pw));
 }
 
+/// Forget the password given for `archive`, as a new session would.
+#[cfg(test)]
+pub fn forget_password(archive: &Path) {
+    PASSWORDS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(a, _)| a != archive);
+}
+
 fn password(archive: &Path) -> Option<String> {
     PASSWORDS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(a, _)| a == archive).map(|(_, p)| p.clone())
 }
@@ -458,6 +464,52 @@ pub fn extract_for_open(archive: &Path, inner: &Path) -> Result<PathBuf, String>
         r?;
     }
     dest.exists().then_some(dest).ok_or_else(|| "Couldn't extract it".into())
+}
+
+/// A password a job carries: never printed, not even by Debug.
+#[derive(Clone)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(…)")
+    }
+}
+
+/// Whether a 7z archive can be made with a password (the 7z command is installed).
+pub fn can_lock_7z() -> bool {
+    seven().is_ok()
+}
+
+/// Compress `names` (inside `parent`) into `out` locked with `pw`: a zip by bsdtar with
+/// AES-256, a 7z by the 7z command with the names encrypted too. Both read the password
+/// from their input, never the command line; 7z asks for it twice. Once made, the
+/// archive opens in Maia with it for the rest of the session.
+pub fn create_locked(out: &Path, parent: &Path, names: &[std::ffi::OsString], pw: &str) -> Result<(), String> {
+    if pw.is_empty() || pw.contains(['\n', '\r']) {
+        return Err("Type a password on one line".into());
+    }
+    let tmp = out.with_file_name(format!(".{}.part", out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+    let r = if format_for(out) == "7zip" {
+        let mut c = tool(seven()?);
+        // The part file's name says nothing of its kind: -t7z does.
+        c.current_dir(parent).args(["a", "-bso0", "-bsp0", "-y", "-t7z", "-mhe=on", "-p", "--"]).arg(&tmp).args(names);
+        run(c, Duration::from_secs(3600), Some(&format!("{pw}\n{pw}")))
+    } else {
+        let mut c = tool("bsdtar");
+        c.arg("-cf").arg(&tmp).args(["--format", "zip", "--options", "zip:encryption=aes256"]).arg("-C").arg(parent).arg("--").args(names);
+        run(c, Duration::from_secs(3600), Some(pw))
+    };
+    match r.and_then(|_| std::fs::rename(&tmp, out).map_err(|e| e.to_string())) {
+        Ok(()) => {
+            set_password(out, pw.to_string());
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 /// Compress `names` (inside `parent`) into `out`; the format follows its extension.

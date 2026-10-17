@@ -28,8 +28,9 @@ pub enum OpKind {
     /// Paths inside `archive` (none: all of it, into its own folder when it holds
     /// several things) extracted into `dest`.
     Extract { archive: PathBuf, members: Vec<PathBuf>, dest: PathBuf },
-    /// `srcs` (all in one folder) packed into the archive `out`.
-    Compress { srcs: Vec<PathBuf>, out: PathBuf },
+    /// `srcs` (all in one folder) packed into the archive `out`, locked with a password
+    /// when there is one.
+    Compress { srcs: Vec<PathBuf>, out: PathBuf, password: Option<crate::archive::Secret> },
     /// One command run as administrator (through pkexec).
     Admin { task: crate::admin::Task, tools: crate::drives::Tools },
     /// Files converted to another format beside them (all into `out`, when one file is
@@ -246,11 +247,15 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
             p.lock().unwrap().current = name_of(archive);
             extract(archive, members, dest, p);
         }
-        OpKind::Compress { srcs, out } => {
+        OpKind::Compress { srcs, out, password } => {
             p.lock().unwrap().total_items = srcs.len();
             p.lock().unwrap().current = name_of(out);
             let names: Vec<std::ffi::OsString> = srcs.iter().filter_map(|s| s.file_name().map(|n| n.to_os_string())).collect();
-            match out.parent().map(|parent| crate::archive::create(out, parent, &names)) {
+            let made = out.parent().map(|parent| match password {
+                Some(pw) => crate::archive::create_locked(out, parent, &names, &pw.0),
+                None => crate::archive::create(out, parent, &names),
+            });
+            match made {
                 Some(Ok(())) => {
                     let mut g = p.lock().unwrap();
                     g.produced.push((out.clone(), out.clone()));

@@ -6983,3 +6983,93 @@ fn timeline_lists_the_last_month() {
     let v = timeline_view(crate::config::ViewSettings::default());
     assert_eq!((v.sort, v.desc, v.group), (crate::config::SortKey::Modified, true, crate::config::GroupBy::Modified));
 }
+
+/// Compress With Password through the real bsdtar and 7z: a zip locked with AES-256 and
+/// a 7z with its names locked too, the password never on any command line while they
+/// are made (every process's argv watched); opened by Maia's own extraction only with
+/// the password, a wrong one refused as such.
+#[test]
+fn locked_archives_open_only_with_their_password() {
+    use crate::archive::{NEEDS_PASSWORD, WRONG_PASSWORD, create_locked, extract, forget_password, list, set_password};
+    if !crate::archive::available() {
+        return;
+    }
+    let d = tmpdir("locked");
+    let src = d.join("src");
+    touch(&src.join("plans/notes – é.txt"), "the secret plans");
+    // Big and incompressible, so the tools run long enough to be watched.
+    let mut noise = vec![0u8; 24 << 20];
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    for b in noise.iter_mut() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *b = x as u8;
+    }
+    std::fs::write(src.join("noise.bin"), &noise).unwrap();
+    let pw = "correct horse 9 battery";
+    let names = vec![std::ffi::OsString::from("plans"), std::ffi::OsString::from("noise.bin")];
+    let mut kinds = vec!["zip"];
+    if crate::archive::can_lock_7z() {
+        kinds.push("7z");
+    }
+    for ext in kinds {
+        let out = d.join(format!("locked.{ext}"));
+        let (o2, s2, n2) = (out.clone(), src.clone(), names.clone());
+        let job = std::thread::spawn(move || create_locked(&o2, &s2, &n2, pw));
+        // The archiver's command line while it runs (the process writing the part
+        // file): the password is not in it.
+        let (mut seen_tool, mut leaked) = (false, false);
+        while !job.is_finished() {
+            for e in std::fs::read_dir("/proc").unwrap().flatten() {
+                let comm = std::fs::read_to_string(e.path().join("comm")).unwrap_or_default();
+                if !matches!(comm.trim(), "bsdtar" | "7z" | "7za" | "7zz") {
+                    continue;
+                }
+                let Ok(c) = std::fs::read(e.path().join("cmdline")) else { continue };
+                let c = String::from_utf8_lossy(&c).replace('\0', " ");
+                if c.contains(&format!(".locked.{ext}.part")) {
+                    seen_tool = true;
+                    leaked |= c.contains(pw);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        job.join().unwrap().unwrap();
+        assert!(!leaked, "the password on the {ext} command line");
+        assert!(seen_tool, "the {ext} tool was watched while it ran");
+        // The real 7z says how it is locked.
+        if crate::media::have("7z") {
+            let o = std::process::Command::new("7z").args(["l", "-slt", "-ba", &format!("-p{pw}")]).arg(&out).output().unwrap();
+            let t = String::from_utf8_lossy(&o.stdout);
+            assert!(t.contains("Encrypted = +"), "{t}");
+            if ext == "zip" {
+                assert!(t.contains("AES-256"), "{t}");
+            }
+        }
+        // Without the password: the zip lists its names but won't give its contents;
+        // the 7z won't even list.
+        forget_password(&out);
+        let stage = d.join(format!("x-{ext}"));
+        if ext == "zip" {
+            assert!(list(&out).unwrap().iter().any(|i| i.path == Path::new("plans/notes – é.txt")));
+        } else {
+            assert_eq!(list(&out).err().as_deref(), Some(NEEDS_PASSWORD));
+        }
+        let e = extract(&out, &[PathBuf::from("plans")], &stage);
+        assert!(e.as_ref().is_err_and(|e| crate::archive::wants_password(e)), "{e:?}");
+        set_password(&out, "wrong".into());
+        let e = extract(&out, &[PathBuf::from("plans")], &d.join(format!("w-{ext}")));
+        assert_eq!(e.err().as_deref(), Some(WRONG_PASSWORD));
+        set_password(&out, pw.into());
+        let _ = std::fs::remove_dir_all(&stage);
+        extract(&out, &[PathBuf::from("plans"), PathBuf::from("noise.bin")], &stage).unwrap();
+        assert_eq!(std::fs::read_to_string(stage.join("plans/notes – é.txt")).unwrap(), "the secret plans");
+        assert!(std::fs::read(stage.join("noise.bin")).unwrap() == noise, "every byte back");
+        assert!(!d.join(format!(".locked.{ext}.part")).exists());
+    }
+    assert!(create_locked(&d.join("bad.zip"), &src, &names, "two\nlines").is_err());
+    assert!(create_locked(&d.join("bad.zip"), &src, &names, "").is_err());
+    assert!(format!("{:?}", crate::archive::Secret(pw.into())) == "Secret(…)", "never printed");
+    let _ = std::fs::remove_dir_all(&d);
+}

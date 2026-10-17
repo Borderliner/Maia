@@ -50,7 +50,7 @@ These are optional. Maia works without them and uses them when they are there:
 | Program | Used for |
 |---|---|
 | `bsdtar` (libarchive) | opening zip, tar, 7z, rar and iso archives like folders; extracting and compressing; EPUB and comic previews |
-| `7z` | password-protected 7z archives (and quicker password checks for zip) |
+| `7z` | password-protected 7z archives, opening and making them (and quicker password checks for zip) |
 | `gio` (GVFS) | network places (smb, sftp, ftp, WebDAV) and phones over MTP |
 | `pkexec` (polkit) | retrying a refused copy, move, delete or rename as administrator |
 | `git` | change marks on files in git repositories, their history and blame, staging and committing, branches, the stash, pulling and pushing |
@@ -101,7 +101,9 @@ as `size>100M`, `modified<7d`, `created:today` or `tag:red`. Some keys to start 
 Every binding can be changed from the command palette.
 
 An archive opens like a folder; right-click it for Extract Here, or right-click files
-for Compress. Set As Wallpaper, in a picture's menu, works on GNOME, KDE, XFCE,
+for Compress. Compress With a password makes a zip locked with AES-256, or a 7z whose
+names are locked too; the password goes to bsdtar or 7z on a pipe, never on the command
+line. Set As Wallpaper, in a picture's menu, works on GNOME, KDE, XFCE,
 Cinnamon, MATE, sway, Hyprland (with hyprpaper or swww) and Noctalia. Its Picture menu
 turns pictures in place (Undo brings the original back from the trash) and saves smaller
 copies beside them; Crop works in the inspector: drag over what to keep and press Enter.
