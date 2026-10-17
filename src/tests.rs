@@ -5406,3 +5406,170 @@ fn picture_fixes_with_imagemagick() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Two clones of one bare repository, each with its own identity and no signing.
+fn sync_fixture(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let d = tmpdir(name);
+    std::fs::create_dir_all(d.join("server.git")).unwrap();
+    git(&d.join("server.git"), &["init", "-q", "--bare", "-b", "main"]);
+    let a = d.join("a");
+    std::fs::create_dir_all(&a).unwrap();
+    work_repo(&a);
+    touch(&a.join("notes.txt"), "one\ntwo\nthree\n");
+    git(&a, &["add", "-A"]);
+    git(&a, &["commit", "-qm", "Start"]);
+    git(&a, &["remote", "add", "origin", d.join("server.git").to_str().unwrap()]);
+    git(&a, &["push", "-q", "-u", "origin", "main"]);
+    git(&d, &["clone", "-q", d.join("server.git").to_str().unwrap(), "b"]);
+    let b = d.join("b");
+    for (k, v) in [("user.name", "Test"), ("user.email", "test@example.invalid"), ("commit.gpgsign", "false"), ("core.hooksPath", ".git/hooks")] {
+        git(&b, &["config", k, v]);
+    }
+    (d, a, b)
+}
+
+/// Fetch, pull and push against a real bare repository: what came in counted, a pull
+/// that can't fast-forward and a push the remote refuses each handed back to be asked
+/// about, then merged, rebased or replaced; a new branch published to origin.
+#[test]
+fn fetch_pull_and_push() {
+    use crate::gitsync::{BEHIND, DIVERGED};
+    use crate::gitwork::{Op, run};
+    let (d, a, b) = sync_fixture("sync");
+    let commit = |at: &Path, file: &str, text: &str, msg: &str| {
+        touch(&at.join(file), text);
+        git(at, &["add", "-A"]);
+        git(at, &["commit", "-qm", msg]);
+    };
+    commit(&a, "a.txt", "from a\n", "A's work");
+    assert_eq!(run(&a, &Op::Push(false)).unwrap(), "Pushed 1 commit to origin/main");
+    assert_eq!(run(&a, &Op::Push(false)).unwrap(), "Nothing to push");
+    assert_eq!(run(&b, &Op::Fetch).unwrap(), "Fetched: 1 commit to pull");
+    assert_eq!(run(&b, &Op::Pull(None)).unwrap(), "Pulled 1 commit");
+    assert!(b.join("a.txt").exists());
+    assert_eq!(run(&b, &Op::Pull(None)).unwrap(), "Already up to date");
+    // Both move on: the pull asks, the push asks.
+    commit(&a, "a2.txt", "more from a\n", "More from A");
+    run(&a, &Op::Push(false)).unwrap();
+    commit(&b, "b.txt", "from b\n", "B's work");
+    assert_eq!(run(&b, &Op::Pull(None)).unwrap_err(), DIVERGED);
+    assert_eq!(run(&b, &Op::Push(false)).unwrap_err(), BEHIND);
+    assert_eq!(run(&b, &Op::Pull(Some(true))).unwrap(), "Rebased onto origin/main");
+    assert!(b.join("a2.txt").exists() && b.join("b.txt").exists());
+    assert_eq!(run(&b, &Op::Push(false)).unwrap(), "Pushed 1 commit to origin/main");
+    // Merged instead of rebased.
+    commit(&b, "b2.txt", "x\n", "B again");
+    run(&b, &Op::Push(false)).unwrap();
+    commit(&a, "a3.txt", "y\n", "A again");
+    assert_eq!(run(&a, &Op::Pull(None)).unwrap_err(), DIVERGED);
+    assert_eq!(run(&a, &Op::Pull(Some(false))).unwrap(), "Merged origin/main");
+    let parents = String::from_utf8(std::process::Command::new("git").arg("-C").arg(&a).args(["log", "-1", "--format=%P"]).output().unwrap().stdout).unwrap();
+    assert_eq!(parents.split_whitespace().count(), 2, "a merge commit");
+    // Replacing what the remote has, after rewriting history it already holds.
+    run(&a, &Op::Push(false)).unwrap();
+    git(&a, &["commit", "-q", "--amend", "-m", "A again, reworded"]);
+    assert_eq!(run(&a, &Op::Push(false)).unwrap_err(), BEHIND);
+    assert_eq!(run(&a, &Op::Push(true)).unwrap(), "Pushed, replacing origin/main");
+    // A new branch has no upstream: Push publishes it, Pull says why it can't.
+    git(&a, &["switch", "-q", "-c", "topic"]);
+    assert_eq!(run(&a, &Op::Pull(None)).unwrap_err(), "topic doesn't track a remote branch yet. Push publishes it.");
+    assert_eq!(run(&a, &Op::Push(false)).unwrap(), "Published topic to origin");
+    assert_eq!(crate::gitsync::upstream(&a).as_deref(), Some("origin/topic"));
+    // Somewhere it can't reach: said plainly.
+    git(&a, &["remote", "set-url", "origin", d.join("gone.git").to_str().unwrap()]);
+    assert_eq!(run(&a, &Op::Fetch).unwrap_err(), "The remote isn't there, or you can't see it.");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Conflicts read from the text git leaves (with or without a base section) and
+/// settled one at a time, keeping one side, the other, or both, the rest untouched.
+#[test]
+fn conflicts_read_and_settled() {
+    use crate::gitsync::{Side, conflicts, resolve};
+    let text = "top\n<<<<<<< HEAD\nours 1\nours 2\n=======\ntheirs 1\n>>>>>>> topic\nmiddle\n<<<<<<< HEAD\nmine\n||||||| base\nold\n=======\nyours\n>>>>>>> 1a2b3c4 (Fix it)\nend\n";
+    let c = conflicts(text);
+    assert_eq!(c.len(), 2);
+    assert_eq!((c[0].ours.as_str(), c[0].theirs.as_str(), c[0].line), ("HEAD", "topic", 2));
+    assert_eq!((c[0].ours_lines.clone(), c[0].theirs_lines.clone()), (vec!["ours 1".to_string(), "ours 2".into()], vec!["theirs 1".to_string()]));
+    assert_eq!((c[1].ours_lines.clone(), c[1].theirs_lines.clone()), (vec!["mine".to_string()], vec!["yours".to_string()]), "the base section left out");
+    assert_eq!(c[1].theirs, "1a2b3c4 (Fix it)");
+    let first = resolve(text, 0, Side::Theirs).unwrap();
+    assert!(first.starts_with("top\ntheirs 1\nmiddle\n<<<<<<< HEAD\n"), "{first}");
+    assert_eq!(conflicts(&first).len(), 1);
+    assert_eq!(resolve(&first, 0, Side::Both).unwrap(), "top\ntheirs 1\nmiddle\nmine\nyours\nend\n");
+    assert_eq!(resolve(text, 1, Side::Ours).unwrap(), text.replace("<<<<<<< HEAD\nmine\n||||||| base\nold\n=======\nyours\n>>>>>>> 1a2b3c4 (Fix it)\n", "mine\n"));
+    assert!(resolve(text, 2, Side::Ours).is_none(), "no third conflict");
+    assert!(conflicts("no markers\n======= alone\n").is_empty());
+}
+
+/// A pull that stops at conflicts: they are shown in place of the file's diff, the
+/// file can't be staged with its markers in, settling the last one stages it, and
+/// Continue makes the merge commit; another one, aborted, goes back to before.
+#[test]
+fn merge_conflicts_settled_and_continued() {
+    use crate::gitsync::{CONFLICTS, Doing, Side, doing};
+    use crate::gitwork::{Op, file_diff, run, work};
+    let (d, a, b) = sync_fixture("conflicts");
+    touch(&a.join("notes.txt"), "one\nTWO from a\nthree\n");
+    git(&a, &["commit", "-qam", "A edits"]);
+    run(&a, &Op::Push(false)).unwrap();
+    touch(&b.join("notes.txt"), "one\ntwo from b\nthree\n");
+    git(&b, &["commit", "-qam", "B edits"]);
+    assert_eq!(run(&b, &Op::Pull(Some(false))).unwrap_err(), CONFLICTS);
+    assert_eq!(doing(&b), Some(Doing::Merge));
+    let w = work(&b).unwrap();
+    assert_eq!(w.doing, Some(Doing::Merge));
+    let f = w.unstaged.iter().find(|c| c.path == "notes.txt").unwrap().clone();
+    assert_eq!(f.status, b'U');
+    let diff = file_diff(&b, &f, false, "HEAD");
+    assert_eq!(diff.conflicts.len(), 1);
+    assert_eq!((diff.conflicts[0].ours_lines.clone(), diff.conflicts[0].theirs_lines.clone()), (vec!["two from b".to_string()], vec!["TWO from a".to_string()]));
+    assert_eq!(run(&b, &Op::Stage(vec!["notes.txt".into()])).unwrap_err(), "It still has conflict markers: settle them first.");
+    assert_eq!(run(&b, &Op::Continue).unwrap_err(), "Some files are still in conflict.");
+    assert_eq!(run(&b, &Op::Settle { path: "notes.txt".into(), at: 0, side: Side::Both }).unwrap(), "Resolved notes.txt");
+    assert_eq!(std::fs::read_to_string(b.join("notes.txt")).unwrap(), "one\ntwo from b\nTWO from a\nthree\n");
+    assert_eq!(run(&b, &Op::Continue).unwrap(), "Finished the merge");
+    assert_eq!(doing(&b), None);
+    // Another one, given up on.
+    touch(&a.join("notes.txt"), "one\nagain from a\nthree\n");
+    git(&a, &["commit", "-qam", "A again"]);
+    run(&a, &Op::Push(false)).unwrap();
+    touch(&b.join("notes.txt"), "one\nagain from b\nthree\n");
+    git(&b, &["commit", "-qam", "B again"]);
+    let before = std::fs::read_to_string(b.join("notes.txt")).unwrap();
+    assert_eq!(run(&b, &Op::Pull(Some(true))).unwrap_err(), CONFLICTS);
+    assert_eq!(doing(&b), Some(Doing::Rebase));
+    assert_eq!(run(&b, &Op::Abort).unwrap(), "Stopped rebasing and went back");
+    assert_eq!((doing(&b), std::fs::read_to_string(b.join("notes.txt")).unwrap()), (None, before));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Show Only Changed Files: the list keeps what git marks as changed and the folders
+/// with changes inside, and everything comes back when it is turned off.
+#[test]
+fn only_changed_files_listed() {
+    let d = tmpdir("only-changed");
+    work_repo(&d);
+    for f in ["src/app.rs", "src/lib.rs", "docs/guide.md", "README.md", "LICENSE"] {
+        touch(&d.join(f), "x\n");
+    }
+    git(&d, &["add", "-A"]);
+    git(&d, &["commit", "-qm", "Start"]);
+    touch(&d.join("src/lib.rs"), "y\n");
+    touch(&d.join("NEW.txt"), "new\n");
+    let r = crate::gitstatus::query(&d).expect("a repository");
+    let stats = HashMap::new();
+    let mut t = Tab::new(1, d.clone(), ViewSettings::default(), egui::Context::default());
+    pump(&mut t, &stats);
+    let names = |t: &Tab| t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&t), ["docs", "src", "LICENSE", "NEW.txt", "README.md"]);
+    t.git_only = Some(std::sync::Arc::new(r.marks.keys().cloned().collect()));
+    t.dirty = true;
+    pump(&mut t, &stats);
+    assert_eq!(names(&t), ["src", "NEW.txt"]);
+    t.git_only = None;
+    t.dirty = true;
+    pump(&mut t, &stats);
+    assert_eq!(names(&t).len(), 5);
+    let _ = std::fs::remove_dir_all(&d);
+}

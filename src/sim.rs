@@ -1017,7 +1017,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(129) {
+    match rng.below(132) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1448,6 +1448,26 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             s.idle(2);
             s.app.cfg.trash_days = before;
         }
+        129 => {
+            // The branch menu's sending and getting, wherever there is a remote.
+            if crate::gitstatus::repo_for(&s.tab().path).is_some() {
+                s.cmd(Cmd::GitBranches);
+                s.idle(5);
+                if matches!(s.app.popup, Popup::Branches(_)) {
+                    for _ in 0..rng.below(4) {
+                        s.act("key ArrowDown");
+                    }
+                    s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
+                }
+            }
+        }
+        130 => {
+            // An answer to a question asked, or leaving it.
+            if matches!(s.app.popup, Popup::Choose { .. }) {
+                s.act(&format!("key {}", rng.pick(&["Escape", "Escape", "Enter"])));
+            }
+        }
+        131 => s.cmd(Cmd::OnlyChanged),
         97 => {
             // A drag that leaves the window (handed to the system when it carries files).
             let (x, y) = p(rng);
@@ -4362,6 +4382,8 @@ mod journeys {
         let chip = s.texts.iter().filter(|(_, t)| t == "main").max_by(|a, b| a.0.center().y.total_cmp(&b.0.center().y)).map(|(r, _)| *r).unwrap_or_else(|| s.fail("no branch chip"));
         s.act(&format!("click {:.0} {:.0}", chip.center().x, chip.center().y));
         wait_until(s, "the branch menu", 5, |s| matches!(s.app.popup, Popup::Branches(_)) && s.texts.iter().any(|(_, t)| t == "History"));
+        // A menu taller than when it was last open settles on its next frame.
+        s.idle(3);
         s.click_text("History");
     }
 
@@ -5011,8 +5033,11 @@ mod journeys {
         let menu = s.text_rect("New branch…");
         assert!(menu.bottom() < s.text_rect("History").bottom() + 400.0 && s.text_rect("History").top() >= 0.0);
         s.shot("branch-menu");
-        // By keyboard: down to docs, Enter.
-        let at = 1 + r.local.iter().position(|b| b.name == "docs").unwrap();
+        for t in ["Pull", "Push", "Fetch"] {
+            assert!(s.texts.iter().any(|(_, x)| x == t), "{t:?} in the menu: there is a remote");
+        }
+        // By keyboard: down past History, Pull, Push and Fetch to docs, Enter.
+        let at = 4 + r.local.iter().position(|b| b.name == "docs").unwrap();
         for _ in 0..at {
             s.act("key ArrowDown");
         }
@@ -6593,6 +6618,178 @@ mod journeys {
         report("trash age", &s);
     }
 
+    /// A bare repository and two clones of it in the sandbox: the one the window is in
+    /// (`b`) and another (`a`) that moves the remote on. Each has its own identity.
+    fn sync_repos(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let home = fixture(name);
+        let d = home.join("Code");
+        let g = |at: &Path, args: &[&str]| crate::tests::git(at, args);
+        std::fs::create_dir_all(d.join("server.git")).unwrap();
+        g(&d.join("server.git"), &["init", "-q", "--bare", "-b", "main"]);
+        let a = d.join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        crate::tests::work_repo(&a);
+        std::fs::write(a.join("notes.txt"), "one\ntwo\nthree\n").unwrap();
+        g(&a, &["add", "-A"]);
+        g(&a, &["commit", "-qm", "Start"]);
+        g(&a, &["remote", "add", "origin", d.join("server.git").to_str().unwrap()]);
+        g(&a, &["push", "-q", "-u", "origin", "main"]);
+        g(&d, &["clone", "-q", d.join("server.git").to_str().unwrap(), "b"]);
+        let b = d.join("b");
+        for (k, v) in [("user.name", "Test"), ("user.email", "test@example.invalid"), ("commit.gpgsign", "false"), ("core.hooksPath", ".git/hooks")] {
+            g(&b, &["config", k, v]);
+        }
+        (home, a, b)
+    }
+
+    fn branch_menu_pick(s: &mut Sim, item: &str) {
+        let chip = s.texts.iter().filter(|(_, t)| t == "main" || t == "topic").max_by(|a, b| a.0.center().y.total_cmp(&b.0.center().y)).map(|(r, _)| *r).unwrap_or_else(|| s.fail("no branch chip"));
+        s.act(&format!("click {:.0} {:.0}", chip.center().x, chip.center().y));
+        wait_until(s, "the branch menu", 5, |s| matches!(s.app.popup, Popup::Branches(_)) && s.texts.iter().any(|(_, t)| t == "Pull"));
+        // A menu taller than when it was last open settles on its next frame.
+        s.idle(3);
+        s.click_text(item);
+    }
+
+    /// Pull, Push and Fetch from the branch menu against a real bare repository: what is
+    /// waiting counted, a pull that can't fast-forward answered with Rebase, the push,
+    /// and a new branch published; the status bar says what is going on meanwhile.
+    #[test]
+    fn pull_and_push_from_the_branch_menu() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let (_home, a, b) = sync_repos("syncmenu");
+        let g = |at: &Path, args: &[&str]| crate::tests::git(at, args);
+        let commit = |at: &Path, f: &str, msg: &str| {
+            std::fs::write(at.join(f), msg).unwrap();
+            g(at, &["add", "-A"]);
+            g(at, &["commit", "-qm", msg]);
+        };
+        commit(&a, "a.txt", "A's work");
+        g(&a, &["push", "-q"]);
+        let mut s = Sim::new(&b, vec2(1280.0, 800.0));
+        wait_until(&mut s, "the repository", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
+        s.idle(3);
+        branch_menu_pick(&mut s, "Fetch");
+        wait_until(&mut s, "fetched", 20, |s| toast_is(s, "Fetched: 1 commit to pull"));
+        // The menu counts what a pull would bring.
+        let chip = s.texts.iter().filter(|(_, t)| t == "main").max_by(|a, b| a.0.center().y.total_cmp(&b.0.center().y)).map(|(r, _)| *r).unwrap();
+        s.act(&format!("click {:.0} {:.0}", chip.center().x, chip.center().y));
+        wait_until(&mut s, "the menu", 5, |s| s.texts.iter().any(|(_, t)| t == "Pull"));
+        s.idle(3);
+        for t in ["History", "Pull", "Push", "Fetch", "Branches", "New branch…"] {
+            assert!(some_text(&s, t), "{t:?} in the menu");
+        }
+        look(&mut s, "branch menu with sync");
+        s.shot("branch-menu-sync");
+        s.click_text("Pull");
+        wait_until(&mut s, "pulled", 20, |s| toast_is(s, "Pulled 1 commit"));
+        assert!(b.join("a.txt").exists());
+        // Both move on: asked whether to merge or rebase.
+        commit(&a, "a2.txt", "More from A");
+        g(&a, &["push", "-q"]);
+        commit(&b, "b.txt", "B's work");
+        s.app.toast = None;
+        branch_menu_pick(&mut s, "Pull");
+        wait_until(&mut s, "asked", 20, |s| matches!(s.app.popup, Popup::Choose { .. }));
+        s.idle(3);
+        assert!(some_text(&s, "This branch and its remote have both moved on") && some_text(&s, "Merge") && some_text(&s, "Rebase"));
+        look(&mut s, "diverged");
+        s.shot("pull-diverged");
+        s.click_text("Rebase");
+        wait_until(&mut s, "rebased", 20, |s| toast_is(s, "Rebased onto origin/main"));
+        assert!(b.join("a2.txt").exists() && b.join("b.txt").exists());
+        branch_menu_pick(&mut s, "Push");
+        wait_until(&mut s, "pushed", 20, |s| toast_is(s, "Pushed 1 commit to origin/main"));
+        // A new branch: Push becomes Publish.
+        g(&b, &["switch", "-q", "-c", "topic"]);
+        crate::gitstatus::rescan(&b);
+        wait_until(&mut s, "on topic", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some_and(|r| r.branch == "topic"));
+        s.idle(3);
+        branch_menu_pick(&mut s, "Publish branch");
+        wait_until(&mut s, "published", 20, |s| toast_is(s, "Published topic to origin"));
+        report("sync", &s);
+    }
+
+    /// A pull that stops at a conflict: the Changes page opens on its own, with what is
+    /// in progress above; the file's conflict shows both sides, Keep both settles it, and
+    /// Continue makes the merge commit.
+    #[test]
+    fn conflicts_settled_on_the_changes_page() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let (_home, a, b) = sync_repos("conflictpage");
+        let g = |at: &Path, args: &[&str]| crate::tests::git(at, args);
+        std::fs::write(a.join("notes.txt"), "one\nTWO from a\nthree\n").unwrap();
+        g(&a, &["commit", "-qam", "A edits"]);
+        g(&a, &["push", "-q"]);
+        std::fs::write(b.join("notes.txt"), "one\ntwo from b\nthree\n").unwrap();
+        g(&b, &["commit", "-qam", "B edits"]);
+        let mut s = Sim::new(&b, vec2(1280.0, 800.0));
+        wait_until(&mut s, "the repository", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
+        s.idle(3);
+        branch_menu_pick(&mut s, "Pull");
+        wait_until(&mut s, "asked", 20, |s| matches!(s.app.popup, Popup::Choose { .. }));
+        s.idle(3);
+        s.click_text("Merge");
+        wait_until(&mut s, "the Changes page", 20, |s| s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.git.as_ref()).is_some_and(|h| h.changes.open));
+        wait_until(&mut s, "the conflict listed", 20, |s| changes(s).unstaged.contains(&"notes.txt".to_string()));
+        s.idle(3);
+        see(&mut s, "Merging · 1 file in conflict");
+        click_in_inspector(&mut s, "notes.txt", "click");
+        wait_until(&mut s, "the conflict shown", 10, |s| s.texts.iter().any(|(_, t)| t == "Keep both"));
+        s.idle(3);
+        for t in ["Keep HEAD", "Keep both", "two from b", "TWO from a"] {
+            assert!(some_text(&s, t), "{t:?} shown");
+        }
+        look(&mut s, "conflict");
+        s.shot("conflict");
+        click_control(&mut s, "keep both");
+        wait_until(&mut s, "settled", 20, |s| changes(s).staged.contains(&"notes.txt".to_string()) && !changes(s).busy);
+        assert_eq!(std::fs::read_to_string(b.join("notes.txt")).unwrap(), "one\ntwo from b\nTWO from a\nthree\n");
+        wait_until(&mut s, "nothing left", 10, |s| s.texts.iter().any(|(_, t)| t == "Merging · nothing left in conflict"));
+        click_control(&mut s, "conflict continue");
+        wait_until(&mut s, "merged", 20, |_| crate::gitsync::doing(&b).is_none());
+        wait_until(&mut s, "the banner gone", 10, |s| !s.texts.iter().any(|(_, t)| t.starts_with("Merging")));
+        look(&mut s, "merged");
+        report("conflicts", &s);
+    }
+
+    /// Show Only Changed Files from its key: the list narrows to what git marks, the
+    /// filter box says so, and the key again shows everything.
+    #[test]
+    fn only_changed_files_from_the_key() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let (_home, _a, b) = sync_repos("onlychanged");
+        for f in ["src/app.rs", "src/lib.rs", "docs/guide.md", "LICENSE"] {
+            std::fs::create_dir_all(b.join(f).parent().unwrap()).unwrap();
+            std::fs::write(b.join(f), "x\n").unwrap();
+        }
+        crate::tests::git(&b, &["add", "-A"]);
+        crate::tests::git(&b, &["commit", "-qm", "More"]);
+        std::fs::write(b.join("src/lib.rs"), "y\n").unwrap();
+        std::fs::write(b.join("NEW.txt"), "new\n").unwrap();
+        let mut s = Sim::new(&b, vec2(1280.0, 800.0));
+        wait_until(&mut s, "the marks", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some_and(|r| !r.marks.is_empty()));
+        s.idle(3);
+        let names = |s: &Sim| s.tab().view.iter().map(|&i| s.tab().entries[i as usize].name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&s).len(), 5);
+        s.act("key ctrl+shift+g");
+        wait_until(&mut s, "narrowed", 10, |s| s.tab().view.len() == 2);
+        assert_eq!(names(&s), ["src", "NEW.txt"]);
+        s.idle(3);
+        assert!(some_text(&s, "Filter 2 changed items…"));
+        look(&mut s, "only changed");
+        s.shot("only-changed");
+        s.act("key ctrl+shift+g");
+        wait_until(&mut s, "everything", 10, |s| s.tab().view.len() == 5);
+        report("only changed", &s);
+    }
+
     /// Select the listed item named `label`, which scrolls it into view.
     fn reveal(s: &mut Sim, label: &str) {
         let p = s.tab().entries.iter().find(|e| e.name == label).map(|e| e.path.clone()).unwrap_or_else(|| s.fail(&format!("{label:?} not listed")));
@@ -7713,6 +7910,15 @@ mod journeys {
         }
         s.click_text("Resize");
         s.idle(2);
+        // A long menu in a short window scrolls down to the sizes.
+        for _ in 0..20 {
+            if some_text(&s, "Other size…") {
+                break;
+            }
+            let at = s.text_rect("Resize").center();
+            s.act(&format!("scroll {:.0} {:.0} -3", at.x, at.y));
+            s.idle(2);
+        }
         assert!(some_text(&s, "Fit within 1920 px") && some_text(&s, "Other size…"));
         look(&mut s, "the picture menu");
         shot_still(&mut s, "picture-menu");

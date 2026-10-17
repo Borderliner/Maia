@@ -30,6 +30,7 @@ mod fuzzy;
 mod gitchanges;
 mod gitlog;
 mod gitstatus;
+mod gitsync;
 mod gitwork;
 mod icons;
 mod imgdec;

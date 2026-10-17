@@ -1015,7 +1015,27 @@ impl App {
         // Changes started from the branch menu: said once done, and read again.
         for (root, title, r) in crate::gitwork::finished() {
             crate::gitstatus::rescan(&root);
+            use crate::gitsync::{BEHIND, CONFLICTS, DIVERGED};
+            use crate::gitwork::Op;
+            let go = |root: &PathBuf, op: Op, title: &str| -> Option<Box<dyn FnOnce(&mut App)>> {
+                let (root, title) = (root.clone(), title.to_string());
+                Some(Box::new(move |app: &mut App| crate::gitwork::start(&app.ctx, &root, op, title)))
+            };
             match r {
+                Err(e) if e == DIVERGED => {
+                    let choices = vec![("Merge".to_string(), false, go(&root, Op::Pull(Some(false)), "Couldn't merge")), ("Rebase".to_string(), false, go(&root, Op::Pull(Some(true)), "Couldn't rebase"))];
+                    self.popup = Popup::Choose { msg: "This branch and its remote have both moved on".into(), sub: "Merge them into one commit, or put your commits on top of the remote's (rebase).".into(), choices };
+                }
+                Err(e) if e == BEHIND => {
+                    let choices = vec![("Pull first".to_string(), false, go(&root, Op::Pull(None), "Couldn't pull")), ("Replace the remote's".to_string(), true, go(&root, Op::Push(true), "Couldn't push"))];
+                    self.popup = Popup::Choose { msg: "The remote has commits this branch doesn't".into(), sub: "Pull them first, or replace the remote branch with yours. Replacing drops its commits for everyone.".into(), choices };
+                }
+                Err(e) if e == CONFLICTS => {
+                    self.toast("Stopped at conflicts: settle them on the Changes page");
+                    if crate::gitstatus::repo_for(&self.tab().path).is_some_and(|r| r.root == root) {
+                        self.actions.push(Action::Cmd(Cmd::GitChanges));
+                    }
+                }
                 Ok(msg) => self.toast(msg),
                 Err(e) if matches!(self.popup, Popup::None) => self.popup = Popup::notice(title, e),
                 Err(_) => self.toast(title),
@@ -1042,6 +1062,13 @@ impl App {
                 let ig = hide.then(|| crate::gitstatus::repo_for(&t.path)).flatten().filter(|r| !r.ignored.is_empty() && !crate::gitstatus::inside_ignored(r, &t.path)).map(|r| r.ignored.clone());
                 if ig.as_ref().map(std::sync::Arc::as_ptr) != t.git_hide.as_ref().map(std::sync::Arc::as_ptr) {
                     t.git_hide = ig;
+                    t.dirty = true;
+                }
+                // Only the changed files: each new status answer narrows the list again.
+                let only = t.only_changed.then(|| crate::gitstatus::repo_for(&t.path)).flatten();
+                if only.as_ref().map(std::rc::Rc::as_ptr) != t.git_only_from.as_ref().map(std::rc::Rc::as_ptr) {
+                    t.git_only = only.as_ref().map(|r| std::sync::Arc::new(r.marks.keys().cloned().collect()));
+                    t.git_only_from = only;
                     t.dirty = true;
                 }
                 if t.dirty || t.built_tree != t.tree_active() {
@@ -1964,6 +1991,17 @@ impl App {
                     // panel's lower right corner.
                     let at = p.branch_chip.unwrap_or_else(|| Rect::from_min_size(p.rect.right_bottom() - vec2(120.0, 30.0), vec2(100.0, 20.0)));
                     self.popup = Popup::branches(p.id, r.root.clone(), at);
+                }
+            }
+            Cmd::OnlyChanged => {
+                let t = self.panel().tab_mut();
+                t.only_changed = !t.only_changed;
+                let on = t.only_changed;
+                if on && crate::gitstatus::repo_for(&self.tab().path).is_none() {
+                    self.panel().tab_mut().only_changed = false;
+                    self.toast("Not in a git repository");
+                } else {
+                    self.toast(if on { "Showing only changed files" } else { "Showing every file" });
                 }
             }
             Cmd::GitChanges => {

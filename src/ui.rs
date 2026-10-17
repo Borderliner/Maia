@@ -1135,6 +1135,7 @@ impl App {
         };
         let loading = t.is_loading();
         let branch = crate::gitstatus::repo_for(&t.path).map(|r| (r.branch.clone(), r.ahead, r.behind)).filter(|b| !b.0.is_empty());
+        let syncing = crate::gitstatus::repo_for(&t.path).and_then(|r| crate::gitwork::busy(&r.root));
         let mut branch_menu = None;
         let mut chip_at = None;
         let nsel = t.selected.len();
@@ -1275,6 +1276,10 @@ impl App {
                     }
                 }
             }
+            // Beside the branch while it is being pulled or pushed; the answer is a toast.
+            if let Some(what) = syncing.filter(|_| branch.is_some()) {
+                chip(ui, None, what, pal.text_dim, false, "git is talking to the remote");
+            }
             if nsel > 1 {
                 let layers = move |p: &egui::Painter, r: Rect| {
                     let st = Stroke::new(1.2, pal.accent);
@@ -1322,7 +1327,8 @@ impl App {
         let edit_rect = Rect::from_min_max(pos2(frame_rect.left() + 22.0, frame_rect.top() + 1.0), pos2(frame_rect.right() - 22.0 * btns - 2.0, frame_rect.bottom() - 1.0));
         let shown = vf + vfi;
         // Files when only files are listed; an empty folder has items, not files.
-        let hint = format!("Filter {} {}…", fmt_count(shown), if shown > 0 && (t.flatten || vf == 0) { if shown == 1 { "file" } else { "files" } } else if shown == 1 { "item" } else { "items" });
+        let changed = if t.git_only.is_some() { " changed" } else { "" };
+        let hint = format!("Filter {}{changed} {}…", fmt_count(shown), if shown > 0 && (t.flatten || vf == 0) { if shown == 1 { "file" } else { "files" } } else if shown == 1 { "item" } else { "items" });
         // Short form when the full hint wouldn't fit.
         let hint = if fw < 150.0 { "Filter…".to_string() } else { hint };
         let hint = if t.content.on { if fw < 150.0 { "Find…".into() } else { "Find in files…".into() } } else { hint };
@@ -1679,7 +1685,7 @@ impl App {
 }
 
 fn p_filter_active(t: &tab::Tab) -> bool {
-    !t.filter.is_empty() || t.flatten
+    !t.filter.is_empty() || t.flatten || t.git_only.is_some()
 }
 
 pub fn fmt_count(n: usize) -> String {

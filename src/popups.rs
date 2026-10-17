@@ -161,6 +161,9 @@ pub enum Popup {
     Layouts { delete: bool },
     Prompt { title: String, text: String, on_ok: Option<Box<dyn FnOnce(&mut App, String)>> },
     Confirm { msg: String, ok: String, on_ok: Option<Box<dyn FnOnce(&mut App)>> },
+    /// A question with a few answers, each a label, whether it can't be undone, and what
+    /// it does; Cancel besides.
+    Choose { msg: String, sub: String, choices: Vec<(String, bool, Option<Box<dyn FnOnce(&mut App)>>)> },
     Conflict(ConflictState),
     Properties(PropState),
     OpenWith { paths: Vec<PathBuf>, query: String, all: bool },
@@ -280,6 +283,7 @@ impl Popup {
             Popup::Layouts { .. } => "Layouts",
             Popup::Prompt { .. } => "Prompt",
             Popup::Confirm { .. } => "Confirm",
+            Popup::Choose { .. } => "Choose",
             Popup::Conflict(..) => "Conflict",
             Popup::Properties(..) => "Properties",
             Popup::OpenWith { .. } => "OpenWith",
@@ -829,6 +833,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::Layouts { delete } => layouts(app, ctx, *delete),
         Popup::Prompt { title, text, on_ok } => prompt(app, ctx, title, text, on_ok),
         Popup::Confirm { msg, ok, on_ok } => confirm(app, ctx, msg, ok, on_ok),
+        Popup::Choose { msg, sub, choices } => choose(app, ctx, msg, sub, choices),
         Popup::Conflict(st) => conflict(app, ctx, st),
         Popup::Properties(st) => properties(app, ctx, st),
         Popup::OpenWith { paths, query, all } => open_with(app, ctx, paths, query, all),
@@ -1279,6 +1284,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::InspectorLineNumbers | Cmd::InspectorWrap | Cmd::InspectorMinimap | Cmd::InspectorBlame | Cmd::InspectorFollow => p.inspector.is_some(),
         Cmd::InspectorSource => p.inspector.as_ref().is_some_and(|i| i.rich_kind().is_some()),
         Cmd::GitHistory | Cmd::GitBranches | Cmd::GitChanges => crate::gitstatus::repo_for(&t.path).is_some(),
+        Cmd::OnlyChanged => t.only_changed || crate::gitstatus::repo_for(&t.path).is_some(),
         Cmd::ComparePanels | Cmd::SelectDifferences | Cmd::SyncPanels => panels > 1,
         Cmd::OpenLinkTarget => t.target_entries().first().map(|e| e.is_link).unwrap_or(false),
         Cmd::RestoreTrash => t.path.starts_with(crate::sidebar::trash_dir()),
@@ -3904,6 +3910,42 @@ fn confirm(app: &mut App, ctx: &egui::Context, msg: &str, ok_label: &str, on_ok:
     !cancel
 }
 
+/// A question and its answers as buttons, the first the one Enter gives; one that
+/// can't be undone is drawn as a warning and never the first.
+fn choose(app: &mut App, ctx: &egui::Context, msg: &str, sub: &str, choices: &mut [(String, bool, Option<Box<dyn FnOnce(&mut App)>>)]) -> bool {
+    let pal = app.pal;
+    let mut pick = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)).then_some(0);
+    let mut cancel = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+    centered(ctx, "choose", 460.0, &pal, |ui| {
+        ui.add_space(4.0);
+        dialog_title(ui, msg, (!sub.is_empty()).then_some(sub), &pal);
+        dialog_buttons(ui, |ui| {
+            // Right to left: the first answer at the right edge.
+            for (i, (label, risky, _)) in choices.iter().enumerate() {
+                let b = if *risky {
+                    ui.add(egui::Button::new(egui::RichText::new(label.as_str()).color(Color32::WHITE)).fill(pal.danger).min_size(vec2(72.0, 0.0)))
+                } else if i == 0 {
+                    primary_button(ui, label, true, &pal)
+                } else {
+                    plain_button(ui, label, &pal)
+                };
+                crate::ui::note_control(ui, b.rect, "choose answer");
+                if b.clicked() {
+                    pick = Some(i);
+                }
+            }
+            if plain_button(ui, "Cancel", &pal).clicked() {
+                cancel = true;
+            }
+        });
+    });
+    if let Some(f) = pick.and_then(|i| choices.get_mut(i)).and_then(|c| c.2.take()) {
+        f(app);
+        return false;
+    }
+    !cancel
+}
+
 fn conflict(app: &mut App, ctx: &egui::Context, st: &mut ConflictState) -> bool {
     let pal = app.pal;
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
@@ -4883,6 +4925,9 @@ fn git_file_menu(app: &mut App, ctx: &egui::Context, panel: u64, file: usize, po
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum BranchItem {
     History,
+    Pull,
+    Push,
+    Fetch,
     Branch(usize),
     New,
     Remote(usize),
@@ -4895,6 +4940,10 @@ fn branch_items(r: Option<&crate::gitwork::Refs>) -> (Vec<BranchItem>, Vec<(usiz
     let mut v = vec![BranchItem::History];
     let mut heads = vec![];
     let Some(r) = r else { return (v, heads) };
+    // With somewhere to send to and get from, and a branch to do it for.
+    if !r.remotes.is_empty() && r.local.iter().any(|b| b.current) {
+        v.extend([BranchItem::Pull, BranchItem::Push, BranchItem::Fetch]);
+    }
     heads.push((v.len(), "Branches"));
     v.extend((0..r.local.len().min(BRANCHES_SHOWN)).map(BranchItem::Branch));
     v.push(BranchItem::New);
@@ -4997,6 +5046,9 @@ fn branch_menu(app: &mut App, ctx: &egui::Context, st: &mut BranchState) -> bool
                 let x = r.left() + 10.0;
                 let (label, right): (String, Option<String>) = match (*it, &refs) {
                     (BranchItem::History, _) => ((if history { "Close history" } else { "History" }).into(), None),
+                    (BranchItem::Pull, _) => ("Pull".into(), None),
+                    (BranchItem::Push, Some(r)) => ((if r.local.iter().any(|b| b.current && b.upstream.is_empty()) { "Publish branch" } else { "Push" }).into(), None),
+                    (BranchItem::Fetch, _) => ("Fetch".into(), None),
                     (BranchItem::New, _) => ("New branch…".into(), None),
                     (BranchItem::Branch(b), Some(r)) => (r.local[b].name.clone(), None),
                     (BranchItem::Remote(k), Some(r)) => (r.remote[k].clone(), None),
@@ -5008,6 +5060,13 @@ fn branch_menu(app: &mut App, ctx: &egui::Context, st: &mut BranchState) -> bool
                     _ => (String::new(), None),
                 };
                 let mut end = r.right() - 8.0;
+                // What a pull would bring and a push would send, by the branch HEAD is on.
+                if let (BranchItem::Pull | BranchItem::Push, Some(rf)) = (*it, &refs) {
+                    if let Some(b) = rf.local.iter().find(|b| b.current) {
+                        let (a, d) = if matches!(it, BranchItem::Pull) { (0, b.behind) } else { (b.ahead, 0) };
+                        end = paint_counts(p, end, r.center().y, a, d, &small, dim) - 4.0;
+                    }
+                }
                 if let (BranchItem::Branch(b), Some(rf)) = (*it, &refs) {
                     let b = &rf.local[b];
                     end = paint_counts(p, end, r.center().y, b.ahead, b.behind, &small, dim) - 4.0;
@@ -5058,6 +5117,9 @@ fn branch_menu(app: &mut App, ctx: &egui::Context, st: &mut BranchState) -> bool
                 _ => app.actions.push(Action::Cmd(Cmd::GitHistory)),
             }
         }
+        (BranchItem::Pull, _) => start(app, crate::gitwork::Op::Pull(None), "Couldn't pull".into()),
+        (BranchItem::Push, _) => start(app, crate::gitwork::Op::Push(false), "Couldn't push".into()),
+        (BranchItem::Fetch, _) => start(app, crate::gitwork::Op::Fetch, "Couldn't fetch".into()),
         (BranchItem::Branch(b), Some(r)) if !r.local[b].current => {
             let name = r.local[b].name.clone();
             start(app, crate::gitwork::Op::Switch(name.clone()), format!("Couldn't switch to {name}"));
