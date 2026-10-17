@@ -405,6 +405,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
     let mut reset_sel = false;
     let mut visible: Vec<PathBuf> = vec![];
     let mut flip = false;
+    let kept = &app.ud.workspaces;
     // Every project is asked about while only those with unsaved work show.
     let checking = if st.unsaved { st.items.iter().filter(|p| matches!(st.changes.get(&p.root), None | Some(Asked::Asking))).count() } else { 0 };
     pp::centered(ctx, "projects", 680.0, &pal, |ui| {
@@ -471,6 +472,15 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                     let ic = Rect::from_center_size(pos2(x - 10.0, r.center().y), Vec2::splat(small));
                     crate::theme::paint_lucide(ui.painter(), ic, "git-branch", dc);
                     x = ic.left() - 8.0;
+                    // Opens as it was left: its tabs and panels.
+                    if let Some(w) = kept.get(&p.root) {
+                        let wr = Rect::from_center_size(pos2(x - 8.0, r.center().y), Vec2::splat(small));
+                        crate::theme::paint_glyph(ui.painter(), wr, crate::theme::Glyph::Split, dc);
+                        let tabs: usize = w.panels.iter().map(|p| p.tabs.len()).sum();
+                        let tip = format!("Opens as you left it: {tabs} {}{}", if tabs == 1 { "tab" } else { "tabs" }, if w.panels.len() > 1 { format!(" in {} panels", w.panels.len()) } else { String::new() });
+                        ui.interact(wr.expand(3.0), egui::Id::new(("project workspace", j)), Sense::hover()).on_hover_text(tip);
+                        x = wr.left() - 8.0;
+                    }
                     if let Some(s) = st.changes.get(&p.root).and_then(|a| a.status()) {
                         let plural = |n: u32, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
                         let marks = [
@@ -552,7 +562,13 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
     }
     if let Some((path, new_tab, focus)) = open {
         let panel = app.active;
-        app.actions.push(if new_tab { Action::NewTab { panel, path, select: None, focus } } else { Action::Navigate { panel, path } });
+        if new_tab {
+            app.actions.push(Action::NewTab { panel, path, select: None, focus });
+        } else if !app.open_workspace(&path) {
+            // The project left is kept as it was, for next time.
+            app.keep_workspace();
+            app.actions.push(Action::Navigate { panel, path });
+        }
         return false;
     }
     true

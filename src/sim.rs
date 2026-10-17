@@ -10026,6 +10026,67 @@ mod journeys {
         report("undo history", &s);
     }
 
+    /// Workspaces: leaving a project through Recent Projects keeps its tabs and panels;
+    /// opening it again there brings them back (and keeps the one left), marked in its
+    /// row; Ctrl+Enter still opens just the folder.
+    #[test]
+    fn workspaces_kept_per_project() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let home = root().join("home/workspaces");
+        let _ = std::fs::remove_dir_all(&home);
+        let (a, b) = (home.join("Code/alpha"), home.join("Code/beta"));
+        for r in [&a, &b] {
+            std::fs::create_dir_all(r.join("src")).unwrap();
+            std::fs::write(r.join("README.md"), "x\n").unwrap();
+            crate::tests::git(r, &["init", "-q"]);
+        }
+        let mut s = Sim::new(&a, vec2(1280.0, 800.0));
+        // Alpha: two tabs, and a second panel on its src.
+        s.act("key ctrl+t");
+        go(&mut s, &a.join("src"));
+        s.cmd(SplitRight);
+        s.settle();
+        assert_eq!(s.app.panels.len(), 2);
+        let open = |s: &mut Sim, name: &str, keys: &str| {
+            s.act("key ctrl+alt+p");
+            wait_until(s, "the projects", 20, |s| matches!(&s.app.popup, Popup::Projects(p) if p.done));
+            s.act(&format!("text {name}"));
+            s.idle(2);
+            s.act(&format!("key {keys}"));
+            s.settle();
+        };
+        open(&mut s, "beta", "Enter");
+        assert!(s.app.ud.workspaces.get(&a).is_some_and(|w| w.panels.len() == 2), "alpha kept as it was left");
+        assert_eq!(s.tab().path, b);
+        // Beta on its own: the other panel, still on alpha, closed.
+        s.act("key Tab");
+        s.cmd(ClosePanel);
+        s.settle();
+        assert_eq!(s.tab().path, b);
+        assert_eq!(s.app.panels.len(), 1);
+        s.act("key ctrl+alt+p");
+        wait_until(&mut s, "the projects", 20, |s| matches!(&s.app.popup, Popup::Projects(p) if p.done));
+        s.act("text alpha");
+        s.idle(3);
+        look(&mut s, "a project with a workspace");
+        s.idle(10);
+        s.shot("workspace-row");
+        s.act("key Enter");
+        s.settle();
+        assert_eq!(s.app.panels.len(), 2, "alpha's two panels back");
+        let paths: Vec<PathBuf> = s.app.panels.values().flat_map(|p| p.tabs.iter().map(|t| t.path.clone())).collect();
+        assert!(paths.contains(&a.join("src")) && paths.contains(&a), "{paths:?}");
+        assert!(s.app.ud.workspaces.get(&b).is_some_and(|w| w.panels.len() == 1), "beta kept as left");
+        // Ctrl+Enter: the folder alone, in a new tab.
+        let panels = s.app.panels.len();
+        open(&mut s, "beta", "ctrl+Enter");
+        assert_eq!(s.app.panels.len(), panels, "no workspace for a new tab");
+        assert_eq!(s.tab().path, b);
+        report("workspaces", &s);
+    }
+
     /// What's Using This… from a folder's menu lists a `sleep` this test started working
     /// in it, as the user's own, with its PID; Stop asks first, then ends it and the list
     /// empties. One that ignores SIGTERM is still there a few seconds later and is offered

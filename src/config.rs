@@ -544,6 +544,8 @@ pub struct UserData {
     pub aliases: HashMap<String, String>,
     /// Commands last run from the palette, newest first.
     pub recent_cmds: Vec<String>,
+    /// Each git project's tabs and panels as they were left, by the project's top folder.
+    pub workspaces: HashMap<PathBuf, LayoutSnap>,
     pub layouts: BTreeMap<String, LayoutSnap>,
     pub views: HashMap<PathBuf, SavedView>,
     pub default_view: Option<ViewSettings>,

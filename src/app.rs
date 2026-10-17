@@ -815,6 +815,28 @@ impl App {
         }
     }
 
+    /// Remember the tabs and panels for the project the active tab is in, to open it as
+    /// it was left. The window's size is the window's, not the project's.
+    pub fn keep_workspace(&mut self) {
+        let Some(root) = crate::project::git_root(&self.panel().path()) else { return };
+        let mut snap = self.layout_snap(&self.ctx.clone());
+        snap.window_size = None;
+        snap.maximized = false;
+        self.ud.workspaces.insert(root, snap);
+        self.ud_dirty = true;
+    }
+
+    /// Open the project at `root` as it was left; false when nothing was kept for it.
+    pub fn open_workspace(&mut self, root: &Path) -> bool {
+        let Some(snap) = self.ud.workspaces.get(root).cloned() else { return false };
+        // Only one that still holds a folder of the project: a moved project starts fresh.
+        if !snap.panels.iter().flat_map(|p| p.tabs.iter()).any(|t| t.path.starts_with(root) && t.path.exists()) {
+            return false;
+        }
+        self.keep_workspace();
+        self.apply_layout(&snap)
+    }
+
     pub fn apply_layout(&mut self, l: &LayoutSnap) -> bool {
         if l.panels.is_empty() {
             return false;
@@ -3245,6 +3267,7 @@ impl App {
         if cfg!(test) {
             return;
         }
+        self.keep_workspace();
         let ctx = self.ctx.clone();
         self.save_all(&ctx);
     }
