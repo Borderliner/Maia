@@ -1017,7 +1017,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(144) {
+    match rng.below(146) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1498,6 +1498,65 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             s.act(&format!("{} {x:.0} {y:.0}", rng.pick(&["dclick", "click"])));
             s.act(rng.pick(&["key Enter", "key ArrowRight", "key Escape"]));
             if matches!(s.app.popup, Popup::Viewer(_)) && rng.below(2) == 0 {
+                s.act("key Escape");
+            }
+        }
+        144 => {
+            // Onto the shelf by key, menu or a drag onto it; then Copy Here, Move Here or
+            // Clear, from its buttons or the palette, now and then in another folder.
+            match rng.below(3) {
+                0 => s.act("key alt+s"),
+                1 => {
+                    let (x, y) = p(rng);
+                    s.act(&format!("click {x:.0} {y:.0} right"));
+                    s.act("text add to shelf");
+                    s.act("key Enter");
+                }
+                _ => {
+                    let (x, y) = p(rng);
+                    s.act(&format!("drag {x:.0} {y:.0} {:.0} {:.0}", s.size.x / 2.0 + rng.f(-200.0, 200.0), s.size.y - rng.f(4.0, 30.0)));
+                }
+            }
+            if rng.below(3) == 0 {
+                s.act("key alt+ArrowUp");
+                s.settle();
+            }
+            match rng.below(4) {
+                0 => click_control_at(s, rng.pick(&["shelf copy", "shelf move", "shelf clear"])),
+                1 => s.cmd(*rng.pick(&[Cmd::ShelfCopyHere, Cmd::ShelfMoveHere, Cmd::ClearShelf])),
+                _ => {}
+            }
+            s.idle(1 + rng.below(6));
+            if matches!(s.app.popup, Popup::Conflict(_)) {
+                s.act(rng.pick(&["key Enter", "key Escape"]));
+            }
+        }
+        145 => {
+            // The shelf's items: shown in their folder, taken off, or dragged out of it;
+            // everything dragged at once.
+            click_control_at(s, "shelf item");
+            let item = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "shelf item").map(|(_, r, _)| *r));
+            if let Some(r) = item {
+                match rng.below(3) {
+                    0 => {
+                        s.act(&format!("move {:.0} {:.0}", r.center().x, r.center().y));
+                        s.act(&format!("click {:.0} {:.0}", r.right() - 12.0, r.center().y));
+                    }
+                    _ => {
+                        let (x, y) = p(rng);
+                        s.act(&format!("drag {:.0} {:.0} {x:.0} {y:.0}", r.left() + 14.0, r.center().y));
+                    }
+                }
+            }
+            if rng.below(3) == 0 {
+                let all = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "shelf all").map(|(_, r, _)| *r));
+                if let Some(r) = all {
+                    let (x, y) = p(rng);
+                    s.act(&format!("drag {:.0} {:.0} {x:.0} {y:.0}", r.center().x, r.center().y));
+                }
+            }
+            s.idle(1 + rng.below(4));
+            if matches!(s.app.popup, Popup::Conflict(_) | Popup::DropMenu { .. }) {
                 s.act("key Escape");
             }
         }
@@ -8272,6 +8331,131 @@ mod journeys {
         s.cmd(ViewPictures);
         assert!(!s.popup_open() && toast_is(&s, "No pictures here"));
         report("viewer", &s);
+    }
+
+    fn control_rect(s: &mut Sim, what: &str) -> Rect {
+        s.idle(1);
+        crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == what).map(|(_, r, _)| *r)).unwrap_or_else(|| s.fail(&format!("no {what} on screen")))
+    }
+
+    fn shelf_names(s: &Sim) -> Vec<String> {
+        s.app.shelf.items.iter().map(|i| i.path.file_name().unwrap().to_string_lossy().into_owned()).collect()
+    }
+
+    /// The shelf: files gathered from three folders by key, menu and a drop; copied into
+    /// one folder and undone, then moved into another and undone; one item taken off by
+    /// its ×, one whose file went away dropping off by itself, the rest cleared; a file
+    /// dropped on the empty shelf's spot; an item dragged off it into a folder; the strip
+    /// only there while it holds something.
+    #[test]
+    fn shelf_gathers_then_moves_or_copies() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("shelf");
+        let mut s = Sim::new(&home.join("Documents"), vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        assert_eq!(s.app.shelf.shown_h, 0.0, "no strip while it is empty");
+        select_path(&mut s, &home.join("Documents/notes.txt"));
+        s.act("key alt+s");
+        assert_eq!(shelf_names(&s), ["notes.txt"]);
+        s.idle(12);
+        assert!(s.app.shelf.shown_h > 20.0, "the strip slides in");
+        assert!(some_text(&s, "1 item"));
+        go(&mut s, &home.join("Music/Album"));
+        let row = row_text(&s, "01 Intro.mp3");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        s.click_text("Add to Shelf");
+        assert_eq!(shelf_names(&s), ["notes.txt", "01 Intro.mp3"]);
+        // Dragged from the list onto the strip.
+        let row = row_text(&s, "02 Song.flac");
+        let strip = control_rect(&mut s, "shelf all");
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", row.center().x, row.center().y, strip.right() + 200.0, strip.center().y));
+        assert_eq!(shelf_names(&s), ["notes.txt", "01 Intro.mp3", "02 Song.flac"], "dropped on it");
+        assert!(home.join("Music/Album/02 Song.flac").exists(), "and left where it was");
+        assert!(some_text(&s, "3 items") && some_text(&s, "notes.txt") && some_text(&s, "02 Song.flac"));
+        look(&mut s, "shelf with three items");
+        s.shot("shelf-graphite");
+        // Copied into Empty, and undone.
+        go(&mut s, &home.join("Empty"));
+        click_control(&mut s, "shelf copy");
+        wait_until(&mut s, "copied", 10, |_| ["notes.txt", "01 Intro.mp3", "02 Song.flac"].iter().all(|f| home.join("Empty").join(f).exists()));
+        assert_eq!(s.app.shelf.items.len(), 3, "a copy keeps the shelf");
+        wait_until(&mut s, "the copy's undo", 10, |s| s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Created(_))));
+        s.act("key ctrl+z");
+        wait_until(&mut s, "copies undone", 10, |_| !home.join("Empty/notes.txt").exists());
+        // Moved into a new folder from the palette, and undone.
+        std::fs::create_dir_all(home.join("Gathered")).unwrap();
+        go(&mut s, &home.join("Gathered"));
+        palette_run(&mut s, "Move Shelf Here");
+        wait_until(&mut s, "moved", 10, |_| ["notes.txt", "01 Intro.mp3", "02 Song.flac"].iter().all(|f| home.join("Gathered").join(f).exists()));
+        assert!(!home.join("Documents/notes.txt").exists());
+        assert!(s.app.shelf.items.is_empty(), "a move empties the shelf");
+        s.idle(12);
+        assert_eq!(s.app.shelf.shown_h, 0.0, "and the strip goes");
+        wait_until(&mut s, "the move's undo", 10, |s| s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Move(_))));
+        s.act("key ctrl+z");
+        wait_until(&mut s, "move undone", 10, |_| home.join("Documents/notes.txt").exists() && home.join("Music/Album/01 Intro.mp3").exists());
+        // One off by its ×, one gone from the disk, the rest cleared.
+        go(&mut s, &home.join("Documents"));
+        s.act("key ctrl+a");
+        s.act("key alt+s");
+        let n = s.app.shelf.items.len();
+        assert!(n >= 5, "the whole folder: {n}");
+        s.idle(12);
+        let chip = control_rect(&mut s, "shelf item");
+        s.act(&format!("move {:.0} {:.0}", chip.center().x, chip.center().y));
+        s.act(&format!("click {:.0} {:.0}", chip.right() - 12.0, chip.center().y));
+        assert_eq!(s.app.shelf.items.len(), n - 1, "taken off by its ×");
+        assert!(!s.app.shelf.items.iter().any(|i| i.path == home.join("Documents/Taxes")), "the first one");
+        std::fs::remove_file(home.join("Documents/report.md")).unwrap();
+        wait_until(&mut s, "the vanished file dropped", 10, |s| !s.app.shelf.has(&home.join("Documents/report.md")));
+        // A click on an item shows it in its folder.
+        go(&mut s, &home);
+        let chip = control_rect(&mut s, "shelf item");
+        s.act(&format!("click {:.0} {:.0}", chip.left() + 12.0, chip.center().y));
+        s.settle();
+        assert_eq!(s.tab().path, home.join("Documents"), "its folder");
+        assert_eq!(s.tab().cursor.map(|c| s.tab().entries[c as usize].path.clone()), s.app.shelf.items.first().map(|i| i.path.clone()), "selected there");
+        click_control(&mut s, "shelf clear");
+        assert!(s.app.shelf.items.is_empty());
+        // Dropped on the empty shelf's spot, at the bottom while files are dragged.
+        go(&mut s, &home.join("Music/Album"));
+        s.idle(12);
+        let row = row_text(&s, "01 Intro.mp3");
+        let (cx, by) = (s.size.x / 2.0 + 20.0, s.size.y - 22.0);
+        s.act(&format!("down {:.0} {:.0}", row.center().x, row.center().y));
+        for k in 1..=10 {
+            let t = k as f32 / 10.0;
+            s.act(&format!("move {:.0} {:.0}", row.center().x + (cx - row.center().x) * t, row.center().y + (by - row.center().y) * t));
+        }
+        assert!(some_text(&s, "Shelf"), "the spot to drop on");
+        s.shot("shelf-drop-spot-graphite");
+        s.act(&format!("up {cx:.0} {by:.0}"));
+        assert_eq!(shelf_names(&s), ["01 Intro.mp3"], "dropped on the spot");
+        assert!(home.join("Music/Album/01 Intro.mp3").exists());
+        // Dragged off the shelf onto a folder: moved there.
+        go(&mut s, &home);
+        s.idle(12);
+        let chip = control_rect(&mut s, "shelf item");
+        let docs = row_text(&s, "Documents");
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", chip.left() + 14.0, chip.center().y, docs.center().x, docs.center().y));
+        wait_until(&mut s, "moved onto the folder", 10, |_| home.join("Documents/01 Intro.mp3").exists());
+        wait_until(&mut s, "and off the shelf", 10, |s| s.app.shelf.items.is_empty());
+        // Tight and split.
+        go(&mut s, &home.join("Documents"));
+        s.act("key ctrl+a");
+        s.act("key alt+s");
+        s.cmd(SplitRight);
+        s.settle();
+        look(&mut s, "shelf with a split");
+        s.resize(520.0, 340.0);
+        look(&mut s, "shelf small");
+        s.shot("shelf-small-graphite");
+        s.resize(1280.0, 800.0);
+        report("shelf", &s);
     }
 
     #[test]

@@ -57,6 +57,7 @@ mod runner;
 mod semantic;
 mod sendto;
 mod share;
+mod shelf;
 mod sidebar;
 mod signals;
 mod sqlite;

@@ -118,6 +118,10 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             items.push(Item::cmd(Cmd::NewFolder));
             items.push(Item::cmd(Cmd::NewFile));
             items.push(Item::cmd(Cmd::Paste));
+            if !app.shelf.items.is_empty() {
+                items.push(Item::cmd(Cmd::ShelfMoveHere));
+                items.push(Item::cmd(Cmd::ShelfCopyHere));
+            }
             items.push(Item { id: "terminal_here".into(), label: "Open Terminal Here".into(), act: Act::Terminal(here.clone()), children: vec![] });
             items.push(Item::sep());
         }
@@ -340,6 +344,9 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         }
         if all_dirs {
             items.push(Item::cmd(Cmd::ToggleBookmark));
+        }
+        if !in_trash && ents.iter().any(|e| !app.shelf.has(&e.0)) {
+            items.push(Item::labeled(Cmd::AddToShelf, "Add to Shelf"));
         }
         if single && !ents[0].1 && !in_trash {
             items.push(Item::cmd(Cmd::PreviousVersions));

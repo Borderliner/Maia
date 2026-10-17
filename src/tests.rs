@@ -5556,6 +5556,33 @@ fn viewer_pictures_decode_upright_off_the_frame() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// The shelf keeps one of each, reads the details of what was dropped on it and lets go
+/// of what is gone, on its own thread.
+#[test]
+fn shelf_gathers_once_and_drops_what_vanished() {
+    let d = tmpdir("shelf");
+    touch(&d.join("a/report.md"), "# r");
+    touch(&d.join("b/photo.png"), "png");
+    std::fs::create_dir_all(d.join("c/folder")).unwrap();
+    let mut sh = crate::shelf::Shelf::default();
+    let items = vec![(d.join("a/report.md"), None), (d.join("b/photo.png"), None), (d.join("c/folder"), None)];
+    assert_eq!(sh.add(items), 3);
+    assert_eq!(sh.add(vec![(d.join("a/report.md"), None)]), 0, "once only");
+    std::fs::remove_file(d.join("b/photo.png")).unwrap();
+    let ctx = egui::Context::default();
+    let t0 = Instant::now();
+    while sh.items.len() == 3 || sh.items.iter().any(|i| i.entry.is_none()) {
+        assert!(t0.elapsed() < Duration::from_secs(5), "never looked");
+        sh.pump(&ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(sh.paths(), vec![d.join("a/report.md"), d.join("c/folder")], "the vanished one gone, the order kept");
+    assert!(sh.items[1].entry.as_ref().is_some_and(|e| e.is_dir), "details read for the icon");
+    sh.remove(&d.join("a/report.md"));
+    assert_eq!(sh.paths(), vec![d.join("c/folder")]);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 #[test]
 fn mountinfo_lines_read_with_their_subvolumes() {
     use crate::versions::parse_mountinfo;

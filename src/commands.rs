@@ -257,6 +257,10 @@ commands! {
     CompareFiles, "compare_files", Files, "Compare Files", "Show how the two selected files differ, in the inspector.", [];
     GitIgnore, "git_ignore", Files, "Add To .gitignore", "Ignore the selected files or folders in this repository's .gitignore.", [];
     GitIgnoreExt, "git_ignore_ext", Files, "Ignore Files Like This", "Ignore every file with the selected file's extension in this repository's .gitignore.", [];
+    AddToShelf, "add_to_shelf", Files, "Add To Shelf", "Gather the selection on the shelf, to move or copy it with things from other folders.", ["Alt+S"];
+    ShelfMoveHere, "shelf_move_here", Files, "Move Shelf Here", "Move everything on the shelf into this folder.", [];
+    ShelfCopyHere, "shelf_copy_here", Files, "Copy Shelf Here", "Copy everything on the shelf into this folder, keeping the shelf.", [];
+    ClearShelf, "clear_shelf", Files, "Clear Shelf", "Take everything off the shelf; the files stay where they are.", [];
     Trash, "trash", Files, "Move To Trash", "Move the selection to the trash.", ["Delete"];
     DeletePermanent, "delete_permanent", Files, "Delete Permanently", "Delete the selection without using the trash (asks first).", ["Shift+Delete"];
     BatchRename, "batch_rename", Files, "Batch Rename…", "Rename the selected items together, numbered or found and replaced, seeing every new name first.", [];
