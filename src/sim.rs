@@ -9568,7 +9568,8 @@ mod journeys {
 
     /// Recent Projects from its key: the git repositories under the home folder, the
     /// last visited first and the rest by git's own activity, each with its branch and,
-    /// once git has said, a dot for uncommitted changes. Typing narrows; Enter opens one
+    /// once git has said, what is unsaved there; Tab (or the switch) keeps only those with
+    /// unsaved work, every project asked about for it. Typing narrows; Enter opens one
     /// here, Ctrl+Enter in a new tab, a click here too. The next time it opens at once,
     /// with what was found before.
     #[test]
@@ -9619,11 +9620,26 @@ mod journeys {
         wait_until(&mut s, "the projects found", 20, |s| st(s).done);
         let mine: Vec<String> = st(&s).items.iter().filter(|p| p.root.starts_with(&home)).map(|p| p.name.clone()).collect();
         assert_eq!(mine, ["tools", "maia", "site", "old"], "visited first, then by activity; nothing from node_modules");
-        wait_until(&mut s, "git asked", 20, |s| st(s).changes.get(&maia) == Some(&Some(true)) && st(s).changes.get(&tools) == Some(&Some(false)));
+        let said = |s: &Sim, r: &Path| st(s).changes.get(r).and_then(|a| a.status());
+        wait_until(&mut s, "git asked", 20, |s| said(s, &maia).is_some_and(|x| x.changed == 1) && said(s, &tools) == Some(crate::projects::Status::default()));
         assert!(some_text(&s, "main"), "the branch");
+        assert!(some_text(&s, "1"), "maia's one change");
         look(&mut s, "recent projects");
         s.idle(12);
         s.shot("recent-projects");
+        // Only the projects with unsaved work: maia, and none of the clean or fake ones.
+        s.act("key Tab");
+        assert!(st(&s).unsaved);
+        wait_until(&mut s, "every project asked", 20, |s| st(s).items.iter().filter(|p| p.root.starts_with(&home)).all(|p| st(s).changes.get(&p.root).is_some_and(|a| *a != crate::projects::Asked::Asking)));
+        s.idle(2);
+        assert!(!s.texts.iter().any(|(_, t)| t.starts_with("Checking")), "the ones git can't answer for are not waited on");
+        let shown = |s: &Sim| st(s).shown().iter().map(|&i| st(s).items[i].root.clone()).filter(|r| r.starts_with(&home)).collect::<Vec<_>>();
+        assert_eq!(shown(&s), [maia.clone()]);
+        look(&mut s, "unsaved projects");
+        s.idle(12);
+        s.shot("recent-projects-unsaved");
+        click_control(&mut s, "all projects");
+        assert!(!st(&s).unsaved && shown(&s).contains(&tools), "everything again");
         // Narrowed and opened here.
         s.act("text site");
         s.idle(2);

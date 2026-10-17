@@ -5755,31 +5755,63 @@ fn projects_found_ranked_and_cached() {
     let _ = std::fs::remove_dir_all(&h);
 }
 
-/// Uncommitted changes asked of git itself: a clean work tree has none; an untracked
-/// file, an edit and a staged file each count.
+/// Unsaved work asked of git itself: a clean work tree has none; an untracked file, an
+/// edit and a staged file each count; commits not pushed to its remote and stashes count
+/// too, and a commit to pull is told apart from one to push.
 #[test]
-fn projects_changes_asked_of_git() {
-    use crate::projects::has_changes;
+fn projects_unsaved_work_asked_of_git() {
+    use crate::projects::{Status, parse_status, status};
     if !crate::media::have("git") {
         return;
     }
-    let d = tmpdir("project-changes");
+    let base = tmpdir("project-changes");
+    let (server, d, other) = (base.join("server.git"), base.join("work"), base.join("other"));
+    std::fs::create_dir_all(&server).unwrap();
+    git(&server, &["init", "-q", "--bare", "-b", "main"]);
+    std::fs::create_dir_all(&d).unwrap();
     touch(&d.join("README"), "hello\n");
-    git(&d, &["init", "-q"]);
+    git(&d, &["init", "-q", "-b", "main"]);
+    for (k, v) in [("user.name", "Test"), ("user.email", "test@example.invalid"), ("commit.gpgsign", "false")] {
+        git(&d, &["config", k, v]);
+    }
     git(&d, &["add", "."]);
     git(&d, &["commit", "-q", "-m", "first"]);
-    assert_eq!(has_changes(&d), Some(false));
+    git(&d, &["remote", "add", "origin", server.to_str().unwrap()]);
+    git(&d, &["push", "-q", "-u", "origin", "main"]);
+    assert_eq!(status(&d), Some(Status { upstream: true, ..Default::default() }));
+    assert!(!status(&d).unwrap().unsaved());
     touch(&d.join("new.txt"), "x\n");
-    assert_eq!(has_changes(&d), Some(true), "untracked");
-    std::fs::remove_file(d.join("new.txt")).unwrap();
+    assert_eq!(status(&d).map(|s| s.changed), Some(1), "untracked");
     touch(&d.join("README"), "hello again\n");
-    assert_eq!(has_changes(&d), Some(true), "edited");
     git(&d, &["add", "README"]);
-    assert_eq!(has_changes(&d), Some(true), "staged");
+    assert_eq!(status(&d).map(|s| s.changed), Some(2), "staged and untracked");
+    git(&d, &["stash", "-q", "-u"]);
+    let s = status(&d).unwrap();
+    assert_eq!((s.changed, s.stashes), (0, 1), "stashed away");
+    assert!(s.unsaved(), "a stash is unsaved work");
+    git(&d, &["stash", "pop", "-q"]);
+    git(&d, &["add", "-A"]);
     git(&d, &["commit", "-q", "-m", "second"]);
-    assert_eq!(has_changes(&d), Some(false));
-    assert_eq!(has_changes(&d.join("nowhere")), None);
-    let _ = std::fs::remove_dir_all(&d);
+    let s = status(&d).unwrap();
+    assert_eq!((s.changed, s.ahead, s.behind), (0, 1, 0), "not pushed");
+    git(&d, &["push", "-q"]);
+    // Someone else pushes: one to pull, nothing unsaved here.
+    git(&base, &["clone", "-q", server.to_str().unwrap(), "other"]);
+    for (k, v) in [("user.name", "Other"), ("user.email", "other@example.invalid"), ("commit.gpgsign", "false")] {
+        git(&other, &["config", k, v]);
+    }
+    touch(&other.join("theirs.txt"), "t\n");
+    git(&other, &["add", "."]);
+    git(&other, &["commit", "-q", "-m", "theirs"]);
+    git(&other, &["push", "-q"]);
+    git(&d, &["fetch", "-q"]);
+    let s = status(&d).unwrap();
+    assert_eq!((s.ahead, s.behind, s.unsaved()), (0, 1, false));
+    assert_eq!(status(&base.join("nowhere")), None);
+    // A rename's record carries its old path, which is not a second change.
+    let v2 = b"# branch.oid 1a2b\0# branch.head main\0# branch.upstream origin/main\0# branch.ab +3 -2\02 R. N... 100644 100644 100644 aa bb R100 new name.txt\0old name.txt\0? scratch\0";
+    assert_eq!(parse_status(v2), Status { changed: 2, ahead: 3, behind: 2, stashes: 0, upstream: true });
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// What's using a path, against processes this test starts: a `sleep` working in a
