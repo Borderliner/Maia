@@ -92,7 +92,11 @@ An archive opens like a folder; right-click it for Extract Here, or right-click 
 for Compress. Connect To Server (in the menu, or type an `smb://`, `sftp://` or
 `ftp://` address into Go To) opens network shares, which then stay in the sidebar's
 Network section. Right-click files for Tags to give them colour labels or named tags
-(kept on the files as extended attributes, which other programs can read). In a git
+(kept on the files as extended attributes, which other programs can read). Batch Rename,
+in the menu of several files, numbers them or finds and replaces in their names and shows
+every new name before anything changes. Find Duplicates, in a folder's menu, lists the
+files under it with the same contents and moves the extra copies to the trash. Options
+can empty the trash of what has been in it longer than 7, 30 or 90 days. In a git
 repository, the branch name in the status bar opens a menu: the commit history, the
 branches to switch to or create, the stash and the other work trees. In the history a
 commit shows its files with their diffs, and right-clicking a file shows the commits
