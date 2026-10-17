@@ -926,7 +926,9 @@ impl App {
         self.draw(&ctx);
         self.process_actions(&ctx);
         self.ext_drop = None;
-        if self.last_save.elapsed() > Duration::from_secs(8) {
+        // Tests share one home and run side by side: saving on its own, one test's Show
+        // Hidden reached the tests started after it. Those that check saving ask for it.
+        if !cfg!(test) && self.last_save.elapsed() > Duration::from_secs(8) {
             self.hot_reload();
             self.save_all(&ctx);
         }
@@ -3113,6 +3115,9 @@ impl App {
 
 impl App {
     pub fn on_exit(&mut self) {
+        if cfg!(test) {
+            return;
+        }
         let ctx = self.ctx.clone();
         self.save_all(&ctx);
     }
