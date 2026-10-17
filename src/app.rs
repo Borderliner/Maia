@@ -1222,12 +1222,12 @@ impl App {
                 }
                 if let OpKind::Move { .. } = j.kind {
                     if !p.produced.is_empty() {
-                        self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Move(p.produced.clone()) });
+                        self.undo.push(UndoEntry { label: crate::ui::job_undo_label(&j.label), kind: UndoKind::Move(p.produced.clone()) });
                     }
                 }
                 if let OpKind::Sort { .. } = j.kind {
                     if !p.produced.is_empty() || !p.made.is_empty() {
-                        let label = j.label.replacen("Tidying", "Tidy", 1);
+                        let label = crate::ui::job_undo_label(&j.label);
                         self.undo.push(UndoEntry { label, kind: UndoKind::Sorted(p.produced.clone(), p.made.clone()) });
                     }
                 }
@@ -1235,13 +1235,13 @@ impl App {
                     if !p.produced.is_empty() {
                         let label = match &j.kind {
                             OpKind::Convert { srcs, to, .. } => crate::convert::undo_label(srcs, *to),
-                            _ => j.label.clone(),
+                            _ => crate::ui::job_undo_label(&j.label),
                         };
                         self.undo.push(UndoEntry { label, kind: UndoKind::Created(p.produced.iter().map(|x| x.1.clone()).collect()) });
                     }
                 }
                 if let OpKind::Trash { paths } = &j.kind {
-                    self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Trashed(paths.clone()) });
+                    self.undo.push(UndoEntry { label: crate::ui::job_undo_label(&j.label), kind: UndoKind::Trashed(paths.clone()) });
                 }
             }
         }
@@ -2389,7 +2389,7 @@ impl App {
                 let r = if cmd == Cmd::NewFolder { std::fs::create_dir(&dest) } else { std::fs::File::create_new(&dest).map(|_| ()) };
                 match r {
                     Ok(()) => {
-                        self.undo.push(UndoEntry { label: format!("Create {}", dest.display()), kind: UndoKind::Created(vec![dest.clone()]) });
+                        self.undo.push(UndoEntry { label: format!("Create {}", dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()), kind: UndoKind::Created(vec![dest.clone()]) });
                         let t = self.tab();
                         t.filter.clear();
                         t.pending_rename = Some(dest);
@@ -3215,7 +3215,12 @@ impl App {
         t.pending_restore = Some(tab::HistState { path: t.path.clone(), cursor: new_paths.first().cloned(), selected: new_paths.clone(), scroll: t.current_scroll });
         t.reload();
         let pairs: Vec<(PathBuf, PathBuf)> = plan.iter().map(|(p, _)| p.clone()).zip(new_paths).collect();
-        self.undo.push(UndoEntry { label: if batch { format!("Rename {} items", pairs.len()) } else { "Rename".into() }, kind: UndoKind::Rename(pairs.clone()) });
+        let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let label = match pairs.as_slice() {
+            [(from, to)] if !batch => format!("Rename {} to {}", name(from), name(to)),
+            _ => format!("Rename {} items", pairs.len()),
+        };
+        self.undo.push(UndoEntry { label, kind: UndoKind::Rename(pairs.clone()) });
         if errors.is_empty() {
             return;
         }

@@ -1313,10 +1313,12 @@ fn finished_jobs_read_in_the_past_tense() {
     use crate::ui::finished_label;
     assert_eq!(finished_label("Copying 1 item"), "Copied 1 item");
     assert_eq!(finished_label("Moving 3 items"), "Moved 3 items");
-    assert_eq!(finished_label("Moving to trash 2 items"), "Moved to trash 2 items");
+    assert_eq!(finished_label("Moving 2 items to the trash"), "Moved 2 items to the trash");
+    assert_eq!(crate::ui::job_undo_label("Moving notes.txt to the trash"), "Move notes.txt to the trash");
+    assert_eq!(crate::ui::job_undo_label("Copying 3 items"), "Copy 3 items");
     assert_eq!(finished_label("Deleting 1 item"), "Deleted 1 item");
     assert_eq!(crate::ui::failed_label("Copying 1 item"), "Couldn't copy 1 item");
-    assert_eq!(crate::ui::failed_label("Moving to trash 2 items"), "Couldn't move to trash 2 items");
+    assert_eq!(crate::ui::failed_label("Moving 2 items to the trash"), "Couldn't move 2 items to the trash");
     assert_eq!(crate::ui::failed_label("Deleting 3 items as administrator"), "Couldn't delete 3 items as administrator");
 }
 

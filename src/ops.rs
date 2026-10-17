@@ -112,7 +112,22 @@ pub fn spawn(id: u64, kind: OpKind, ctx: egui::Context) -> Job {
         OpKind::Admin { task, .. } => task.label(),
         OpKind::Convert { srcs, to, .. } => crate::convert::label(srcs, *to),
         OpKind::Sort { label, .. } => label.clone(),
-        _ => format!("{} {} item{}", kind.verb(), n, if n == 1 { "" } else { "s" }),
+        // One file by its name, several by their number: "Moving notes.txt to the trash".
+        _ => {
+            let first = match &kind {
+                OpKind::Copy { srcs, .. } | OpKind::Move { srcs, .. } => srcs.first(),
+                OpKind::Trash { paths } | OpKind::Delete { paths } | OpKind::Extract { members: paths, .. } => paths.first(),
+                _ => None,
+            };
+            let what = match first {
+                Some(p) if n == 1 => name_of(p),
+                _ => format!("{n} item{}", if n == 1 { "" } else { "s" }),
+            };
+            match &kind {
+                OpKind::Trash { .. } => format!("Moving {what} to the trash"),
+                _ => format!("{} {what}", kind.verb()),
+            }
+        }
     };
     let (p2, c2, k2, pa2) = (progress.clone(), cancel.clone(), kind.clone(), pause.clone());
     std::thread::spawn(move || {

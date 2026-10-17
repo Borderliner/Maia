@@ -9990,6 +9990,7 @@ mod journeys {
         assert!(matches!(s.app.popup, Popup::UndoHistory(_)));
         s.idle(3);
         assert!(some_text(&s, "Moved to the trash · 1 item") && some_text(&s, "Renamed · 1 item"));
+        assert!(some_text(&s, "Move budget 2026.csv to the trash") && some_text(&s, "Rename report.md to b.md") && some_text(&s, "Rename notes.txt to a.txt"), "each named by what it did");
         assert!(some_text(&s, "today"), "when");
         look(&mut s, "undo history");
         s.idle(10);
