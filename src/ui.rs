@@ -275,7 +275,7 @@ pub fn cancelled_label(label: &str) -> String {
 }
 
 fn job_title(label: &str, failed: bool) -> String {
-    for (now, done, verb) in [("Copying", "Copied", "copy"), ("Moving to trash", "Moved to trash", "move to trash"), ("Moving", "Moved", "move"), ("Deleting", "Deleted", "delete"), ("Extracting", "Extracted", "extract"), ("Compressing", "Compressed", "compress"), ("Converting", "Converted", "convert"), ("Merging", "Merged", "merge"), ("Splitting", "Split", "split")] {
+    for (now, done, verb) in [("Copying", "Copied", "copy"), ("Moving to trash", "Moved to trash", "move to trash"), ("Moving", "Moved", "move"), ("Deleting", "Deleted", "delete"), ("Extracting", "Extracted", "extract"), ("Compressing", "Compressed", "compress"), ("Converting", "Converted", "convert"), ("Merging", "Merged", "merge"), ("Splitting", "Split", "split"), ("Tidying", "Tidied", "tidy")] {
         if let Some(rest) = label.strip_prefix(now) {
             return if failed { format!("Couldn't {verb}{rest}") } else { format!("{done}{rest}") };
         }

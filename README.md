@@ -114,7 +114,10 @@ click files for Tags to give them colour labels or named tags (kept on the files
 extended attributes, which other programs can read). Batch Rename, in the menu of
 several files, numbers them or finds and replaces in their names and shows every new
 name before anything changes. Find Duplicates, in a folder's menu, lists the files under
-it with the same contents and moves the extra copies to the trash. Options can empty the
+it with the same contents and moves the extra copies to the trash. Tidy Folder, there
+too, sorts the loose files into Pictures, Documents, Music, Videos, Archives and
+Installers, or the photos and videos into a folder a month by the date they were taken,
+listing every move first; one Undo puts it all back. Options can empty the
 trash of what has been in it longer than 7, 30 or 90 days. In a git repository, the
 branch name in the status bar opens a menu: the commit history, the branches to switch
 to or create, the stash and the other work trees, and Pull, Push and Fetch. A pull that

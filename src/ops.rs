@@ -36,6 +36,8 @@ pub enum OpKind {
     /// made of several). The tools travel with the job: a test's fakes are only known
     /// to the thread that set them.
     Convert { srcs: Vec<PathBuf>, to: crate::convert::Target, out: Option<PathBuf>, tools: crate::drives::Tools },
+    /// Each file moved into its own folder (made when missing): Tidy Folder.
+    Sort { moves: Vec<(PathBuf, PathBuf)>, label: String },
 }
 
 impl OpKind {
@@ -49,6 +51,7 @@ impl OpKind {
             OpKind::Compress { .. } => "Compressing",
             OpKind::Admin { .. } => "Working as administrator",
             OpKind::Convert { .. } => "Converting",
+            OpKind::Sort { .. } => "Moving",
         }
     }
 }
@@ -74,6 +77,8 @@ pub struct Progress {
     /// How far into the item at hand a job that can't count bytes is (a conversion), from
     /// 0 to 1.
     pub within: Option<f32>,
+    /// Folders the job made, outermost first.
+    pub made: Vec<PathBuf>,
 }
 
 pub struct Job {
@@ -96,12 +101,14 @@ pub fn spawn(id: u64, kind: OpKind, ctx: egui::Context) -> Job {
         OpKind::Copy { srcs, .. } | OpKind::Move { srcs, .. } | OpKind::Compress { srcs, .. } | OpKind::Convert { srcs, .. } => srcs.len(),
         OpKind::Trash { paths } | OpKind::Delete { paths } | OpKind::Extract { members: paths, .. } => paths.len(),
         OpKind::Admin { .. } => 1,
+        OpKind::Sort { moves, .. } => moves.len(),
     };
     let label = match &kind {
         OpKind::Extract { archive, members, .. } if members.is_empty() => format!("Extracting {}", name_of(archive)),
         OpKind::Compress { out, .. } => format!("Compressing into {}", name_of(out)),
         OpKind::Admin { task, .. } => task.label(),
         OpKind::Convert { srcs, to, .. } => crate::convert::label(srcs, *to),
+        OpKind::Sort { label, .. } => label.clone(),
         _ => format!("{} {} item{}", kind.verb(), n, if n == 1 { "" } else { "s" }),
     };
     let (p2, c2, k2, pa2) = (progress.clone(), cancel.clone(), kind.clone(), pause.clone());
@@ -180,42 +187,33 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 if cancel.stop() {
                     break;
                 }
-                if s.parent() == Some(dest.as_path()) {
-                    p.lock().unwrap().done_items += 1;
-                    continue; // moving onto itself is a no-op
+                move_one(s, dest, decide.get(s).copied().unwrap_or(Conflict::KeepBoth), p, cancel, ctx);
+            }
+        }
+        OpKind::Sort { moves, .. } => {
+            p.lock().unwrap().total_items = moves.len();
+            for (s, dest) in moves {
+                if cancel.stop() {
+                    break;
                 }
-                if inside(dest, s) {
-                    p.lock().unwrap().errors.push(format!("Can't move {} into itself", s.display()));
-                    continue;
-                }
-                let policy = decide.get(s).copied().unwrap_or(Conflict::KeepBoth);
-                let Some(dst) = resolve_dest(s, dest, policy, p) else { continue };
-                p.lock().unwrap().current = name_of(s);
-                let merge = policy == Conflict::Merge && dst.is_dir();
-                let r = match if merge { Err(std::io::Error::from_raw_os_error(libc::EXDEV)) } else { fs::rename(s, &dst) } {
-                    Ok(()) => Ok(()),
-                    // Cross-device: copy then delete.
-                    Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-                        p.lock().unwrap().total_bytes += tree_size(s);
-                        copy_tree(s, &dst, p, cancel, ctx, merge).and_then(|_| remove_tree(s))
+                // The folders it makes, outermost first, so Undo can take them away again.
+                if !dest.is_dir() {
+                    let mut new = vec![];
+                    let mut d = dest.as_path();
+                    while !d.exists() {
+                        new.push(d.to_path_buf());
+                        let Some(up) = d.parent() else { break };
+                        d = up;
                     }
-                    Err(e) => Err(e),
-                };
-                match r {
-                    Ok(()) => p.lock().unwrap().produced.push((s.clone(), dst)),
-                    Err(e) => {
+                    if let Err(e) = fs::create_dir_all(dest) {
                         let mut g = p.lock().unwrap();
-                        if crate::admin::denied(&e) {
-                            g.denied.push(s.clone());
-                        }
-                        if crate::holders::is_busy(&e) {
-                            g.busy.push(s.clone());
-                        }
-                        g.errors.push(format!("{}: {e}", s.display()));
+                        g.errors.push(format!("{}: {e}", dest.display()));
+                        g.done_items += 1;
+                        continue;
                     }
+                    p.lock().unwrap().made.extend(new.into_iter().rev());
                 }
-                p.lock().unwrap().done_items += 1;
-                ctx.request_repaint();
+                move_one(s, dest, Conflict::KeepBoth, p, cancel, ctx);
             }
         }
         OpKind::Trash { paths } => {
@@ -284,6 +282,45 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
             }
         }
     }
+}
+
+/// Move `s` into `dest`, recording what it became (or why it couldn't).
+fn move_one(s: &PathBuf, dest: &Path, policy: Conflict, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
+    if s.parent() == Some(dest) {
+        p.lock().unwrap().done_items += 1;
+        return; // moving onto itself is a no-op
+    }
+    if inside(dest, s) {
+        p.lock().unwrap().errors.push(format!("Can't move {} into itself", s.display()));
+        return;
+    }
+    let Some(dst) = resolve_dest(s, dest, policy, p) else { return };
+    p.lock().unwrap().current = name_of(s);
+    let merge = policy == Conflict::Merge && dst.is_dir();
+    let r = match if merge { Err(std::io::Error::from_raw_os_error(libc::EXDEV)) } else { fs::rename(s, &dst) } {
+        Ok(()) => Ok(()),
+        // Cross-device: copy then delete.
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            p.lock().unwrap().total_bytes += tree_size(s);
+            copy_tree(s, &dst, p, cancel, ctx, merge).and_then(|_| remove_tree(s))
+        }
+        Err(e) => Err(e),
+    };
+    match r {
+        Ok(()) => p.lock().unwrap().produced.push((s.clone(), dst)),
+        Err(e) => {
+            let mut g = p.lock().unwrap();
+            if crate::admin::denied(&e) {
+                g.denied.push(s.clone());
+            }
+            if crate::holders::is_busy(&e) {
+                g.busy.push(s.clone());
+            }
+            g.errors.push(format!("{}: {e}", s.display()));
+        }
+    }
+    p.lock().unwrap().done_items += 1;
+    ctx.request_repaint();
 }
 
 /// Extract into a hidden staging folder beside the results, then move each top-level

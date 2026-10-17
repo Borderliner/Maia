@@ -6570,3 +6570,130 @@ fn pdfs_merged_and_split_through_poppler() {
     assert!(!w.join("Bad.pdf").exists() && parts_in(&w).is_empty(), "{:?}", parts_in(&w));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A JPEG made by ImageMagick with a date taken and, when given, a place written into its
+/// EXIF by exiv2; None without the two tools.
+pub(crate) fn exif_photo(path: &Path, size: &str, taken: &str, gps: Option<[&str; 4]>) -> Option<()> {
+    if !crate::media::have("magick") || !crate::media::have("exiv2") {
+        return None;
+    }
+    let ok = std::process::Command::new("magick").args(["-size", size, "gradient:#e94-#36c"]).arg(path).status().ok()?.success();
+    assert!(ok, "magick");
+    let mut c = std::process::Command::new("exiv2");
+    c.arg(format!("-Mset Exif.Photo.DateTimeOriginal Ascii {taken}"));
+    if let Some([lat_ref, lat, lon_ref, lon]) = gps {
+        c.arg(format!("-Mset Exif.GPSInfo.GPSLatitudeRef {lat_ref}")).arg(format!("-Mset Exif.GPSInfo.GPSLatitude {lat}"));
+        c.arg(format!("-Mset Exif.GPSInfo.GPSLongitudeRef {lon_ref}")).arg(format!("-Mset Exif.GPSInfo.GPSLongitude {lon}"));
+    }
+    let ok = c.arg("mo").arg(path).stderr(std::process::Stdio::null()).status().ok()?.success();
+    assert!(ok, "exiv2");
+    Some(())
+}
+
+/// EXIF as exiv2 writes it, read back: the date a photo was taken, its place (south and
+/// west negative), its orientation, in a JPEG and a WebP; a photo without EXIF and a
+/// file cut short give nothing and don't fail.
+#[test]
+fn exif_dates_and_places_from_real_photos() {
+    let d = tmpdir("exif");
+    let jpg = d.join("sydney.jpg");
+    if exif_photo(&jpg, "64x48", "2023:07:14 10:20:30", Some(["S", "33/1 51/1 3540/100", "E", "151/1 12/1 4020/100"])).is_none() {
+        return;
+    }
+    let x = crate::exif::read(&jpg).expect("EXIF read");
+    assert_eq!(x.taken, Some([2023, 7, 14, 10, 20, 30]));
+    let (lat, lon) = x.gps.expect("a place");
+    assert!((lat + 33.8598).abs() < 1e-3 && (lon - 151.2112).abs() < 1e-3, "{lat} {lon}");
+    assert_eq!(x.orientation, 1);
+    let ok = std::process::Command::new("exiv2").args(["-Mset Exif.Image.Orientation 6", "-Mset Exif.GPSInfo.GPSLongitudeRef W", "mo"]).arg(&jpg).status().unwrap().success();
+    assert!(ok);
+    let x = crate::exif::read(&jpg).unwrap();
+    assert_eq!(x.orientation, 6);
+    assert!(x.gps.unwrap().1 < -151.0, "west is negative");
+    // The decoder turns it by the same field.
+    assert_eq!(crate::imgdec::load(&jpg, 64).unwrap().1, [48, 64]);
+    let webp = d.join("plain.webp");
+    assert!(std::process::Command::new("magick").args(["-size", "40x30", "xc:teal"]).arg(&webp).status().unwrap().success());
+    assert!(crate::exif::read(&webp).is_none_or(|x| x.taken.is_none()), "no EXIF, no date");
+    let ok = std::process::Command::new("exiv2").args(["-Mset Exif.Photo.DateTimeOriginal Ascii 2021:12:31 23:59:00", "mo"]).arg(&webp).stderr(std::process::Stdio::null()).status().unwrap().success();
+    if ok {
+        assert_eq!(crate::exif::read(&webp).and_then(|x| x.taken), Some([2021, 12, 31, 23, 59, 0]), "WebP's EXIF chunk");
+    }
+    let bytes = std::fs::read(&jpg).unwrap();
+    for cut in [2, 10, 40, 100] {
+        let _ = crate::exif::block(&bytes[..cut]).map(crate::exif::parse);
+    }
+    assert_eq!(crate::exif::parse(b"Exif\0\0MM\0*\0\0\0\x08\xff\xff"), crate::exif::Exif { orientation: 1, ..Default::default() });
+    assert!(crate::exif::read(&d).is_none(), "a folder is no photo");
+}
+
+/// Tidy Folder's plans for a real folder: by kind, installers before archives, folders,
+/// hidden and unknown files left alone, a folder already named for a kind keeping its
+/// own; photos by the month they were taken from their EXIF, else by when they last
+/// changed, said so.
+#[test]
+fn tidy_plans_by_kind_and_month() {
+    use crate::tidy::{Mode, kind_folder, month_folder, read_plans};
+    for (n, k) in [("setup.deb", Some("Installers")), ("Game.AppImage", Some("Installers")), ("yay-12.4-1-x86_64.pkg.tar.zst", Some("Installers")), ("Tool.flatpakref", Some("Installers")), ("photos.tar.gz", Some("Archives")), ("a.ZIP", Some("Archives")), ("IMG_1.JPG", Some("Pictures")), ("scan.heic", Some("Pictures")), ("report.pdf", Some("Documents")), ("notes.txt", Some("Documents")), ("song.flac", Some("Music")), ("clip.MOV", Some("Videos")), ("main.rs", None), ("README", None), (".zip", None)] {
+        assert_eq!(kind_folder(n), k, "{n}");
+    }
+    assert_eq!(month_folder(2024, 6), "2024/2024-06");
+    let d = tmpdir("tidy");
+    let dl = d.join("Downloads");
+    std::fs::create_dir_all(dl.join("Old stuff")).unwrap();
+    for f in ["setup.deb", "photos.tar.gz", "report.pdf", "song.mp3", "clip.mp4", "main.rs", ".hidden.png", "screen.png"] {
+        touch(&dl.join(f), f);
+    }
+    let shot = dl.join("trip.jpg");
+    if exif_photo(&shot, "32x24", "2022:03:09 08:00:00", None).is_none() {
+        return;
+    }
+    // Last changed on 2025-05-20 at noon, local time.
+    let may = crate::timefmt::parse_local("2025-05-20T12:00:00").unwrap();
+    for f in ["screen.png", "clip.mp4", "trip.jpg"] {
+        std::fs::File::options().write(true).open(dl.join(f)).unwrap().set_modified(may).unwrap();
+    }
+    let p = read_plans(&dl).unwrap();
+    let kind: Vec<(String, String)> = p.kind.iter().map(|m| (m.src.file_name().unwrap().to_string_lossy().into_owned(), m.to.clone())).collect();
+    let want: Vec<(String, String)> = [("clip.mp4", "Videos"), ("photos.tar.gz", "Archives"), ("report.pdf", "Documents"), ("screen.png", "Pictures"), ("setup.deb", "Installers"), ("song.mp3", "Music"), ("trip.jpg", "Pictures")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    assert_eq!(kind, want);
+    let month: Vec<(String, String, bool)> = p.month.iter().map(|m| (m.src.file_name().unwrap().to_string_lossy().into_owned(), m.to.clone(), m.taken)).collect();
+    assert_eq!(month, [("clip.mp4".to_string(), "2025/2025-05".to_string(), false), ("screen.png".into(), "2025/2025-05".into(), false), ("trip.jpg".into(), "2022/2022-03".into(), true)]);
+    // Already a Pictures folder: its pictures stay.
+    let pics = d.join("Pictures");
+    std::fs::create_dir_all(&pics).unwrap();
+    touch(&pics.join("a.png"), "x");
+    touch(&pics.join("b.pdf"), "x");
+    let p = read_plans(&pics).unwrap();
+    assert_eq!(p.kind.iter().map(|m| m.to.as_str()).collect::<Vec<_>>(), ["Documents"]);
+    assert_eq!(p.month.len(), 1, "by month it is still sorted");
+    assert!(read_plans(&d.join("gone")).is_err());
+    let _ = Mode::Kind;
+}
+
+/// The moves run as one job: folders made as needed, a name already taken kept apart,
+/// and Undo putting every file back and taking away the folders it made (not one that
+/// was there before).
+#[test]
+fn tidy_moves_and_undo() {
+    let d = tmpdir("tidy-job");
+    std::fs::create_dir_all(d.join("Music")).unwrap();
+    touch(&d.join("Music/song.mp3"), "old");
+    for f in ["song.mp3", "a.png", "b.pdf"] {
+        touch(&d.join(f), f);
+    }
+    let moves = vec![(d.join("song.mp3"), d.join("Music")), (d.join("a.png"), d.join("2024/2024-06")), (d.join("b.pdf"), d.join("Documents"))];
+    let job = ops::spawn(1, OpKind::Sort { moves, label: "Tidying x".into() }, egui::Context::default());
+    let t0 = Instant::now();
+    while !job.progress.lock().unwrap().finished {
+        assert!(t0.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let p = std::mem::take(&mut *job.progress.lock().unwrap());
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    assert_eq!(std::fs::read_to_string(d.join("Music/song (1).mp3")).unwrap(), "song.mp3");
+    assert_eq!(std::fs::read_to_string(d.join("Music/song.mp3")).unwrap(), "old");
+    assert!(d.join("2024/2024-06/a.png").is_file() && d.join("Documents/b.pdf").is_file());
+    assert_eq!(p.made, [d.join("2024"), d.join("2024/2024-06"), d.join("Documents")]);
+    assert_eq!(p.produced.len(), 3);
+}

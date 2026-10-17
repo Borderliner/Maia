@@ -179,29 +179,7 @@ fn jpeg(b: &[u8]) -> Option<(Rgba, u8)> {
 
 /// Orientation (1..=8) from a raw EXIF/TIFF block.
 fn exif_orientation(e: &[u8]) -> u8 {
-    let d = e.strip_prefix(b"Exif\0\0").unwrap_or(e);
-    if d.len() < 8 {
-        return 1;
-    }
-    let le = &d[0..2] == b"II";
-    let u16_at = |i: usize| -> Option<u16> {
-        let s = d.get(i..i + 2)?;
-        Some(if le { u16::from_le_bytes([s[0], s[1]]) } else { u16::from_be_bytes([s[0], s[1]]) })
-    };
-    let u32_at = |i: usize| -> Option<u32> {
-        let s = d.get(i..i + 4)?;
-        Some(if le { u32::from_le_bytes([s[0], s[1], s[2], s[3]]) } else { u32::from_be_bytes([s[0], s[1], s[2], s[3]]) })
-    };
-    let Some(ifd) = u32_at(4) else { return 1 };
-    let ifd = ifd as usize;
-    let Some(n) = u16_at(ifd) else { return 1 };
-    for k in 0..n as usize {
-        let at = ifd + 2 + k * 12;
-        if u16_at(at) == Some(0x0112) {
-            return u16_at(at + 8).map(|v| v as u8).filter(|v| (1..=8).contains(v)).unwrap_or(1);
-        }
-    }
-    1
+    crate::exif::parse(e).orientation
 }
 
 fn webp(b: &[u8]) -> Option<Rgba> {

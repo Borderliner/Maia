@@ -189,6 +189,7 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
                 items.push(Item::cmd(Cmd::SaveSmart));
             }
             items.push(Item::cmd(Cmd::SpaceUsed));
+            items.push(Item::cmd(Cmd::TidyFolder));
         }
         if in_trash {
             items.push(Item::sep());

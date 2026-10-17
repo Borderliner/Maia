@@ -1022,7 +1022,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(147) {
+    match rng.below(148) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1976,6 +1976,38 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             s.idle(1 + rng.below(30));
             if rng.below(3) == 0 && some_text_at(s, "Cancel") {
                 s.click_text("Cancel");
+            }
+        }
+        147 => {
+            // Tidy Folder: from the folder's menu or the palette, the two ways looked at,
+            // applied or let go, sometimes undone at once.
+            if rng.below(2) == 0 {
+                s.cmd(Cmd::TidyFolder);
+            } else {
+                let list = s.app.panels.get(&s.app.active).map(|p| p.list_rect);
+                if let Some(l) = list {
+                    s.act(&format!("click {:.0} {:.0} right", l.center().x, l.bottom() - 10.0));
+                    s.act("text tidy");
+                    s.act("key Enter");
+                }
+            }
+            s.idle(2 + rng.below(20));
+            for _ in 0..rng.below(4) {
+                click_control_at(s, rng.pick(&["tidy by kind", "tidy by month"]));
+            }
+            if matches!(s.app.popup, Popup::Tidy(_)) {
+                match rng.below(3) {
+                    0 => click_control_at(s, "tidy apply"),
+                    1 => s.act("key Enter"),
+                    _ => s.act("key Escape"),
+                }
+                if matches!(s.app.popup, Popup::Tidy(_)) {
+                    s.act("key Escape");
+                }
+                s.settle();
+                if rng.below(2) == 0 {
+                    s.act("key ctrl+z");
+                }
             }
         }
         _ => {
@@ -8702,6 +8734,110 @@ mod journeys {
         look(&mut s, "after converting");
         s.shot("convert-done");
         report("convert", &s);
+    }
+
+    /// Tidy Folder from the folder's menu: every move listed beside where it goes, by
+    /// kind and then photos by month (the date a photo was taken, or its file date,
+    /// said so); applied as one job; Undo puts every file back and takes the new
+    /// folders away; by month too; at other font sizes and Spacing and a small window.
+    #[test]
+    fn tidy_a_folder() {
+        if !sandboxed() {
+            return;
+        }
+        let d = root().join("home/Downloads");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("Keep me")).unwrap();
+        for f in ["setup.deb", "photos.tar.gz", "report.pdf", "song.mp3", "clip.mp4", "main.rs", ".hidden.png"] {
+            std::fs::write(d.join(f), f).unwrap();
+        }
+        png_file(&d.join("screen.png"), 40, 30, 2);
+        if crate::tests::exif_photo(&d.join("trip.jpg"), "64x48", "2022:03:09 08:00:00", None).is_none() {
+            return;
+        }
+        let may = crate::timefmt::parse_local("2025-05-20T12:00:00").unwrap();
+        for f in ["screen.png", "clip.mp4"] {
+            std::fs::File::options().write(true).open(d.join(f)).unwrap().set_modified(may).unwrap();
+        }
+        let before: Vec<String> = {
+            let mut v: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            v.sort();
+            v
+        };
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.settle();
+        let open = |s: &mut Sim| {
+            let list = s.app.panels[&s.app.active].list_rect;
+            s.act(&format!("click {:.0} {:.0} right", list.center().x, list.bottom() - 30.0));
+            s.idle(2);
+            menu_pick(s, "Tidy Folder…");
+            wait_until(s, "the plan", 10, |s| matches!(&s.app.popup, Popup::Tidy(t) if t.plans.is_some()));
+            s.idle(2);
+        };
+        open(&mut s);
+        for t in ["Tidy Downloads", "By kind", "Photos by month", "setup.deb", "Installers", "Archives", "Documents", "Music", "Videos", "Pictures", "7 files into 6 folders"] {
+            assert!(some_text(&s, t), "{t:?} shown");
+        }
+        let Popup::Tidy(t) = &s.app.popup else { s.fail("the dialog") };
+        let names: Vec<String> = t.moves().iter().map(|m| m.src.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert!(!names.iter().any(|n| ["main.rs", "Keep me", ".hidden.png"].contains(&n.as_str())), "left alone: {names:?}");
+        look(&mut s, "tidy by kind");
+        shot_still(&mut s, "tidy-kind");
+        click_control(&mut s, "tidy by month");
+        s.idle(2);
+        for t in ["2022/2022-03", "2025/2025-05  (file date)", "3 files into 2 folders"] {
+            assert!(some_text(&s, t), "{t:?} shown");
+        }
+        look(&mut s, "tidy by month");
+        shot_still(&mut s, "tidy-month");
+        for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
+            s.app.cfg.font_size = font;
+            s.app.cfg.spacing = spacing;
+            s.idle(3);
+            look(&mut s, &format!("tidy at font {font}, spacing {spacing}"));
+        }
+        s.resize(640.0, 480.0);
+        look(&mut s, "tidy in a small window");
+        s.shot("tidy-small");
+        s.resize(1280.0, 800.0);
+        click_control(&mut s, "tidy by kind");
+        s.act("key Enter");
+        wait_until(&mut s, "tidied", 10, |_| d.join("Installers/setup.deb").is_file() && d.join("Pictures/trip.jpg").is_file());
+        wait_until(&mut s, "the job done", 10, |s| s.app.undo.last().is_some_and(|u| u.label == "Tidy Downloads"));
+        for (f, k) in [("photos.tar.gz", "Archives"), ("report.pdf", "Documents"), ("song.mp3", "Music"), ("clip.mp4", "Videos"), ("screen.png", "Pictures")] {
+            assert!(d.join(k).join(f).is_file(), "{k}/{f}");
+        }
+        assert!(d.join("main.rs").is_file() && d.join(".hidden.png").is_file() && d.join("Keep me").is_dir());
+        s.settle();
+        look(&mut s, "tidied");
+        s.shot("tidy-done");
+        s.act("key ctrl+z");
+        s.settle();
+        let after: Vec<String> = {
+            let mut v: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(after, before, "Undo put it all back");
+        // By month, from the palette.
+        palette_run(&mut s, "Tidy Folder…");
+        wait_until(&mut s, "the plan", 10, |s| matches!(&s.app.popup, Popup::Tidy(t) if t.plans.is_some()));
+        click_control(&mut s, "tidy by month");
+        click_control(&mut s, "tidy apply");
+        wait_until(&mut s, "by month", 10, |_| d.join("2022/2022-03/trip.jpg").is_file() && d.join("2025/2025-05/clip.mp4").is_file());
+        assert!(d.join("report.pdf").is_file(), "only photos and videos");
+        // Nothing left to sort: said so, and Tidy can't be pressed.
+        let empty = root().join("home/Downloads/Keep me");
+        go(&mut s, &empty);
+        palette_run(&mut s, "Tidy Folder…");
+        wait_until(&mut s, "the plan", 10, |s| matches!(&s.app.popup, Popup::Tidy(t) if t.plans.is_some()));
+        s.idle(2);
+        assert!(some_text(&s, "Nothing here to sort by kind"));
+        s.act("key Enter");
+        assert!(matches!(s.app.popup, Popup::Tidy(_)), "nothing to do: it stays open");
+        s.act("key Escape");
+        report("tidy", &s);
     }
 
     /// Recent Projects from its key: the git repositories under the home folder, the

@@ -70,6 +70,9 @@ pub enum UndoKind {
     Trashed(Vec<PathBuf>),
     /// Pictures changed in place, their originals in the trash.
     Replaced(Vec<PathBuf>),
+    /// Files moved into folders made for them (outermost first), which go again if
+    /// nothing else is in them by then.
+    Sorted(Vec<(PathBuf, PathBuf)>, Vec<PathBuf>),
 }
 
 pub struct App {
@@ -1175,6 +1178,13 @@ impl App {
                         self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Move(p.produced.clone()) });
                     }
                 }
+                if let OpKind::Sort { moves, .. } = &j.kind {
+                    if !p.produced.is_empty() || !p.made.is_empty() {
+                        let label = j.label.replacen("Tidying", "Tidy", 1);
+                        self.undo.push(UndoEntry { label, kind: UndoKind::Sorted(p.produced.clone(), p.made.clone()) });
+                    }
+                    finished_dirs.extend(moves.first().and_then(|m| m.0.parent()).map(Path::to_path_buf));
+                }
                 if let OpKind::Copy { .. } | OpKind::Extract { .. } | OpKind::Compress { .. } | OpKind::Convert { .. } = j.kind {
                     if !p.produced.is_empty() {
                         let label = match &j.kind {
@@ -1848,6 +1858,7 @@ impl App {
                 Some(d) => self.popup = crate::devtools::tasks(&ctx, d),
                 None => self.toast("Run Task needs a folder"),
             },
+            Cmd::TidyFolder => crate::tidy::open(self),
             Cmd::BatchRename => {
                 let panel = self.active;
                 match crate::batchname::open(self, panel) {
@@ -2778,6 +2789,17 @@ impl App {
                 errs += best.values().filter(|it| crate::trashcan::restore(it).is_err()).count();
             }
             UndoKind::Replaced(paths) => errs += crate::picfix::undo_replaced(paths),
+            UndoKind::Sorted(pairs, made) => {
+                for (src, dst) in pairs {
+                    if std::fs::symlink_metadata(src).is_ok() || std::fs::rename(dst, src).is_err() {
+                        errs += 1;
+                    }
+                }
+                // Innermost first; one something else was put into stays.
+                for d in made.iter().rev() {
+                    let _ = std::fs::remove_dir(d);
+                }
+            }
         }
         for p in self.panels.values_mut() {
             p.tab_mut().reload();
