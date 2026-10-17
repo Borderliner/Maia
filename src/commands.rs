@@ -243,6 +243,16 @@ commands! {
     CopyCodeBlocks, "copy_code_blocks", Files, "Copy As Code Blocks", "Copy the selected files' text as Markdown code blocks under their paths; a folder gives the files git keeps.", [];
     CopyWebLink, "copy_web_link", Files, "Copy Web Link", "Copy a link to the selection on GitHub, GitLab or Codeberg at this commit, with the line a search showed.", [];
     OpenWebLink, "open_web_link", Files, "Open Web Link", "Open the selection on GitHub, GitLab or Codeberg in your browser, at this commit and the line a search showed.", [];
+    Email, "email", Files, "Email", "Attach the selected files to a new email in your mail app.", [];
+    Print, "print", Files, "Print…", "Print the selected files on one of your printers.", [];
+    RotateLeft, "rotate_left", Files, "Rotate Left", "Turn the selected pictures a quarter to the left, in place; the originals go to the trash.", [];
+    RotateRight, "rotate_right", Files, "Rotate Right", "Turn the selected pictures a quarter to the right, in place; the originals go to the trash.", [];
+    ResizeHalf, "resize_half", Files, "Resize To Half", "Save a copy of each selected picture at half its size, beside it.", [];
+    ResizeQuarter, "resize_quarter", Files, "Resize To A Quarter", "Save a copy of each selected picture at a quarter of its size, beside it.", [];
+    ResizeFit, "resize_fit", Files, "Resize To Fit 1920 px", "Save a copy of each selected picture no larger than 1920 pixels on its longer side, beside it.", [];
+    ResizeCustom, "resize_custom", Files, "Resize To…", "Save a copy of each selected picture at a size you type: its longer side, width × height, or a percentage.", [];
+    CropPicture, "crop_picture", Files, "Crop…", "Drag over the part of the picture to keep in the inspector, then press Enter to save it as a copy.", [];
+    SetWallpaper, "set_wallpaper", Files, "Set As Wallpaper", "Make the selected picture the desktop's wallpaper.", [];
     CompareFiles, "compare_files", Files, "Compare Files", "Show how the two selected files differ, in the inspector.", [];
     GitIgnore, "git_ignore", Files, "Add To .gitignore", "Ignore the selected files or folders in this repository's .gitignore.", [];
     GitIgnoreExt, "git_ignore_ext", Files, "Ignore Files Like This", "Ignore every file with the selected file's extension in this repository's .gitignore.", [];

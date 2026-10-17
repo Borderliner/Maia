@@ -64,6 +64,8 @@ pub enum UndoKind {
     Move(Vec<(PathBuf, PathBuf)>),
     Created(Vec<PathBuf>),
     Trashed(Vec<PathBuf>),
+    /// Pictures changed in place, their originals in the trash.
+    Replaced(Vec<PathBuf>),
 }
 
 pub struct App {
@@ -160,6 +162,8 @@ pub struct App {
     shares: Vec<std::sync::mpsc::Receiver<ShareDone>>,
     /// How the Connect dialog's last attempt ended: (address, Ok or the reason).
     dialog_result: Option<(String, Result<(), String>)>,
+    /// Wallpapers, printing and picture fixes, run one after another.
+    pub errands: crate::errands::Runner,
 }
 
 /// What a thread sharing files hands back: text for the clipboard, what to say, and a
@@ -263,6 +267,7 @@ impl App {
             trash_days: cfg.trash_days,
             shares: vec![],
             dialog_result: None,
+            errands: Default::default(),
             cfg,
             ud,
         };
@@ -917,6 +922,7 @@ impl App {
         self.pump_net();
         self.pump_shares(ctx);
         self.age_trash();
+        crate::errands::pump(self);
         let notes = std::mem::take(&mut *self.notes.lock().unwrap_or_else(|e| e.into_inner()));
         if let Some(n) = notes.into_iter().last() {
             self.toast(n);
@@ -2098,6 +2104,7 @@ impl App {
                     Err(e) => ShareDone { copy: None, open: vec![], toast: format!("Couldn't make a link: {e}"), rescan: None, renamed: None },
                 });
             }
+            Cmd::SetWallpaper | Cmd::Email | Cmd::Print | Cmd::RotateLeft | Cmd::RotateRight | Cmd::ResizeHalf | Cmd::ResizeQuarter | Cmd::ResizeFit | Cmd::ResizeCustom | Cmd::CropPicture => crate::errands::run(self, cmd),
             Cmd::CompareFiles => {
                 let files: Vec<PathBuf> = self.tab().target_entries().iter().filter(|e| !e.is_dir).map(|e| e.path.clone()).collect();
                 let [a, b] = files.as_slice() else {
@@ -2666,6 +2673,7 @@ impl App {
                 }
                 errs += best.values().filter(|it| crate::trashcan::restore(it).is_err()).count();
             }
+            UndoKind::Replaced(paths) => errs += crate::picfix::undo_replaced(paths),
         }
         for p in self.panels.values_mut() {
             p.tab_mut().reload();

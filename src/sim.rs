@@ -429,9 +429,15 @@ pub fn media_fixture(name: &str) -> PathBuf {
     png_file(&d.join("photo.png"), 320, 200, 5);
     std::fs::write(d.join("drawing.svg"), r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48" viewBox="0 0 64 48"><rect width="64" height="48" fill="#2a7"/><circle cx="32" cy="24" r="16" fill="#fc3"/></svg>"##).unwrap();
     std::fs::write(d.join("broken.mp4"), b"\x00\x00\x00\x18ftypmp42 this is not a video").unwrap();
-    // Minimal valid PDF: three A6 pages, each a differently coloured rectangle.
-    let colors = ["0.2 0.4 0.8", "0.8 0.3 0.2", "0.2 0.7 0.3"];
-    let mut objs = vec!["<< /Type /Catalog /Pages 2 0 R >>".to_string(), "<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3 >>".to_string()];
+    std::fs::write(d.join("doc.pdf"), sample_pdf(&["0.2 0.4 0.8", "0.8 0.3 0.2", "0.2 0.7 0.3"])).unwrap();
+    d
+}
+
+/// A minimal valid PDF written by hand: one A6 page per colour ("r g b"), each a
+/// rectangle filled with it.
+pub fn sample_pdf(colors: &[&str]) -> String {
+    let kids: Vec<String> = (0..colors.len()).map(|k| format!("{} 0 R", 3 + 2 * k)).collect();
+    let mut objs = vec!["<< /Type /Catalog /Pages 2 0 R >>".to_string(), format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), colors.len())];
     for (k, c) in colors.iter().enumerate() {
         let stream = format!("{c} rg 20 20 250 380 re f");
         objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 298 420] /Contents {} 0 R >>", 4 + 2 * k));
@@ -449,8 +455,7 @@ pub fn media_fixture(name: &str) -> PathBuf {
         pdf.push_str(&format!("{o:010} 00000 n \n"));
     }
     pdf.push_str(&format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1));
-    std::fs::write(d.join("doc.pdf"), pdf).unwrap();
-    d
+    pdf
 }
 
 pub struct Sim {
@@ -1012,7 +1017,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(125) {
+    match rng.below(129) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1296,6 +1301,106 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             if matches!(s.app.popup, Popup::Confirm { .. }) {
                 s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
             }
+        }
+        125 => {
+            // An office document previewed through the stand-in LibreOffice, then left at
+            // once (its conversion killed) or after a page or two.
+            let dir = root().join("home").read_dir().ok().and_then(|r| r.flatten().map(|d| d.path().join("Documents/Office")).find(|p| p.is_dir()));
+            if let Some(dir) = dir {
+                let f = *rng.pick(&["plan.docx", "sheet.ods", "slow deck.odp", "broken.pptx"]);
+                s.act("key ctrl+p");
+                s.act(&format!("text {}", dir.join(f).display()));
+                s.act("key Enter");
+                s.settle();
+                if s.app.panels.get(&s.app.active).is_some_and(|p| p.inspector.is_none()) {
+                    s.cmd(Cmd::ToggleInspector);
+                }
+                s.idle(1 + rng.below(30));
+                if rng.below(2) == 0 {
+                    s.act("key PageDown");
+                }
+            }
+        }
+        126 => {
+            // A picture made the wallpaper on one desktop or another (stand-in setters),
+            // from a menu or the palette.
+            let pics = root().join("home").read_dir().ok().and_then(|r| r.flatten().map(|d| d.path().join("Pictures/Trip")).find(|p| p.is_dir()));
+            crate::wallpaper::DESKTOP.with(|w| *w.borrow_mut() = rng.pick(&["Hyprland", "GNOME", "KDE", "LXQt", ""]).to_string());
+            if let Some(dir) = pics.filter(|_| rng.below(3) > 0) {
+                s.act("key ctrl+p");
+                s.act(&format!("text {}", dir.join(format!("img{:02}.png", rng.below(12))).display()));
+                s.act("key Enter");
+                s.settle();
+            }
+            if rng.below(2) == 0 {
+                s.cmd(Cmd::SetWallpaper);
+            } else {
+                let (x, y) = p(rng);
+                s.act(&format!("click {x:.0} {y:.0} right"));
+                s.act("text wallpaper");
+                s.act("key Enter");
+            }
+            s.idle(1 + rng.below(10));
+        }
+        127 => {
+            // Email or print what is selected, from the palette or a menu; in the Print
+            // dialog, printers and copies by key or click, then print or cancel.
+            crate::sendto::MAIL_APP.with(|m| *m.borrow_mut() = (rng.below(3) > 0).then(|| "thunderbird %u".to_string()));
+            if rng.below(2) == 0 {
+                s.cmd(*rng.pick(&[Cmd::Email, Cmd::Print]));
+            } else {
+                let (x, y) = p(rng);
+                s.act(&format!("click {x:.0} {y:.0} right"));
+                s.act(&format!("text {}", rng.pick(&["email", "print"])));
+                s.act("key Enter");
+            }
+            s.idle(2 + rng.below(6));
+            if matches!(s.app.popup, Popup::Print(_)) {
+                for _ in 0..rng.below(5) {
+                    match rng.below(3) {
+                        0 => click_control_at(s, rng.pick(&["more copies", "fewer copies", "printer"])),
+                        _ => s.act(&format!("key {}", rng.pick(&["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]))),
+                    }
+                }
+                s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
+            }
+        }
+        128 => {
+            // A picture turned, resized or cropped (the real ImageMagick), from a menu or
+            // the palette; a crop dragged out and saved or let go.
+            let pics = root().join("home").read_dir().ok().and_then(|r| r.flatten().map(|d| d.path().join("Pictures/Trip")).find(|p| p.is_dir()));
+            if let Some(dir) = pics.filter(|_| rng.below(4) > 0) {
+                s.act("key ctrl+p");
+                s.act(&format!("text {}", dir.join(format!("img{:02}.png", rng.below(12))).display()));
+                s.act("key Enter");
+                s.settle();
+            }
+            match rng.below(3) {
+                0 => s.cmd(*rng.pick(&[Cmd::RotateLeft, Cmd::RotateRight, Cmd::ResizeHalf, Cmd::ResizeQuarter, Cmd::ResizeFit, Cmd::ResizeCustom])),
+                1 => {
+                    let (x, y) = p(rng);
+                    s.act(&format!("click {x:.0} {y:.0} right"));
+                    s.act(&format!("text {}", rng.pick(&["rotate", "half", "quarter", "1920", "other size", "crop"])));
+                    s.act("key Enter");
+                }
+                _ => s.cmd(Cmd::CropPicture),
+            }
+            s.idle(2);
+            if matches!(s.app.popup, Popup::Prompt { .. }) {
+                s.act("key ctrl+a");
+                s.act(&format!("text {}", rng.pick(&["50%", "64", "40 × 30", "nonsense", "0"])));
+                s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
+            }
+            let ir = s.app.panels.get(&s.app.active).and_then(|p| p.inspector_rect);
+            if let Some(ir) = ir.filter(|_| s.app.panels[&s.app.active].inspector.as_ref().is_some_and(|i| i.crop.is_some())) {
+                for _ in 0..1 + rng.below(3) {
+                    let (x0, y0) = (rng.f(ir.left(), ir.right()), rng.f(ir.top(), ir.bottom()));
+                    let (x1, y1) = (rng.f(ir.left(), ir.right()), rng.f(ir.top(), ir.bottom()));
+                    s.act(&format!("drag {x0:.0} {y0:.0} {x1:.0} {y1:.0}"));
+                }
+                s.act(&format!("key {}", rng.pick(&["Enter", "Escape", "ArrowDown"])));
+            }
+            s.idle(1 + rng.below(10));
         }
         121 => {
             // Sharing: code blocks, a web link or .gitignore, from the palette or a menu.
@@ -7260,6 +7365,465 @@ mod journeys {
         report("devprev", &s);
     }
 
+    /// Office documents in the inspector, through a stand-in for LibreOffice: a slow one
+    /// says it is being prepared and its conversion dies when the user moves on; a
+    /// document shows as its PDF with its pages; the second look is the cached PDF,
+    /// LibreOffice not started again; one it can't read says so under its name; and
+    /// without LibreOffice nothing is converted.
+    #[test]
+    fn office_previews() {
+        if !sandboxed() || !crate::media::have("pdftoppm") {
+            return;
+        }
+        let d = root().join("home/office");
+        let _ = std::fs::remove_dir_all(&d);
+        for f in ["Q3 report.docx", "budget.xlsx", "slow talk.odp", "broken.pptx", "notes.txt"] {
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(f), format!("not really {f}")).unwrap();
+        }
+        let fake = root().join("office-tools");
+        let _ = std::fs::remove_dir_all(&fake);
+        crate::tests::fake_soffice(&fake);
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.cmd(ToggleInspector);
+        s.settle();
+        let log = || std::fs::read_to_string(fake.join("soffice.log")).unwrap_or_default().lines().count();
+        // Slow: a quiet line while LibreOffice works, and nothing else moves.
+        select_path(&mut s, &d.join("slow talk.odp"));
+        wait_until(&mut s, "the slow conversion", 10, |_| fake.join("sleep.pid").exists());
+        assert!(inspector(&s).office_pending());
+        s.idle(2);
+        assert!(some_text(&s, "Preparing preview…"));
+        look(&mut s, "office preparing");
+        s.shot("office-preparing");
+        let pid = std::fs::read_to_string(fake.join("sleep.pid")).unwrap();
+        // Moving on kills it.
+        select_path(&mut s, &d.join("Q3 report.docx"));
+        assert!(crate::tests::process_gone(pid.trim()), "the slow conversion was killed");
+        wait_until(&mut s, "the document's pages", 20, |s| inspector(s).pdf_state().is_some_and(|(p, n, shown)| p == 1 && n == Some(2) && shown.is_some_and(|x| x.0 == 1)));
+        let e = s.tab().entries.iter().find(|e| e.name == "Q3 report.docx").unwrap().clone();
+        assert_eq!(inspector(&s).pdf_path(), Some(crate::office::cached(&e.path, e.size, e.modified).as_path()));
+        assert!(!some_text(&s, "Preparing preview…"));
+        toolbar_centred(&mut s, "office", &["1 / 2"]);
+        look(&mut s, "office preview");
+        s.shot("office-preview");
+        let list = s.app.panels[&s.app.active].list_rect;
+        s.act(&format!("move {:.0} {:.0}", list.right() + 150.0, list.center().y));
+        s.act("key PageDown");
+        wait_until(&mut s, "page 2", 20, |s| inspector(s).pdf_state().is_some_and(|(p, _, shown)| p == 2 && shown.is_some_and(|x| x.0 == 2)));
+        s.act("move -50 -50");
+        // The second look: the cached PDF straight away, LibreOffice not run.
+        let runs = log();
+        select_path(&mut s, &d.join("notes.txt"));
+        wait_until(&mut s, "the text", 10, |s| inspector(s).text_lines().is_some());
+        select_path(&mut s, &d.join("Q3 report.docx"));
+        wait_until(&mut s, "the cached pages", 3, |s| inspector(s).pdf_state().is_some_and(|(_, n, _)| n == Some(2)));
+        assert_eq!(log(), runs, "not converted again");
+        // A spreadsheet the same way; a deck LibreOffice can't read.
+        select_path(&mut s, &d.join("budget.xlsx"));
+        wait_until(&mut s, "the spreadsheet's pages", 20, |s| inspector(s).pdf_state().is_some_and(|(_, n, shown)| n == Some(2) && shown.is_some()));
+        select_path(&mut s, &d.join("broken.pptx"));
+        wait_until(&mut s, "the refusal", 20, |s| inspector(s).note() == Some("Can't preview this document"));
+        s.idle(2);
+        assert!(some_text(&s, "Can't preview this document") && some_text(&s, "broken.pptx"));
+        look(&mut s, "office refused");
+        s.shot("office-refused");
+        // At other font sizes and Spacing the toolbar keeps its place.
+        select_path(&mut s, &d.join("Q3 report.docx"));
+        wait_until(&mut s, "the pages again", 10, |s| inspector(s).pdf_state().is_some_and(|(_, n, shown)| n == Some(2) && shown.is_some()));
+        for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0)] {
+            s.app.cfg.font_size = font;
+            s.app.cfg.spacing = spacing;
+            s.idle(3);
+            toolbar_centred(&mut s, &format!("office at font {font}, spacing {spacing}"), &["1 / 2"]);
+            look(&mut s, &format!("office at font {font}, spacing {spacing}"));
+        }
+        // No LibreOffice: as before, nothing converted.
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(root().join("office-none")));
+        let runs = log();
+        std::fs::write(d.join("new.odt"), "fresh").unwrap();
+        s.cmd(Refresh);
+        wait_until(&mut s, "the new document listed", 10, |s| s.tab().entries.iter().any(|e| e.name == "new.odt"));
+        select_path(&mut s, &d.join("new.odt"));
+        s.settle();
+        assert!(!inspector(&s).office_pending() && inspector(&s).pdf_state().is_none());
+        assert_eq!(log(), runs);
+        report("office", &s);
+    }
+
+    /// Set As Wallpaper from a picture's menu with Noctalia running (a stand-in, found
+    /// among the running programs) on Hyprland; from the palette on GNOME, both of its
+    /// pictures set; on a desktop Maia can't drive, a toast and nothing run. Not offered
+    /// for a text file or for two pictures.
+    #[test]
+    fn set_as_wallpaper() {
+        if !sandboxed() {
+            return;
+        }
+        let d = root().join("home/wallpaper");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        png_file(&d.join("dunes.png"), 320, 200, 4);
+        png_file(&d.join("forest.png"), 200, 320, 7);
+        std::fs::write(d.join("notes.txt"), "not a picture").unwrap();
+        let fake = root().join("wallpaper-tools");
+        let _ = std::fs::remove_dir_all(&fake);
+        crate::tests::fake_tool(&fake, "noctalia", "[ \"$1\" = run ] && while :; do sleep 1; done; exit 0");
+        crate::tests::fake_tool(&fake, "gsettings", "exit 0");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+        crate::wallpaper::DESKTOP.with(|w| *w.borrow_mut() = "Hyprland".into());
+        let mut shell = std::process::Command::new(fake.join("noctalia")).arg("run").spawn().unwrap();
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+                crate::wallpaper::DESKTOP.with(|w| w.borrow_mut().clear());
+            }
+        }
+        let _reset = Reset;
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.settle();
+        let calls = || crate::tests::fake_calls(&fake).into_iter().filter(|c| c.get(1).map(String::as_str) != Some("run")).collect::<Vec<_>>();
+        // Not for text, nor for two pictures at once.
+        for (what, ctrl) in [("notes.txt", false), ("forest.png", true)] {
+            let row = row_text(&s, if ctrl { "dunes.png" } else { what });
+            select_path(&mut s, &d.join("dunes.png"));
+            if !ctrl {
+                select_path(&mut s, &d.join(what));
+            } else {
+                let r = row_text(&s, what);
+                s.act(&format!("click {:.0} {:.0} ctrl", r.center().x, r.center().y));
+            }
+            let row = if ctrl { row } else { row_text(&s, what) };
+            s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+            s.idle(2);
+            assert!(s.popup_open() && !some_text(&s, "Set As Wallpaper"), "{what}");
+            s.act("key Escape");
+        }
+        // Noctalia: its own message, the picture's path.
+        select_path(&mut s, &d.join("dunes.png"));
+        let row = row_text(&s, "dunes.png");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        look(&mut s, "the picture's menu");
+        shot_still(&mut s, "wallpaper-menu");
+        s.click_text("Set As Wallpaper");
+        wait_until(&mut s, "noctalia asked", 10, |_| !calls().is_empty());
+        wait_until(&mut s, "the toast", 10, |s| toast_is(s, "Wallpaper set"));
+        assert_eq!(calls(), [["noctalia", "msg", "wallpaper-set", d.join("dunes.png").to_str().unwrap()]]);
+        look(&mut s, "wallpaper set");
+        s.shot("wallpaper-set");
+        let _ = shell.kill();
+        let _ = shell.wait();
+        // GNOME, from the palette: the light and the dark picture.
+        crate::wallpaper::DESKTOP.with(|w| *w.borrow_mut() = "ubuntu:GNOME".into());
+        select_path(&mut s, &d.join("forest.png"));
+        palette_run(&mut s, "Set As Wallpaper");
+        wait_until(&mut s, "gsettings run", 10, |_| calls().len() == 3);
+        let uri = crate::clipboard::path_to_uri(&d.join("forest.png"));
+        assert_eq!(calls()[1], ["gsettings", "set", "org.gnome.desktop.background", "picture-uri", uri.as_str()]);
+        assert_eq!(calls()[2], ["gsettings", "set", "org.gnome.desktop.background", "picture-uri-dark", uri.as_str()]);
+        // A desktop Maia doesn't know: said plainly, nothing run.
+        crate::wallpaper::DESKTOP.with(|w| *w.borrow_mut() = "LXQt".into());
+        s.app.toast = None;
+        palette_run(&mut s, "Set As Wallpaper");
+        wait_until(&mut s, "the refusal", 10, |s| toast_is(s, "Maia can't set the wallpaper on this desktop"));
+        assert_eq!(calls().len(), 3);
+        look(&mut s, "wallpaper refused");
+        s.shot("wallpaper-refused");
+        report("wallpaper", &s);
+    }
+
+    /// Email and Print from a file's menu and the palette: the mail app opened with the
+    /// files attached; the Print dialog with CUPS's printers, the default chosen, another
+    /// picked by key, two copies sent to lp; no printers said plainly; neither offered
+    /// for a folder, Print not without CUPS, and no mail app said so.
+    #[test]
+    fn email_and_print() {
+        if !sandboxed() {
+            return;
+        }
+        let d = root().join("home/sendto");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("Receipts")).unwrap();
+        std::fs::write(d.join("report.pdf"), sample_pdf(&["0.2 0.4 0.8"])).unwrap();
+        png_file(&d.join("photo.png"), 120, 80, 2);
+        std::fs::write(d.join("notes.txt"), "remember the milk").unwrap();
+        let fake = root().join("sendto-tools");
+        let _ = std::fs::remove_dir_all(&fake);
+        crate::tests::fake_tool(&fake, "xdg-email", "exit 0");
+        let lpstat = |printers: &str| crate::tests::fake_tool(&fake, "lpstat", &format!("case \"$1\" in -e) printf '{printers}';; -d) echo 'system default destination: HP_ENVY_6000';; esac"));
+        lpstat("Office_Laser\\nHP_ENVY_6000\\n");
+        crate::tests::fake_tool(&fake, "lp", "echo 'request id is Office_Laser-12 (2 file(s))'");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+        crate::sendto::MAIL_APP.with(|m| *m.borrow_mut() = Some("thunderbird %u".into()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+                crate::sendto::MAIL_APP.with(|m| *m.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.settle();
+        let right = |s: &mut Sim, name: &str| {
+            let row = row_text(s, name);
+            s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+            s.idle(2);
+        };
+        // A folder: neither.
+        select_path(&mut s, &d.join("Receipts"));
+        right(&mut s, "Receipts");
+        assert!(!some_text(&s, "Email") && !some_text(&s, "Print…"));
+        s.act("key Escape");
+        // Email from the menu.
+        select_path(&mut s, &d.join("report.pdf"));
+        right(&mut s, "report.pdf");
+        assert!(some_text(&s, "Email") && some_text(&s, "Print…"));
+        shot_still(&mut s, "email-print-menu");
+        let n = launched().len();
+        s.click_text("Email");
+        s.idle(2);
+        assert!(launched()[n..].iter().any(|l| l.contains("xdg-email") && l.contains(&format!("\"--attach\" \"{}\"", d.join("report.pdf").display()))), "{:?}", &launched()[n..]);
+        assert!(toast_is(&s, "Opening a new email"));
+        // Print two files from the palette: the default printer first chosen.
+        let r = row_text(&s, "photo.png");
+        s.act(&format!("click {:.0} {:.0} ctrl", r.center().x, r.center().y));
+        palette_run(&mut s, "Print…");
+        wait_until(&mut s, "the printers", 10, |s| matches!(&s.app.popup, Popup::Print(st) if st.printers.is_some()));
+        s.idle(3);
+        assert!(some_text(&s, "Print 2 files") && some_text(&s, "Office_Laser") && some_text(&s, "HP_ENVY_6000") && some_text(&s, "Default"));
+        assert!(matches!(&s.app.popup, Popup::Print(st) if st.sel == 1), "the default chosen");
+        look(&mut s, "print dialog");
+        shot_still(&mut s, "print-dialog");
+        for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
+            s.app.cfg.font_size = font;
+            s.app.cfg.spacing = spacing;
+            s.idle(3);
+            look(&mut s, &format!("print dialog at font {font}, spacing {spacing}"));
+            if font == 16.5 {
+                shot_still(&mut s, "print-dialog-large");
+            }
+        }
+        // A short window: the dialog scrolls rather than lose its buttons.
+        for (w, h) in [(520.0, 340.0), (640.0, 480.0), (1280.0, 800.0)] {
+            s.resize(w, h);
+            look(&mut s, &format!("print dialog at {w}x{h}"));
+        }
+        s.act("key ArrowUp");
+        assert!(matches!(&s.app.popup, Popup::Print(st) if st.sel == 0));
+        click_control(&mut s, "more copies");
+        click_control(&mut s, "more copies");
+        s.act("key ArrowLeft");
+        s.idle(1);
+        assert!(some_text(&s, "2"));
+        assert!(matches!(&s.app.popup, Popup::Print(st) if st.copies == 2));
+        s.act("key Enter");
+        wait_until(&mut s, "lp", 10, |s| toast_is(s, "Sent 2 copies to Office_Laser"));
+        let lp = crate::tests::fake_calls(&fake).into_iter().find(|c| c[0] == "lp").unwrap();
+        assert_eq!(lp, ["lp", "-d", "Office_Laser", "-n", "2", d.join("photo.png").to_str().unwrap(), d.join("report.pdf").to_str().unwrap()]);
+        assert!(!s.popup_open());
+        // No printers.
+        lpstat("");
+        select_path(&mut s, &d.join("notes.txt"));
+        palette_run(&mut s, "Print…");
+        wait_until(&mut s, "no printers", 10, |s| matches!(&s.app.popup, Popup::Print(st) if st.printers.is_some()));
+        s.idle(3);
+        assert!(some_text(&s, "No printers are set up"));
+        look(&mut s, "no printers");
+        shot_still(&mut s, "print-none");
+        s.act("key Enter");
+        assert!(s.popup_open(), "nothing to print on");
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        // No CUPS: not offered. No mail app: said so.
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(root().join("sendto-none")));
+        crate::sendto::MAIL_APP.with(|m| *m.borrow_mut() = None);
+        right(&mut s, "notes.txt");
+        assert!(some_text(&s, "Email") && !some_text(&s, "Print…"));
+        s.click_text("Email");
+        s.idle(2);
+        assert!(toast_is(&s, "No mail app is set up"));
+        report("email-print", &s);
+    }
+
+    /// Picture fixes with the real ImageMagick: offered in a picture's menu only; a
+    /// photo stored turned turned right in place, again from the palette, and Undo
+    /// bringing the original back byte for byte; copies fitted within 1920 px and at a
+    /// typed size, selected as they land; a crop dragged on the inspector's picture,
+    /// moved and stretched, saved with Enter at the size the footer said, and one
+    /// cancelled with Escape; at other font sizes and Spacing.
+    #[test]
+    fn picture_fixes() {
+        if !sandboxed() {
+            return;
+        }
+        let d = root().join("home/picfix");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let Some(fake) = crate::tests::imagemagick_tools(&root().join("picfix-tools")) else { return };
+        let raw = root().join("raw.jpg");
+        assert!(std::process::Command::new(fake.join("magick")).args(["-size", "400x240", "gradient:#e94-#36c"]).arg(&raw).status().unwrap().success());
+        let original = crate::tests::with_exif_orientation(&std::fs::read(&raw).unwrap(), 6);
+        std::fs::write(d.join("photo.jpg"), &original).unwrap();
+        png_file(&d.join("big.png"), 2400, 1600, 6);
+        std::fs::write(d.join("notes.txt"), "not a picture").unwrap();
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.cmd(ToggleInspector);
+        s.settle();
+        let shown = |name: &str| crate::imgdec::load(&d.join(name), 64).map(|x| x.1);
+        let right = |s: &mut Sim, name: &str| {
+            select_path(s, &d.join(name));
+            let row = row_text(s, name);
+            s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+            s.idle(2);
+        };
+        // Only for pictures.
+        right(&mut s, "notes.txt");
+        assert!(!some_text(&s, "Picture"));
+        s.act("key Escape");
+        // Turned right in place, from the menu.
+        assert_eq!(shown("photo.jpg"), Some([240, 400]));
+        right(&mut s, "photo.jpg");
+        s.click_text("Picture");
+        s.idle(2);
+        for t in ["Rotate left", "Rotate right", "Resize", "Crop…"] {
+            assert!(some_text(&s, t), "{t}");
+        }
+        s.click_text("Resize");
+        s.idle(2);
+        assert!(some_text(&s, "Fit within 1920 px") && some_text(&s, "Other size…"));
+        look(&mut s, "the picture menu");
+        shot_still(&mut s, "picture-menu");
+        s.click_text("Rotate right");
+        wait_until(&mut s, "the turn", 15, |s| s.app.undo.last().is_some_and(|u| u.label == "Rotate photo.jpg"));
+        assert_eq!(shown("photo.jpg"), Some([400, 240]));
+        let undos = s.app.undo.len();
+        palette_run(&mut s, "Rotate Right");
+        wait_until(&mut s, "the second turn", 15, |_| shown("photo.jpg") == Some([240, 400]));
+        s.idle(2);
+        assert_eq!(s.app.undo.len(), undos, "one Undo for both turns");
+        assert_eq!(crate::trashcan::list().into_iter().filter(|it| it.original == d.join("photo.jpg")).count(), 1);
+        s.act("key ctrl+z");
+        s.settle();
+        assert_eq!(std::fs::read(d.join("photo.jpg")).unwrap(), original, "the original back");
+        // Copies, selected as they land.
+        right(&mut s, "big.png");
+        s.click_text("Picture");
+        s.idle(1);
+        s.click_text("Resize");
+        s.idle(1);
+        s.click_text("Fit within 1920 px");
+        wait_until(&mut s, "the fitted copy", 15, |s| toast_is(s, "Saved big (1920 px).png"));
+        wait_until(&mut s, "the copy selected", 10, |s| s.tab().target_entries().first().is_some_and(|e| e.name == "big (1920 px).png"));
+        assert_eq!(shown("big (1920 px).png"), Some([1920, 1280]));
+        select_path(&mut s, &d.join("big.png"));
+        wait_until(&mut s, "big.png shown", 10, |s| s.app.thumbs.dims(&d.join("big.png")).is_some());
+        palette_run(&mut s, "Resize To…");
+        s.idle(2);
+        assert!(matches!(&s.app.popup, Popup::Prompt { text, .. } if text == "2400 × 1600"), "its own size to start from");
+        look(&mut s, "the size prompt");
+        shot_still(&mut s, "resize-prompt");
+        s.act("key ctrl+a");
+        s.act("text 25%");
+        s.act("key Enter");
+        wait_until(&mut s, "the quarter copy", 15, |s| toast_is(s, "Saved big (600 px).png"));
+        palette_run(&mut s, "Resize To…");
+        s.act("key ctrl+a");
+        s.act("text huge");
+        s.act("key Enter");
+        assert!(toast_is(&s, "Type a size such as 1280, 1280 × 720 or 50%"));
+        s.app.toast = None;
+        // A crop, drawn, moved and stretched, saved with Enter.
+        let n = launched().len();
+        right(&mut s, "photo.jpg");
+        s.click_text("Picture");
+        s.idle(1);
+        s.click_text("Crop…");
+        wait_until(&mut s, "the picture", 10, |s| some_text(s, "Drag over the part to keep"));
+        look(&mut s, "crop started");
+        s.shot("crop-start");
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
+        let c = pos2(ir.center().x, ir.top() + 30.0 + (ir.height() - 30.0) / 2.0);
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", c.x - 80.0, c.y - 120.0, c.x + 60.0, c.y + 100.0));
+        s.idle(2);
+        let sel = |s: &Sim| inspector(s).crop.as_ref().and_then(|c| c.sel);
+        let first = sel(&s).unwrap_or_else(|| s.fail("a crop drawn"));
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", c.x, c.y, c.x + 20.0, c.y + 10.0));
+        s.idle(2);
+        let moved = sel(&s).unwrap();
+        assert!((moved.width() - first.width()).abs() < 1e-4 && moved.min.x > first.min.x, "moved, same size: {first:?} -> {moved:?}");
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", c.x + 80.0, c.y, c.x + 120.0, c.y));
+        s.idle(2);
+        let wide = sel(&s).unwrap();
+        assert!(wide.max.x > moved.max.x && wide.min.x == moved.min.x, "stretched by its right edge: {moved:?} -> {wide:?}");
+        let [_, _, w, h] = crate::picfix::crop_px(wide, [240, 400]).unwrap();
+        let hint = format!("{w} × {h}  ·  Enter to crop");
+        assert!(some_text(&s, &hint), "the footer says {hint:?}");
+        look(&mut s, "crop drawn");
+        s.shot("crop-drawn");
+        s.act("key Enter");
+        wait_until(&mut s, "the cropped copy", 15, |s| toast_is(s, "Saved photo (cropped).jpg"));
+        assert_eq!(shown("photo (cropped).jpg"), Some([w, h]));
+        assert_eq!(launched().len(), n, "Enter cropped, it opened nothing");
+        assert!(inspector(&s).crop.is_none());
+        wait_until(&mut s, "the cropped copy selected", 10, |s| s.tab().target_entries().first().is_some_and(|e| e.name == "photo (cropped).jpg"));
+        // Cancelled with Escape; left by moving on.
+        select_path(&mut s, &d.join("photo.jpg"));
+        palette_run(&mut s, "Crop…");
+        assert!(inspector(&s).crop.as_ref().is_some_and(|c| c.path == d.join("photo.jpg")));
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", c.x - 40.0, c.y - 40.0, c.x + 40.0, c.y + 40.0));
+        for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
+            s.app.cfg.font_size = font;
+            s.app.cfg.spacing = spacing;
+            s.idle(3);
+            look(&mut s, &format!("crop at font {font}, spacing {spacing}"));
+        }
+        // A small window, the inspector docked below, a light theme: the crop stays on
+        // the picture and its line in the footer.
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        for (w, h) in [(640.0, 480.0), (520.0, 340.0)] {
+            s.resize(w, h);
+            look(&mut s, &format!("crop at {w}x{h}"));
+        }
+        s.app.cfg.inspector_layout = crate::config::InspectorLayout::Bottom;
+        s.resize(900.0, 700.0);
+        look(&mut s, "crop docked below");
+        assert!(inspector(&s).crop.is_some());
+        s.shot("crop-light-bottom");
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.act("key Escape");
+        assert!(inspector(&s).crop.is_none());
+        assert!(!d.join("photo (cropped) (1).jpg").exists());
+        palette_run(&mut s, "Crop…");
+        assert!(inspector(&s).crop.is_some());
+        select_path(&mut s, &d.join("notes.txt"));
+        s.idle(2);
+        assert!(inspector(&s).crop.is_none(), "another file: no crop");
+        report("picfix", &s);
+    }
+
     #[test]
     fn monkey_sessions() {
         if !sandboxed() {
@@ -7297,6 +7861,22 @@ mod journeys {
             }
             for sub in ["gvfs", "netmounts"] {
                 let _ = std::fs::create_dir_all(drv.join(sub));
+            }
+            // Office documents, converted by a stand-in for LibreOffice.
+            crate::tests::fake_soffice(&drv);
+            // Wallpaper setters that only say yes.
+            for t in ["gsettings", "plasma-apply-wallpaperimage", "noctalia"] {
+                crate::tests::fake_tool(&drv, t, "exit 0");
+            }
+            // ImageMagick, the real one.
+            let _ = crate::tests::imagemagick_tools(&drv);
+            // A mail opener and CUPS with two printers.
+            crate::tests::fake_tool(&drv, "xdg-email", "exit 0");
+            crate::tests::fake_tool(&drv, "lpstat", "case \"$1\" in -e) printf 'Office_Laser\\nHP_ENVY_6000\\n';; -d) echo 'system default destination: HP_ENVY_6000';; esac");
+            crate::tests::fake_tool(&drv, "lp", "echo 'request id is Office_Laser-1 (1 file(s))'");
+            for f in ["plan.docx", "sheet.ods", "slow deck.odp", "broken.pptx"] {
+                let _ = std::fs::create_dir_all(home.join("Documents/Office"));
+                let _ = std::fs::write(home.join("Documents/Office").join(f), "not really an office file");
             }
             crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(drv));
             // An archive to wander into.
@@ -7364,6 +7944,8 @@ mod journeys {
             wipe_root();
         }
         crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        crate::wallpaper::DESKTOP.with(|w| w.borrow_mut().clear());
+        crate::sendto::MAIL_APP.with(|m| *m.borrow_mut() = None);
         let launched = crate::mime::LAUNCHED.lock().unwrap().len();
         let out = crate::clipboard::DRAGGED_OUT.lock().unwrap().len();
         eprintln!("sim monkey: {launched} external launches intercepted, {out} drags handed out");

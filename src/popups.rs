@@ -196,6 +196,7 @@ pub enum Popup {
     CleanBuilds(crate::devtools::CleanState),
     Duplicates(crate::dupes::State),
     BatchRename(crate::batchname::State),
+    Print(Box<crate::sendto::PrintState>),
 }
 
 /// The branch menu, its lists read on a worker as it opens.
@@ -292,6 +293,7 @@ impl Popup {
             Popup::CleanBuilds(..) => "CleanBuilds",
             Popup::Duplicates(..) => "Duplicates",
             Popup::BatchRename(..) => "BatchRename",
+            Popup::Print(..) => "Print",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -840,6 +842,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::CleanBuilds(st) => crate::devtools::clean_popup(app, ctx, st),
         Popup::Duplicates(st) => crate::dupes::popup(app, ctx, st),
         Popup::BatchRename(st) => crate::batchname::popup(app, ctx, st),
+        Popup::Print(st) => crate::sendto::dialog(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -1294,6 +1297,11 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::OpenInEditor => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::CopyPathRelative => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::CopyCodeBlocks => !tab::is_computer(&t.path) && t.archive.is_none(),
+        Cmd::Email => t.archive.is_none() && !t.target_entries().is_empty() && t.target_entries().iter().all(|e| !e.is_dir),
+        Cmd::Print => t.archive.is_none() && !t.target_entries().is_empty() && t.target_entries().iter().all(|e| !e.is_dir && crate::sendto::printable(&e.name, e.ext())) && crate::drives::Tools::current().is_some_and(|t| crate::sendto::cups(&t)),
+        Cmd::RotateLeft | Cmd::RotateRight | Cmd::ResizeHalf | Cmd::ResizeQuarter | Cmd::ResizeFit | Cmd::ResizeCustom => t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()) && !t.target_entries().is_empty() && t.target_entries().iter().all(|e| !e.is_dir && crate::picfix::is_picture(e.ext())) && crate::drives::Tools::current().is_some_and(|t| crate::picfix::magick(&t).is_some()),
+        Cmd::CropPicture => t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()) && matches!(t.target_entries().as_slice(), [e] if !e.is_dir && crate::picfix::can_crop(e.ext())) && crate::drives::Tools::current().is_some_and(|t| crate::picfix::magick(&t).is_some()),
+        Cmd::SetWallpaper => t.archive.is_none() && matches!(t.target_entries().as_slice(), [e] if !e.is_dir && crate::wallpaper::is_wallpaper(e.ext())),
         Cmd::CompareFiles => t.archive.is_none() && t.target_entries().iter().filter(|e| !e.is_dir).count() == 2 && t.target_entries().len() == 2,
         Cmd::CopyWebLink | Cmd::OpenWebLink | Cmd::GitIgnore => t.archive.is_none() && crate::gitstatus::repo_for(&t.path).is_some(),
         Cmd::GitIgnoreExt => t.archive.is_none() && crate::gitstatus::repo_for(&t.path).is_some() && crate::share::shared_ext(t.target_entries().iter().map(|e| (e.path.as_path(), e.is_dir))).is_some(),

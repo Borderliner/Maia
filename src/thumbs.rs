@@ -130,6 +130,14 @@ impl Thumbs {
         }
     }
 
+    /// The size of a picture already decoded at some size.
+    pub fn dims(&self, path: &Path) -> Option<[u32; 2]> {
+        match self.slots.get(self.ready_by_path.get(path)?) {
+            Some(Slot::Ready(l)) => Some(l.dims),
+            _ => None,
+        }
+    }
+
     pub fn failed(&self, path: &Path) -> bool {
         self.failed.contains(path)
     }

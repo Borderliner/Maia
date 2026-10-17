@@ -5014,3 +5014,395 @@ fn trash_emptied_by_age() {
     assert_eq!(crate::config::Config::default().trash_days, 0, "off unless chosen");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A stand-in for LibreOffice: it logs its arguments, writes a two-page PDF (a real one,
+/// poppler reads it) named as LibreOffice names its output, fails on a "broken" file and
+/// sleeps on a "slow" one, its sleep's pid written down so a test can see it killed.
+pub(crate) fn fake_soffice(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("sample.pdf"), crate::sim::sample_pdf(&["0.2 0.4 0.8", "0.8 0.3 0.2"])).unwrap();
+    let script = r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "$*" >> "$D/soffice.log"
+out=""; prev=""
+for a; do [ "$prev" = --outdir ] && out="$a"; prev="$a"; last="$a"; done
+case "$last" in
+*slow*) sleep 30 & echo $! > "$D/sleep.pid"; wait; exit 0;;
+*broken*) exit 1;;
+esac
+name=$(basename "$last")
+cp "$D/sample.pdf" "$out/${name%.*}.pdf"
+"#;
+    let p = dir.join("soffice");
+    std::fs::write(&p, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Whether a process is gone (or only a zombie waiting to be reaped), after up to 3 s.
+pub(crate) fn process_gone(pid: &str) -> bool {
+    let t0 = std::time::Instant::now();
+    while t0.elapsed().as_secs() < 3 {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => return true,
+            Ok(s) if s.rsplit_once(')').is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')) => return true,
+            _ => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+    false
+}
+
+/// Office documents through LibreOffice (a stand-in that writes a real PDF): converted
+/// once into the cache with a profile of Maia's own, read back the second time without
+/// starting it, again when the file changes; a file it can't read refused; a slow one
+/// killed with its children, when the preview goes away and at the time limit.
+#[test]
+fn office_documents_convert_to_pdf_once() {
+    use crate::office::{TIMEOUT, cached, convert, is_office, program};
+    let d = tmpdir("office");
+    let fake = d.join("tools");
+    fake_soffice(&fake);
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(d.join("none")));
+    assert_eq!(program(&crate::drives::Tools::current().unwrap()), None, "no LibreOffice: no conversion");
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    assert_eq!(program(&t), Some("soffice"));
+    for x in ["docx", "doc", "odt", "rtf", "xlsx", "xls", "ods", "pptx", "ppt", "odp"] {
+        assert!(is_office(x), "{x}");
+    }
+    assert!(!is_office("pdf") && !is_office("txt") && !is_office("docm"));
+    let src = d.join("Q3 report.v2.docx");
+    touch(&src, "PK not really a document");
+    let meta = |p: &Path| std::fs::metadata(p).map(|m| (m.len(), m.modified().ok())).unwrap();
+    let (size, mtime) = meta(&src);
+    let log = || std::fs::read_to_string(fake.join("soffice.log")).unwrap_or_default();
+    let pdf = convert(&t, "soffice", &src, size, mtime, TIMEOUT, &|| false).unwrap();
+    assert_eq!(pdf, cached(&src, size, mtime));
+    assert!(std::fs::read(&pdf).unwrap().starts_with(b"%PDF-1.4"));
+    if crate::media::have("pdfinfo") {
+        assert_eq!(crate::media::pdf_pages(&pdf), Some(2), "the PDF reads");
+    }
+    let args = log();
+    assert_eq!(args.lines().count(), 1);
+    let profile = crate::clipboard::path_to_uri(&crate::office::cache_dir().join("profile"));
+    assert!(args.starts_with(&format!("-env:UserInstallation={profile} --headless --norestore --nolockcheck --convert-to pdf --outdir ")), "{args}");
+    assert!(args.trim_end().ends_with(&src.display().to_string()), "{args}");
+    assert!(profile.starts_with("file:///") && !profile.contains("/.config/libreoffice"));
+    // The second look: from the cache, LibreOffice not started.
+    assert_eq!(convert(&t, "soffice", &src, size, mtime, TIMEOUT, &|| false).unwrap(), pdf);
+    assert_eq!(log().lines().count(), 1);
+    // Changed: converted again, to a file of its own.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&src, "PK a longer document than before").unwrap();
+    let (size2, mtime2) = meta(&src);
+    let pdf2 = convert(&t, "soffice", &src, size2, mtime2, TIMEOUT, &|| false).unwrap();
+    assert_ne!(pdf2, pdf);
+    assert_eq!(log().lines().count(), 2);
+    let stage = crate::office::cache_dir().join(format!(".part-{}", pdf2.file_stem().unwrap().to_string_lossy()));
+    assert!(!stage.exists(), "the staging folder is gone");
+    let broken = d.join("broken.xlsx");
+    touch(&broken, "x");
+    let (bs, bm) = meta(&broken);
+    assert_eq!(convert(&t, "soffice", &broken, bs, bm, TIMEOUT, &|| false).unwrap_err(), "Can't preview this document");
+    // Slow: stopped (the preview went away), then timed out; LibreOffice's children die too.
+    let slow = d.join("slow.pptx");
+    touch(&slow, "x");
+    let (ss, sm) = meta(&slow);
+    let t0 = std::time::Instant::now();
+    let r = convert(&t, "soffice", &slow, ss, sm, TIMEOUT, &|| t0.elapsed().as_millis() > 400);
+    assert!(r.is_err() && t0.elapsed().as_secs() < 5);
+    let pid = std::fs::read_to_string(fake.join("sleep.pid")).unwrap();
+    assert!(process_gone(pid.trim()), "the child's child was killed");
+    let _ = std::fs::remove_file(fake.join("sleep.pid"));
+    let t0 = std::time::Instant::now();
+    let r = convert(&t, "soffice", &slow, ss, sm, std::time::Duration::from_millis(500), &|| false);
+    assert_eq!(r.unwrap_err(), "LibreOffice took too long to read this document");
+    assert!(t0.elapsed().as_secs() < 5);
+    let pid = std::fs::read_to_string(fake.join("sleep.pid")).unwrap();
+    assert!(process_gone(pid.trim()));
+    assert!(!cached(&slow, ss, sm).exists());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A stand-in program `name` in `dir`: it appends its name and arguments, one per line
+/// and a blank line after, to `calls.log`, then runs `body` (sh).
+pub(crate) fn fake_tool(dir: &Path, name: &str, body: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    let p = dir.join(name);
+    std::fs::write(&p, format!("#!/bin/sh\nD=\"$(dirname \"$0\")\"\n{{ echo {name}; for a; do printf '%s\\n' \"$a\"; done; echo; }} >> \"$D/calls.log\"\n{body}\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The calls the stand-ins in `dir` received, each as its program and arguments.
+pub(crate) fn fake_calls(dir: &Path) -> Vec<Vec<String>> {
+    let log = std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default();
+    log.split("\n\n").filter(|c| !c.trim().is_empty()).map(|c| c.lines().map(String::from).collect()).collect()
+}
+
+/// Set As Wallpaper picks each desktop's own way: Noctalia (and the Quickshell one before
+/// it) over the compositor it runs on; GNOME's two pictures, Cinnamon, MATE, KDE, XFCE's
+/// every monitor and workspace, sway's quoted command, swww and hyprpaper; nothing for a
+/// desktop it doesn't know or a tool that isn't there. Then the programs are run
+/// (stand-ins): an optional step may fail, a needed one says why, and hyprctl's refusal
+/// printed with exit 0 counts as failing.
+#[test]
+fn wallpaper_each_desktop_its_way() {
+    use crate::wallpaper::{Desk, Way, pick, set, steps, xfce_props};
+    let desk = |de: &str, run: &[&str]| Desk { desktop: de.into(), running: run.iter().map(|s| s.to_string()).collect(), outputs: vec!["DP-1".into(), "eDP-1".into()] };
+    let all = |_: &str| true;
+    let has = |list: &'static [&'static str]| move |n: &str| list.contains(&n);
+    assert_eq!(pick(&desk("Hyprland", &["Hyprland", "noctalia"]), all), Some(Way::Noctalia));
+    assert_eq!(pick(&desk("Hyprland", &["noctalia"]), has(&["hyprctl"])), None, "noctalia not on PATH");
+    assert_eq!(pick(&desk("niri", &["qs:noctalia-shell", "qs"]), all), Some(Way::NoctaliaQs));
+    assert_eq!(pick(&desk("Hyprland", &["hyprpaper"]), all), Some(Way::Hyprpaper));
+    assert_eq!(pick(&desk("Hyprland", &["hyprpaper", "swww-daemon"]), all), Some(Way::Swww));
+    assert_eq!(pick(&desk("Hyprland", &[]), all), None, "nothing draws a wallpaper");
+    assert_eq!(pick(&desk("sway", &[]), all), Some(Way::Sway));
+    assert_eq!(pick(&desk("ubuntu:GNOME", &[]), all), Some(Way::Gnome));
+    assert_eq!(pick(&desk("GNOME", &[]), has(&["swww"])), None, "no gsettings");
+    assert_eq!(pick(&desk("X-Cinnamon", &[]), all), Some(Way::Cinnamon));
+    assert_eq!(pick(&desk("MATE", &[]), all), Some(Way::Mate));
+    assert_eq!(pick(&desk("KDE", &["swww-daemon"]), all), Some(Way::Kde));
+    assert_eq!(pick(&desk("XFCE", &[]), all), Some(Way::Xfce));
+    assert_eq!(pick(&desk("LXQt", &[]), all), None);
+    assert_eq!(pick(&desk("", &[]), all), None);
+    let p = Path::new("/home/ana/Pictures/My \"best\" shot.jpg");
+    let plain = Path::new("/home/ana/Pictures/dunes.jpg");
+    let args = |w: Way, p: &Path, xf: &str| -> Vec<Vec<String>> { steps(w, p, &desk("", &[]), xf).iter().map(|s| s.args.iter().map(|a| a.to_string_lossy().into_owned()).collect()).collect() };
+    assert_eq!(args(Way::Noctalia, plain, ""), [["noctalia", "msg", "wallpaper-set", "/home/ana/Pictures/dunes.jpg"]]);
+    assert_eq!(args(Way::Noctalia, p, ""), [["noctalia", "msg", "wallpaper-set", "DP-1", p.to_str().unwrap()], ["noctalia", "msg", "wallpaper-set", "eDP-1", p.to_str().unwrap()]], "a path with a space goes to each output");
+    assert_eq!(args(Way::NoctaliaQs, plain, ""), [["qs", "-c", "noctalia-shell", "ipc", "call", "wallpaper", "set", "/home/ana/Pictures/dunes.jpg", "all"]]);
+    let uri = "file:///home/ana/Pictures/My%20%22best%22%20shot.jpg";
+    assert_eq!(args(Way::Gnome, p, ""), [["gsettings", "set", "org.gnome.desktop.background", "picture-uri", uri], ["gsettings", "set", "org.gnome.desktop.background", "picture-uri-dark", uri]]);
+    assert_eq!(args(Way::Cinnamon, p, ""), [["gsettings", "set", "org.cinnamon.desktop.background", "picture-uri", uri]]);
+    assert_eq!(args(Way::Mate, p, ""), [["gsettings", "set", "org.mate.background", "picture-filename", p.to_str().unwrap()]]);
+    assert_eq!(args(Way::Kde, p, ""), [["plasma-apply-wallpaperimage", p.to_str().unwrap()]]);
+    assert_eq!(args(Way::Sway, p, ""), [["swaymsg", r#"output * bg "/home/ana/Pictures/My \"best\" shot.jpg" fill"#]]);
+    assert_eq!(args(Way::Swww, plain, ""), [["swww", "img", "/home/ana/Pictures/dunes.jpg"]]);
+    assert_eq!(args(Way::Hyprpaper, plain, ""), [["hyprctl", "hyprpaper", "preload", "/home/ana/Pictures/dunes.jpg"], ["hyprctl", "hyprpaper", "wallpaper", ",/home/ana/Pictures/dunes.jpg"]]);
+    // xfconf-query -c xfce4-desktop -l, from a laptop with an external screen.
+    let listing = "/backdrop/screen0/monitorHDMI-1/workspace0/color-style\n/backdrop/screen0/monitorHDMI-1/workspace0/image-style\n/backdrop/screen0/monitorHDMI-1/workspace0/last-image\n/backdrop/screen0/monitoreDP-1/workspace0/last-image\n/backdrop/screen0/monitoreDP-1/workspace1/last-image\n/backdrop/single-workspace-mode\n/desktop-icons/style\n";
+    assert_eq!(xfce_props(listing), ["/backdrop/screen0/monitorHDMI-1/workspace0/last-image", "/backdrop/screen0/monitoreDP-1/workspace0/last-image", "/backdrop/screen0/monitoreDP-1/workspace1/last-image"]);
+    assert_eq!(args(Way::Xfce, plain, listing).len(), 3);
+    assert_eq!(args(Way::Xfce, plain, listing)[1], ["xfconf-query", "-c", "xfce4-desktop", "-p", "/backdrop/screen0/monitoreDP-1/workspace0/last-image", "-s", "/home/ana/Pictures/dunes.jpg"]);
+    assert_eq!(args(Way::Xfce, plain, "")[0][3..6], ["-n", "-t", "string"], "no property yet: made");
+    // Run through stand-ins.
+    let d = tmpdir("wallpaper");
+    let fake = d.join("tools");
+    fake_tool(&fake, "gsettings", "case \"$3\" in picture-uri-dark) echo \"No such key\" >&2; exit 1;; esac");
+    fake_tool(&fake, "xfconf-query", &format!("[ \"$3\" = -l ] && printf '{}'\nexit 0", listing.replace('\n', "\\n")));
+    fake_tool(&fake, "hyprctl", "echo \"wallpaper failed (not preloaded)\"");
+    fake_tool(&fake, "plasma-apply-wallpaperimage", "echo 'Unable to find the wallpaper plugin' >&2; exit 1");
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    assert_eq!(set(&t, &desk("GNOME", &[]), p), Ok(Way::Gnome), "the dark picture is optional");
+    assert_eq!(fake_calls(&fake).len(), 2);
+    assert_eq!(set(&t, &desk("XFCE", &[]), plain), Ok(Way::Xfce));
+    let calls = fake_calls(&fake);
+    assert_eq!(calls.len(), 6, "listed, then each of three set");
+    assert_eq!(calls[2], ["xfconf-query", "-c", "xfce4-desktop", "-l"]);
+    assert_eq!(set(&t, &desk("Hyprland", &["hyprpaper"]), plain).unwrap_err(), "Couldn't set the wallpaper: wallpaper failed (not preloaded)");
+    assert_eq!(set(&t, &desk("KDE", &[]), plain).unwrap_err(), "Couldn't set the wallpaper: Unable to find the wallpaper plugin");
+    assert_eq!(set(&t, &desk("sway", &[]), plain).unwrap_err(), "Maia can't set the wallpaper on this desktop", "swaymsg isn't there");
+    assert!(crate::wallpaper::is_wallpaper("jpg") && crate::wallpaper::is_wallpaper("webp") && !crate::wallpaper::is_wallpaper("gif") && !crate::wallpaper::is_wallpaper("svg"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Email: xdg-email with each file attached; without it, the mail app's own way for
+/// Thunderbird (and a flatpak one), Evolution, KMail and Claws Mail, and nothing for one
+/// that can't take attachments; no mail app at all is said so and nothing starts.
+#[test]
+fn email_attaches_files() {
+    use crate::sendto::{MAIL_APP, email, email_args};
+    let f = [PathBuf::from("/home/ana/Q3 report.pdf"), PathBuf::from("/home/ana/photo,1.jpg")];
+    let s = |v: Option<Vec<std::ffi::OsString>>| v.map(|v| v.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>());
+    assert_eq!(s(email_args(&f, true, None)).unwrap(), ["xdg-email", "--attach", "/home/ana/Q3 report.pdf", "--attach", "/home/ana/photo,1.jpg"]);
+    let tb = ["thunderbird", "-compose", "attachment='file:///home/ana/Q3%20report.pdf,file:///home/ana/photo%2C1.jpg'"];
+    assert_eq!(s(email_args(&f, false, Some("thunderbird %u"))).unwrap(), tb);
+    assert_eq!(s(email_args(&f, false, Some("/usr/bin/flatpak run --branch=stable org.mozilla.Thunderbird %u"))).unwrap()[..5], ["/usr/bin/flatpak", "run", "--branch=stable", "org.mozilla.Thunderbird", "-compose"]);
+    assert_eq!(s(email_args(&f, false, Some("evolution %U"))).unwrap(), ["evolution", "mailto:?attach=file:///home/ana/Q3%20report.pdf&attach=file:///home/ana/photo%2C1.jpg"]);
+    assert_eq!(s(email_args(&f[..1], false, Some("kmail -caption \"%c\" %u"))).unwrap()[3..], ["--attach", "file:///home/ana/Q3%20report.pdf"]);
+    assert_eq!(s(email_args(&f[..1], false, Some("claws-mail --compose %u"))).unwrap(), ["claws-mail", "--compose", "--attach", "/home/ana/Q3 report.pdf"]);
+    assert_eq!(email_args(&f, false, Some("firefox %u")), None, "a browser can't attach files");
+    assert_eq!(email_args(&f, false, None), None);
+    let d = tmpdir("email");
+    let fake = d.join("tools");
+    fake_tool(&fake, "xdg-email", "exit 0");
+    crate::drives::FAKE.with(|x| *x.borrow_mut() = Some(fake.clone()));
+    let n = crate::mime::LAUNCHED.lock().unwrap().len();
+    assert_eq!(email(&f).unwrap_err(), "No mail app is set up");
+    MAIL_APP.with(|m| *m.borrow_mut() = Some("thunderbird %u".into()));
+    email(&f).unwrap();
+    let launched = crate::mime::LAUNCHED.lock().unwrap().clone();
+    assert!(launched[n..].iter().any(|l| l.contains("xdg-email") && l.contains("\"--attach\" \"/home/ana/Q3 report.pdf\" \"--attach\" \"/home/ana/photo,1.jpg\"")), "{:?}", &launched[n..]);
+    // No xdg-email: Thunderbird itself.
+    crate::drives::FAKE.with(|x| *x.borrow_mut() = Some(d.join("none")));
+    email(&f).unwrap();
+    assert!(crate::mime::LAUNCHED.lock().unwrap()[n..].iter().any(|l| l.starts_with("\"thunderbird\" \"-compose\"")));
+    MAIL_APP.with(|m| *m.borrow_mut() = Some("firefox %u".into()));
+    assert_eq!(email(&f).unwrap_err(), "Install xdg-utils to attach files to an email");
+    MAIL_APP.with(|m| *m.borrow_mut() = None);
+    crate::drives::FAKE.with(|x| *x.borrow_mut() = None);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Print: CUPS's printers read from lpstat (names, and the default when it is one of
+/// them), lp's arguments, which files are offered, and the printers read through a
+/// stand-in lpstat, under the C locale.
+#[test]
+fn print_reads_cups_printers() {
+    use crate::sendto::{Printers, cups, lp_args, parse_printers, printable, printers};
+    let e = "Office_Laser\nHP_ENVY_6000\nPDF\n";
+    assert_eq!(parse_printers(e, "system default destination: HP_ENVY_6000\n"), Printers { names: vec!["Office_Laser".into(), "HP_ENVY_6000".into(), "PDF".into()], default: Some("HP_ENVY_6000".into()) });
+    assert_eq!(parse_printers(e, "no system default destination\n").default, None);
+    assert_eq!(parse_printers("", "no system default destination\n"), Printers::default());
+    assert_eq!(parse_printers("lpstat: No destinations added.\n", "").names, Vec::<String>::new(), "a complaint is no printer");
+    assert_eq!(parse_printers("A\n", "system default destination: Gone\n").default, None);
+    let a: Vec<String> = lp_args("Office_Laser", 2, &[PathBuf::from("/x/a b.pdf"), PathBuf::from("/x/c.png")]).iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    assert_eq!(a, ["-d", "Office_Laser", "-n", "2", "/x/a b.pdf", "/x/c.png"]);
+    for (n, x) in [("a.pdf", "pdf"), ("b.PS", "ps"), ("c.jpg", "jpg"), ("notes.txt", "txt"), ("main.rs", "rs"), ("README.md", "md")] {
+        assert!(printable(n, x), "{n}");
+    }
+    for (n, x) in [("a.docx", "docx"), ("b.zip", "zip"), ("c.mp4", "mp4"), ("d.ods", "ods")] {
+        assert!(!printable(n, x), "{n}");
+    }
+    let d = tmpdir("print");
+    let fake = d.join("tools");
+    fake_tool(&fake, "lpstat", "[ \"$LC_ALL\" = C ] || exit 3\ncase \"$1\" in -e) printf 'Office_Laser\\nHP_ENVY_6000\\n';; -d) echo 'system default destination: HP_ENVY_6000';; esac");
+    crate::drives::FAKE.with(|x| *x.borrow_mut() = Some(fake.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|x| *x.borrow_mut() = None);
+    assert!(!cups(&t), "lp missing");
+    fake_tool(&fake, "lp", "exit 0");
+    assert!(cups(&t));
+    assert_eq!(printers(&t).default.as_deref(), Some("HP_ENVY_6000"));
+    assert_eq!(printers(&t).names.len(), 2);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// `jpeg` with an EXIF block saying it is stored turned (`orient`, 1 to 8), as a camera
+/// held upright writes it.
+pub(crate) fn with_exif_orientation(jpeg: &[u8], orient: u16) -> Vec<u8> {
+    let mut tiff = b"MM\x00\x2a\x00\x00\x00\x08".to_vec();
+    tiff.extend_from_slice(&1u16.to_be_bytes());
+    tiff.extend_from_slice(&0x0112u16.to_be_bytes());
+    tiff.extend_from_slice(&3u16.to_be_bytes());
+    tiff.extend_from_slice(&1u32.to_be_bytes());
+    tiff.extend_from_slice(&orient.to_be_bytes());
+    tiff.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+    let mut app1 = b"Exif\x00\x00".to_vec();
+    app1.extend_from_slice(&tiff);
+    let mut out = jpeg[..2].to_vec();
+    out.extend_from_slice(&[0xff, 0xe1]);
+    out.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&app1);
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+/// The real ImageMagick on the PATH, as a stand-in folder holding only it (and none).
+pub(crate) fn imagemagick_tools(dir: &Path) -> Option<PathBuf> {
+    let real = std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join("magick")).find(|m| m.is_file()))?;
+    std::fs::create_dir_all(dir).unwrap();
+    let _ = std::os::unix::fs::symlink(real, dir.join("magick"));
+    Some(dir.to_path_buf())
+}
+
+/// Picture fixes through the real ImageMagick on real files: a photo stored turned (EXIF
+/// orientation 6) measured upright, turned right in place with its original in the
+/// trash, turned again without a second copy there, and put back by Undo byte for
+/// byte; copies at half, within a box and a longer side, named by their size and never
+/// over another file; a smaller picture left alone by Fit; a crop of the upright
+/// picture; a name ImageMagick would misread; a broken file refused with nothing
+/// changed. Sizes as typed.
+#[test]
+fn picture_fixes_with_imagemagick() {
+    use crate::picfix::{Size, crop, crop_px, cropped_name, dims, magick, parse_size, resize, resized_name, rotate, target, undo_replaced};
+    assert_eq!(parse_size("1280"), Some(Size::Long(1280)));
+    for s in ["1280 × 720", "1280x720", "1280 X 720", "1280*720", " 1280 720 "] {
+        assert_eq!(parse_size(s), Some(Size::Within(1280, 720)), "{s:?}");
+    }
+    assert_eq!(parse_size("50%"), Some(Size::Scale(0.5)));
+    assert_eq!(parse_size("12.5 %"), Some(Size::Scale(0.125)));
+    for s in ["", "0", "big", "1x2x3", "-5", "40000", "0%"] {
+        assert_eq!(parse_size(s), None, "{s:?}");
+    }
+    assert_eq!(target([4032, 3024], Size::Fit(1920)), Some([1920, 1440]));
+    assert_eq!(target([1000, 800], Size::Fit(1920)), None, "already within");
+    assert_eq!(target([4032, 3024], Size::Scale(0.25)), Some([1008, 756]));
+    assert_eq!(target([300, 200], Size::Long(600)), Some([600, 400]), "a longer side asked for grows it");
+    assert_eq!(target([300, 200], Size::Within(100, 100)), Some([100, 67]));
+    assert_eq!(target([300, 200], Size::Scale(1.0)), None);
+    assert_eq!(resized_name("photo.jpg", [1920, 1440]), "photo (1920 px).jpg");
+    assert_eq!(resized_name("scan.v2.png", [600, 800]), "scan.v2 (800 px).png");
+    assert_eq!(cropped_name("photo.jpg"), "photo (cropped).jpg");
+    assert_eq!(cropped_name("README"), "README (cropped)");
+    assert_eq!(crop_px(egui::Rect::from_min_max(egui::pos2(0.25, 0.0), egui::pos2(0.75, 0.5)), [20, 40]), Some([5, 0, 10, 20]));
+    assert_eq!(crop_px(egui::Rect::from_min_max(egui::pos2(0.5, 0.5), egui::pos2(0.51, 0.9)), [20, 40]), None, "under a pixel wide");
+    let d = tmpdir("picfix");
+    let Some(fake) = imagemagick_tools(&d.join("tools")) else {
+        eprintln!("picture fixes: no ImageMagick, skipped");
+        return;
+    };
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(d.join("none")));
+    assert_eq!(magick(&crate::drives::Tools::current().unwrap()), None);
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    let prog = magick(&t).unwrap();
+    // A photo 40 × 20 as stored, upright 20 × 40.
+    let raw = d.join("raw.jpg");
+    assert!(std::process::Command::new(fake.join("magick")).args(["-size", "40x20", "xc:#c84"]).arg(&raw).status().unwrap().success());
+    let photo = d.join("photo.jpg");
+    let original = with_exif_orientation(&std::fs::read(&raw).unwrap(), 6);
+    std::fs::write(&photo, &original).unwrap();
+    let shown = |p: &Path| crate::imgdec::load(p, 64).map(|x| x.1);
+    assert_eq!(shown(&photo), Some([20, 40]));
+    assert_eq!(dims(&t, prog, &photo).unwrap(), [20, 40], "measured upright");
+    let trashed = |p: &Path| crate::trashcan::list().into_iter().filter(|it| it.original == p).count();
+    rotate(&t, prog, &photo, true, false).unwrap();
+    assert_eq!(shown(&photo), Some([40, 20]), "turned right from upright, no orientation left to apply twice");
+    assert_eq!(trashed(&photo), 1, "the original kept in the trash");
+    rotate(&t, prog, &photo, true, true).unwrap();
+    assert_eq!(shown(&photo), Some([20, 40]));
+    assert_eq!(trashed(&photo), 1, "a second turn keeps no second copy");
+    assert!(!d.join(".photo.jpg.part").exists());
+    assert_eq!(undo_replaced(&[photo.clone()]), 0);
+    assert_eq!(std::fs::read(&photo).unwrap(), original, "the original back, byte for byte");
+    // Copies.
+    let big = d.join("big.png");
+    std::fs::write(&big, png_bytes(400, 300, 3)).unwrap();
+    let half = resize(&t, prog, &big, Size::Scale(0.5)).unwrap().unwrap();
+    assert_eq!(half, d.join("big (200 px).png"));
+    assert_eq!(shown(&half), Some([200, 150]));
+    assert_eq!(resize(&t, prog, &big, Size::Fit(1920)).unwrap(), None);
+    let boxed = resize(&t, prog, &big, Size::Within(100, 100)).unwrap().unwrap();
+    assert_eq!((boxed.file_name().unwrap().to_str().unwrap(), shown(&boxed)), ("big (100 px).png", Some([100, 75])));
+    let again = resize(&t, prog, &big, Size::Scale(0.5)).unwrap().unwrap();
+    assert_eq!(again, d.join("big (200 px) (1).png"), "never over the first copy");
+    let long = resize(&t, prog, &photo, Size::Long(80)).unwrap().unwrap();
+    assert_eq!((long.file_name().unwrap().to_str().unwrap(), shown(&long)), ("photo (80 px).jpg", Some([40, 80])), "resized upright");
+    // A crop of the upright picture.
+    let c = crop(&t, prog, &photo, egui::Rect::from_min_max(egui::pos2(0.25, 0.0), egui::pos2(0.75, 0.5))).unwrap();
+    assert_eq!((c.file_name().unwrap().to_str().unwrap(), shown(&c)), ("photo (cropped).jpg", Some([10, 20])));
+    // A name with brackets and a colon.
+    let odd = d.join("shot [1]: png.png");
+    std::fs::write(&odd, png_bytes(30, 10, 1)).unwrap();
+    rotate(&t, prog, &odd, false, false).unwrap();
+    assert_eq!(shown(&odd), Some([10, 30]));
+    // Broken: refused, nothing changed or trashed.
+    let broken = d.join("broken.png");
+    std::fs::write(&broken, b"\x89PNG\r\n\x1a\nnot really").unwrap();
+    assert!(rotate(&t, prog, &broken, true, false).is_err());
+    assert_eq!(std::fs::read(&broken).unwrap(), b"\x89PNG\r\n\x1a\nnot really");
+    assert_eq!(trashed(&broken), 0);
+    assert!(!d.join(".broken.png.part").exists());
+    assert!(resize(&t, prog, &broken, Size::Scale(0.5)).is_err());
+    for it in crate::trashcan::list().into_iter().filter(|it| it.original.starts_with(&d)) {
+        let _ = crate::trashcan::purge(&it);
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

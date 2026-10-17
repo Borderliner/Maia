@@ -225,6 +225,11 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
                 items.push(Item::cmd(Cmd::CompareFiles));
             }
         }
+        if let [(_, false, _, ext)] = ents.as_slice() {
+            if crate::wallpaper::is_wallpaper(ext) {
+                items.push(Item::cmd(Cmd::SetWallpaper));
+            }
+        }
         items.push(Item::cmd(Cmd::OpenInNewTab));
         items.push(Item::cmd(Cmd::OpenInRightSplit));
         items.push(Item::cmd(Cmd::OpenInBottomSplit));
@@ -266,12 +271,36 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             copy.push(Item::cmd(Cmd::CopyWebLink));
         }
         items.push(Item::sub("copy_as", "Copy as", copy));
+        if any_file && ents.iter().all(|e| !e.1) {
+            items.push(Item::cmd(Cmd::Email));
+            let paper = ents.iter().all(|e| crate::sendto::printable(&e.0.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), &e.3));
+            if paper && crate::drives::Tools::current().is_some_and(|t| crate::sendto::cups(&t)) {
+                items.push(Item::cmd(Cmd::Print));
+            }
+        }
         items.push(Item::sep());
         items.push(Item::labeled(Cmd::Rename, if single { "Rename" } else { "Rename All (inline)" }));
         if !single {
             items.push(Item::cmd(Cmd::BatchRename));
         }
         items.push(Item::cmd(Cmd::Duplicate));
+        // Pictures, with ImageMagick to change them.
+        if !in_trash && ents.iter().all(|e| !e.1 && crate::picfix::is_picture(&e.3)) && crate::drives::Tools::current().is_some_and(|t| crate::picfix::magick(&t).is_some()) {
+            let mut kids = vec![
+                Item::labeled(Cmd::RotateLeft, "Rotate left"),
+                Item::labeled(Cmd::RotateRight, "Rotate right"),
+                Item::sub("resize", "Resize", vec![
+                    Item::labeled(Cmd::ResizeHalf, "Half size"),
+                    Item::labeled(Cmd::ResizeQuarter, "Quarter size"),
+                    Item::labeled(Cmd::ResizeFit, "Fit within 1920 px"),
+                    Item::labeled(Cmd::ResizeCustom, "Other size…"),
+                ]),
+            ];
+            if single && crate::picfix::can_crop(&ents[0].3) {
+                kids.push(Item::labeled(Cmd::CropPicture, "Crop…"));
+            }
+            items.push(Item::sub("picture", "Picture", kids));
+        }
         if crate::archive::available() {
             if ents.iter().any(|e| !e.1 && crate::archive::is_archive(&e.0.to_string_lossy())) {
                 items.push(Item::cmd(Cmd::ExtractHere));
