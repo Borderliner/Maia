@@ -1022,7 +1022,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(149) {
+    match rng.below(150) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2055,6 +2055,24 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                         _ => s.idle(5),
                     }
                 }
+            }
+        }
+        149 => {
+            // The Timeline: from the sidebar (here or in a new tab) or the palette, a
+            // day's header folded, a file opened where it is, then back.
+            let row = s.texts.iter().find(|(r, t)| t == "Timeline" && r.right() <= s.app.sidebar_width + 1.0).map(|x| x.0);
+            match (row, rng.below(3)) {
+                (Some(r), 0) => s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y)),
+                (Some(r), 1) => s.act(&format!("click {:.0} {:.0} middle", r.center().x, r.center().y)),
+                _ => s.cmd(Cmd::Timeline),
+            }
+            s.idle(1 + rng.below(30));
+            let hdr = s.texts.iter().find(|(_, t)| t.starts_with("Today  (") || t.starts_with("Yesterday  (")).map(|x| x.0);
+            if let (Some(h), 0) = (hdr, rng.below(3)) {
+                s.act(&format!("click {:.0} {:.0}", h.center().x, h.center().y));
+            }
+            if rng.below(2) == 0 {
+                s.act(rng.pick(&["key ArrowDown", "key Enter", "key alt+ArrowLeft", "key Backspace"]));
             }
         }
         _ => {
@@ -8996,6 +9014,57 @@ mod journeys {
         assert!(l.last().is_some_and(|c| c.contains("https://www.openstreetmap.org/?mlat=-33.859833&mlon=151.211167")), "{:?}", l.last());
         looks(&mut s, "a photo's details");
         report("books, comics, fonts, places", &s);
+    }
+
+    /// The Timeline from the sidebar, under Home: the last month's files from all over
+    /// the home folder, newest first under Today and the other date groups, with the
+    /// hidden, cached and built ones left out; opened from the palette in a tab of its
+    /// own too, and its file opened where it is; at other font sizes and Spacing.
+    #[test]
+    fn timeline_of_recent_files() {
+        if !sandboxed() {
+            return;
+        }
+        let home = root().join("home");
+        crate::tests::timeline_fixture(&home);
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.settle();
+        let row = sidebar_text(&s, "Timeline").unwrap_or_else(|| s.fail("Timeline in the sidebar"));
+        let home_row = sidebar_text(&s, "Home").unwrap();
+        assert!(row.top() > home_row.top() && row.top() - home_row.top() < 60.0, "right under Home");
+        s.act(&format!("click {:.0} {:.0}", row.center().x, row.center().y));
+        s.settle();
+        wait_until(&mut s, "the walk", 15, |s| !s.tab().is_loading());
+        s.idle(3);
+        // Other sessions' files share this home: the fixture's own, in the order shown.
+        let ours = ["Documents/letter.odt", "Code/app/src/main.rs", "Downloads/ticket.pdf", "Pictures/2026/beach.png", "Documents/old report.pdf", ".cache/thumb.png", ".notes.txt", "Code/app/.git/index", "Code/app/web/node_modules/left-pad/index.js", "Code/app/target/debug/app"].map(|p| home.join(p));
+        let names: Vec<String> = s.tab().view.iter().map(|&i| &s.tab().entries[i as usize]).filter(|e| ours.contains(&e.path)).map(|e| e.name.clone()).collect();
+        assert_eq!(names, ["letter.odt", "main.rs", "ticket.pdf", "beach.png"], "newest first, the rest left out");
+        assert_eq!(s.tab().title(), "Timeline");
+        assert_eq!(s.tab().group_labels.first().map(String::as_str), Some("Today"));
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with("Today  (")), "the day's header");
+        assert!(some_text(&s, "Timeline"), "its name in the path bar");
+        look(&mut s, "the timeline");
+        s.shot("timeline");
+        for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
+            s.app.cfg.font_size = font;
+            s.app.cfg.spacing = spacing;
+            s.idle(3);
+            look(&mut s, &format!("the timeline at font {font}, spacing {spacing}"));
+        }
+        for v in [ViewList, ViewLarge, ViewTree, ViewDetails] {
+            s.cmd(v);
+            s.settle();
+            look(&mut s, &format!("the timeline in {v:?}"));
+        }
+        // From the palette, in a tab where Home was.
+        s.cmd(Home);
+        s.settle();
+        palette_run(&mut s, "Timeline");
+        wait_until(&mut s, "the walk", 15, |s| !s.tab().is_loading() && s.tab().smart.is_some());
+        assert_eq!(s.tab().settings.group, crate::config::GroupBy::Modified);
+        report("timeline", &s);
     }
 
     /// Recent Projects from its key: the git repositories under the home folder, the

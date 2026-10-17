@@ -34,6 +34,33 @@ pub struct SmartFolder {
     pub bigger: Option<u64>,
 }
 
+/// The Timeline's id: a smart folder Maia keeps itself (saved ones count up from 1).
+pub const TIMELINE: u64 = u64::MAX;
+
+/// How far back the Timeline looks.
+pub const TIMELINE_DAYS: u32 = 31;
+
+/// Every file changed in the last month under the home folder.
+pub fn timeline() -> SmartFolder {
+    SmartFolder { id: TIMELINE, name: "Timeline".into(), root: crate::fsx::home(), days: Some(TIMELINE_DAYS), ..Default::default() }
+}
+
+/// A smart folder by id: one saved, or the Timeline.
+pub fn by_id(saved: &[SmartFolder], id: u64) -> Option<SmartFolder> {
+    if id == TIMELINE {
+        return Some(timeline());
+    }
+    saved.iter().find(|s| s.id == id).cloned()
+}
+
+/// The Timeline's view: newest first, in the date groups (today, yesterday, this week…).
+pub fn timeline_view(mut v: crate::config::ViewSettings) -> crate::config::ViewSettings {
+    v.sort = crate::config::SortKey::Modified;
+    v.desc = true;
+    v.group = crate::config::GroupBy::Modified;
+    v
+}
+
 /// The kinds a smart folder can ask for: (stored name, shown name).
 pub const KINDS: [(&str, &str); 7] = [("pictures", "Pictures"), ("documents", "Documents"), ("pdfs", "PDFs"), ("videos", "Videos"), ("music", "Music"), ("archives", "Archives"), ("code", "Code")];
 
@@ -408,14 +435,16 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut Edit) -> bool {
 impl App {
     /// Show smart folder `id` in `panel`'s tab, or in a new tab there.
     pub fn open_smart(&mut self, panel: u64, id: u64, new_tab: bool, focus: bool) {
-        let Some(sf) = self.ud.smart.iter().find(|s| s.id == id).cloned() else { return };
+        let Some(sf) = by_id(&self.ud.smart, id) else { return };
         if !sf.root.is_dir() {
             self.toast(format!("{} is no longer there", pp::home_short(&sf.root)));
             return;
         }
+        let timeline = id == TIMELINE;
         if new_tab {
             let mut t = self.make_tab(sf.root.clone());
-            t.open_smart(sf, None);
+            let view = timeline.then(|| (timeline_view(t.settings.clone()), None));
+            t.open_smart(sf, view);
             if let Some(p) = self.panels.get_mut(&panel) {
                 let at = (p.active + 1).min(p.tabs.len());
                 p.tabs.insert(at, t);
@@ -427,6 +456,7 @@ impl App {
         }
         let s = App::nav_view(&self.ud, &sf.root);
         let Some(p) = self.panels.get_mut(&panel) else { return };
+        let s = if timeline { Some((timeline_view(s.map(|x| x.0).unwrap_or_else(|| p.tab().settings.clone())), None)) } else { s };
         let old = p.path();
         p.tab_mut().open_smart(sf, s);
         if let Some(i) = p.inspector.as_mut() {

@@ -146,9 +146,12 @@ and - zoom, 0 fits and 1 shows one pixel for one, and Space plays them as a slid
 a folder's menu, lists what is in it biggest first with each item's share, and trashes
 what you check. Previous Versions, in a file's menu, lists the earlier copies Snapper or
 Timeshift keep in the disk's snapshots; pick one to preview it, then restore it in place
-(the file it replaces goes to the trash) or as a copy beside it. Alt+S puts the
-selection on the shelf, a strip along the bottom of the window, and Move Here or Copy
-Here takes everything on it into the folder you are in.
+(the file it replaces goes to the trash) or as a copy beside it. Timeline, under Home in
+the sidebar, lists the files changed in the last month anywhere in your home folder,
+newest first under Today, Yesterday and the weeks before (hidden folders, caches and
+build output left out). Alt+S puts the selection on the shelf, a strip along the bottom
+of the window, and Move Here or Copy Here takes everything on it into the folder you are
+in.
 
 The inspector renders Markdown, shows JSON, TOML and YAML as trees you fold with the
 arrow keys, and CSV and TSV as tables; its toolbar switches any of them to the text as

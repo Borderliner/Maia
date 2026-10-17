@@ -137,6 +137,7 @@ commands! {
     Forward, "forward", Folder, "Forward", "Go to the next folder in this tab's history.", ["Alt+Right", "Mouse5"];
     Up, "up", Folder, "Up", "Go to the parent folder and select the folder you came from.", ["Alt+Up", "Backspace"];
     Home, "home", Folder, "Home", "Go to your home folder.", ["Alt+Home"];
+    Timeline, "timeline", Folder, "Timeline", "Files changed in the last month anywhere in your home folder, newest first, by day.", [];
     Computer, "computer", Folder, "Computer", "Show drives and volumes; open an unmounted one to mount it.", [];
     ConnectServer, "connect_server", Folder, "Connect To Server…", "Open a network share (smb, sftp, ftp, WebDAV) by its address.", [];
     Refresh, "refresh", Folder, "Refresh", "Re-read this folder and reload previews, keeping scroll and selection.", ["Ctrl+R", "Alt+R"];

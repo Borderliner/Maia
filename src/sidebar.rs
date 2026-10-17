@@ -314,7 +314,14 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             }
             let g = crate::listing::elided(ui, label, font.clone(), r.width() - 62.0, if dim { pal.text_dim.gamma_multiply(0.6) } else { pal.text });
             ui.painter().galley(pos2(r.left() + 52.0, r.center().y - g.size().y / 2.0), g, pal.text);
-            resp.on_hover_text(format!("{}\nCtrl+click: open in a new tab", if tab::is_computer(path) { "Computer".into() } else { path.display().to_string() }))
+            let what = if tab::is_computer(path) {
+                "Computer".into()
+            } else if path == crate::ctxmenu::smart_key(crate::smart::TIMELINE) {
+                "Files changed in the last month".into()
+            } else {
+                path.display().to_string()
+            };
+            resp.on_hover_text(format!("{what}\nCtrl+click: open in a new tab"))
         };
         let nav = |actions: &mut Vec<Action>, resp: &egui::Response, path: &Path| {
             if resp.clicked() {
@@ -618,6 +625,18 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 nav(&mut actions, &resp, p);
                 drop_files(ui, &app.drag, &mut actions, &resp, p);
                 ctx_menu(&resp, &mut actions, p, false);
+                // What changed lately, all over the home folder, right under it.
+                if *g == Glyph::Home && matches("Timeline") {
+                    let key = crate::ctxmenu::smart_key(crate::smart::TIMELINE);
+                    let resp = item(ui, "Timeline", Some(Glyph::Clock), &key, false, false);
+                    let id = crate::smart::TIMELINE;
+                    if resp.clicked() {
+                        actions.push(Action::OpenSmart { panel: active, id, new_tab: mods.ctrl, focus: true });
+                    }
+                    if resp.middle_clicked() {
+                        actions.push(Action::OpenSmart { panel: active, id, new_tab: true, focus: false });
+                    }
+                }
             }
         }
         ui.add_space(12.0);

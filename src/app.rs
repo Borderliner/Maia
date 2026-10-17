@@ -775,8 +775,8 @@ impl App {
                     t.scroll_to_cursor = true;
                 }
                 t.saved_scope = self.ud.views.get(&path).map(|v| v.scope);
-                match ts.smart.and_then(|id| self.ud.smart.iter().find(|s| s.id == id)) {
-                    Some(sf) if sf.root == path => t.open_smart(sf.clone(), None),
+                match ts.smart.and_then(|id| crate::smart::by_id(&self.ud.smart, id)) {
+                    Some(sf) if sf.root == path => t.open_smart(sf, None),
                     _ if ts.flatten => t.set_flatten(true),
                     _ => {}
                 }
@@ -1859,6 +1859,10 @@ impl App {
                 None => self.toast("Run Task needs a folder"),
             },
             Cmd::TidyFolder => crate::tidy::open(self),
+            Cmd::Timeline => {
+                let panel = self.active;
+                self.open_smart(panel, crate::smart::TIMELINE, false, true);
+            }
             Cmd::BatchRename => {
                 let panel = self.active;
                 match crate::batchname::open(self, panel) {

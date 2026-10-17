@@ -728,6 +728,9 @@ impl Tab {
             self.navigate(sf.root.clone(), settings);
         } else {
             // Saved from this folder's own search: the search is the smart folder now.
+            if let Some((v, _)) = settings {
+                self.settings = v;
+            }
             self.filter.clear();
             self.last_filter.clear();
             self.selected.clear();
@@ -1273,7 +1276,10 @@ impl Tab {
         self.rows.clear();
         self.group_labels.clear();
         let mut ordered: Vec<(Option<(String, usize, bool)>, Vec<u32>)> = vec![];
-        if self.settings.group == GroupBy::None || self.flatten {
+        // A flattened walk can be huge and is not grouped; the Timeline is bounded by its
+        // month and reads by day.
+        let timeline = self.smart.as_ref().is_some_and(|s| s.id == crate::smart::TIMELINE);
+        if self.settings.group == GroupBy::None || (self.flatten && !timeline) {
             ordered.push((None, top));
         } else {
             let mut order: Vec<String> = vec![];

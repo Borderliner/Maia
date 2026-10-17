@@ -6935,3 +6935,51 @@ fn photo_places_and_map_links() {
     assert_eq!(place(48.85837, -2.294481), "48.85837° N, 2.29448° W");
     assert_eq!(map_url(48.85837, 2.294481), "https://www.openstreetmap.org/?mlat=48.858370&mlon=2.294481#map=16/48.858370/2.294481");
 }
+
+/// A home folder for the Timeline: files changed today, three days ago, three weeks
+/// ago and two months ago, and recent ones where it never looks (hidden folders and
+/// files, a cache, a git folder, installed packages, a Rust build).
+pub(crate) fn timeline_fixture(h: &Path) {
+    let now = std::time::SystemTime::now();
+    let ago = |days: u64| now - Duration::from_secs(days * 86_400 + 60);
+    let at = |p: &str, days: u64| {
+        touch(&h.join(p), p);
+        std::fs::File::options().write(true).open(h.join(p)).unwrap().set_modified(if days == 0 { now - Duration::from_secs(60) } else { ago(days) }).unwrap();
+    };
+    at("Documents/letter.odt", 0);
+    at("Downloads/ticket.pdf", 3);
+    at("Pictures/2026/beach.png", 21);
+    at("Documents/old report.pdf", 60);
+    at(".cache/thumb.png", 0);
+    at(".notes.txt", 0);
+    at("Code/app/.git/index", 0);
+    at("Code/app/web/package.json", 40);
+    at("Code/app/web/node_modules/left-pad/index.js", 0);
+    at("Code/app/Cargo.toml", 40);
+    at("Code/app/target/debug/app", 0);
+    at("Code/app/src/main.rs", 1);
+}
+
+/// The Timeline: the last month's files under home, the ones where it never looks left
+/// out; opened by its id, it shows newest first in the date groups.
+#[test]
+fn timeline_lists_the_last_month() {
+    use crate::smart::{TIMELINE, by_id, search, timeline, timeline_view};
+    let d = tmpdir("timeline");
+    timeline_fixture(&d);
+    let mut sf = timeline();
+    assert_eq!((sf.id, sf.name.as_str(), sf.days), (TIMELINE, "Timeline", Some(31)));
+    assert_eq!(by_id(&[], TIMELINE), Some(timeline()));
+    assert_eq!(by_id(&[], 7), None);
+    sf.root = d.clone();
+    let (cancel, cut) = (std::sync::atomic::AtomicBool::new(false), std::sync::atomic::AtomicBool::new(false));
+    let mut found: Vec<String> = vec![];
+    search(&sf, &mut |b| {
+        found.extend(b.iter().map(|e| e.path.strip_prefix(&d).unwrap().to_string_lossy().into_owned()));
+        true
+    }, &cancel, &cut);
+    found.sort();
+    assert_eq!(found, ["Code/app/src/main.rs", "Documents/letter.odt", "Downloads/ticket.pdf", "Pictures/2026/beach.png"]);
+    let v = timeline_view(crate::config::ViewSettings::default());
+    assert_eq!((v.sort, v.desc, v.group), (crate::config::SortKey::Modified, true, crate::config::GroupBy::Modified));
+}
