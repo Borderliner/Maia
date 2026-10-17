@@ -6271,3 +6271,302 @@ fn a_version_restored_in_place_or_as_a_copy() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The real converters on the PATH (ImageMagick, ffmpeg and ffprobe, poppler's
+/// pdfunite and pdfseparate, libheif's heif-dec) linked into a stand-in folder; None
+/// when one is missing.
+pub(crate) fn convert_tools(dir: &Path) -> Option<PathBuf> {
+    std::fs::create_dir_all(dir).unwrap();
+    for t in ["magick", "ffmpeg", "ffprobe", "pdfunite", "pdfseparate", "heif-dec"] {
+        let real = std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(t)).find(|m| m.is_file()))?;
+        let _ = std::os::unix::fs::symlink(real, dir.join(t));
+    }
+    Some(dir.to_path_buf())
+}
+
+/// Real inputs for conversions, made by the real tools: a see-through PNG, a JPEG stored
+/// turned (EXIF orientation 6), a two-frame GIF, a HEIC, a tone with a cover and tags
+/// as MP3, a short video with odd sides, and PDFs of three and two pages.
+pub(crate) fn convert_inputs(d: &Path, tools: &Path) {
+    let run = |prog: &str, args: &[&str]| {
+        let ok = std::process::Command::new(tools.join(prog)).args(args).current_dir(d).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+        assert!(ok, "{prog} {args:?}");
+    };
+    run("magick", &["-size", "120x80", "xc:none", "-fill", "#e04030", "-draw", "rectangle 0,0 59,79", "clear.png"]);
+    run("magick", &["-size", "400x240", "gradient:#e94-#36c", "raw.jpg"]);
+    let turned = with_exif_orientation(&std::fs::read(d.join("raw.jpg")).unwrap(), 6);
+    std::fs::write(d.join("turned.jpg"), turned).unwrap();
+    std::fs::remove_file(d.join("raw.jpg")).unwrap();
+    run("magick", &["-delay", "10", "-size", "64x48", "xc:red", "xc:blue", "moving.gif"]);
+    run("magick", &["-size", "90x60", "gradient:#2a7-#fc3", "phone.heic"]);
+    run("ffmpeg", &["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x64", "-frames:v", "1", "cover.png"]);
+    run("ffmpeg", &["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-i", "cover.png", "-map", "0", "-map", "1", "-c:a", "libmp3lame", "-c:v", "png", "-disposition:v", "attached_pic", "-id3v2_version", "3", "-metadata", "title=Test Tone", "-metadata", "artist=Maia", "tone.mp3"]);
+    std::fs::remove_file(d.join("cover.png")).unwrap();
+    run("ffmpeg", &["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=161x121:rate=15", "-f", "lavfi", "-i", "sine=duration=1", "-c:v", "mpeg4", "-c:a", "pcm_s16le", "-shortest", "clip.avi"]);
+    std::fs::write(d.join("three.pdf"), crate::sim::sample_pdf(&["1 0 0", "0 1 0", "0 0 1"])).unwrap();
+    std::fs::write(d.join("two.pdf"), crate::sim::sample_pdf(&["0.5 0.5 0", "0 0.5 0.5"])).unwrap();
+}
+
+/// A conversion job run to its end, as the app runs it.
+fn convert_job(srcs: &[PathBuf], to: crate::convert::Target, out: Option<PathBuf>, tools: &Path) -> ops::Progress {
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(tools.to_path_buf()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    let job = ops::spawn(1, OpKind::Convert { srcs: srcs.to_vec(), to, out, tools: t }, egui::Context::default());
+    let t0 = Instant::now();
+    while !job.progress.lock().unwrap().finished {
+        assert!(t0.elapsed() < Duration::from_secs(120), "{to:?} took too long");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::mem::take(&mut *job.progress.lock().unwrap())
+}
+
+/// Hidden part files left in `d` (a failed or cancelled conversion leaves none).
+fn parts_in(d: &Path) -> Vec<String> {
+    std::fs::read_dir(d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with('.')).collect()
+}
+
+/// What each selection is offered: only formats other than its own, only files of one
+/// kind, merging for two PDFs or more and splitting for one, nothing without the tool.
+#[test]
+fn conversions_offered_by_kind_and_tool() {
+    use crate::convert::{Target as T, offered};
+    let d = tmpdir("convert-offer");
+    let Some(all) = convert_tools(&d.join("all")) else { return };
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(all.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(d.join("none")));
+    std::fs::create_dir_all(d.join("none")).unwrap();
+    let none = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    assert_eq!(offered(&["png"], &t), vec![T::Jpg, T::Webp, T::PicturePdf]);
+    assert_eq!(offered(&["jpeg", "jpg"], &t), vec![T::Png, T::Webp, T::PicturePdf]);
+    assert_eq!(offered(&["png", "jpg", "heic"], &t), vec![T::Jpg, T::Png, T::Webp, T::PicturePdf]);
+    assert_eq!(offered(&["flac"], &t), vec![T::Mp3, T::Opus]);
+    assert_eq!(offered(&["mp3", "wav"], &t), vec![T::Mp3, T::Opus, T::Flac]);
+    assert_eq!(offered(&["mkv"], &t), vec![T::Mp4, T::Webm, T::SoundMp3]);
+    assert_eq!(offered(&["pdf"], &t), vec![T::SplitPdf]);
+    assert_eq!(offered(&["pdf", "pdf"], &t), vec![T::MergePdf]);
+    assert!(offered(&["mp3", "pdf"], &t).is_empty(), "two kinds");
+    assert!(offered(&["txt"], &t).is_empty());
+    assert!(offered(&[], &t).is_empty());
+    for exts in [vec!["png"], vec!["mp3"], vec!["mp4"], vec!["pdf"], vec!["pdf", "pdf"]] {
+        assert!(offered(&exts, &none).is_empty(), "{exts:?} without the tools");
+    }
+    assert_eq!(T::of(Cmd::ConvertSoundMp3), Some(T::SoundMp3));
+    assert!(T::ALL.iter().all(|t| T::of(t.cmd()) == Some(*t)));
+}
+
+/// Pictures through the real ImageMagick: transparency on white in a JPG, a photo stored
+/// turned made upright, one frame of an animated GIF, a HEIC read, a name already taken
+/// kept; then several pictures as one PDF written by Maia, each page A4 the right way
+/// round with the picture on it; libheif read a HEIC an ImageMagick without HEIC refuses.
+#[test]
+fn pictures_converted_through_imagemagick() {
+    use crate::convert::{Target as T, jpeg_size, page_for};
+    let d = tmpdir("convert-pictures");
+    let Some(tools) = convert_tools(&d.join("tools")) else { return };
+    let w = d.join("work");
+    std::fs::create_dir_all(&w).unwrap();
+    convert_inputs(&w, &tools);
+    let shown = |p: &Path| crate::imgdec::load(p, 4096).unwrap_or_else(|| panic!("{} decodes", p.display()));
+    std::fs::write(w.join("clear.jpg"), "taken").unwrap();
+    let p = convert_job(&[w.join("clear.png")], T::Jpg, None, &tools);
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    assert_eq!(p.produced, vec![(w.join("clear.png"), w.join("clear (1).jpg"))]);
+    let (img, dims) = shown(&w.join("clear (1).jpg"));
+    assert_eq!(dims, [120, 80]);
+    let px = |x: u32, y: u32| img.px[((y * img.w + x) * 4) as usize..][..3].to_vec();
+    assert!(px(100, 40).iter().all(|&c| c > 240), "see-through became white: {:?}", px(100, 40));
+    assert!(px(20, 40)[0] > 180 && px(20, 40)[2] < 90, "the red stays: {:?}", px(20, 40));
+    assert_eq!(std::fs::read_to_string(w.join("clear.jpg")).unwrap(), "taken");
+    let p = convert_job(&[w.join("turned.jpg"), w.join("moving.gif"), w.join("phone.heic")], T::Png, None, &tools);
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    assert_eq!(p.done_items, 3);
+    assert_eq!(shown(&w.join("turned.png")).1, [240, 400], "upright, and stored so");
+    assert_eq!(shown(&w.join("moving.png")).1, [64, 48]);
+    assert_eq!(shown(&w.join("phone.png")).1, [90, 60]);
+    assert!(std::fs::read(w.join("moving.png")).unwrap().starts_with(b"\x89PNG"));
+    let p = convert_job(&[w.join("phone.heic")], T::Webp, None, &tools);
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    assert_eq!(shown(&w.join("phone.webp")).1, [90, 60]);
+    // An ImageMagick that can't read HEIC: libheif decodes it instead.
+    let picky = d.join("picky");
+    convert_tools(&picky).unwrap();
+    std::fs::remove_file(picky.join("magick")).unwrap();
+    let real = std::fs::read_link(tools.join("magick")).unwrap();
+    fake_tool(&picky, "magick", &format!("t=\"$D/in.$$\"; cat > \"$t\"\nif head -c 12 \"$t\" | grep -q ftyp; then rm -f \"$t\"; echo \"magick: no decode delegate for this image format 'HEIC'\" >&2; exit 1; fi\n{} \"$@\" < \"$t\"; r=$?; rm -f \"$t\"; exit $r", real.display()));
+    let p = convert_job(&[w.join("phone.heic")], T::Jpg, None, &picky);
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    assert_eq!(shown(&w.join("phone.jpg")).1, [90, 60]);
+    assert!(parts_in(&w).is_empty(), "{:?}", parts_in(&w));
+    // Without libheif the refusal is said.
+    std::fs::remove_file(picky.join("heif-dec")).unwrap();
+    let p = convert_job(&[w.join("phone.heic")], T::Png, None, &picky);
+    assert_eq!(p.errors.len(), 1);
+    assert!(p.errors[0].contains("no decode delegate"), "{:?}", p.errors);
+    // Pictures as one PDF: a page each, landscape for the wide one, A4.
+    let out = w.join("Album.pdf");
+    let p = convert_job(&[w.join("clear.png"), w.join("turned.jpg"), w.join("phone.heic")], T::PicturePdf, Some(out.clone()), &tools);
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    assert_eq!(p.produced.len(), 1);
+    assert_eq!(crate::media::pdf_pages(&out), Some(3));
+    let info = std::process::Command::new("pdfinfo").args(["-f", "1", "-l", "3"]).arg(&out).output().unwrap();
+    let info = String::from_utf8_lossy(&info.stdout);
+    let sizes: Vec<&str> = info.lines().filter(|l| l.starts_with("Page") && l.contains("size:")).map(|l| l.split("size:").nth(1).unwrap().trim()).collect();
+    assert_eq!(sizes.len(), 3, "{info}");
+    assert!(sizes[0].starts_with("841.89 x 595.28"), "the wide picture on a landscape page: {sizes:?}");
+    assert!(sizes[1].starts_with("595.28 x 841.89"), "the upright photo on a portrait one: {sizes:?}");
+    // The page shows the picture: red on the left, white where it was clear.
+    let page = crate::media::pdf_page(&out, 1, 400).expect("page 1 renders");
+    let at = |fx: f32, fy: f32| {
+        let (x, y) = ((page.w as f32 * fx) as u32, (page.h as f32 * fy) as u32);
+        page.px[((y * page.w + x) * 4) as usize..][..3].to_vec()
+    };
+    assert!(at(0.25, 0.5)[0] > 180 && at(0.25, 0.5)[1] < 100, "red on the page: {:?}", at(0.25, 0.5));
+    assert!(at(0.75, 0.5).iter().all(|&c| c > 230), "white beside it: {:?}", at(0.75, 0.5));
+    let jpeg = std::fs::read(w.join("phone.jpg")).unwrap();
+    assert_eq!(jpeg_size(&jpeg), Some((90, 60, 3)));
+    assert_eq!(jpeg_size(b"not a jpeg"), None);
+    assert_eq!(jpeg_size(&jpeg[..20]), None);
+    let ((pw, ph), [x, y, dw, dh]) = page_for(1000, 500);
+    assert!((pw - 841.89).abs() < 0.01 && (ph - 595.28).abs() < 0.01);
+    assert!((dw / dh - 2.0).abs() < 0.01 && x > 0.0 && y > 0.0 && x + dw <= pw && y + dh <= ph);
+    let (_, [x, _, dw, _]) = page_for(10, 4000);
+    assert!(x > 28.0 && dw < 10.0, "a sliver stays in the middle");
+    assert!(parts_in(&w).is_empty(), "{:?}", parts_in(&w));
+}
+
+/// Sound and video through the real ffmpeg: tags and the cover kept in a FLAC and an
+/// MP3, an Opus without the cover it can't hold, a video with odd sides as MP4 (H.264
+/// at even sides) and WebM (VP9), its sound alone as MP3. A broken file fails with
+/// ffmpeg's words and leaves nothing; a long conversion shows how far it got, and
+/// Cancel stops ffmpeg and takes its part file away.
+#[test]
+fn sound_and_video_converted_through_ffmpeg() {
+    use crate::convert::{Target as T, duration, progress_us};
+    let d = tmpdir("convert-media");
+    let Some(tools) = convert_tools(&d.join("tools")) else { return };
+    let w = d.join("work");
+    std::fs::create_dir_all(&w).unwrap();
+    convert_inputs(&w, &tools);
+    let probe = |p: &Path| crate::media::probe(p).unwrap_or_else(|| panic!("{} probes", p.display()));
+    let streams = |p: &Path| {
+        let o = std::process::Command::new("ffprobe").args(["-v", "error", "-show_entries", "stream=codec_name,codec_type:stream_disposition=attached_pic", "-of", "csv=p=0"]).arg(p).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).lines().map(String::from).collect::<Vec<_>>()
+    };
+    let p = convert_job(&[w.join("tone.mp3")], T::Flac, None, &tools);
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    let flac = w.join("tone.flac");
+    let pr = probe(&flac);
+    assert_eq!((pr.codec.as_str(), pr.title.as_deref(), pr.artist.as_deref()), ("flac", Some("Test Tone"), Some("Maia")));
+    assert!(streams(&flac).iter().any(|s| s.starts_with("png,video,1")), "the cover kept: {:?}", streams(&flac));
+    assert!((pr.duration - 2.0).abs() < 0.2, "{}", pr.duration);
+    let p = convert_job(&[flac.clone()], T::Mp3, None, &tools);
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    assert_eq!(p.produced, vec![(flac.clone(), w.join("tone (1).mp3"))], "beside the first, not over it");
+    let back = probe(&w.join("tone (1).mp3"));
+    assert_eq!((back.codec.as_str(), back.title.as_deref()), ("mp3", Some("Test Tone")));
+    assert!(streams(&w.join("tone (1).mp3")).iter().any(|s| s.ends_with(",video,1")));
+    let p = convert_job(&[w.join("tone.mp3")], T::Opus, None, &tools);
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    let opus = w.join("tone.opus");
+    assert_eq!(probe(&opus).codec, "opus");
+    assert_eq!(streams(&opus).len(), 1, "no cover in Opus: {:?}", streams(&opus));
+    // Video, odd sides made even.
+    let p = convert_job(&[w.join("clip.avi")], T::Mp4, None, &tools);
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    let mp4 = probe(&w.join("clip.mp4"));
+    assert_eq!((mp4.codec.as_str(), mp4.video, mp4.audio), ("h264", Some((160, 120)), true));
+    let p = convert_job(&[w.join("clip.avi")], T::Webm, None, &tools);
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    let webm = probe(&w.join("clip.webm"));
+    assert_eq!((webm.codec.as_str(), webm.video), ("vp9", Some((161, 121))));
+    let p = convert_job(&[w.join("clip.mp4")], T::SoundMp3, None, &tools);
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    let snd = probe(&w.join("clip.mp3"));
+    assert!(snd.video.is_none() && snd.audio && snd.codec == "mp3");
+    // A broken file: ffmpeg's own words, nothing left behind.
+    std::fs::write(w.join("broken.wav"), "RIFF but not really").unwrap();
+    let p = convert_job(&[w.join("broken.wav"), w.join("tone.mp3")], T::Flac, None, &tools);
+    assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
+    assert!(p.errors[0].starts_with("broken.wav: ") && p.errors[0].len() > 14, "{:?}", p.errors);
+    assert!(!w.join("broken.flac").exists());
+    assert_eq!(p.done_items, 2, "the next file still converted");
+    assert!(parts_in(&w).is_empty(), "{:?}", parts_in(&w));
+    assert_eq!(progress_us("out_time_us=1500000"), Some(1_500_000));
+    assert_eq!(progress_us("out_time_ms=20"), Some(20));
+    assert_eq!(progress_us("progress=continue"), None);
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(tools.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    assert!(duration(&t, &w.join("tone.mp3")).is_some_and(|d| (d - 2.0).abs() < 0.2));
+    assert_eq!(duration(&t, &w.join("broken.wav")), None);
+    // A long one: progress inside the file, then Cancel.
+    let ok = std::process::Command::new("ffmpeg").args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=120:size=640x480:rate=30", "-c:v", "mpeg4", "-q:v", "20"]).arg(w.join("long.avi")).status().unwrap().success();
+    assert!(ok);
+    let job = ops::spawn(2, OpKind::Convert { srcs: vec![w.join("long.avi")], to: T::Webm, out: None, tools: t }, egui::Context::default());
+    assert_eq!(job.label, "Converting long.avi to WebM");
+    let t0 = Instant::now();
+    while job.progress.lock().unwrap().within.unwrap_or(0.0) <= 0.0 {
+        assert!(t0.elapsed() < Duration::from_secs(60), "no progress from ffmpeg");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(w.join(".long.webm.part").exists(), "written to a part file");
+    let ff = |s: &str| std::fs::read_dir("/proc").unwrap().flatten().any(|e| std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| c.trim() == "ffmpeg") && std::fs::read(e.path().join("cmdline")).is_ok_and(|c| String::from_utf8_lossy(&c).contains(s)));
+    assert!(ff(".long.webm.part"));
+    job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let t0 = Instant::now();
+    while !job.progress.lock().unwrap().finished {
+        assert!(t0.elapsed() < Duration::from_secs(10), "Cancel didn't stop it");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!w.join(".long.webm.part").exists() && !w.join("long.webm").exists());
+    let t0 = Instant::now();
+    while ff(".long.webm.part") && t0.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!ff(".long.webm.part"), "ffmpeg killed");
+    assert!(job.progress.lock().unwrap().errors.is_empty(), "a cancel is no error");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// PDFs through poppler: two merged into one with every page in order, under the name
+/// given; one split into a folder of one-page PDFs named after it, a % in its name
+/// included; a broken PDF refused with nothing left behind.
+#[test]
+fn pdfs_merged_and_split_through_poppler() {
+    use crate::convert::Target as T;
+    let d = tmpdir("convert-pdf");
+    let Some(tools) = convert_tools(&d.join("tools")) else { return };
+    let w = d.join("work");
+    std::fs::create_dir_all(&w).unwrap();
+    convert_inputs(&w, &tools);
+    let out = w.join("Both.pdf");
+    let p = convert_job(&[w.join("three.pdf"), w.join("two.pdf")], T::MergePdf, Some(out.clone()), &tools);
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    assert_eq!(crate::media::pdf_pages(&out), Some(5));
+    // Page four is the second file's first: yellowish.
+    let pg = crate::media::pdf_page(&out, 4, 200).unwrap();
+    let c = &pg.px[(((pg.h / 2) * pg.w + pg.w / 2) * 4) as usize..][..3];
+    assert!(c[0] > 100 && c[1] > 100 && c[2] < 40, "{c:?}");
+    std::fs::rename(w.join("three.pdf"), w.join("50% off.pdf")).unwrap();
+    std::fs::create_dir(w.join("50% off pages")).unwrap();
+    let p = convert_job(&[w.join("50% off.pdf")], T::SplitPdf, None, &tools);
+    assert!(p.errors.is_empty(), "{:?}", p.errors);
+    let folder = w.join("50% off pages (1)");
+    assert_eq!(p.produced, vec![(w.join("50% off.pdf"), folder.clone())]);
+    let mut names: Vec<String> = std::fs::read_dir(&folder).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(names, ["50% off 1.pdf", "50% off 2.pdf", "50% off 3.pdf"]);
+    for n in &names {
+        assert_eq!(crate::media::pdf_pages(&folder.join(n)), Some(1), "{n}");
+    }
+    std::fs::write(w.join("broken.pdf"), "%PDF-1.4 nothing").unwrap();
+    let p = convert_job(&[w.join("broken.pdf")], T::SplitPdf, None, &tools);
+    assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
+    let p = convert_job(&[w.join("broken.pdf"), w.join("two.pdf")], T::MergePdf, Some(w.join("Bad.pdf")), &tools);
+    assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
+    assert!(!w.join("Bad.pdf").exists() && parts_in(&w).is_empty(), "{:?}", parts_in(&w));
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -346,6 +346,13 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             }
             items.push(Item::sub("compress", "Compress", vec![Item::labeled(Cmd::CompressZip, "Zip (.zip)"), Item::labeled(Cmd::CompressTarGz, "Tar.gz (.tar.gz)"), Item::labeled(Cmd::CompressTarXz, "Tar.xz (.tar.xz)"), Item::labeled(Cmd::Compress7z, "7-Zip (.7z)")]));
         }
+        // Files of one kind, into the formats the installed tools write.
+        if !in_trash && t.archive.is_none() && ents.iter().all(|e| !e.1) {
+            let exts: Vec<&str> = ents.iter().map(|e| e.3.as_str()).collect();
+            if let Some(kids) = crate::convert::menu(&exts) {
+                items.push(Item::sub("convert", "Convert", kids.into_iter().map(|(c, l)| Item::labeled(c, l)).collect()));
+            }
+        }
         // Only what git doesn't ignore yet can be added.
         if repo.as_deref().is_some_and(|r| ents.iter().any(|e| e.0 != r.root && !crate::gitstatus::ignored(Some(r), &e.0, &here))) {
             let what = match ents.as_slice() {

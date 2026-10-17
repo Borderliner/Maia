@@ -56,12 +56,14 @@ These are optional. Maia works without them and uses them when they are there:
 | `git` | change marks on files in git repositories, their history and blame, staging and committing, branches, the stash, pulling and pushing |
 | `sqlite3` | the tables and first rows of SQLite databases, read-only, in the inspector |
 | `ollama` | search by meaning, if you turn it on (it fetches a ~860 MB model only when you ask); `ollama-vulkan` lets it use the graphics card |
-| `ffmpeg`, `ffprobe`, `ffplay` | video and audio previews and thumbnails |
+| `ffmpeg`, `ffprobe`, `ffplay` | video and audio previews and thumbnails; converting sound and video |
 | `pdfinfo`, `pdftoppm` (poppler) | PDF pages in the inspector |
 | `pdflatex` (TeX Live) or `tectonic`, with poppler's `pdftocairo` | formulas in Markdown |
 | `soffice` (LibreOffice) | Word, Excel, PowerPoint and OpenDocument files in the inspector, with poppler |
 | `udisksctl` (udisks2), `lsblk` | mounting, unmounting and ejecting drives |
-| `magick` or `convert` (ImageMagick) | turning, resizing and cropping pictures |
+| `magick` or `convert` (ImageMagick) | turning, resizing, cropping and converting pictures |
+| `heif-dec` (libheif) | converting HEIC photos an ImageMagick without HEIC can't read |
+| `pdfunite`, `pdfseparate` (poppler) | merging PDFs and splitting one into pages |
 | `xdg-email` (xdg-utils) | Email: files attached to a new message in your mail app |
 | `lp`, `lpstat` (CUPS) | Print |
 | desktop thumbnailers | thumbnails for other formats, shared with your other apps |
@@ -102,6 +104,10 @@ for Compress. Set As Wallpaper, in a picture's menu, works on GNOME, KDE, XFCE,
 Cinnamon, MATE, sway, Hyprland (with hyprpaper or swww) and Noctalia. Its Picture menu
 turns pictures in place (Undo brings the original back from the trash) and saves smaller
 copies beside them; Crop works in the inspector: drag over what to keep and press Enter.
+Convert, in the menu of files of one kind, saves a copy in another format beside each:
+pictures as JPG, PNG or WebP, or all of them as one PDF; sound as MP3, Opus or FLAC;
+video as MP4 or WebM, or its sound alone. It merges several PDFs into one and splits one
+into a folder of pages. Undo takes the copies away again.
 Connect To Server (in the menu, or type an `smb://`, `sftp://` or `ftp://` address into
 Go To) opens network shares, which then stay in the sidebar's Network section. Right-
 click files for Tags to give them colour labels or named tags (kept on the files as

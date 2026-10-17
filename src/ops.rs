@@ -32,6 +32,10 @@ pub enum OpKind {
     Compress { srcs: Vec<PathBuf>, out: PathBuf },
     /// One command run as administrator (through pkexec).
     Admin { task: crate::admin::Task, tools: crate::drives::Tools },
+    /// Files converted to another format beside them (all into `out`, when one file is
+    /// made of several). The tools travel with the job: a test's fakes are only known
+    /// to the thread that set them.
+    Convert { srcs: Vec<PathBuf>, to: crate::convert::Target, out: Option<PathBuf>, tools: crate::drives::Tools },
 }
 
 impl OpKind {
@@ -44,6 +48,7 @@ impl OpKind {
             OpKind::Extract { .. } => "Extracting",
             OpKind::Compress { .. } => "Compressing",
             OpKind::Admin { .. } => "Working as administrator",
+            OpKind::Convert { .. } => "Converting",
         }
     }
 }
@@ -66,6 +71,9 @@ pub struct Progress {
     /// An archive that wants a password (or refused the one given): asked for, then the
     /// job runs again.
     pub password: Option<(PathBuf, bool)>,
+    /// How far into the item at hand a job that can't count bytes is (a conversion), from
+    /// 0 to 1.
+    pub within: Option<f32>,
 }
 
 pub struct Job {
@@ -85,7 +93,7 @@ pub fn spawn(id: u64, kind: OpKind, ctx: egui::Context) -> Job {
     let cancel = Arc::new(AtomicBool::new(false));
     let pause = Arc::new(AtomicBool::new(false));
     let n = match &kind {
-        OpKind::Copy { srcs, .. } | OpKind::Move { srcs, .. } | OpKind::Compress { srcs, .. } => srcs.len(),
+        OpKind::Copy { srcs, .. } | OpKind::Move { srcs, .. } | OpKind::Compress { srcs, .. } | OpKind::Convert { srcs, .. } => srcs.len(),
         OpKind::Trash { paths } | OpKind::Delete { paths } | OpKind::Extract { members: paths, .. } => paths.len(),
         OpKind::Admin { .. } => 1,
     };
@@ -93,6 +101,7 @@ pub fn spawn(id: u64, kind: OpKind, ctx: egui::Context) -> Job {
         OpKind::Extract { archive, members, .. } if members.is_empty() => format!("Extracting {}", name_of(archive)),
         OpKind::Compress { out, .. } => format!("Compressing into {}", name_of(out)),
         OpKind::Admin { task, .. } => task.label(),
+        OpKind::Convert { srcs, to, .. } => crate::convert::label(srcs, *to),
         _ => format!("{} {} item{}", kind.verb(), n, if n == 1 { "" } else { "s" }),
     };
     let (p2, c2, k2, pa2) = (progress.clone(), cancel.clone(), kind.clone(), pause.clone());
@@ -113,10 +122,19 @@ pub struct Gate<'a> {
 
 impl Gate<'_> {
     /// Blocks while paused; returns true if cancelled.
-    fn stop(&self) -> bool {
+    pub(crate) fn stop(&self) -> bool {
         while self.pause.load(Ordering::Relaxed) && !self.cancel.load(Ordering::Relaxed) {
             std::thread::sleep(std::time::Duration::from_millis(80));
         }
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// For work another process does, which is stopped and continued instead of waited on.
+    pub(crate) fn paused(&self) -> bool {
+        self.pause.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
 }
@@ -225,6 +243,7 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 Err(e) => p.lock().unwrap().errors.push(e),
             }
         }
+        OpKind::Convert { srcs, to, out, tools } => crate::convert::run(srcs, *to, out.as_deref(), tools, p, cancel, ctx),
         OpKind::Extract { archive, members, dest } => {
             p.lock().unwrap().current = name_of(archive);
             extract(archive, members, dest, p);

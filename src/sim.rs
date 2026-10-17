@@ -1022,7 +1022,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(146) {
+    match rng.below(147) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1932,11 +1932,61 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             }
             s.idle(1 + rng.below(20));
         }
+        146 => {
+            // A conversion of whatever is selected: from the Convert menu or the
+            // palette, a PDF's name typed or let go, the card's Cancel now and then.
+            const CONVERTS: &[Cmd] = &[Cmd::ConvertJpg, Cmd::ConvertPng, Cmd::ConvertWebp, Cmd::ConvertPdf, Cmd::ConvertMp3, Cmd::ConvertOpus, Cmd::ConvertFlac, Cmd::ConvertMp4, Cmd::ConvertWebm, Cmd::ConvertSoundMp3, Cmd::MergePdfs, Cmd::SplitPdf];
+            if rng.below(3) == 0 {
+                let media = std::fs::read_dir(root().join("home")).ok().and_then(|r| r.flatten().map(|d| d.path().join("Media")).find(|p| p.is_dir()));
+                if let Some(m) = media.filter(|_| s.tab().path != root().join("home")) {
+                    s.note(format!("into {}", m.display()));
+                    let id = s.app.active;
+                    if let Some(p) = s.app.panels.get_mut(&id) {
+                        p.tab_mut().navigate(m, None);
+                    }
+                    s.settle();
+                    let n = s.tab().entries.len();
+                    if n > 0 {
+                        let id = s.app.active;
+                        let pick = rng.below(n) as u32;
+                        if let Some(p) = s.app.panels.get_mut(&id) {
+                            p.tab_mut().select_only(pick);
+                        }
+                    }
+                }
+            }
+            match rng.below(2) {
+                0 => {
+                    let (x, y) = p(rng);
+                    s.act(&format!("click {x:.0} {y:.0} right"));
+                    s.act("text convert");
+                    s.act("key Enter");
+                    s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowRight", "Enter", "Escape"])));
+                    s.act("key Enter");
+                }
+                _ => s.cmd(*rng.pick(CONVERTS)),
+            }
+            s.idle(2);
+            if matches!(s.app.popup, Popup::Prompt { .. }) {
+                if rng.below(2) == 0 {
+                    s.act(&format!("text {}", rng.pick(&["Album", " ", "a/b", "日本.pdf"])));
+                }
+                s.act(&format!("key {}", rng.pick(&["Enter", "Enter", "Escape"])));
+            }
+            s.idle(1 + rng.below(30));
+            if rng.below(3) == 0 && some_text_at(s, "Cancel") {
+                s.click_text("Cancel");
+            }
+        }
         _ => {
             s.note("idle".into());
             s.idle(rng.below(20) + 1);
         }
     }
+}
+
+fn some_text_at(s: &Sim, want: &str) -> bool {
+    s.texts.iter().any(|(_, t)| t == want)
 }
 
 #[cfg(test)]
@@ -8490,6 +8540,170 @@ mod journeys {
         report("picfix", &s);
     }
 
+    /// Select these names in the active tab, the cursor on the first.
+    fn select_names(s: &mut Sim, names: &[&str]) {
+        let id = s.app.active;
+        let t = s.app.panels.get_mut(&id).unwrap().tab_mut();
+        let picks: Vec<u32> = names.iter().filter_map(|n| t.entries.iter().position(|e| e.name == *n).map(|i| i as u32)).collect();
+        assert_eq!(picks.len(), names.len(), "{names:?} listed");
+        t.selected = picks.iter().copied().collect();
+        t.cursor = picks.first().copied();
+        s.idle(2);
+    }
+
+    /// Open the menu of the row `name` and the submenu `sub`, scrolling a long menu
+    /// down to it in a short window.
+    fn open_submenu(s: &mut Sim, name: &str, sub: &str) {
+        let row = row_text(s, name);
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        for _ in 0..30 {
+            if some_text(s, sub) {
+                break;
+            }
+            let at = s.texts.iter().rev().find(|(_, t)| t == "Open").map(|x| x.0.center()).unwrap_or(row.center());
+            s.act(&format!("scroll {:.0} {:.0} -3", at.x, at.y));
+            s.idle(2);
+        }
+        s.click_text(sub);
+        s.idle(2);
+    }
+
+    /// Click `label` in the open menu, scrolling it into view first.
+    fn menu_pick(s: &mut Sim, label: &str) {
+        menu_show(s, label);
+        s.click_text(label);
+    }
+
+    /// Scroll the open menu until `label` is in view.
+    fn menu_show(s: &mut Sim, label: &str) {
+        for _ in 0..30 {
+            if s.texts.iter().any(|(r, t)| t == label && r.bottom() < s.size.y - 4.0) {
+                break;
+            }
+            // Over the menu itself (a job card may be up too): the context menu's own
+            // first rows, else the popup drawn last.
+            let menu = match &s.app.popup {
+                Popup::Ctx(_) => s.texts.iter().rev().find(|(_, t)| ["Open", "Mount", "Select All"].contains(&t.as_str())).map(|x| x.0.center()),
+                _ => None,
+            };
+            let at = menu.or_else(|| crate::ui::POPUPS.with(|p| p.borrow().last().map(|r| r.center()))).unwrap_or(pos2(s.size.x / 2.0, s.size.y / 2.0));
+            s.act(&format!("scroll {:.0} {:.0} -3", at.x, at.y));
+            s.idle(2);
+        }
+    }
+
+    /// Converting from the Convert menu and the palette: only formats the files aren't
+    /// in already, only for files of one kind; a sound file as FLAC with the job card
+    /// saying how far it is, Undo taking the copy away; a long video cancelled on its
+    /// card, ffmpeg's part file gone; pictures put into one PDF under a name typed in
+    /// the prompt; two PDFs merged and one split into a folder of pages; at other font
+    /// sizes and Spacing.
+    #[test]
+    fn convert_files_from_the_menu() {
+        if !sandboxed() {
+            return;
+        }
+        let d = root().join("home/convert");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let Some(tools) = crate::tests::convert_tools(&root().join("convert-tools")) else { return };
+        crate::tests::convert_inputs(&d, &tools);
+        let ok = std::process::Command::new(tools.join("ffmpeg")).args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=90:size=640x480:rate=30", "-c:v", "mpeg4", "-q:v", "20"]).arg(d.join("long.avi")).status().unwrap().success();
+        assert!(ok);
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(tools.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.settle();
+        // A sound file: not offered as what it is already.
+        select_names(&mut s, &["tone.mp3"]);
+        open_submenu(&mut s, "tone.mp3", "Convert");
+        for t in ["FLAC", "Opus"] {
+            assert!(some_text(&s, t), "{t}");
+        }
+        assert!(!some_text(&s, "MP3") && !some_text(&s, "MP4"));
+        look(&mut s, "the convert menu");
+        shot_still(&mut s, "convert-menu");
+        menu_pick(&mut s, "FLAC");
+        wait_until(&mut s, "the FLAC", 30, |s| s.app.jobs.iter().any(|j| j.progress.lock().unwrap().finished) && d.join("tone.flac").exists());
+        s.idle(2);
+        assert!(some_text(&s, "Converted tone.mp3 to FLAC"), "the card says it");
+        assert_eq!(s.app.undo.last().map(|u| u.label.as_str()), Some("Convert tone.mp3 to FLAC"));
+        s.act("key ctrl+z");
+        s.settle();
+        assert!(!d.join("tone.flac").exists(), "Undo took the copy away");
+        // Two kinds at once: nothing to convert.
+        select_names(&mut s, &["tone.mp3", "two.pdf"]);
+        let row = row_text(&s, "tone.mp3");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        assert!(!some_text(&s, "Convert"));
+        s.act("key Escape");
+        // A long video: the card counts inside the file; Cancel stops it.
+        select_names(&mut s, &["long.avi"]);
+        palette_run(&mut s, "Convert To WebM");
+        let webm = |s: &Sim| s.app.jobs.iter().find(|j| j.label == "Converting long.avi to WebM").map(|j| j.progress.clone());
+        wait_until(&mut s, "progress inside the file", 30, |s| webm(s).is_some_and(|p| p.lock().unwrap().within.unwrap_or(0.0) > 0.01));
+        s.idle(2);
+        let line = s.texts.iter().find(|(_, t)| t.starts_with("0 / 1 item · ")).map(|x| x.1.clone()).unwrap_or_else(|| s.fail("the card's line"));
+        assert!(line.ends_with('%'), "{line}");
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with("Converting long.avi")), "the card's title");
+        s.shot("convert-card");
+        let parts: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with('.')).collect();
+        assert_eq!(parts, [".long.webm.part"], "{:?}", s.app.jobs.first().map(|j| j.progress.lock().unwrap().errors.clone()));
+        for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
+            s.app.cfg.font_size = font;
+            s.app.cfg.spacing = spacing;
+            s.idle(3);
+        }
+        s.click_text("Cancel");
+        wait_until(&mut s, "cancelled", 15, |s| webm(s).is_none_or(|p| p.lock().unwrap().finished));
+        s.idle(2);
+        assert!(!d.join(".long.webm.part").exists() && !d.join("long.webm").exists());
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with("Cancelled converting")), "the card says it stopped");
+        s.shot("convert-cancelled");
+        // Pictures into one PDF, named first.
+        select_names(&mut s, &["clear.png", "turned.jpg", "phone.heic"]);
+        open_submenu(&mut s, "clear.png", "Convert");
+        menu_show(&mut s, "PDF…");
+        assert!(some_text(&s, "JPG") && some_text(&s, "PNG") && some_text(&s, "WebP"));
+        s.click_text("PDF…");
+        s.idle(2);
+        assert!(matches!(&s.app.popup, Popup::Prompt { text, .. } if text == "Pictures.pdf"));
+        look(&mut s, "the PDF's name");
+        shot_still(&mut s, "convert-pdf-name");
+        s.act("key ctrl+a");
+        s.act("text Holiday");
+        s.act("key Enter");
+        wait_until(&mut s, "the PDF", 30, |_| d.join("Holiday.pdf").exists());
+        assert_eq!(crate::media::pdf_pages(&d.join("Holiday.pdf")), Some(3));
+        // Two PDFs merged; one split.
+        select_names(&mut s, &["three.pdf", "two.pdf"]);
+        palette_run(&mut s, "Merge PDFs…");
+        assert!(matches!(&s.app.popup, Popup::Prompt { text, .. } if text == "Merged.pdf"));
+        s.act("key Enter");
+        wait_until(&mut s, "merged", 30, |_| d.join("Merged.pdf").exists());
+        assert_eq!(crate::media::pdf_pages(&d.join("Merged.pdf")), Some(5));
+        wait_until(&mut s, "the card gone", 10, |s| s.app.jobs.is_empty());
+        s.settle();
+        select_names(&mut s, &["three.pdf"]);
+        open_submenu(&mut s, "three.pdf", "Convert");
+        assert!(!some_text(&s, "Merge into one PDF…"));
+        menu_pick(&mut s, "Split into pages");
+        wait_until(&mut s, "split", 30, |_| d.join("three pages/three 3.pdf").exists());
+        s.settle();
+        look(&mut s, "after converting");
+        s.shot("convert-done");
+        report("convert", &s);
+    }
+
     /// Recent Projects from its key: the git repositories under the home folder, the
     /// last visited first and the rest by git's own activity, each with its branch and,
     /// once git has said, a dot for uncommitted changes. Typing narrows; Enter opens one
@@ -9446,8 +9660,13 @@ mod journeys {
             for t in ["gsettings", "plasma-apply-wallpaperimage", "noctalia"] {
                 crate::tests::fake_tool(&drv, t, "exit 0");
             }
-            // ImageMagick, the real one.
+            // ImageMagick, the real one, with ffmpeg and poppler's and libheif's tools, and
+            // real pictures, sound, video and PDFs to convert.
             let _ = crate::tests::imagemagick_tools(&drv);
+            if crate::tests::convert_tools(&drv).is_some() {
+                let _ = std::fs::create_dir_all(home.join("Media"));
+                crate::tests::convert_inputs(&home.join("Media"), &drv);
+            }
             // A mail opener and CUPS with two printers.
             crate::tests::fake_tool(&drv, "xdg-email", "exit 0");
             crate::tests::fake_tool(&drv, "lpstat", "case \"$1\" in -e) printf 'Office_Laser\\nHP_ENVY_6000\\n';; -d) echo 'system default destination: HP_ENVY_6000';; esac");

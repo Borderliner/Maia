@@ -265,8 +265,17 @@ pub fn failed_label(label: &str) -> String {
     job_title(label, true)
 }
 
+/// The card's title once Cancel stopped the job: "Cancelled converting clip.mkv to MP4".
+pub fn cancelled_label(label: &str) -> String {
+    let mut c = label.chars();
+    match c.next() {
+        Some(f) => format!("Cancelled {}{}", f.to_lowercase(), c.as_str()),
+        None => "Cancelled".into(),
+    }
+}
+
 fn job_title(label: &str, failed: bool) -> String {
-    for (now, done, verb) in [("Copying", "Copied", "copy"), ("Moving to trash", "Moved to trash", "move to trash"), ("Moving", "Moved", "move"), ("Deleting", "Deleted", "delete"), ("Extracting", "Extracted", "extract"), ("Compressing", "Compressed", "compress")] {
+    for (now, done, verb) in [("Copying", "Copied", "copy"), ("Moving to trash", "Moved to trash", "move to trash"), ("Moving", "Moved", "move"), ("Deleting", "Deleted", "delete"), ("Extracting", "Extracted", "extract"), ("Compressing", "Compressed", "compress"), ("Converting", "Converted", "convert"), ("Merging", "Merged", "merge"), ("Splitting", "Split", "split")] {
         if let Some(rest) = label.strip_prefix(now) {
             return if failed { format!("Couldn't {verb}{rest}") } else { format!("{done}{rest}") };
         }
@@ -1590,30 +1599,44 @@ impl App {
                         let p = j.progress.lock().unwrap();
                         let done = p.finished;
                         let failed = done && !p.errors.is_empty() && p.errors.len() >= p.total_items.max(1);
-                        ui.horizontal(|ui| {
-                            let title = if failed { failed_label(&j.label) } else if done { finished_label(&j.label) } else { j.label.clone() };
-                            ui.label(egui::RichText::new(title).strong());
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if done {
-                                    if ui.small_button("×").clicked() {
-                                        remove = Some(k);
-                                    }
-                                } else {
-                                    if ui.small_button("Cancel").clicked() {
-                                        j.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                                    }
-                                    let paused = j.pause.load(std::sync::atomic::Ordering::Relaxed);
-                                    if ui.small_button(if paused { "Resume" } else { "Pause" }).clicked() {
-                                        j.pause.store(!paused, std::sync::atomic::Ordering::Relaxed);
-                                    }
+                        let cancelled = j.cancel.load(std::sync::atomic::Ordering::Relaxed);
+                        // The title gets what the buttons leave and ends in "…" past it: a
+                        // file's name in it can be any length.
+                        let h = ui.text_style_height(&egui::TextStyle::Body).max(ui.spacing().interact_size.y);
+                        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
+                        let mut buttons = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Center)));
+                        {
+                            let ui = &mut buttons;
+                            if done {
+                                if ui.small_button("×").clicked() {
+                                    remove = Some(k);
                                 }
-                            });
-                        });
-                        let frac = if p.total_bytes > 0 { p.done_bytes as f32 / p.total_bytes as f32 } else if p.total_items > 0 { p.done_items as f32 / p.total_items as f32 } else { 0.0 };
-                        ui.add(egui::ProgressBar::new(if done { 1.0 } else { frac }).desired_height(5.0).fill(if p.errors.is_empty() { pal.accent } else { pal.danger }));
+                            } else {
+                                if ui.small_button("Cancel").clicked() {
+                                    j.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                let paused = j.pause.load(std::sync::atomic::Ordering::Relaxed);
+                                if ui.small_button(if paused { "Resume" } else { "Pause" }).clicked() {
+                                    j.pause.store(!paused, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        let left = Rect::from_min_max(row.min, pos2((buttons.min_rect().left() - 8.0).max(row.left()), row.max.y));
+                        let title = if done && cancelled { cancelled_label(&j.label) } else if failed { failed_label(&j.label) } else if done { finished_label(&j.label) } else { j.label.clone() };
+                        ui.new_child(egui::UiBuilder::new().max_rect(left).layout(egui::Layout::left_to_right(egui::Align::Center))).add(egui::Label::new(egui::RichText::new(title).strong()).truncate());
+                        let frac = match p.within {
+                            // Items done and the share of the one at hand.
+                            Some(w) if p.total_items > 0 => ((p.done_items as f32 + w) / p.total_items as f32).min(1.0),
+                            _ if p.total_bytes > 0 => p.done_bytes as f32 / p.total_bytes as f32,
+                            _ if p.total_items > 0 => p.done_items as f32 / p.total_items as f32,
+                            _ => 0.0,
+                        };
+                        ui.add(egui::ProgressBar::new(if done && !cancelled { 1.0 } else { frac }).desired_height(5.0).fill(if p.errors.is_empty() { pal.accent } else { pal.danger }));
                         let el = j.started.elapsed().as_secs_f64().max(0.001);
                         let mut line = format!("{} / {} item{}", p.done_items, p.total_items, if p.total_items == 1 { "" } else { "s" });
-                        if p.total_bytes > 0 {
+                        if p.within.is_some() && !done {
+                            line.push_str(&format!(" · {:.0}%", frac * 100.0));
+                        } else if p.total_bytes > 0 {
                             let speed = p.done_bytes as f64 / el;
                             line = format!("{} of {} · {}/s", fsx::fmt_size(p.done_bytes), fsx::fmt_size(p.total_bytes), fsx::fmt_size(speed as u64));
                             if !done && speed > 0.0 {

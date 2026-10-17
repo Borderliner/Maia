@@ -307,6 +307,18 @@ commands! {
     CompressTarGz, "compress_tar_gz", Files, "Compress To Tar.gz", "Pack the selection into a .tar.gz archive.", [];
     CompressTarXz, "compress_tar_xz", Files, "Compress To Tar.xz", "Pack the selection into a .tar.xz archive.", [];
     Compress7z, "compress_7z", Files, "Compress To 7z", "Pack the selection into a .7z archive.", [];
+    ConvertJpg, "convert_jpg", Files, "Convert To JPG", "Save a JPG copy of each selected picture beside it, upright and on white where it was see-through.", [];
+    ConvertPng, "convert_png", Files, "Convert To PNG", "Save a PNG copy of each selected picture beside it.", [];
+    ConvertWebp, "convert_webp", Files, "Convert To WebP", "Save a WebP copy of each selected picture beside it.", [];
+    ConvertPdf, "convert_pdf", Files, "Convert Pictures To PDF…", "Put the selected pictures into one PDF, a page each, upright and fitted to A4.", [];
+    ConvertMp3, "convert_mp3", Files, "Convert To MP3", "Save an MP3 copy of each selected sound file beside it, with its tags and cover.", [];
+    ConvertOpus, "convert_opus", Files, "Convert To Opus", "Save an Opus copy of each selected sound file beside it.", [];
+    ConvertFlac, "convert_flac", Files, "Convert To FLAC", "Save a lossless FLAC copy of each selected sound file beside it.", [];
+    ConvertMp4, "convert_mp4", Files, "Convert To MP4", "Save an MP4 (H.264) copy of each selected video beside it, one that plays almost anywhere.", [];
+    ConvertWebm, "convert_webm", Files, "Convert To WebM", "Save a WebM (VP9) copy of each selected video beside it.", [];
+    ConvertSoundMp3, "convert_sound_mp3", Files, "Save Sound As MP3", "Save the sound of each selected video as an MP3 beside it.", [];
+    MergePdfs, "merge_pdfs", Files, "Merge PDFs…", "Join the selected PDFs into one, in the order they are listed.", [];
+    SplitPdf, "split_pdf", Files, "Split PDF Into Pages", "Save every page of the selected PDF as a PDF of its own, in a folder beside it.", [];
 
     SelectAll, "select_all", Selection, "Select All", "Select every item without scrolling.", ["Ctrl+A"];
     SelectNone, "select_none", Selection, "Select None", "Clear the selection.", ["Ctrl+Shift+A"];

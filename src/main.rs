@@ -21,6 +21,7 @@ mod datatree;
 mod envfile;
 mod errands;
 mod config;
+mod convert;
 mod devtools;
 mod drives;
 mod dupes;

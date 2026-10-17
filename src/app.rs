@@ -1152,6 +1152,7 @@ impl App {
                 match &j.kind {
                     OpKind::Copy { dest, .. } | OpKind::Move { dest, .. } | OpKind::Extract { dest, .. } => finished_dirs.push(dest.clone()),
                     OpKind::Compress { out, .. } => finished_dirs.extend(out.parent().map(Path::to_path_buf)),
+                    OpKind::Convert { srcs, .. } => finished_dirs.extend(srcs.first().and_then(|s| s.parent()).map(Path::to_path_buf)),
                     // Done by another process: show the result now rather than wait for the watcher.
                     OpKind::Admin { task, .. } => {
                         use crate::admin::Task;
@@ -1174,9 +1175,13 @@ impl App {
                         self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Move(p.produced.clone()) });
                     }
                 }
-                if let OpKind::Copy { .. } | OpKind::Extract { .. } | OpKind::Compress { .. } = j.kind {
+                if let OpKind::Copy { .. } | OpKind::Extract { .. } | OpKind::Compress { .. } | OpKind::Convert { .. } = j.kind {
                     if !p.produced.is_empty() {
-                        self.undo.push(UndoEntry { label: j.label.clone(), kind: UndoKind::Created(p.produced.iter().map(|x| x.1.clone()).collect()) });
+                        let label = match &j.kind {
+                            OpKind::Convert { srcs, to, .. } => crate::convert::undo_label(srcs, *to),
+                            _ => j.label.clone(),
+                        };
+                        self.undo.push(UndoEntry { label, kind: UndoKind::Created(p.produced.iter().map(|x| x.1.clone()).collect()) });
                     }
                 }
                 if let OpKind::Trash { paths } = &j.kind {
@@ -2363,6 +2368,11 @@ impl App {
                 for a in archives {
                     let dest = a.parent().map(Path::to_path_buf).unwrap_or_default();
                     self.actions.push(Action::StartJob(OpKind::Extract { archive: a, members: vec![], dest }));
+                }
+            }
+            Cmd::ConvertJpg | Cmd::ConvertPng | Cmd::ConvertWebp | Cmd::ConvertPdf | Cmd::ConvertMp3 | Cmd::ConvertOpus | Cmd::ConvertFlac | Cmd::ConvertMp4 | Cmd::ConvertWebm | Cmd::ConvertSoundMp3 | Cmd::MergePdfs | Cmd::SplitPdf => {
+                if let Some(to) = crate::convert::Target::of(cmd) {
+                    crate::convert::start(self, to);
                 }
             }
             Cmd::CompressZip | Cmd::CompressTarGz | Cmd::CompressTarXz | Cmd::Compress7z => {
