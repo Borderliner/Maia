@@ -61,6 +61,7 @@ These are optional. Maia works without them and uses them when they are there:
 | `pdflatex` (TeX Live) or `tectonic`, with poppler's `pdftocairo` | formulas in Markdown |
 | `soffice` (LibreOffice) | Word, Excel, PowerPoint and OpenDocument files in the inspector, with poppler |
 | `udisksctl` (udisks2), `lsblk` | mounting, unmounting and ejecting drives |
+| `gdbus` (GLib), with udisks2 | formatting a USB drive |
 | `magick` or `convert` (ImageMagick) | turning, resizing, cropping and converting pictures |
 | `heif-dec` (libheif) | converting HEIC photos an ImageMagick without HEIC can't read |
 | `pdfunite`, `pdfseparate` (poppler) | merging PDFs and splitting one into pages |
@@ -139,11 +140,13 @@ GitLab or Codeberg at the commit checked out, and Open Web Link opens that page.
 Files, in the menu of two selected files, shows how they differ in the inspector. Maia
 pushes only when you ask.
 
-What's Using This, in the menu of a file, folder or drive, lists the programs that have
-it open and can stop them; a drive that refuses to unmount shows the same list, and the
-palette's What's Using a Port finds what listens on one. A filter typed into a folder
-can be kept with Save As Smart Folder, which lists the matching files under it again
-each time it opens, from the sidebar.
+Format, in a USB drive's menu, erases it and makes one FAT32, exFAT or ext4 partition
+with the label you give, once you type the drive's name; the drives the system runs from
+are never offered. What's Using This, in the menu of a file, folder or drive, lists the
+programs that have it open and can stop them; a drive that refuses to unmount shows the
+same list, and the palette's What's Using a Port finds what listens on one. A filter
+typed into a folder can be kept with Save As Smart Folder, which lists the matching
+files under it again each time it opens, from the sidebar.
 
 F3 shows the folder's pictures full window: Left and Right go through them, the wheel, +
 and - zoom, 0 fits and 1 shows one pixel for one, and Space plays them as a slideshow

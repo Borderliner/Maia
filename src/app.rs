@@ -673,6 +673,28 @@ impl App {
         }
     }
 
+    /// Erase the drive `d` is on and format it: tabs on any of its partitions move to
+    /// Computer first, so nothing holds it busy.
+    pub fn format_drive(&mut self, d: crate::drives::Drive, fs: crate::drives::Fs, label: String) {
+        let all = crate::sidebar::drives();
+        let gone: Vec<PathBuf> = all.iter().filter(|x| x.disk == d.disk).flat_map(|x| x.mounts.clone()).collect();
+        let s = self.view_for(Path::new(tab::COMPUTER));
+        for p in self.panels.values_mut() {
+            for t in &mut p.tabs {
+                if gone.iter().any(|m| t.path.starts_with(m)) {
+                    t.navigate(PathBuf::from(tab::COMPUTER), Some(s.clone()));
+                }
+            }
+            if let Some(i) = p.inspector.as_mut() {
+                i.invalidate();
+            }
+        }
+        match crate::drives::Job::format(d, fs, label, &self.ctx) {
+            Ok(j) => self.drive_jobs.push(j),
+            Err(e) => self.toast(e),
+        }
+    }
+
     /// The drive mounted at `path` (for sidebar and Computer view rows).
     pub fn drive_at(&self, path: &Path) -> Option<crate::drives::Drive> {
         if let Some(dev) = tab::drive_dev(path) {
@@ -721,6 +743,7 @@ impl App {
                 (Op::Mount, Ok(_)) => self.toast(format!("Mounted {name}")),
                 (Op::Unmount, Ok(_)) => self.toast(format!("Unmounted {name}")),
                 (Op::Eject, Ok(_)) => self.toast(format!("{name} can be safely removed")),
+                (Op::Format, Ok(_)) => self.toast(format!("Formatted {name}")),
                 (op, Err(e)) => {
                     let msg = format!("Couldn't {} {name}: {e}", op.verb());
                     // Something has the drive open: say what, unless a dialog is up. The

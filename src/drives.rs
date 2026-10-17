@@ -247,6 +247,8 @@ pub enum Op {
     Mount,
     Unmount,
     Eject,
+    /// Erase a removable drive and make one filesystem on it (`Job::format`).
+    Format,
 }
 
 /// Run an operation (may wait for a password prompt). Mount returns where it mounted.
@@ -275,7 +277,128 @@ pub fn perform(tools: &Tools, op: Op, d: &Drive, all: &[Drive]) -> Result<Option
             }
             ctl(&["power-off", "-b", &d.disk]).map(|_| None)
         }
+        Op::Format => Err("Formatting needs a filesystem and a label".into()),
     }
+}
+
+/// The filesystems a drive can be formatted with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fs {
+    Fat32,
+    Exfat,
+    Ext4,
+}
+
+impl Fs {
+    pub const ALL: [Fs; 3] = [Fs::Fat32, Fs::Exfat, Fs::Ext4];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Fs::Fat32 => "FAT32",
+            Fs::Exfat => "exFAT",
+            Fs::Ext4 => "ext4",
+        }
+    }
+
+    /// udisks' name for it.
+    fn kind(self) -> &'static str {
+        match self {
+            Fs::Fat32 => "vfat",
+            Fs::Exfat => "exfat",
+            Fs::Ext4 => "ext4",
+        }
+    }
+
+    /// The MBR partition type it goes in.
+    fn part_type(self) -> &'static str {
+        match self {
+            Fs::Fat32 => "0x0c",
+            Fs::Exfat => "0x07",
+            Fs::Ext4 => "0x83",
+        }
+    }
+
+    /// The longest label it keeps.
+    pub fn max_label(self) -> usize {
+        match self {
+            Fs::Fat32 => 11,
+            Fs::Exfat => 15,
+            Fs::Ext4 => 16,
+        }
+    }
+}
+
+/// A label as `fs` stores it (FAT32 in capitals), or why it can't be one: too long, or
+/// a character other than letters, digits, spaces, `-`, `_` and `.`.
+pub fn label_for(fs: Fs, label: &str) -> Result<String, String> {
+    let l = label.trim();
+    if !l.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.')) {
+        return Err("Letters, digits, spaces, - _ and . only".into());
+    }
+    if l.len() > fs.max_label() {
+        return Err(format!("{} labels are {} characters at most", fs.name(), fs.max_label()));
+    }
+    Ok(if fs == Fs::Fat32 { l.to_ascii_uppercase() } else { l.to_string() })
+}
+
+/// udisks' object path for a block device: `/dev/sdb` is `…/block_devices/sdb`, other
+/// characters than letters, digits and `_` written as `_` and two hex digits.
+pub fn object_path(dev: &str) -> String {
+    let name = dev.rsplit('/').next().unwrap_or(dev);
+    let mut out = String::from("/org/freedesktop/UDisks2/block_devices/");
+    for b in name.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'_' {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("_{b:02x}"));
+        }
+    }
+    out
+}
+
+/// The two udisks calls (through gdbus) that erase `disk` and make it one partition of
+/// `fs` named `label`: a new MBR partition table, then the partition, formatted.
+pub fn format_calls(disk: &str, fs: Fs, label: &str) -> [Vec<String>; 2] {
+    let base = |method: &str| -> Vec<String> {
+        ["call", "--system", "--interactive", "--timeout", "600", "--dest", "org.freedesktop.UDisks2", "--object-path", &object_path(disk), "--method", method].map(String::from).to_vec()
+    };
+    let mut table = base("org.freedesktop.UDisks2.Block.Format");
+    table.extend(["'dos'".to_string(), "@a{sv} {}".to_string()]);
+    let mut part = base("org.freedesktop.UDisks2.PartitionTable.CreatePartitionAndFormat");
+    // Ownership of the new filesystem's top folder to whoever formats it: ext4 has one.
+    let own = if fs == Fs::Ext4 { ", 'take-ownership': <true>" } else { "" };
+    part.extend(["0".to_string(), "0".to_string(), format!("'{}'", fs.part_type()), "''".to_string(), "@a{sv} {}".to_string(), format!("'{}'", fs.kind()), format!("{{'label': <'{label}'>{own}}}")]);
+    [table, part]
+}
+
+/// Erase the disk `d` is on and make one partition of `fs` named `label` on it. Only a
+/// removable disk that holds nothing of the running system, as lsblk says right now;
+/// its partitions are unmounted first.
+pub fn format(tools: &Tools, d: &Drive, fs: Fs, label: &str) -> Result<(), String> {
+    let label = label_for(fs, label)?;
+    let now = list(tools);
+    let parts: Vec<&Drive> = now.iter().filter(|x| x.disk == d.disk).collect();
+    if parts.is_empty() {
+        return Err("The drive is no longer connected".into());
+    }
+    if !d.removable || parts.iter().any(|x| !x.removable) {
+        return Err("Only a removable drive can be formatted here".into());
+    }
+    if !d.disk.starts_with("/dev/") || !d.disk[5..].bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err("Not a drive Maia can format".into());
+    }
+    let t = Duration::from_secs(120);
+    for p in parts.iter().filter(|x| x.mounted()) {
+        let mut c = tools.cmd("udisksctl");
+        c.args(["unmount", "-b", &p.dev]);
+        run(c, t)?;
+    }
+    for args in format_calls(&d.disk, fs, &label) {
+        let mut c = tools.cmd("gdbus");
+        c.args(&args);
+        run(c, Duration::from_secs(900))?;
+    }
+    Ok(())
 }
 
 impl Op {
@@ -284,6 +407,7 @@ impl Op {
             Op::Mount => "mount",
             Op::Unmount => "unmount",
             Op::Eject => "eject",
+            Op::Format => "format",
         }
     }
 }
@@ -320,6 +444,26 @@ impl Job {
             ctx.request_repaint();
         });
         Ok(Job { op, drive, open_in, rx })
+    }
+
+    /// Format the disk `drive` is on (see `format`), on a worker: udisks may ask for a
+    /// password, and making a filesystem takes a while.
+    pub fn format(drive: Drive, fs: Fs, label: String, ctx: &egui::Context) -> Result<Job, String> {
+        let tools = Tools::current().ok_or("Drive tools are unavailable")?;
+        if !tools.has("gdbus") {
+            return Err("Formatting needs gdbus (from GLib)".into());
+        }
+        if busy(&drive.dev) {
+            return Err(format!("{} is busy", drive.title()));
+        }
+        BUSY.with(|b| b.borrow_mut().push(drive.dev.clone()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (d, ctx) = (drive.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(format(&tools, &d, fs, &label).map(|_| None));
+            ctx.request_repaint();
+        });
+        Ok(Job { op: Op::Format, drive, open_in: None, rx })
     }
 
     /// The result once the operation finished (the device stops being busy).

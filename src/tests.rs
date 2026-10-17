@@ -7167,3 +7167,62 @@ fn batch_rename_names_from_music_tags() {
     let got = names_with(&items, &r, &[tag("Intro", "Band", "1/9"), tag("AC/DC #1", "Them", "10"), None]).unwrap();
     assert_eq!(got, ["01 Band - Intro.mp3", "10 Them - AC-DC #1.flac", "-.mp3"], "no tags: no stray spaces");
 }
+
+/// Formatting through stand-ins for lsblk, udisksctl and gdbus (never the real ones):
+/// a removable stick unmounted first, then udisks asked over D-Bus for a new partition
+/// table and one partition formatted with the label; the system disk, a drive lsblk no
+/// longer calls removable and a bad label refused before anything runs.
+#[test]
+fn format_a_removable_drive_through_udisks() {
+    use crate::drives::{Fs, format, format_calls, label_for, list, object_path};
+    let d = tmpdir("format");
+    let rows = [
+        r#"PATH="/dev/sda" PKNAME="" LABEL="" FSTYPE="" SIZE="500107862016" RM="0" HOTPLUG="0" TYPE="disk" MOUNTPOINTS="""#,
+        r#"PATH="/dev/sda2" PKNAME="sda" LABEL="" FSTYPE="btrfs" SIZE="499570991104" RM="0" HOTPLUG="0" TYPE="part" MOUNTPOINTS="/""#,
+        r#"PATH="/dev/sdz" PKNAME="" LABEL="" FSTYPE="" SIZE="16008609792" RM="1" HOTPLUG="1" TYPE="disk" MOUNTPOINTS="""#,
+        r#"PATH="/dev/sdz1" PKNAME="sdz" LABEL="OLD" FSTYPE="vfat" SIZE="16007561216" RM="1" HOTPLUG="1" TYPE="part" MOUNTPOINTS="/run/media/me/OLD""#,
+    ];
+    std::fs::write(d.join("rows"), rows.join("\n") + "\n").unwrap();
+    fake_tool(&d, "lsblk", "cat \"$D/rows\"");
+    fake_tool(&d, "udisksctl", "exit 0");
+    fake_tool(&d, "gdbus", "echo '()'");
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(d.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    let all = list(&t);
+    let stick = all.iter().find(|x| x.dev == "/dev/sdz1").unwrap().clone();
+    let system = all.iter().find(|x| x.dev == "/dev/sda2").unwrap().clone();
+    assert!(stick.removable && !system.removable);
+    let _ = std::fs::remove_file(d.join("calls.log"));
+    format(&t, &stick, Fs::Exfat, "Holiday 26").unwrap();
+    let calls = fake_calls(&d);
+    let progs: Vec<&str> = calls.iter().map(|c| c[0].as_str()).collect();
+    assert_eq!(progs, ["lsblk", "udisksctl", "gdbus", "gdbus"], "unmounted, then the two udisks calls");
+    assert_eq!(calls[1][1..], ["unmount", "-b", "/dev/sdz1"]);
+    let want = format_calls("/dev/sdz", Fs::Exfat, "Holiday 26");
+    assert_eq!(calls[2][1..], want[0][..]);
+    assert_eq!(calls[3][1..], want[1][..]);
+    assert!(want[0].contains(&"/org/freedesktop/UDisks2/block_devices/sdz".to_string()) && want[0].contains(&"org.freedesktop.UDisks2.Block.Format".to_string()) && want[0].contains(&"'dos'".to_string()));
+    assert_eq!(want[1][want[1].len() - 2..], ["'exfat'".to_string(), "{'label': <'Holiday 26'>}".to_string()]);
+    assert!(format_calls("/dev/sdz", Fs::Ext4, "x")[1].last().unwrap().contains("'take-ownership': <true>"));
+    assert_eq!(format_calls("/dev/sdz", Fs::Fat32, "X")[1][format_calls("/dev/sdz", Fs::Fat32, "X")[1].len() - 5], "'0x0c'");
+    // Refused before anything runs.
+    let _ = std::fs::remove_file(d.join("calls.log"));
+    assert!(format(&t, &system, Fs::Ext4, "x").is_err(), "the system disk");
+    let mut lied = system.clone();
+    lied.removable = true;
+    assert!(format(&t, &lied, Fs::Ext4, "x").is_err(), "lsblk is asked again");
+    assert!(format(&t, &stick, Fs::Fat32, "far too long a label").is_err());
+    assert!(format(&t, &stick, Fs::Exfat, "it's").is_err(), "a quote would end the label");
+    assert!(fake_calls(&d).iter().all(|c| c[0] != "gdbus" && c[0] != "udisksctl"), "{:?}", fake_calls(&d));
+    let mut gone = stick.clone();
+    gone.disk = "/dev/sdq".into();
+    assert_eq!(format(&t, &gone, Fs::Exfat, "x").err().as_deref(), Some("The drive is no longer connected"));
+    // Labels and object paths.
+    assert_eq!(label_for(Fs::Fat32, " photos 26 ").unwrap(), "PHOTOS 26");
+    assert_eq!(label_for(Fs::Exfat, "Photos").unwrap(), "Photos");
+    assert!(label_for(Fs::Fat32, "TWELVE CHARS").is_err() && label_for(Fs::Exfat, "TWELVE CHARS").is_ok());
+    assert!(label_for(Fs::Ext4, "a/b").is_err());
+    assert_eq!(object_path("/dev/mmcblk0"), "/org/freedesktop/UDisks2/block_devices/mmcblk0");
+    assert_eq!(object_path("/dev/dm-0"), "/org/freedesktop/UDisks2/block_devices/dm_2d0");
+}

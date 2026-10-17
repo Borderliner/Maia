@@ -31,6 +31,7 @@ mod editor;
 mod ctxmenu;
 mod filediff;
 mod fontview;
+mod formatdrive;
 mod fsx;
 mod fuzzy;
 mod gitchanges;

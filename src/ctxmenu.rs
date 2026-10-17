@@ -92,6 +92,7 @@ impl Item {
             crate::drives::Op::Mount => "Mount",
             crate::drives::Op::Unmount => "Unmount",
             crate::drives::Op::Eject => "Eject",
+            crate::drives::Op::Format => "Format…",
         };
         Item { id: format!("drive_{}", op.verb()), label: label.into(), act: Act::Drive(op), children: vec![] }
     }
@@ -107,6 +108,12 @@ impl Item {
         }
         if drives.iter().any(|d| d.removable) {
             v.push(Item::drive(Op::Eject));
+        }
+        // One drive at a time: erasing is asked about by name.
+        if let [d] = drives {
+            if d.removable && crate::drives::Tools::current().is_some_and(|t| t.has("gdbus")) {
+                v.push(Item::drive(Op::Format));
+            }
         }
         v
     }
@@ -852,6 +859,11 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                     }),
                 )));
             }
+            Act::Drive(crate::drives::Op::Format) => {
+                if let Some(d) = st.targets.first().and_then(|t| app.drive_at(t)).filter(|d| d.removable) {
+                    app.actions.push(Action::Open(crate::formatdrive::open(d)));
+                }
+            }
             Act::Drive(op) => {
                 for t in &st.targets {
                     if let Some(d) = app.drive_at(t) {
@@ -859,6 +871,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                             crate::drives::Op::Mount => !d.mounted(),
                             crate::drives::Op::Unmount => crate::drives::can_unmount(&d),
                             crate::drives::Op::Eject => d.removable,
+                            crate::drives::Op::Format => false,
                         };
                         // Ejecting one partition ejects its whole disk: once is enough.
                         if applies && !crate::drives::busy(&d.dev) && !(op == crate::drives::Op::Eject && app.drive_jobs.iter().any(|j| j.drive.disk == d.disk)) {

@@ -253,8 +253,38 @@ case "$op" in
   *) echo "unknown $op" >&2; exit 1 ;;
 esac
 "#;
+    // udisks over D-Bus, for Format: each call's arguments logged one per line; the new
+    // partition table takes the disk's partitions away and the formatted partition comes
+    // back with its label and filesystem.
+    let gdbus = r#"#!/bin/bash
+D="$(dirname "$0")"
+{ echo "gdbus"; for a in "$@"; do printf '%s\n' "$a"; done; echo; } >> "$D/gdbus.log"
+echo "gdbus $*" >> "$D/log"
+path=""; method=""; prev=""
+for a in "$@"; do
+  [ "$prev" = --object-path ] && path="$a"
+  [ "$prev" = --method ] && method="$a"
+  prev="$a"
+done
+disk="${path##*/}"
+sleep 0.2
+if [ -f "$D/fail/format" ]; then echo "GDBus.Error:org.freedesktop.UDisks2.Error.Failed: Error creating file system: $(cat "$D/fail/format")" >&2; exit 1; fi
+case "$method" in
+  org.freedesktop.UDisks2.Block.Format)
+    awk -F'\t' -v d="$disk" '$2!=d' "$D/devices" > "$D/devices.new" && mv "$D/devices.new" "$D/devices"
+    echo "()" ;;
+  org.freedesktop.UDisks2.PartitionTable.CreatePartitionAndFormat)
+    last="${@: -1}"; kind="${@: -2:1}"
+    label="$(printf '%s' "$last" | sed -n "s/.*'label': <'\([^']*\)'>.*/\1/p")"
+    fs="$(printf '%s' "$kind" | tr -d "'")"
+    size="$(awk -F'\t' -v p="/dev/$disk" '$1==p{print $5}' "$D/devices")"
+    printf '/dev/%s1\t%s\t%s\t%s\t%s\t1\t1\tpart\n' "$disk" "$disk" "${label:--}" "$fs" "$size" >> "$D/devices"
+    echo "(objectpath '/org/freedesktop/UDisks2/block_devices/${disk}1',)" ;;
+  *) echo "unknown method $method" >&2; exit 1 ;;
+esac
+"#;
     use std::os::unix::fs::PermissionsExt;
-    for (n, body) in [("lsblk", lsblk), ("udisksctl", udisks)] {
+    for (n, body) in [("lsblk", lsblk), ("udisksctl", udisks), ("gdbus", gdbus)] {
         std::fs::write(d.join(n), body).unwrap();
         std::fs::set_permissions(d.join(n), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
@@ -1022,7 +1052,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(152) {
+    match rng.below(153) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2119,6 +2149,38 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.act(rng.pick(&["key Enter", "key Escape"]));
                 if matches!(s.app.popup, Popup::MusicTags(_)) {
                     s.act("key Escape");
+                }
+            }
+        }
+        152 => {
+            // Format, from a drive's menu in the sidebar: the filesystem, the label, the
+            // name typed or not, then Erase and Format or Escape. Fake udisks only.
+            let names = ["Photo Card", "Busy Stick", "Holiday Photos", "Root"];
+            let at = names.iter().find_map(|n| s.texts.iter().find(|(r, t)| t == n && r.right() <= s.app.sidebar_width + 1.0).map(|x| (x.0, *n)));
+            if let Some((r, name)) = at {
+                s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+                s.act("text format");
+                s.act("key Enter");
+                s.idle(2);
+                for _ in 0..rng.below(5) {
+                    if !matches!(s.app.popup, Popup::FormatDrive(_)) {
+                        break;
+                    }
+                    match rng.below(3) {
+                        0 => click_control_at(s, rng.pick(&["format fat32", "format exfat", "format ext4", "format label", "format confirm"])),
+                        1 => s.act(&format!("text {}", rng.pick(&[name, "x", "ÄÖ", " "]))),
+                        _ => s.act(&format!("key {}", rng.pick(&["Backspace", "ctrl+a"]))),
+                    }
+                }
+                if matches!(s.app.popup, Popup::FormatDrive(_)) {
+                    match rng.below(3) {
+                        0 => click_control_at(s, "format erase"),
+                        1 => s.act("key Enter"),
+                        _ => s.act("key Escape"),
+                    }
+                    if matches!(s.app.popup, Popup::FormatDrive(_)) {
+                        s.act("key Escape");
+                    }
                 }
             }
         }
@@ -9265,6 +9327,98 @@ mod journeys {
         shot_still(&mut s, "rename-from-tags");
         s.act("key Escape");
         report("music tags", &s);
+    }
+
+    /// Format, in a removable drive's menu (the sidebar and Computer), through stand-ins
+    /// for udisks only: not offered for the system's or an internal disk; the dialog
+    /// names the drive and its size, says everything on it goes, and Erase and Format
+    /// waits until the name is typed; the card erased and made exFAT with its new label;
+    /// a stick something holds open refused at its unmount, udisks never asked; FAT32's
+    /// label too long said so. At other font sizes and Spacing.
+    #[test]
+    fn format_a_usb_drive() {
+        if !sandboxed() {
+            return;
+        }
+        let d = fake_drives("format");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(d.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let gdbus_log = || std::fs::read_to_string(d.join("gdbus.log")).unwrap_or_default();
+        let home = fixture("format");
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.cmd(Computer);
+        wait_until(&mut s, "drives listed", 10, |s| s.tab().entries.iter().any(|e| e.name == "Photo Card"));
+        s.settle();
+        for name in ["Root", "Windows"] {
+            let r = list_text(&s, name);
+            s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+            s.idle(3);
+            assert!(!some_text(&s, "Format…"), "{name}: never formatted from here");
+            s.act("key Escape");
+        }
+        // From the sidebar.
+        let card = sidebar_text(&s, "Photo Card").unwrap_or_else(|| s.fail("the card in the sidebar"));
+        s.act(&format!("click {:.0} {:.0} right", card.center().x, card.center().y));
+        s.idle(3);
+        menu_pick(&mut s, "Format…");
+        s.idle(2);
+        assert!(matches!(s.app.popup, Popup::FormatDrive(_)));
+        for t in ["Format “Photo Card”", "14.9 GB removable drive · /dev/sdz", "Type Photo Card to confirm", "Everything on this 14.9 GB drive is erased: every partition and every file on it."] {
+            assert!(some_text(&s, t), "{t:?} shown");
+        }
+        s.act("key Enter");
+        assert!(matches!(s.app.popup, Popup::FormatDrive(_)) && gdbus_log().is_empty(), "nothing before the name is typed");
+        click_control(&mut s, "format erase");
+        assert!(matches!(s.app.popup, Popup::FormatDrive(_)) && gdbus_log().is_empty(), "the button waits too");
+        click_control(&mut s, "format fat32");
+        click_control(&mut s, "format label");
+        s.act("key ctrl+a");
+        s.act("text Holiday Photos");
+        s.idle(2);
+        assert!(some_text(&s, "FAT32 labels are 11 characters at most"));
+        click_control(&mut s, "format exfat");
+        click_control(&mut s, "format confirm");
+        s.act("text Photo Card");
+        s.idle(2);
+        look(&mut s, "the format dialog");
+        shot_still(&mut s, "format-dialog");
+        for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
+            s.app.cfg.font_size = font;
+            s.app.cfg.spacing = spacing;
+            s.idle(3);
+            look(&mut s, &format!("the format dialog at font {font}, spacing {spacing}"));
+        }
+        click_control(&mut s, "format erase");
+        wait_until(&mut s, "formatted", 15, |s| toast_is(s, "Formatted Photo Card"));
+        let log = gdbus_log();
+        assert!(log.contains("--object-path\n/org/freedesktop/UDisks2/block_devices/sdz\n--method\norg.freedesktop.UDisks2.Block.Format\n'dos'"), "{log}");
+        assert!(log.contains("org.freedesktop.UDisks2.PartitionTable.CreatePartitionAndFormat") && log.contains("'exfat'\n{'label': <'Holiday Photos'>}"), "{log}");
+        assert!(!log.contains("sdw") && !log.contains("sdy"), "no other disk touched");
+        s.settle();
+        wait_until(&mut s, "the new label", 15, |s| sidebar_text(s, "Holiday Photos").is_some());
+        look(&mut s, "after formatting");
+        s.shot("format-done");
+        // A stick that won't unmount: refused before udisks is asked to format it.
+        let before = gdbus_log();
+        let r = list_text(&s, "Busy Stick");
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(3);
+        menu_pick(&mut s, "Format…");
+        s.idle(2);
+        click_control(&mut s, "format confirm");
+        s.act("text Busy Stick");
+        s.act("key Enter");
+        wait_until(&mut s, "refused", 15, |s| s.app.drive_jobs.is_empty() && (s.app.toast.as_ref().is_some_and(|t| t.0.starts_with("Couldn't format Busy Stick")) || matches!(s.app.popup, Popup::Holders(_))));
+        assert_eq!(gdbus_log(), before, "udisks never asked");
+        assert!(d.join("media/Busy Stick/busy.txt").exists(), "its files untouched");
+        report("format", &s);
     }
 
     /// Recent Projects from its key: the git repositories under the home folder, the
