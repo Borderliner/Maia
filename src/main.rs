@@ -10,6 +10,7 @@ mod avatars;
 mod batchname;
 mod buildclean;
 mod update;
+mod versions;
 mod wallpaper;
 mod clipboard;
 mod commands;

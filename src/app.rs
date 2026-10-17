@@ -46,6 +46,8 @@ pub enum Action {
     Open(Popup),
     StartJob(OpKind),
     ExternalDrop { paths: Vec<PathBuf>, dest: PathBuf },
+    /// Work that needs the whole app, handed up from a view that holds only its part.
+    Run(Box<dyn FnOnce(&mut App)>),
 }
 
 pub enum Drag {
@@ -1804,6 +1806,7 @@ impl App {
                 Some(d) => self.popup = crate::dupes::open(&ctx, d),
                 None => self.toast("Find Duplicates needs a folder"),
             },
+            Cmd::PreviousVersions => crate::versions::open(self),
             Cmd::CleanBuilds => match crate::devtools::target_dir(self) {
                 Some(d) => self.popup = crate::devtools::clean(&ctx, d),
                 None => self.toast("Clean Build Folders needs a folder"),
@@ -2830,6 +2833,7 @@ impl App {
             Action::Open(p) => self.popup = p,
             Action::StartJob(k) => self.start_job(k),
             Action::ExternalDrop { paths, dest } => self.begin_transfer(paths, dest, false),
+            Action::Run(f) => f(self),
         }
     }
 

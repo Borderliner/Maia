@@ -1017,7 +1017,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(129) {
+    match rng.below(141) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1401,6 +1401,33 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.act(&format!("key {}", rng.pick(&["Enter", "Escape", "ArrowDown"])));
             }
             s.idle(1 + rng.below(10));
+        }
+        140 => {
+            // Previous Versions, often of the file the fake snapshots hold: the list walked
+            // by keys and clicks, a version restored or saved beside it, or the page shut.
+            let f = root().join("home").read_dir().ok().and_then(|r| r.flatten().map(|d| d.path().join("Disk/vol/docs/report.txt")).find(|p| p.is_file()));
+            if let Some(f) = f.filter(|_| rng.below(3) > 0) {
+                s.act("key ctrl+p");
+                s.act(&format!("text {}", f.display()));
+                s.act("key Enter");
+                s.settle();
+            }
+            if rng.below(2) == 0 {
+                s.cmd(Cmd::PreviousVersions);
+            } else {
+                let (x, y) = p(rng);
+                s.act(&format!("click {x:.0} {y:.0} right"));
+                s.act("text previous versions");
+                s.act("key Enter");
+            }
+            s.idle(2 + rng.below(10));
+            for _ in 0..rng.below(5) {
+                match rng.below(4) {
+                    0 => click_control_at(s, rng.pick(&["version row", "version restore", "version copy", "versions close"])),
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "End", "Home", "PageDown", "Escape"]))),
+                }
+            }
+            s.idle(1 + rng.below(5));
         }
         121 => {
             // Sharing: code blocks, a web link or .gitignore, from the palette or a menu.
@@ -7824,6 +7851,112 @@ mod journeys {
         report("picfix", &s);
     }
 
+    fn versions_page(s: &Sim) -> Option<&crate::versions::Page> {
+        s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.versions.as_deref())
+    }
+
+    /// Previous Versions from a file's menu: Snapper's and Timeshift's copies newest first,
+    /// the unchanged ones left out, each previewed under the list as it is picked; one
+    /// saved beside the file, one put in its place and undone; snapshots only root can
+    /// read said in a sentence; a disk without snapshots said so; Escape closing the
+    /// inspector it opened.
+    #[test]
+    fn previous_versions_from_the_snapshots() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("versions");
+        let d = home.join("Disk");
+        let (file, table) = crate::tests::snapshot_fixture(&d);
+        crate::versions::FAKE.with(|f| *f.borrow_mut() = Some(table.clone()));
+        let docs = file.parent().unwrap().to_path_buf();
+        let mut s = Sim::new(&docs, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        let row = row_text(&s, "report.txt");
+        s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
+        s.idle(2);
+        assert!(some_text(&s, "Previous Versions…"), "in the file's menu");
+        s.click_text("Previous Versions…");
+        wait_until(&mut s, "the snapshots read", 10, |s| versions_page(s).is_some_and(|p| p.found.is_some()));
+        s.idle(3);
+        let n = versions_page(&s).and_then(|p| p.found.as_ref()).map_or(0, |f| f.versions.len());
+        assert_eq!(n, 4, "the copies that differ, newest first");
+        assert!(some_text(&s, "Previous versions of report.txt"));
+        assert!(some_text(&s, "before & after") && some_text(&s, "before update") && some_text(&s, "weekly, monthly"), "what each snapshot says of itself");
+        let first = versions_page(&s).and_then(|p| p.selected()).map(|v| v.entry.path.clone()).unwrap();
+        wait_until(&mut s, "the newest version previewed", 10, |s| s.texts.iter().any(|(_, t)| t.trim() == "third"));
+        assert!(first.starts_with(d.join("vol/.snapshots/3")));
+        look(&mut s, "previous versions");
+        s.shot("versions-graphite");
+        // The keys walk the list; each version shows under it.
+        s.act("key ArrowDown");
+        wait_until(&mut s, "the second version previewed", 10, |s| s.texts.iter().any(|(_, t)| t.trim() == "frist"));
+        assert_eq!(versions_page(&s).map(|p| p.sel), Some(1));
+        s.act("key End");
+        wait_until(&mut s, "the oldest previewed", 10, |s| s.texts.iter().any(|(_, t)| t.trim() == "rsync copy, the oldest"));
+        s.act("key Home");
+        s.act("key ArrowDown");
+        // Saved beside the file.
+        click_control(&mut s, "version copy");
+        let when = crate::versions::parse_utc("2026-10-08 06:00:00");
+        let copy = docs.join(crate::versions::copy_name(&file, when));
+        wait_until(&mut s, "the copy saved", 10, |_| copy.is_file());
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "frist\n");
+        assert!(versions_page(&s).is_none(), "the page closes once it is done");
+        wait_until(&mut s, "the copy selected", 10, |s| s.tab().cursor.map(|c| s.tab().entries[c as usize].path.clone()) == Some(copy.clone()));
+        // Put in its place, from the palette, and undone.
+        select_path(&mut s, &file);
+        palette_run(&mut s, "Previous Versions");
+        wait_until(&mut s, "the snapshots read again", 10, |s| versions_page(s).is_some_and(|p| p.found.is_some()));
+        click_control(&mut s, "version restore");
+        wait_until(&mut s, "restored", 10, |_| std::fs::read_to_string(&file).ok().as_deref() == Some("third\n"));
+        wait_until(&mut s, "undo offered", 10, |s| s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Replaced(_))));
+        assert!(root().join("xdg/data/Trash/files/report.txt").exists(), "the file it replaced is in the trash");
+        s.act("key ctrl+z");
+        wait_until(&mut s, "undone", 10, |_| std::fs::read_to_string(&file).ok().as_deref() == Some("fourth draft, the one in use\n"));
+        // Snapshots only root may read.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(d.join("vol/.snapshots"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        select_path(&mut s, &file);
+        s.cmd(PreviousVersions);
+        wait_until(&mut s, "read as far as it can", 10, |s| versions_page(s).is_some_and(|p| p.found.is_some()));
+        s.idle(3);
+        assert!(some_text(&s, "Snapper's snapshots here can only be read by an administrator."), "said plainly");
+        assert_eq!(versions_page(&s).and_then(|p| p.found.as_ref()).map(|f| f.versions.len()), Some(2), "Timeshift's still listed");
+        look(&mut s, "versions with locked snapshots");
+        s.shot("versions-locked-graphite");
+        s.resize(520.0, 340.0);
+        look(&mut s, "versions small");
+        s.shot("versions-small-graphite");
+        s.resize(1280.0, 800.0);
+        std::fs::set_permissions(d.join("vol/.snapshots"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Escape: the inspector the page opened goes with it.
+        s.act("key Escape");
+        s.idle(2);
+        assert!(s.app.panels[&s.app.active].inspector.is_none(), "closed with the page");
+        // A disk with no snapshots.
+        crate::versions::FAKE.with(|f| *f.borrow_mut() = Some(String::new()));
+        s.cmd(PreviousVersions);
+        wait_until(&mut s, "nothing found", 10, |s| versions_page(s).is_some_and(|p| p.found.is_some()));
+        s.idle(2);
+        assert!(some_text(&s, "This disk keeps no snapshots of this file's folder."));
+        look(&mut s, "no snapshots");
+        // Another file: the page leaves for its preview.
+        s.cmd(ToggleInspector);
+        s.cmd(ToggleInspector);
+        s.cmd(PreviousVersions);
+        s.act("key ArrowDown");
+        s.idle(2);
+        assert!(versions_page(&s).is_some(), "the keys stay with the page");
+        let other = docs.join(crate::versions::copy_name(&file, when));
+        select_path(&mut s, &other);
+        s.idle(2);
+        assert!(versions_page(&s).is_none(), "gone with another file under the cursor");
+        crate::versions::FAKE.with(|f| *f.borrow_mut() = None);
+        report("versions", &s);
+    }
+
     #[test]
     fn monkey_sessions() {
         if !sandboxed() {
@@ -7879,6 +8012,9 @@ mod journeys {
                 let _ = std::fs::write(home.join("Documents/Office").join(f), "not really an office file");
             }
             crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(drv));
+            // Snapshots of one file, for Previous Versions.
+            let (_, table) = crate::tests::snapshot_fixture(&home.join("Disk"));
+            crate::versions::FAKE.with(|f| *f.borrow_mut() = Some(table));
             // An archive to wander into.
             if crate::archive::available() {
                 let _ = crate::archive::create(&home.join("bundle.zip"), &home.join("Documents"), &["notes.txt".into(), "Taxes".into()]);
@@ -7944,6 +8080,7 @@ mod journeys {
             wipe_root();
         }
         crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        crate::versions::FAKE.with(|f| *f.borrow_mut() = None);
         crate::wallpaper::DESKTOP.with(|w| w.borrow_mut().clear());
         crate::sendto::MAIL_APP.with(|m| *m.borrow_mut() = None);
         let launched = crate::mime::LAUNCHED.lock().unwrap().len();

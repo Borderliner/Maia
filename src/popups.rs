@@ -1308,6 +1308,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::CodeSearch | Cmd::FindTodos => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::RunTask => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::CleanBuilds | Cmd::FindDuplicates => !tab::is_computer(&t.path) && t.archive.is_none(),
+        Cmd::PreviousVersions => t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()) && matches!(t.target_entries().as_slice(), [e] if !e.is_dir),
         Cmd::CopyPathLine => p.line_hint.as_ref().is_some_and(|h| t.target_entries().iter().any(|e| e.path == h.0)),
         Cmd::OpenTabInWindow => p.tabs.len() > 0,
         Cmd::GroupDeleted | Cmd::GroupOriginal => crate::trashcan::is_trash_files(&t.path),

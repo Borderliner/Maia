@@ -334,6 +334,9 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         if all_dirs {
             items.push(Item::cmd(Cmd::ToggleBookmark));
         }
+        if single && !ents[0].1 && !in_trash {
+            items.push(Item::cmd(Cmd::PreviousVersions));
+        }
         items.push(Item::cmd(Cmd::Properties));
     }
     let targets = ents.into_iter().map(|e| e.0).collect();
