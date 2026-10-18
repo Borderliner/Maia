@@ -272,15 +272,20 @@ impl ApplicationHandler<UserEvent> for Runner {
             });
         }
         let mut app = App::new(&self.ctx, self.paths.take().unwrap_or_default());
+        let (tx, rx) = std::sync::mpsc::channel();
         if let Some((l, sock)) = self.listener.take() {
-            let (tx, rx) = std::sync::mpsc::channel();
             let p = self.proxy.clone();
-            crate::single::serve(l, tx, move || {
+            crate::single::serve(l, tx.clone(), move || {
                 let _ = p.send_event(UserEvent::Repaint(Duration::ZERO));
             });
-            app.requests = Some(rx);
             self.sock = Some(sock);
         }
+        // "Show in folder" from other apps, over the session bus.
+        let p = self.proxy.clone();
+        crate::fm1::serve(tx, move || {
+            let _ = p.send_event(UserEvent::Repaint(Duration::ZERO));
+        });
+        app.requests = Some(rx);
         self.app = Some(app);
         gl.window.request_redraw();
         self.gl = Some(gl);

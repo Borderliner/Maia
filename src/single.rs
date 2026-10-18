@@ -16,6 +16,10 @@ pub enum Request {
     Open(Vec<PathBuf>),
     /// Launched without paths: bring the window forward.
     Focus,
+    /// Show these in their folders, selected ("Show in folder" from another app).
+    Show(Vec<PathBuf>),
+    /// Show these files' properties.
+    Properties(Vec<PathBuf>),
 }
 
 /// The socket for this session (one per display, so two sessions of one user are apart).

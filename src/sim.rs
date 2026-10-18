@@ -2852,6 +2852,42 @@ mod journeys {
         report("refused rename", &s);
     }
 
+    /// "Show in folder" from another app (the requests the session bus hands over): each
+    /// folder opens in a new tab with the file asked for selected, two files in one
+    /// folder make one tab, Properties opens for the third method, and a path that's gone
+    /// is said to be gone.
+    #[test]
+    fn show_in_folder_from_other_apps() {
+        if !sandboxed() {
+            return;
+        }
+        use crate::single::Request;
+        let home = fixture("showin");
+        let d = home.join("Documents");
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        let (tx, rx) = std::sync::mpsc::channel();
+        s.app.requests = Some(rx);
+        let tabs = |s: &Sim| s.app.panels[&s.app.active].tabs.len();
+        let n = tabs(&s);
+        tx.send(Request::Show(vec![d.join("notes.txt"), d.join("report.md")])).unwrap();
+        s.settle();
+        assert_eq!(tabs(&s), n + 1, "one tab for the one folder");
+        assert_eq!(s.tab().path, d);
+        assert_eq!(s.tab().cursor_path(), Some(d.join("notes.txt")), "the file asked for, selected");
+        look(&mut s, "shown from another app");
+        tx.send(Request::Show(vec![d.join("Taxes")])).unwrap();
+        s.settle();
+        assert_eq!((s.tab().path.clone(), s.tab().cursor_path()), (d.clone(), Some(d.join("Taxes"))), "a folder shown in its parent, not opened");
+        tx.send(Request::Properties(vec![d.join("report.md")])).unwrap();
+        s.settle();
+        assert!(matches!(s.app.popup, Popup::Properties(_)));
+        s.act("key Escape");
+        tx.send(Request::Show(vec![d.join("gone.txt")])).unwrap();
+        s.settle();
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0.contains("doesn't exist")));
+        report("show in folder", &s);
+    }
+
     /// The cursor walked onto `name` with the arrow keys.
     fn cursor_to(s: &mut Sim, name: &str) {
         s.act("key Home");

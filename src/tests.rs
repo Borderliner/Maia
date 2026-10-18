@@ -7624,3 +7624,63 @@ fn tour_words_match_the_app() {
     // The choices on the first page are Options' own rows.
     assert!(crate::popups::OPTS.iter().any(|o| o.0 == crate::popups::Opt::Tour && o.1 == crate::popups::Section::System), "found again in Startup & system");
 }
+
+/// "Show in folder" over D-Bus, against a private bus (never the user's): Maia takes
+/// org.freedesktop.FileManager1 (a second connection can't), and calls made with the
+/// real gdbus reach the window as requests: items to show selected, folders to open,
+/// properties; Introspect describes it; an unknown method is refused. A message
+/// written and read back is the same message.
+#[test]
+fn file_manager1_answers_show_in_folder() {
+    use crate::fm1::{Bus, NAME, answer, build, read, strings};
+    use crate::single::Request;
+    // The wire format alone first: a call with an `as` body, round trip.
+    let mut body = vec![];
+    // `as`: the array's byte length, then each string's length, bytes and nul.
+    body.extend_from_slice(&13u32.to_le_bytes());
+    body.extend_from_slice(&8u32.to_le_bytes());
+    body.extend_from_slice(b"file:///\0");
+    let m = build(1, 9, &[(1, 'o', "/org/freedesktop/FileManager1"), (2, 's', NAME), (3, 's', "ShowItems")], None, "as", &body);
+    let back = read(&mut std::io::Cursor::new(m)).unwrap();
+    assert_eq!((back.serial, back.path.as_str(), back.member.as_str(), back.signature.as_str()), (9, "/org/freedesktop/FileManager1", "ShowItems", "as"));
+    assert_eq!(strings(&back.body), ["file:///"]);
+    if !crate::media::have("dbus-daemon") || !crate::media::have("gdbus") {
+        return;
+    }
+    let d = tmpdir("fm1");
+    let sock = d.join("bus");
+    let conf = d.join("bus.conf");
+    std::fs::write(&conf, format!("<busconfig><type>session</type><listen>unix:path={}</listen><auth>EXTERNAL</auth><policy context=\"default\"><allow send_destination=\"*\" eavesdrop=\"true\"/><allow eavesdrop=\"true\"/><allow own=\"*\"/></policy></busconfig>", sock.display())).unwrap();
+    let mut daemon = std::process::Command::new("dbus-daemon").arg(format!("--config-file={}", conf.display())).arg("--nofork").stdout(std::process::Stdio::null()).spawn().unwrap();
+    let start = Instant::now();
+    while !sock.exists() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let addr = format!("unix:path={}", sock.display());
+    let mut bus = Bus::connect(&addr).expect("connected and authenticated");
+    assert!(bus.own(NAME), "the name is Maia's");
+    assert!(!Bus::connect(&addr).unwrap().own(NAME), "and no one else's while it holds it");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || answer(bus, tx, || {}));
+    touch(&d.join("Some folder/a b.txt"), "x");
+    let call = |method: &str, uris: &str| {
+        std::process::Command::new("gdbus").args(["call", "--address", &addr, "--dest", NAME, "--object-path", "/org/freedesktop/FileManager1", "--method"]).arg(format!("org.freedesktop.FileManager1.{method}")).arg(uris).arg("").output().unwrap()
+    };
+    let file = d.join("Some folder/a b.txt");
+    let uri = format!("['file://{}']", file.display().to_string().replace(' ', "%20"));
+    let out = call("ShowItems", &uri);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "()");
+    assert!(matches!(rx.recv_timeout(Duration::from_secs(5)), Ok(Request::Show(p)) if p == [file.clone()]), "the file, to show selected");
+    assert!(call("ShowFolders", &format!("['file://{}']", d.display())).status.success());
+    assert!(matches!(rx.recv_timeout(Duration::from_secs(5)), Ok(Request::Open(p)) if p == [d.clone()]));
+    assert!(call("ShowItemProperties", &uri).status.success());
+    assert!(matches!(rx.recv_timeout(Duration::from_secs(5)), Ok(Request::Properties(p)) if p == [file.clone()]));
+    let intro = std::process::Command::new("gdbus").args(["introspect", "--address", &addr, "--dest", NAME, "--object-path", "/org/freedesktop/FileManager1"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&intro.stdout).contains("ShowItems"));
+    let bad = call("Explode", "['file:///']");
+    assert!(!bad.status.success() && String::from_utf8_lossy(&bad.stderr).contains("UnknownMethod"));
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    let _ = std::fs::remove_dir_all(&d);
+}

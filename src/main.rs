@@ -60,6 +60,7 @@ mod picfix;
 mod popups;
 mod project;
 mod projects;
+mod fm1;
 mod quickopen;
 mod undohist;
 mod hints;

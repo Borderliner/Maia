@@ -141,6 +141,9 @@ pub fn set_default() -> Result<String, String> {
         let _ = std::fs::write(crate::config::data_dir().join("previous-file-manager"), prev);
     }
     crate::mime::set_default(DESKTOP_ID, "inode/directory")?;
+    // "Show in folder" from browsers and other apps comes here too.
+    #[cfg(not(test))]
+    let _ = crate::fm1::set_service(true, &crate::fm1::exe());
     Ok("Maia is now the default file manager".into())
 }
 
@@ -152,6 +155,8 @@ pub fn unset_default() -> Result<String, String> {
     match other {
         Some(id) => {
             crate::mime::set_default(&id, "inode/directory")?;
+            #[cfg(not(test))]
+            let _ = crate::fm1::set_service(false, &crate::fm1::exe());
             let name = crate::mime::apps().by_id(&id).map(|a| a.name.clone()).unwrap_or(id);
             Ok(format!("{name} opens folders again"))
         }
@@ -164,6 +169,8 @@ pub fn uninstall() -> Result<String, String> {
     if let Some(p) = prev {
         let _ = crate::mime::set_default(p.trim(), "inode/directory");
     }
+    #[cfg(not(test))]
+    let _ = crate::fm1::set_service(false, &crate::fm1::exe());
     for p in [desktop_path(), icon_path()] {
         let _ = std::fs::remove_file(p);
     }

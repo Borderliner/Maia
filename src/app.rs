@@ -677,7 +677,34 @@ impl App {
             None => return,
         };
         for r in reqs {
-            if let crate::single::Request::Open(paths) = r {
+            use crate::single::Request;
+            match r {
+                Request::Show(paths) => {
+                    // Each folder once, in a tab, on the first thing asked for in it.
+                    let panel = self.active;
+                    let mut by_dir: Vec<(PathBuf, Vec<PathBuf>)> = vec![];
+                    for p in paths.into_iter().filter(|p| std::fs::symlink_metadata(p).is_ok()) {
+                        let Some(d) = p.parent().map(Path::to_path_buf) else { continue };
+                        match by_dir.iter_mut().find(|(x, _)| *x == d) {
+                            Some((_, v)) => v.push(p),
+                            None => by_dir.push((d, vec![p])),
+                        }
+                    }
+                    if by_dir.is_empty() {
+                        self.toast("Couldn't show that: it doesn't exist");
+                    }
+                    for (dir, items) in by_dir {
+                        self.actions.push(Action::NewTab { panel, path: dir, select: items.first().cloned(), focus: true });
+                    }
+                }
+                Request::Properties(paths) => {
+                    let paths: Vec<PathBuf> = paths.into_iter().filter(|p| p.exists()).collect();
+                    if !paths.is_empty() {
+                        self.popup = Popup::properties(paths);
+                    }
+                }
+                Request::Focus => {}
+                Request::Open(paths) => {
                 let panel = self.active;
                 for p in paths {
                     if !p.exists() {
@@ -689,6 +716,7 @@ impl App {
                     } else {
                         self.toast(format!("Couldn't open {}", p.display()));
                     }
+                }
                 }
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -3027,9 +3055,15 @@ impl App {
                 self.drive_op(crate::drives::Op::Mount, &dev, Some((panel, true)));
             }
             Action::NewTab { panel, path, select, focus } => {
-                let mut t = self.make_tab(path);
-                if let Some(s) = select {
-                    t.navigate(s, None);
+                let mut t = self.make_tab(path.clone());
+                match select {
+                    // A folder to select in this one: highlighted, not opened.
+                    Some(s) if s.is_dir() && s.parent() == Some(path.as_path()) => {
+                        t.pending_restore = Some(tab::HistState { path, cursor: Some(s.clone()), selected: vec![s], scroll: 0.0 });
+                        t.scroll_to_cursor = true;
+                    }
+                    Some(s) => t.navigate(s, None),
+                    None => {}
                 }
                 if let Some(p) = self.panels.get_mut(&panel) {
                     let at = p.active + 1;
