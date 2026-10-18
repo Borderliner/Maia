@@ -489,8 +489,8 @@ pub fn apply(plan: &[(PathBuf, String)]) -> Vec<String> {
             let _ = std::fs::rename(&tmp, p);
             continue;
         }
-        if let Err(e) = std::fs::rename(&tmp, &dest) {
-            errors.push(format!("{}: {e}", dest.display()));
+        if let Err(e) = crate::fsx::rename_new(&tmp, &dest) {
+            errors.push(if e.kind() == std::io::ErrorKind::AlreadyExists { format!("{} already exists", dest.display()) } else { format!("{}: {e}", dest.display()) });
             let _ = std::fs::rename(&tmp, p);
         }
     }

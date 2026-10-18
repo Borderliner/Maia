@@ -68,6 +68,8 @@ pub struct Progress {
     pub finished: bool,
     /// (src, dst) pairs actually produced, for undo.
     pub produced: Vec<(PathBuf, PathBuf)>,
+    /// What those replaced, now in the trash (Undo brings them back).
+    pub replaced: Vec<PathBuf>,
     /// Items refused for lack of permission (offered again as administrator).
     pub denied: Vec<PathBuf>,
     /// Items something else was using (what holds them is offered).
@@ -178,14 +180,28 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                     break;
                 }
                 let policy = decide.get(s).copied().unwrap_or(Conflict::KeepBoth);
-                let Some(dst) = resolve_dest(s, dest, policy, p) else { continue };
-                if s.is_dir() && inside(&dst, s) {
+                let Some(d) = resolve_dest(s, dest, policy, p) else { continue };
+                if s.is_dir() && inside(d.landed(), s) {
                     p.lock().unwrap().errors.push(format!("Can't copy {} into itself", s.display()));
                     continue;
                 }
-                match copy_tree(s, &dst, p, cancel, ctx, policy == Conflict::Merge) {
-                    Ok(()) => p.lock().unwrap().produced.push((s.clone(), dst)),
+                let merge = policy == Conflict::Merge && d.replace.is_none();
+                let fresh = fs::symlink_metadata(&d.to).is_err();
+                let r = copy_tree(s, &d.to, p, cancel, ctx, merge).and_then(|_| match &d.replace {
+                    Some(t) => swap_in(&d.to, t),
+                    None => Ok(()),
+                });
+                match r {
+                    Ok(()) => {
+                        let mut g = p.lock().unwrap();
+                        g.produced.push((s.clone(), d.landed().to_path_buf()));
+                        g.replaced.extend(d.replace.clone());
+                    }
                     Err(e) => {
+                        // Half a copy is no copy: what this job made goes, nothing else.
+                        if fresh {
+                            let _ = remove_tree(&d.to);
+                        }
                         let mut g = p.lock().unwrap();
                         if crate::admin::denied(&e) {
                             g.denied.push(s.clone());
@@ -396,15 +412,29 @@ fn move_one(s: &PathBuf, dest: &Path, policy: Conflict, p: &Mutex<Progress>, can
         p.lock().unwrap().errors.push(format!("Can't move {} into itself", s.display()));
         return;
     }
-    let Some(dst) = resolve_dest(s, dest, policy, p) else { return };
+    let Some(d) = resolve_dest(s, dest, policy, p) else { return };
     p.lock().unwrap().current = name_of(s);
-    let merge = policy == Conflict::Merge && dst.is_dir();
-    let r = match if merge { Err(std::io::Error::from_raw_os_error(libc::EXDEV)) } else { fs::rename(s, &dst) } {
-        Ok(()) => Ok(()),
-        // Cross-device: copy then delete.
+    let merge = policy == Conflict::Merge && d.replace.is_none() && d.to.is_dir();
+    let fresh = fs::symlink_metadata(&d.to).is_err();
+    let r = match if merge { Err(std::io::Error::from_raw_os_error(libc::EXDEV)) } else { crate::fsx::rename_new(s, &d.to) } {
+        Ok(()) => match &d.replace {
+            Some(t) => swap_in(&d.to, t).inspect_err(|_| {
+                // Not swapped in: back where it came from rather than left half-placed.
+                let _ = fs::rename(&d.to, s);
+            }),
+            None => Ok(()),
+        },
+        // Cross-device: copy, put in place, and only then delete the original.
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             p.lock().unwrap().total_bytes += tree_size(s);
-            copy_tree(s, &dst, p, cancel, ctx, merge).and_then(|_| remove_tree(s))
+            let r = copy_tree(s, &d.to, p, cancel, ctx, merge).and_then(|_| match &d.replace {
+                Some(t) => swap_in(&d.to, t),
+                None => Ok(()),
+            });
+            if r.is_err() && fresh {
+                let _ = remove_tree(&d.to);
+            }
+            r.and_then(|_| remove_tree(s))
         }
         Err(e) => Err(e),
     };
@@ -412,7 +442,8 @@ fn move_one(s: &PathBuf, dest: &Path, policy: Conflict, p: &Mutex<Progress>, can
         Ok(()) => {
             let mut g = p.lock().unwrap();
             g.gone.push(s.clone());
-            g.produced.push((s.clone(), dst));
+            g.produced.push((s.clone(), d.landed().to_path_buf()));
+            g.replaced.extend(d.replace.clone());
         }
         Err(e) => {
             let mut g = p.lock().unwrap();
@@ -488,29 +519,47 @@ fn name_of(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-fn resolve_dest(src: &Path, dest_dir: &Path, conflict: Conflict, p: &Mutex<Progress>) -> Option<PathBuf> {
+/// Where an item goes: `to`, and when it replaces something there, what. A replacement
+/// is written beside it under a hidden name and swapped in only once whole, so a copy
+/// that fails or is cancelled halfway leaves what was there as it was.
+struct Dest {
+    to: PathBuf,
+    replace: Option<PathBuf>,
+}
+
+impl Dest {
+    /// The name the item has once it is in place.
+    fn landed(&self) -> &Path {
+        self.replace.as_deref().unwrap_or(&self.to)
+    }
+}
+
+fn resolve_dest(src: &Path, dest_dir: &Path, conflict: Conflict, p: &Mutex<Progress>) -> Option<Dest> {
     let name = name_of(src);
     let target = dest_dir.join(&name);
     let exists = fs::symlink_metadata(&target).is_ok();
     // Copying a file onto itself always duplicates.
     if !exists || target == src {
-        return Some(if exists { unique_dest(dest_dir, &name) } else { target });
+        return Some(Dest { to: if exists { unique_dest(dest_dir, &name) } else { target }, replace: None });
     }
     match conflict {
-        Conflict::KeepBoth => Some(unique_dest(dest_dir, &name)),
+        Conflict::KeepBoth => Some(Dest { to: unique_dest(dest_dir, &name), replace: None }),
         Conflict::Skip => {
             p.lock().unwrap().done_items += 1;
             None
         }
-        Conflict::Merge if target.is_dir() && src.is_dir() => Some(target),
-        Conflict::Merge | Conflict::Overwrite => {
-            if let Err(e) = remove_tree(&target) {
-                p.lock().unwrap().errors.push(format!("{}: {e}", target.display()));
-                return None;
-            }
-            Some(target)
-        }
+        Conflict::Merge if target.is_dir() && src.is_dir() => Some(Dest { to: target, replace: None }),
+        Conflict::Merge | Conflict::Overwrite => Some(Dest { to: unique_dest(dest_dir, &format!(".{name}.maia-part")), replace: Some(target) }),
     }
+}
+
+/// Put a finished part in place of what it replaces: the old one to the trash, where it
+/// can be had back (removed only when the trash can't take it), then the part renamed.
+fn swap_in(part: &Path, target: &Path) -> std::io::Result<()> {
+    if crate::trashcan::delete(target).is_err() {
+        remove_tree(target)?;
+    }
+    fs::rename(part, target)
 }
 
 /// Is `p` the same as or inside `dir`, also through symlinks (compared by real path)?
@@ -587,8 +636,21 @@ fn copy_tree(
         }
         for de in fs::read_dir(src)?.flatten() {
             let child = dst.join(de.file_name());
-            if merge && !child.is_dir() && fs::symlink_metadata(&child).is_ok() {
-                let _ = fs::remove_file(&child);
+            let there = fs::symlink_metadata(&child).ok();
+            if merge && there.as_ref().is_some_and(|m| !m.is_dir()) {
+                if de.file_type().is_ok_and(|t| t.is_dir()) {
+                    // A folder where a file was: the file goes first, as before.
+                    fs::remove_file(&child)?;
+                } else {
+                    // A file over a file: written beside it, renamed over it once whole
+                    // (a rename replaces in one step), so a failure keeps the old one.
+                    let part = unique_dest(dst, &format!(".{}.maia-part", de.file_name().to_string_lossy()));
+                    if let Err(e) = copy_tree(&de.path(), &part, p, cancel, ctx, false).and_then(|_| fs::rename(&part, &child)) {
+                        let _ = remove_tree(&part);
+                        return Err(e);
+                    }
+                    continue;
+                }
             }
             copy_tree(&de.path(), &child, p, cancel, ctx, merge)?;
         }

@@ -22,6 +22,8 @@ fn what(k: &UndoKind) -> &'static str {
         UndoKind::Trashed(_) => "Moved to the trash",
         UndoKind::Replaced(_) => "Changed in place",
         UndoKind::Sorted(..) => "Sorted into folders",
+        UndoKind::Copied(..) => "Copied, replacing",
+        UndoKind::MovedOver(..) => "Moved, replacing",
     }
 }
 

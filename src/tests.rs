@@ -7385,3 +7385,89 @@ fn a_filter_drops_hidden_files_from_the_selection() {
     assert!(t.selected.contains(&report));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Nothing a copy or move replaces is lost: a replacement is written beside what it
+/// replaces and swapped in once whole, the old one going to the trash; one that fails
+/// halfway (a file it can't read) leaves the old one as it was and nothing half made;
+/// merging replaces a file in one step; a link to a folder deleted is only the link;
+/// names swapped in one rename both survive, and a rename never lands on a name taken.
+#[test]
+fn file_operations_never_lose_what_they_replace() {
+    use std::os::unix::fs::PermissionsExt;
+    let ctx = egui::Context::default();
+    let d = tmpdir("safety");
+    let (src, dst) = (d.join("src"), d.join("dst"));
+    let run = |kind: OpKind| {
+        let j = ops::spawn(1, kind, ctx.clone());
+        wait_job(&j);
+        let p = j.progress.lock().unwrap();
+        (p.errors.clone(), p.produced.clone())
+    };
+    let over = |p: &Path| HashMap::from([(p.to_path_buf(), Conflict::Overwrite)]);
+    let parts = |dir: &Path| std::fs::read_dir(dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains("maia-part")).count();
+    let trashed = |orig: &Path| crate::trashcan::list().into_iter().filter(|i| i.original == orig).count();
+    // Replaced, with the old one in the trash.
+    touch(&src.join("a.txt"), "new");
+    touch(&dst.join("a.txt"), "old");
+    let (errs, made) = run(OpKind::Copy { srcs: vec![src.join("a.txt")], dest: dst.clone(), decide: over(&src.join("a.txt")) });
+    assert!(errs.is_empty(), "{errs:?}");
+    assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "new");
+    assert_eq!(made, [(src.join("a.txt"), dst.join("a.txt"))], "recorded where it landed");
+    assert_eq!(trashed(&dst.join("a.txt")), 1, "the old one can be had back");
+    assert_eq!(parts(&dst), 0);
+    // A replacement that fails: the old file stays, nothing half made is left.
+    touch(&src.join("locked.txt"), "can't read me");
+    std::fs::set_permissions(src.join("locked.txt"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    touch(&dst.join("locked.txt"), "precious");
+    let unreadable = std::fs::File::open(src.join("locked.txt")).is_err();
+    if unreadable {
+        let (errs, _) = run(OpKind::Copy { srcs: vec![src.join("locked.txt")], dest: dst.clone(), decide: over(&src.join("locked.txt")) });
+        assert_eq!(errs.len(), 1);
+        assert_eq!(std::fs::read_to_string(dst.join("locked.txt")).unwrap(), "precious", "kept when the new one couldn't be read");
+        assert_eq!(parts(&dst), 0, "no part left behind");
+        // Merging a folder whose file can't be read: the file there is kept too.
+        std::fs::create_dir_all(src.join("box")).unwrap();
+        std::fs::rename(src.join("locked.txt"), src.join("box/locked.txt")).unwrap();
+        touch(&dst.join("box/locked.txt"), "precious too");
+        let (errs, _) = run(OpKind::Copy { srcs: vec![src.join("box")], dest: dst.clone(), decide: HashMap::from([(src.join("box"), Conflict::Merge)]) });
+        assert_eq!(errs.len(), 1);
+        assert_eq!(std::fs::read_to_string(dst.join("box/locked.txt")).unwrap(), "precious too");
+        assert_eq!(parts(&dst.join("box")), 0);
+        // A folder copy that fails halfway leaves no half folder.
+        std::fs::create_dir_all(src.join("half")).unwrap();
+        touch(&src.join("half/fine.txt"), "fine");
+        std::fs::rename(src.join("box/locked.txt"), src.join("half/zz-locked.txt")).unwrap();
+        let (errs, _) = run(OpKind::Copy { srcs: vec![src.join("half")], dest: dst.clone(), decide: HashMap::new() });
+        assert_eq!(errs.len(), 1);
+        assert!(!dst.join("half").exists(), "half a copy is no copy");
+        std::fs::set_permissions(src.join("half/zz-locked.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    // A move that replaces: the old one to the trash, the moved one in its place.
+    touch(&src.join("m.txt"), "moved");
+    touch(&dst.join("m.txt"), "was here");
+    let (errs, _) = run(OpKind::Move { srcs: vec![src.join("m.txt")], dest: dst.clone(), decide: over(&src.join("m.txt")) });
+    assert!(errs.is_empty(), "{errs:?}");
+    assert!(!src.join("m.txt").exists() && std::fs::read_to_string(dst.join("m.txt")).unwrap() == "moved");
+    assert_eq!(trashed(&dst.join("m.txt")), 1);
+    // A link to a folder, deleted: the folder and its files stay.
+    touch(&d.join("real/keep.txt"), "keep");
+    std::os::unix::fs::symlink(d.join("real"), d.join("link")).unwrap();
+    let (errs, _) = run(OpKind::Delete { paths: vec![d.join("link")] });
+    assert!(errs.is_empty());
+    assert!(std::fs::symlink_metadata(d.join("link")).is_err() && d.join("real/keep.txt").exists());
+    // Two names swapped in one go; a rename onto a name taken is refused.
+    touch(&d.join("x.txt"), "x");
+    touch(&d.join("y.txt"), "y");
+    let errs = crate::rename::apply(&[(d.join("x.txt"), "y.txt".into()), (d.join("y.txt"), "x.txt".into())]);
+    assert!(errs.is_empty(), "{errs:?}");
+    assert_eq!((std::fs::read_to_string(d.join("x.txt")).unwrap(), std::fs::read_to_string(d.join("y.txt")).unwrap()), ("y".into(), "x".into()));
+    let errs = crate::rename::apply(&[(d.join("x.txt"), "y.txt".into())]);
+    assert_eq!(errs.len(), 1, "taken");
+    assert_eq!((std::fs::read_to_string(d.join("x.txt")).unwrap(), std::fs::read_to_string(d.join("y.txt")).unwrap()), ("y".into(), "x".into()), "both untouched");
+    assert!(crate::fsx::rename_new(&d.join("x.txt"), &d.join("y.txt")).is_err());
+    // Clean the test's trash entries.
+    for it in crate::trashcan::list().into_iter().filter(|i| i.original.starts_with(&d)) {
+        let _ = crate::trashcan::purge(&it);
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

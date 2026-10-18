@@ -619,3 +619,27 @@ pub fn drive_kind_cached(path: &Path, ctx: &egui::Context) -> crate::config::Dri
         }
     }
 }
+
+/// Rename `from` to `to` only if nothing is at `to`: the kernel checks and renames in one
+/// step, so another program can't put a file there in between and have it replaced.
+/// File systems without that (some FUSE and network ones) get the check, then the rename.
+pub fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    let (f, t) = (c(from)?, c(to)?);
+    // The system call, not glibc's wrapper, which older systems lack.
+    let r = unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
+    if r == 0 {
+        return Ok(());
+    }
+    let e = std::io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::ENOTSUP) => {
+            if fs::symlink_metadata(to).is_ok() {
+                return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+            }
+            fs::rename(from, to)
+        }
+        _ => Err(e),
+    }
+}

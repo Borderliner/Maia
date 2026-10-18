@@ -2723,6 +2723,17 @@ mod journeys {
         s.click_text("Replace");
         s.settle();
         assert_eq!(std::fs::read_to_string(dst_dir.join("report.md")).unwrap(), std::fs::read_to_string(&src).unwrap(), "replaced");
+        // The one replaced is in the trash; Undo brings it back in its place.
+        wait_until(&mut s, "the copy's undo", 10, |s| s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Copied(..))));
+        s.act("key ctrl+z");
+        s.settle();
+        assert_eq!(std::fs::read_to_string(dst_dir.join("report.md")).unwrap(), "older report", "the replaced one back");
+        select_path(&mut s, &src);
+        s.act("key F5");
+        s.settle();
+        s.click_text("Replace");
+        s.settle();
+        assert_eq!(std::fs::read_to_string(dst_dir.join("report.md")).unwrap(), std::fs::read_to_string(&src).unwrap(), "replaced again");
         // F6 (move) into a conflict: Skip leaves the source where it is.
         select_path(&mut s, &src);
         s.act("key F6");

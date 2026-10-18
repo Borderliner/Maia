@@ -98,7 +98,8 @@ impl UndoKind {
     /// How many files or folders the change touched.
     pub fn count(&self) -> usize {
         match self {
-            UndoKind::Rename(v) | UndoKind::Move(v) | UndoKind::Sorted(v, _) => v.len(),
+            UndoKind::Rename(v) | UndoKind::Move(v) | UndoKind::Sorted(v, _) | UndoKind::MovedOver(v, _) => v.len(),
+            UndoKind::Copied(v, _) => v.len(),
             UndoKind::Created(v) | UndoKind::Trashed(v) | UndoKind::Replaced(v) => v.len(),
         }
     }
@@ -114,6 +115,10 @@ pub enum UndoKind {
     /// Files moved into folders made for them (outermost first), which go again if
     /// nothing else is in them by then.
     Sorted(Vec<(PathBuf, PathBuf)>, Vec<PathBuf>),
+    /// Copies made, and among them those that replaced something (which is in the trash).
+    Copied(Vec<PathBuf>, Vec<PathBuf>),
+    /// A move over things that were there (in the trash now).
+    MovedOver(Vec<(PathBuf, PathBuf)>, Vec<PathBuf>),
 }
 
 pub struct App {
@@ -1248,7 +1253,8 @@ impl App {
                 }
                 if let OpKind::Move { .. } = j.kind {
                     if !p.produced.is_empty() {
-                        self.undo.push(UndoEntry { label: crate::ui::job_undo_label(&j.label), kind: UndoKind::Move(p.produced.clone()) });
+                        let kind = if p.replaced.is_empty() { UndoKind::Move(p.produced.clone()) } else { UndoKind::MovedOver(p.produced.clone(), p.replaced.clone()) };
+                        self.undo.push(UndoEntry { label: crate::ui::job_undo_label(&j.label), kind });
                     }
                 }
                 if let OpKind::Sort { .. } = j.kind {
@@ -1263,7 +1269,9 @@ impl App {
                             OpKind::Convert { srcs, to, .. } => crate::convert::undo_label(srcs, *to),
                             _ => crate::ui::job_undo_label(&j.label),
                         };
-                        self.undo.push(UndoEntry { label, kind: UndoKind::Created(p.produced.iter().map(|x| x.1.clone()).collect()) });
+                        let made: Vec<PathBuf> = p.produced.iter().map(|x| x.1.clone()).collect();
+                        let kind = if p.replaced.is_empty() { UndoKind::Created(made) } else { UndoKind::Copied(made, p.replaced.clone()) };
+                        self.undo.push(UndoEntry { label, kind });
                     }
                 }
                 if let OpKind::Trash { paths } = &j.kind {
@@ -2879,6 +2887,30 @@ impl App {
                     .map(|(from, to)| (to.clone(), from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
                     .collect();
                 errs = crate::rename::apply(&plan).len();
+            }
+            UndoKind::Copied(made, replaced) => {
+                // The copies over something: theirs back from the trash in their place.
+                errs += crate::picfix::undo_replaced(replaced);
+                errs += made.iter().filter(|p| !replaced.contains(p) && crate::trashcan::delete(p).is_err()).count();
+            }
+            UndoKind::MovedOver(pairs, replaced) => {
+                let mut back = vec![];
+                for (src, dst) in pairs {
+                    if std::fs::symlink_metadata(src).is_ok() || crate::fsx::rename_new(dst, src).is_err() {
+                        errs += 1;
+                    } else {
+                        back.push((dst.clone(), src.clone()));
+                    }
+                }
+                // What was there before comes back from the trash, now its place is free.
+                for r in replaced {
+                    match crate::trashcan::list().into_iter().filter(|i| i.original == *r).max_by(|a, b| a.deleted.cmp(&b.deleted)) {
+                        Some(it) if std::fs::symlink_metadata(r).is_err() => errs += crate::trashcan::restore(&it).is_err() as usize,
+                        _ => errs += 1,
+                    }
+                }
+                moved_back = ops::Changed::moved(&back);
+                moved_back.arrived.extend(replaced.iter().filter_map(|r| r.parent().map(Path::to_path_buf)));
             }
             UndoKind::Move(pairs) => {
                 let mut back = vec![];
