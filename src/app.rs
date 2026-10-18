@@ -2863,7 +2863,19 @@ impl App {
             return;
         }
         let n = wanted.len();
-        let errs: Vec<String> = wanted.iter().filter_map(|it| crate::trashcan::restore(it).err().map(|e| e.to_string())).collect();
+        let mut back = vec![];
+        let errs: Vec<String> = wanted
+            .iter()
+            .filter_map(|it| match crate::trashcan::restore(it) {
+                Ok(()) => {
+                    back.push((it.file.clone(), it.original.clone()));
+                    None
+                }
+                Err(e) => Some(e.to_string()),
+            })
+            .collect();
+        // Every tab showing where they come back to, not only this one.
+        self.show_changed(&ops::Changed::moved(&back));
         if errs.is_empty() {
             self.toast(format!("Restored {n} item{}", if n == 1 { "" } else { "s" }));
         } else {
@@ -2887,6 +2899,8 @@ impl App {
                     .map(|(from, to)| (to.clone(), from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
                     .collect();
                 errs = crate::rename::apply(&plan).len();
+                let back: Vec<(PathBuf, PathBuf)> = pairs.iter().map(|(from, to)| (to.clone(), from.clone())).collect();
+                moved_back = ops::Changed::moved(&back);
             }
             UndoKind::Copied(made, replaced) => {
                 // The copies over something: theirs back from the trash in their place.
@@ -2925,6 +2939,12 @@ impl App {
             }
             UndoKind::Created(paths) => {
                 errs += paths.iter().filter(|p| crate::trashcan::delete(p).is_err()).count();
+                for p in paths {
+                    moved_back.gone.push(p.clone());
+                    if let Some(d) = p.parent().filter(|d| !moved_back.left.iter().any(|x| x == d)) {
+                        moved_back.left.push(d.to_path_buf());
+                    }
+                }
             }
             UndoKind::Trashed(orig) => {
                 // Restore the most recent trash entry for each original path.
@@ -2934,7 +2954,9 @@ impl App {
                         best.insert(it.original.clone(), it);
                     }
                 }
-                errs += best.values().filter(|it| crate::trashcan::restore(it).is_err()).count();
+                let back: Vec<(PathBuf, PathBuf)> = best.values().filter(|it| crate::trashcan::restore(it).is_ok()).map(|it| (it.file.clone(), it.original.clone())).collect();
+                errs += best.len() - back.len();
+                moved_back = ops::Changed::moved(&back);
             }
             UndoKind::Replaced(paths) => errs += crate::picfix::undo_replaced(paths),
             UndoKind::Sorted(pairs, made) => {
@@ -3284,12 +3306,18 @@ impl App {
         t.pending_restore = Some(tab::HistState { path: t.path.clone(), cursor: new_paths.first().cloned(), selected: new_paths.clone(), scroll: t.current_scroll });
         t.reload();
         let pairs: Vec<(PathBuf, PathBuf)> = plan.iter().map(|(p, _)| p.clone()).zip(new_paths).collect();
+        // Undo takes back only what was renamed: a name refused stays as it was.
+        let done: Vec<(PathBuf, PathBuf)> = pairs.iter().filter(|(a, b)| std::fs::symlink_metadata(b).is_ok() && std::fs::symlink_metadata(a).is_err()).cloned().collect();
         let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let label = match pairs.as_slice() {
+        let label = match done.as_slice() {
             [(from, to)] if !batch => format!("Rename {} to {}", name(from), name(to)),
-            _ => format!("Rename {} items", pairs.len()),
+            _ => format!("Rename {} items", done.len()),
         };
-        self.undo.push(UndoEntry { label, kind: UndoKind::Rename(pairs.clone()) });
+        if !done.is_empty() {
+            self.undo.push(UndoEntry { label, kind: UndoKind::Rename(done.clone()) });
+            // Other tabs on the same folder show the new names too.
+            self.show_changed(&ops::Changed::moved(&done));
+        }
         if errors.is_empty() {
             return;
         }
@@ -3297,7 +3325,6 @@ impl App {
         let tools = crate::drives::Tools::current().filter(|t| t.has("pkexec"));
         match (&pairs[..], tools) {
             ([(from, to)], Some(tools)) if errors[0].contains("os error 13") || errors[0].contains("os error 1)") => {
-                self.undo.pop();
                 let task = crate::admin::Task::Rename { from: from.clone(), to: to.clone() };
                 let name = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 self.popup = Popup::confirm(format!("You don't have permission to rename “{name}”. Rename it as administrator?"), "Use administrator", Box::new(move |app: &mut App| {

@@ -2763,6 +2763,33 @@ mod journeys {
         report("conflicts", &s);
     }
 
+    /// A rename the folder refuses (it is read-only) leaves nothing for Undo: Undo then
+    /// takes back the change before it, not a rename that never happened.
+    #[test]
+    fn a_refused_rename_leaves_nothing_to_undo() {
+        if !sandboxed() {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let home = fixture("refusedrename");
+        let d = home.join("Documents/Taxes/2025");
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let undos = s.app.undo.len();
+        select_path(&mut s, &d.join("receipt.pdf"));
+        s.act("key F2");
+        s.act("key ctrl+a");
+        s.act("text kept.pdf");
+        s.act("key Enter");
+        s.settle();
+        let refused = !d.join("kept.pdf").exists();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(refused && d.join("receipt.pdf").exists(), "the folder said no");
+        assert_eq!(s.app.undo.len(), undos, "no Undo for a rename that didn't happen");
+        assert!(s.app.toast.is_some(), "and it says why");
+        report("refused rename", &s);
+    }
+
     /// The cursor walked onto `name` with the arrow keys.
     fn cursor_to(s: &mut Sim, name: &str) {
         s.act("key Home");
