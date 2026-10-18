@@ -7378,6 +7378,9 @@ mod journeys {
         let root = app.clone();
         let faded = move |s: &Sim, f: &str| crate::gitstatus::ignored(crate::gitstatus::repo_for(&root).as_deref(), &root.join(f), &root);
         assert!(!faded(&s, "scratch.txt"));
+        // The menu offers it once git's word on the folder is in (late on a busy machine).
+        let repo = app.clone();
+        wait_until(&mut s, "git's status of the project", 20, move |_| crate::gitstatus::repo_for(&repo).is_some_and(|r| r.marks.keys().any(|k| k.ends_with("scratch.txt"))));
         reveal(&mut s, "scratch.txt");
         let row = row_text(&s, "scratch.txt");
         s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
