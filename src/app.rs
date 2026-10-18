@@ -248,6 +248,8 @@ impl App {
         };
         theme::install_fonts(&ctx, &font_family, &cfg_mono);
         crate::mime::preload();
+        // Nothing of Maia's on disk yet: a first start (the welcome tour).
+        let first = [config::config_path(), config::userdata_path(), config::session_path()].iter().all(|p| !p.exists());
         let cfg = config::load_config();
         let ud = config::load_userdata();
         let mut pal = theme::palette(cfg.theme);
@@ -352,6 +354,7 @@ impl App {
             app.active = id;
             app.prev_active = id;
         }
+        crate::tour::at_start(&mut app, first);
         app
     }
 
@@ -913,23 +916,27 @@ impl App {
             self.cfg_dirty = false;
         }
         if self.ud_dirty {
-            // Merge-safe: reload others' bookmarks if the file changed under us is handled by hot reload.
-            if self.cfg.recents_store == config::RecentsStore::Persistent {
-                let _ = config::save_json(&config::userdata_path(), &self.ud);
-            } else {
-                // Session-only (or off): never write the recents list to disk.
-                let mut ud = self.ud.clone();
-                ud.recents.clear();
-                let _ = config::save_json(&config::userdata_path(), &ud);
-            }
-            self.ud_mtime = config::mtime(&config::userdata_path());
-            self.ud_dirty = false;
+            self.save_userdata();
         }
         if self.save_session {
             let s = Session { layout: Some(self.layout_snap(ctx)), sidebar: self.sidebar, sidebar_width: self.sidebar_width };
             let _ = config::save_json(&config::session_path(), &s);
         }
         self.last_save = Instant::now();
+    }
+
+    pub fn save_userdata(&mut self) {
+        // Merge-safe: reload others' bookmarks if the file changed under us is handled by hot reload.
+        if self.cfg.recents_store == config::RecentsStore::Persistent {
+            let _ = config::save_json(&config::userdata_path(), &self.ud);
+        } else {
+            // Session-only (or off): never write the recents list to disk.
+            let mut ud = self.ud.clone();
+            ud.recents.clear();
+            let _ = config::save_json(&config::userdata_path(), &ud);
+        }
+        self.ud_mtime = config::mtime(&config::userdata_path());
+        self.ud_dirty = false;
     }
 
     fn hot_reload(&mut self) {
@@ -2634,6 +2641,8 @@ impl App {
                 Err(e) => self.toast(format!("Uninstall failed: {e}")),
             },
             Cmd::About => self.popup = Popup::About,
+            Cmd::Welcome => self.popup = crate::tour::open(crate::tour::Kind::Welcome, false),
+            Cmd::WhatsNew => self.popup = crate::tour::open(crate::tour::Kind::News, false),
             Cmd::Undo => {
                 self.undo_last();
             }

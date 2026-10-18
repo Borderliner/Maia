@@ -357,6 +357,8 @@ commands! {
     Install, "install", Misc, "Install Maia", "Add Maia to your app launcher and ~/.local/bin.", [];
     SetDefault, "set_default_fm", Misc, "Set As Default File Manager", "Make Maia open folders for other apps.", [];
     Uninstall, "uninstall", Misc, "Uninstall Maia", "Remove the launcher entry and installed binary.", [];
+    Welcome, "welcome_tour", Misc, "Welcome Tour", "The pages shown on the first start: what Maia does, and a few choices to make it yours.", [];
+    WhatsNew, "whats_new", Misc, "What's New in Maia", "What this version added, with the main changes shown at work.", [];
     About, "about", Misc, "About Maia", "Version and credits.", [];
 }
 

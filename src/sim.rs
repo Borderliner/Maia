@@ -771,6 +771,11 @@ impl Sim {
         self.frame(vec![]);
     }
 
+    /// Where the last frame drew the first of `labels` found, if any.
+    pub fn text_rect_any(&self, labels: &[&str]) -> Option<Rect> {
+        labels.iter().find_map(|l| self.texts.iter().rev().find(|(_, s)| s == l).map(|(r, _)| *r))
+    }
+
     /// Where the last frame drew `label` (topmost match).
     pub fn text_rect(&self, label: &str) -> Rect {
         self.texts.iter().rev().find(|(_, s)| s == label).map(|(r, _)| *r).unwrap_or_else(|| self.fail(&format!("no {label:?} on screen")))
@@ -1073,7 +1078,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(159) {
+    match rng.below(161) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2298,6 +2303,42 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                     s.fail(&format!("{} still listed in {} after it was moved", p.display(), t.path.display()));
                 }
             }
+        }
+        159 => {
+            // The welcome tour or What's New: pages by keys, buttons and dots, the films
+            // clicked, choices made on the first page, then closed one way or another.
+            s.cmd(if rng.below(2) == 0 { Cmd::Welcome } else { Cmd::WhatsNew });
+            for _ in 0..rng.below(10) {
+                if !matches!(s.app.popup, Popup::Tour(_)) {
+                    break;
+                }
+                match rng.below(4) {
+                    0 => s.act(&format!("key {}", rng.pick(&["ArrowRight", "ArrowLeft", "Enter", "Tab", "space"]))),
+                    1 => click_control_at(s, rng.pick(&["tour next", "tour back", "tour dot", "tour film", "tour theme", "switch", "choice"])),
+                    2 => {
+                        let r = s.text_rect_any(&["Font size", "Show hidden files", "Animations"]);
+                        if let Some(r) = r {
+                            s.act(&format!("scroll {:.0} {:.0} {:.1}", r.center().x, r.center().y, rng.f(-8.0, 8.0)));
+                        }
+                    }
+                    _ => s.idle(rng.below(40) + 1),
+                }
+            }
+            if matches!(s.app.popup, Popup::Tour(_)) {
+                match rng.below(3) {
+                    0 => s.act("key Escape"),
+                    1 => click_control_at(s, "tour close"),
+                    _ => s.act("click 4 4"),
+                }
+            }
+        }
+        160 => {
+            // From Options' row: the tour or What's New, and straight back out.
+            s.app.popup = Popup::options_at(crate::popups::Section::System);
+            s.idle(3);
+            click_control_at(s, rng.pick(&["tour button", "whats new button"]));
+            s.idle(rng.below(20) + 1);
+            s.act("key Escape");
         }
         _ => {
             s.note("idle".into());
@@ -11080,6 +11121,215 @@ mod journeys {
         s.shot("shelf-small-graphite");
         s.resize(1280.0, 800.0);
         report("shelf", &s);
+    }
+
+    // ---------------------------------------------------------------- welcome tour
+
+    fn tour(s: &Sim) -> &crate::tour::State {
+        match &s.app.popup {
+            Popup::Tour(t) => t,
+            _ => s.fail(&format!("the tour is not open (popup {})", s.app.popup.kind_name())),
+        }
+    }
+
+    /// Nothing of Maia's on disk, as on a first start.
+    fn forget_maia() {
+        for p in [crate::config::config_path(), crate::config::userdata_path(), crate::config::session_path()] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// Wait for the page's film to be on screen (decoded on its own thread).
+    fn film_on(s: &mut Sim) {
+        wait_until(s, "the film shown", 10, |s| tour(s).film_shown());
+        s.idle(12);
+    }
+
+    /// The welcome tour on a first start and never again; What's New on a start after
+    /// an update (a 0.2 home has no record of the version) and not after a newer one; both
+    /// from the palette and Options. Pages by keys, buttons, dots and clicks outside;
+    /// choices on the first page made in place and kept; films played to their end and
+    /// then still, with nothing left waking the window; every page in a wide, a narrow
+    /// and a short window, in a dark and a light theme, and with animations off.
+    #[test]
+    fn welcome_tour_and_whats_new() {
+        if !sandboxed() {
+            return;
+        }
+        struct Off;
+        impl Drop for Off {
+            fn drop(&mut self) {
+                crate::tour::AUTO.with(|a| a.set(false));
+                forget_maia();
+            }
+        }
+        let _off = Off;
+        crate::tour::AUTO.with(|a| a.set(true));
+        let home = fixture("tour");
+        let now = env!("CARGO_PKG_VERSION");
+        let seen = || crate::config::load_userdata().seen_version;
+        // A first start: the tour, its choices at their defaults.
+        forget_maia();
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.idle(3);
+        assert!(tour(&s).kind == crate::tour::Kind::Welcome && tour(&s).auto && tour(&s).page == 0, "the tour on a first start");
+        assert_eq!(seen(), now, "this version written down at once");
+        s.shot("tour-start");
+        for t in ["Welcome to Maia", "Appearance", "Files & folders", "Follow system light/dark", "Font size", "Animations", "Show hidden files"] {
+            assert!(some_text(&s, t), "{t:?} on the first page");
+        }
+        let d = crate::config::Config::default();
+        assert!(s.app.cfg.theme == d.theme && !s.app.cfg.show_hidden && !s.app.cfg.single_click && !s.app.cfg_dirty, "nothing chosen yet");
+        look(&mut s, "tour first page");
+        // A light theme and hidden files, chosen here, take effect behind it.
+        let themes = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == "tour theme").map(|(_, r, _)| *r).collect::<Vec<_>>());
+        assert_eq!(themes.len(), 6, "six themes to pick from");
+        let latte = themes[5];
+        s.act(&format!("click {:.0} {:.0}", latte.center().x, latte.center().y));
+        assert_eq!(s.app.cfg.theme, crate::theme::ThemeName::Latte, "picked");
+        s.idle(2);
+        assert!(!s.app.pal.dark, "the window light at once");
+        click_in_row(&mut s, "switch", "Show hidden files");
+        s.settle();
+        assert!(s.app.cfg.show_hidden && s.tab().view.iter().any(|&i| s.tab().entries[i as usize].name == ".bashrc"), "hidden files shown behind the tour");
+        assert!(s.app.cfg_dirty, "kept as Options keeps it");
+        // On by the keys, the buttons and the dots.
+        s.act("key ArrowRight");
+        assert_eq!(tour(&s).page, 1);
+        film_on(&mut s);
+        assert!(some_text(&s, "Go anywhere by typing") && some_text(&s, "Ctrl+P") && some_text(&s, "Go To"), "the page, its keys as bound");
+        look(&mut s, "tour film page");
+        click_control(&mut s, "tour next");
+        assert_eq!(tour(&s).page, 2);
+        click_control(&mut s, "tour back");
+        assert_eq!(tour(&s).page, 1);
+        s.act("key Enter");
+        assert_eq!(tour(&s).page, 2, "Enter goes on");
+        s.act("key ArrowLeft");
+        s.act("key ArrowLeft");
+        s.act("key ArrowLeft");
+        assert_eq!(tour(&s).page, 0, "and no further back than the first");
+        let dots = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == "tour dot").map(|(_, r, _)| *r).collect::<Vec<_>>());
+        assert_eq!(dots.len(), crate::tour::WELCOME.len(), "a dot a page");
+        let last = dots[dots.len() - 1];
+        s.act(&format!("click {:.0} {:.0}", last.center().x, last.center().y));
+        assert_eq!(tour(&s).page, crate::tour::WELCOME.len() - 1);
+        film_on(&mut s);
+        assert!(some_text(&s, "Done"), "the last page ends it");
+        s.act("key ArrowRight");
+        assert!(s.popup_open(), "Right on the last page stays");
+        // Escape closes it, saying where it is.
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0.contains("Welcome Tour")), "where to find it again");
+        s.app.save_all(&s.ctx.clone());
+        drop(s);
+        // Started again: nothing, and the choices kept.
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.idle(3);
+        assert!(!s.popup_open(), "the tour never comes back by itself");
+        assert!(s.app.cfg.show_hidden && s.app.cfg.theme == crate::theme::ThemeName::Latte, "the choices kept");
+        drop(s);
+        // An update from 0.2: settings there, no version recorded. What's New.
+        forget_maia();
+        crate::config::save_json(&crate::config::config_path(), &crate::config::Config::default()).unwrap();
+        std::fs::write(crate::config::userdata_path(), r#"{"bookmarks":[],"recents":[]}"#).unwrap();
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.idle(3);
+        assert!(tour(&s).kind == crate::tour::Kind::News && tour(&s).auto, "What's New after an update");
+        film_on(&mut s);
+        assert!(some_text(&s, &format!("New in Maia {}", crate::tour::NEWS_VERSION)) && some_text(&s, "Pictures full window") && some_text(&s, "F3"));
+        let n = crate::tour::NEWS.len();
+        for _ in 1..n {
+            s.act("key ArrowRight");
+        }
+        s.idle(12);
+        assert!(some_text(&s, &format!("Also new in {}", crate::tour::NEWS_VERSION)) && some_text(&s, "For everyone"), "the rest, in groups");
+        look(&mut s, "tour list page");
+        // A click outside closes it.
+        s.act("click 20 790");
+        assert!(!s.popup_open(), "a click outside closes it");
+        assert_eq!(seen(), now);
+        drop(s);
+        // A newer version seen (Maia went back a version): nothing.
+        let mut ud = crate::config::load_userdata();
+        ud.seen_version = "99.0.0".into();
+        crate::config::save_json(&crate::config::userdata_path(), &ud).unwrap();
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.idle(3);
+        assert!(!s.popup_open(), "nothing after a newer version");
+        // From the palette, and from Options: no word on closing.
+        s.act("key ctrl+shift+p");
+        s.act("text welcome tour");
+        s.act("key Enter");
+        assert!(tour(&s).kind == crate::tour::Kind::Welcome && !tour(&s).auto, "from the palette");
+        click_control(&mut s, "tour close");
+        assert!(!s.popup_open() && s.app.toast.is_none(), "closed without a word");
+        s.app.popup = Popup::options_at(crate::popups::Section::System);
+        s.idle(3);
+        assert!(some_text(&s, "What's new"), "a row in Startup & system");
+        click_control(&mut s, "whats new button");
+        s.idle(1);
+        assert!(tour(&s).kind == crate::tour::Kind::News, "from Options");
+        // A film plays to its end, then rests, and nothing wakes the window.
+        film_on(&mut s);
+        wait_until(&mut s, "the film over", 60, |s| {
+            tour(s).film_done()
+        });
+        s.idle(3);
+        assert_eq!(s.repaint, std::time::Duration::MAX, "nothing left to draw: {:?}", s.repaint);
+        // A click on it plays it again.
+        click_control(&mut s, "tour film");
+        s.idle(2);
+        assert!(!tour(&s).film_done(), "playing again");
+        s.act("key Escape");
+        // Animations off: each film shows its last state at once, nothing ticking.
+        s.app.cfg.animations = false;
+        s.cmd(WhatsNew);
+        film_on(&mut s);
+        wait_until(&mut s, "the still", 10, |s| tour(s).film_done());
+        s.idle(3);
+        assert_eq!(s.repaint, std::time::Duration::MAX, "a still: {:?}", s.repaint);
+        s.act("key Escape");
+        s.app.cfg.animations = true;
+        // Every page, in a wide, a narrow and a short window, dark and light.
+        let shots = std::env::var_os("MAIA_SIM_SHOTS").is_some();
+        for theme in [crate::theme::ThemeName::Graphite, crate::theme::ThemeName::Paper] {
+            s.app.cfg.theme = theme;
+            for (w, h) in [(1280.0, 800.0), (640.0, 480.0), (900.0, 420.0)] {
+                s.resize(w, h);
+                for (cmd, kind) in [(Welcome, "welcome"), (WhatsNew, "news")] {
+                    s.cmd(cmd);
+                    let n = tour(&s).pages().len();
+                    for p in 0..n {
+                        if !matches!(crate::tour::pages(tour(&s).kind)[p].body, crate::tour::Body::Film(_)) {
+                            s.idle(14);
+                        } else {
+                            film_on(&mut s);
+                        }
+                        look(&mut s, &format!("tour {kind} page {p} {w}x{h}"));
+                        if shots && (w == 1280.0 || p < 2) {
+                            s.shot(&format!("tour-{}-{w}-{kind}-{p}", theme.label().to_lowercase()));
+                        }
+                        s.act("key ArrowRight");
+                    }
+                    s.act("key Escape");
+                    assert!(!s.popup_open());
+                }
+            }
+        }
+        // The first page scrolls in a short window: its last choice reachable.
+        s.resize(900.0, 420.0);
+        s.cmd(Welcome);
+        s.idle(4);
+        let r = s.text_rect("Follow system light/dark");
+        s.act(&format!("scroll {:.0} {:.0} -20", r.center().x, r.center().y));
+        s.idle(6);
+        for t in ["Single click to open", "Search by meaning", "Startup & system", "Default file manager"] {
+            assert!(some_text(&s, t), "{t:?} scrolled to");
+        }
+        s.act("key Escape");
+        report("welcome tour", &s);
     }
 
     // ---------------------------------------------------------------- tour films

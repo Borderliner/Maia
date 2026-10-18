@@ -94,6 +94,7 @@ mod timefmt;
 mod trashcan;
 mod theme;
 mod tidy;
+mod tour;
 mod thumbcache;
 mod thumbs;
 mod ui;
