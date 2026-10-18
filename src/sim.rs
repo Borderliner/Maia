@@ -5308,6 +5308,8 @@ mod journeys {
         // The history: our branch alone, origin/main on their commit, docs with its remote.
         s.act(&format!("click {:.0} {:.0}", chip.center().x, chip.center().y));
         wait_until(&mut s, "the branch menu", 5, |s| s.texts.iter().any(|(_, t)| t == "History"));
+        // A menu taller than when it was last open settles on its next frame.
+        s.idle(3);
         s.click_text("History");
         wait_until(&mut s, "history", 30, |s| history(s).is_some_and(|h| h.1 && h.0 == 4));
         s.idle(3);
