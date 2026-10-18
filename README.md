@@ -91,54 +91,65 @@ as `size>100M`, `modified<7d`, `created:today` or `tag:red`. Some keys to start 
 | Every file below this folder in one list | Ctrl+E |
 | Only the files git marks as changed | Ctrl+Shift+G |
 | Recent git projects | Ctrl+Alt+P |
+| A file anywhere in this project | Ctrl+O |
 | Rename (several files at once) | F2 |
 | New folder | Ctrl+Shift+N |
 | Trash, delete | Delete, Shift+Delete |
-| Undo | Ctrl+Z |
+| Undo, and what it can take back | Ctrl+Z, Ctrl+Alt+Z |
 | Options | Ctrl+, |
 | Pictures full window | F3 |
 | Onto the shelf | Alt+S |
+| Click anything by its letters | Ctrl+J |
+| Mark a place, go back to it | Ctrl+M, Ctrl+' |
 
 Every binding can be changed from the command palette.
 
 An archive opens like a folder; right-click it for Extract Here, or right-click files
 for Compress. Compress With a password makes a zip locked with AES-256, or a 7z whose
 names are locked too; the password goes to bsdtar or 7z on a pipe, never on the command
-line. Set As Wallpaper, in a picture's menu, works on GNOME, KDE, XFCE,
-Cinnamon, MATE, sway, Hyprland (with hyprpaper or swww) and Noctalia. Its Picture menu
-turns pictures in place (Undo brings the original back from the trash) and saves smaller
-copies beside them; Crop works in the inspector: drag over what to keep and press Enter.
-Convert, in the menu of files of one kind, saves a copy in another format beside each:
-pictures as JPG, PNG or WebP, or all of them as one PDF; sound as MP3, Opus or FLAC;
-video as MP4 or WebM, or its sound alone. It merges several PDFs into one and splits one
-into a folder of pages. Undo takes the copies away again.
-Connect To Server (in the menu, or type an `smb://`, `sftp://` or `ftp://` address into
-Go To) opens network shares, which then stay in the sidebar's Network section. Right-
-click files for Tags to give them colour labels or named tags (kept on the files as
-extended attributes, which other programs can read). Batch Rename, in the menu of
-several files, numbers them or finds and replaces in their names and shows every new
-name before anything changes; `{artist}`, `{title}`, `{track}` and `{album}` put a song's
-tags in its name. Edit Tags, in the menu of MP3, FLAC, M4A, Ogg and Opus files, changes
-their title, artist, album, track, year and genre, and a picture selected with them
-becomes their cover; the originals go to the trash, so Undo brings them back. Find Duplicates, in a folder's menu, lists the files under
-it with the same contents and moves the extra copies to the trash. Tidy Folder, there
-too, sorts the loose files into Pictures, Documents, Music, Videos, Archives and
+line. Set As Wallpaper, in a picture's menu, works on GNOME, KDE, XFCE, Cinnamon, MATE,
+sway, Hyprland (with hyprpaper or swww) and Noctalia. Its Picture menu turns pictures in
+place (Undo brings the original back from the trash) and saves smaller copies beside
+them; Crop works in the inspector: drag over what to keep and press Enter. Convert, in
+the menu of files of one kind, saves a copy in another format beside each: pictures as
+JPG, PNG or WebP, or all of them as one PDF; sound as MP3, Opus or FLAC; video as MP4 or
+WebM, or its sound alone. It merges several PDFs into one and splits one into a folder
+of pages. Undo takes the copies away again. Connect To Server (in the menu, or type an
+`smb://`, `sftp://` or `ftp://` address into Go To) opens network shares, which then
+stay in the sidebar's Network section. Right- click files for Tags to give them colour
+labels or named tags (kept on the files as extended attributes, which other programs can
+read). Batch Rename, in the menu of several files, numbers them or finds and replaces in
+their names and shows every new name before anything changes; `{artist}`, `{title}`,
+`{track}` and `{album}` put a song's tags in its name. Edit Tags, in the menu of MP3,
+FLAC, M4A, Ogg and Opus files, changes their title, artist, album, track, year and
+genre, and a picture selected with them becomes their cover; the originals go to the
+trash, so Undo brings them back. Find Duplicates, in a folder's menu, lists the files
+under it with the same contents and moves the extra copies to the trash. Tidy Folder,
+there too, sorts the loose files into Pictures, Documents, Music, Videos, Archives and
 Installers, or the photos and videos into a folder a month by the date they were taken,
-listing every move first; one Undo puts it all back. Options can empty the
-trash of what has been in it longer than 7, 30 or 90 days. In a git repository, the
-branch name in the status bar opens a menu: the commit history, the branches to switch
-to or create, the stash and the other work trees, and Pull, Push and Fetch. A pull that
-can't fast-forward asks whether to merge or rebase; a file left in conflict shows both
-sides on the Changes page, where Keep settles each one and Continue or Abort finishes
-the merge. In the history a commit shows its files with their diffs, and right-clicking
-a file shows the commits that changed it. Changes, above the commits, stages files or
-single hunks, discards (into the stash, or the trash for a new file) and commits;
-Ctrl+Enter commits. Files git ignores are drawn faded, or hidden (Options, Git), and Add
-to .gitignore in a file's menu ignores it or every file with its extension. Copy as
-gives files as Markdown code blocks under their paths, or as links to them on GitHub,
-GitLab or Codeberg at the commit checked out, and Open Web Link opens that page. Compare
-Files, in the menu of two selected files, shows how they differ in the inspector. Maia
-pushes only when you ask.
+listing every move first; one Undo puts it all back. Options can empty the trash of what
+has been in it longer than 7, 30 or 90 days. In a git repository, the branch name in the
+status bar opens a menu: the commit history, the branches to switch to or create, the
+stash and the other work trees, and Pull, Push and Fetch. A pull that can't fast-forward
+asks whether to merge or rebase; a file left in conflict shows both sides on the Changes
+page, where Keep settles each one and Continue or Abort finishes the merge. In the
+history a commit shows its files with their diffs, and right-clicking a file shows the
+commits that changed it. Changes, above the commits, stages files or single hunks,
+discards (into the stash, or the trash for a new file) and commits; Ctrl+Enter commits.
+Files git ignores are drawn faded, or hidden (Options, Git), and Add to .gitignore in a
+file's menu ignores it or every file with its extension. Copy as gives files as Markdown
+code blocks under their paths, or as links to them on GitHub, GitLab or Codeberg at the
+commit checked out, and Open Web Link opens that page. Compare Files, in the menu of two
+selected files, shows how they differ in the inspector. Maia pushes only when you ask.
+Recent Projects says what is only on this computer in each repository (changes, commits
+not pushed, stashes), and Tab keeps just those; a project opened there comes back with
+the tabs and panels it was left with. Clean Build Folders, in a folder's menu (or for
+every project under home, from the palette), lists `node_modules`, `target` and the like
+with their sizes; one click checks those untouched for a month, and Delete frees their
+room at once.
+
+When a copy or a move meets a name that is taken, Replace puts the one that was there in
+the trash, and Undo brings it back; nothing is removed until the new one is whole.
 
 Format, in a USB drive's menu, erases it and makes one FAT32, exFAT or ext4 partition
 with the label you give, once you type the drive's name; the drives the system runs from
