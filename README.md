@@ -104,6 +104,10 @@ as `size>100M`, `modified<7d`, `created:today` or `tag:red`. Some keys to start 
 
 Every binding can be changed from the command palette.
 
+The first start shows a short tour with a few choices, and the first start after an
+update shows what it added. Welcome Tour and What's New in Maia, in the palette, bring
+them back.
+
 An archive opens like a folder; right-click it for Extract Here, or right-click files
 for Compress. Compress With a password makes a zip locked with AES-256, or a 7z whose
 names are locked too; the password goes to bsdtar or 7z on a pipe, never on the command

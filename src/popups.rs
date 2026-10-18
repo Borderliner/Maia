@@ -218,6 +218,8 @@ pub enum Popup {
     SpaceUsed(Box<crate::spaceuse::State>),
     /// Pictures full window.
     Viewer(Box<crate::viewer::State>),
+    /// The welcome tour or What's New.
+    Tour(Box<crate::tour::State>),
 }
 
 /// The branch menu, its lists read on a worker as it opens.
@@ -360,6 +362,7 @@ impl Popup {
             Popup::SmartEdit(..) => "SmartEdit",
             Popup::SpaceUsed(..) => "SpaceUsed",
             Popup::Viewer(..) => "Viewer",
+            Popup::Tour(..) => "Tour",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -564,7 +567,7 @@ pub(crate) fn step(sel: &mut usize, n: usize, k: &Keys, skip: impl Fn(usize) -> 
     *sel = s;
 }
 
-fn popup_frame(pal: &Palette) -> egui::Frame {
+pub(crate) fn popup_frame(pal: &Palette) -> egui::Frame {
     egui::Frame::NONE
         .fill(pal.raised)
         .stroke(Stroke::new(1.0, pal.border))
@@ -838,7 +841,7 @@ thread_local! {
 
 const CLOSE_FADE: f64 = 0.08;
 
-fn note_layer(id: Id) {
+pub(crate) fn note_layer(id: Id) {
     POPUP_LAYERS.with(|l| l.borrow_mut().push(egui::LayerId::new(egui::Order::Foreground, id)));
 }
 
@@ -922,6 +925,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::SmartEdit(st) => crate::smart::popup(app, ctx, st),
         Popup::SpaceUsed(st) => crate::spaceuse::popup(app, ctx, st),
         Popup::Viewer(st) => crate::viewer::draw(app, ctx, st),
+        Popup::Tour(st) => crate::tour::draw(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -2086,6 +2090,7 @@ pub(crate) enum Opt {
     ResetAll,
     Install,
     Editor,
+    Tour,
 }
 
 /// The pages of Options, in the order of its left column.
@@ -2224,6 +2229,7 @@ pub(crate) const OPTS: &[(Opt, Section, &str, &str, &str)] = &[
     (Opt::AssetCache, Section::System, "System", "Asset cache size", "Memory for thumbnails and previews."),
     (Opt::Editor, Section::System, "Developer", "Editor", "Empty finds one; a command can use {file} and {line}."),
     (Opt::Updates, Section::System, "Updates", "Check for updates", "Asks GitHub for a newer Maia, only when you check."),
+    (Opt::Tour, Section::System, "Updates", "What's new", "What this version added, and the welcome tour."),
     (Opt::ConfigFile, Section::System, "Settings", "Config file", "Every option as text, in your editor."),
     (Opt::ResetAll, Section::System, "Settings", "Reset to defaults", "Every option and hotkey; asks first."),
     (Opt::Install, Section::System, "Settings", "Install Maia", "Add Maia to the app launcher and ~/.local/bin."),
@@ -2427,7 +2433,7 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
         // Lives in the desktop's settings, not Maia's: nothing to reset.
         Opt::DefaultFm => true,
         // Buttons, not settings.
-        Opt::ConfigFile | Opt::ResetAll | Opt::Install | Opt::Updates => true,
+        Opt::ConfigFile | Opt::ResetAll | Opt::Install | Opt::Updates | Opt::Tour => true,
         Opt::SingleInstance => f!(single_instance),
         Opt::Meaning => f!(semantic_search),
         Opt::MeaningFolders => f!(semantic_folders),
@@ -2573,6 +2579,17 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
             update_control(ui, app, &pal);
             false
         }
+        Opt::Tour => {
+            // Right to left: What's New at the edge, the tour beside it.
+            for (label, c, what) in [("What's new", Cmd::WhatsNew, "whats new button"), ("Tour", Cmd::Welcome, "tour button")] {
+                let b = ui.button(label);
+                crate::ui::note_control(ui, b.rect, what);
+                if b.clicked() {
+                    app.actions.push(Action::Cmd(c));
+                }
+            }
+            false
+        }
         Opt::ConfigFile | Opt::ResetAll | Opt::Install => {
             let (label, c) = match o {
                 Opt::ConfigFile => ("Open", Cmd::OpenConfig),
@@ -2712,8 +2729,33 @@ fn option_row(ui: &mut Ui, app: &mut App, oi: usize, r: Rect, look: &RowLook, q:
     (changed, resp.clicked())
 }
 
+/// What follows a change made in Options (or the welcome tour's choices): a theme that
+/// follows the desktop, the keymap and listings rebuilt, tooltips on or off.
+pub(crate) fn option_changed(app: &mut App, ctx: &egui::Context) {
+    if app.cfg.follow_system_theme {
+        if let Some(t) = ctx.system_theme() {
+            app.cfg.theme = match t {
+                egui::Theme::Light => if app.cfg.theme.is_light() { app.cfg.theme } else { ThemeName::Paper },
+                egui::Theme::Dark if app.cfg.theme.is_light() => ThemeName::Midnight,
+                _ => app.cfg.theme,
+            };
+        }
+    }
+    app.set_config_changed();
+    ctx.all_styles_mut(|s| s.interaction.tooltip_delay = if app.cfg.tooltips { 0.5 } else { 1e9 });
+}
+
+/// One option as Options draws it, in a card of another dialog: title, what it does,
+/// its control and the reset arrow. Returns whether it changed.
+pub(crate) fn option_in(ui: &mut Ui, app: &mut App, o: Opt, r: Rect, first: bool) -> bool {
+    let Some(oi) = OPTS.iter().position(|x| x.0 == o) else { return false };
+    let pal = app.pal;
+    let look = RowLook { compact: false, label: false, selected: false, scroll: false, first };
+    option_row(ui, app, oi, r, &look, &fuzzy::Query::new(""), &pal).0
+}
+
 /// One line of key hints in `r`; those that would not fit are left out.
-fn hint_row(ui: &Ui, r: Rect, items: &[(&str, &str)], pal: &Palette) {
+pub(crate) fn hint_row(ui: &Ui, r: Rect, items: &[(&str, &str)], pal: &Palette) {
     let p = ui.painter();
     let cy = r.center().y;
     let mut x = r.left();
@@ -2826,6 +2868,7 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
                     Opt::ConfigFile => cmd = Some(Cmd::OpenConfig),
                     Opt::ResetAll => cmd = Some(Cmd::ResetConfig),
                     Opt::Install => cmd = Some(Cmd::Install),
+                    Opt::Tour => cmd = Some(Cmd::WhatsNew),
                     Opt::Updates => {
                         if let crate::update::State::Available(r) = app.updater.state() {
                             app.updater.install(r, ctx);
@@ -2984,17 +3027,7 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
         changed = true;
     }
     if changed {
-        if app.cfg.follow_system_theme {
-            if let Some(t) = ctx.system_theme() {
-                app.cfg.theme = match t {
-                    egui::Theme::Light => if app.cfg.theme.is_light() { app.cfg.theme } else { ThemeName::Paper },
-                    egui::Theme::Dark if app.cfg.theme.is_light() => ThemeName::Midnight,
-                    _ => app.cfg.theme,
-                };
-            }
-        }
-        app.set_config_changed();
-        ctx.all_styles_mut(|s| s.interaction.tooltip_delay = if app.cfg.tooltips { 0.5 } else { 1e9 });
+        option_changed(app, ctx);
     }
     if let Some(c) = cmd {
         app.actions.push(Action::Cmd(c));
@@ -4200,7 +4233,7 @@ fn themes(app: &mut App, ctx: &egui::Context) -> bool {
 
 /// A theme as a small window: its sidebar, title strip, three rows (one selected), an
 /// accent button, and two lines of code in its code colours. `rad` rounds its corners.
-fn theme_card(painter: &egui::Painter, r: Rect, p: Palette, rad: u8) {
+pub(crate) fn theme_card(painter: &egui::Painter, r: Rect, p: Palette, rad: u8) {
     let round = CornerRadius::same(rad);
     painter.rect_filled(r, round, p.panel);
     let side = Rect::from_min_max(r.min, pos2(r.left() + (r.width() * 0.28).round(), r.bottom()));

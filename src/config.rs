@@ -557,6 +557,8 @@ pub struct UserData {
     pub servers: Vec<String>,
     /// Saved searches, in the sidebar's order.
     pub smart: Vec<crate::smart::SmartFolder>,
+    /// The newest version started (the welcome tour and What's New are shown once).
+    pub seen_version: String,
 }
 
 impl UserData {

@@ -771,6 +771,11 @@ impl Sim {
         self.frame(vec![]);
     }
 
+    /// Where the last frame drew the first of `labels` found, if any.
+    pub fn text_rect_any(&self, labels: &[&str]) -> Option<Rect> {
+        labels.iter().find_map(|l| self.texts.iter().rev().find(|(_, s)| s == l).map(|(r, _)| *r))
+    }
+
     /// Where the last frame drew `label` (topmost match).
     pub fn text_rect(&self, label: &str) -> Rect {
         self.texts.iter().rev().find(|(_, s)| s == label).map(|(r, _)| *r).unwrap_or_else(|| self.fail(&format!("no {label:?} on screen")))
@@ -789,20 +794,41 @@ impl Sim {
     /// Save what the last frame drew as `<MAIA_SIM_SHOTS>/<name>.png` (nothing when the
     /// variable is not set). The look in use goes into the name.
     pub fn shot(&self, name: &str) {
-        let Some(sh) = &self.shots else { return };
-        let (w, h) = ((self.size.x * self.ppp).round() as usize, (self.size.y * self.ppp).round() as usize);
-        let rgb = sh.paint(w, h, self.ppp);
+        let Some((w, h, rgb)) = self.pixels() else { return };
         let look = std::env::var("MAIA_SIM_LOOK").unwrap_or_default().replace(',', "-");
         let name: String = format!("{name}{}{look}", if look.is_empty() { "" } else { "@" }).chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '@') { c } else { '_' }).collect();
-        let Ok(f) = std::fs::File::create(sh.dir.join(format!("{name}.png"))) else { return };
+        if let Some(dir) = self.shots.as_ref().map(|sh| sh.dir.clone()) {
+            write_png(&dir.join(format!("{name}.png")), w, h, &rgb);
+        }
+    }
+
+    /// The last frame painted in software: width, height and RGB rows (MAIA_SIM_SHOTS
+    /// only).
+    pub fn pixels(&self) -> Option<(usize, usize, Vec<u8>)> {
+        let sh = self.shots.as_ref()?;
+        let (w, h) = ((self.size.x * self.ppp).round() as usize, (self.size.y * self.ppp).round() as usize);
+        Some((w, h, sh.paint(w, h, self.ppp)))
+    }
+
+    /// The folder MAIA_SIM_SHOTS names, when it does.
+    pub fn shots_dir(&self) -> Option<PathBuf> {
+        self.shots.as_ref().map(|sh| sh.dir.clone())
+    }
+}
+
+pub fn write_png(path: &Path, w: usize, h: usize, rgb: &[u8]) {
+    {
+        let Ok(f) = std::fs::File::create(path) else { return };
         let mut e = png::Encoder::new(std::io::BufWriter::new(f), w as u32, h as u32);
         e.set_color(png::ColorType::Rgb);
         e.set_depth(png::BitDepth::Eight);
         if let Ok(mut wr) = e.write_header() {
-            let _ = wr.write_image_data(&rgb);
+            let _ = wr.write_image_data(rgb);
         }
     }
+}
 
+impl Sim {
     pub fn resize(&mut self, w: f32, h: f32) {
         self.note(format!("resize {w}x{h}"));
         self.size = vec2(w, h);
@@ -1052,7 +1078,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(159) {
+    match rng.below(161) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2277,6 +2303,42 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                     s.fail(&format!("{} still listed in {} after it was moved", p.display(), t.path.display()));
                 }
             }
+        }
+        159 => {
+            // The welcome tour or What's New: pages by keys, buttons and dots, the films
+            // clicked, choices made on the first page, then closed one way or another.
+            s.cmd(if rng.below(2) == 0 { Cmd::Welcome } else { Cmd::WhatsNew });
+            for _ in 0..rng.below(10) {
+                if !matches!(s.app.popup, Popup::Tour(_)) {
+                    break;
+                }
+                match rng.below(4) {
+                    0 => s.act(&format!("key {}", rng.pick(&["ArrowRight", "ArrowLeft", "Enter", "Tab", "space"]))),
+                    1 => click_control_at(s, rng.pick(&["tour next", "tour back", "tour dot", "tour film", "tour theme", "switch", "choice"])),
+                    2 => {
+                        let r = s.text_rect_any(&["Font size", "Show hidden files", "Animations"]);
+                        if let Some(r) = r {
+                            s.act(&format!("scroll {:.0} {:.0} {:.1}", r.center().x, r.center().y, rng.f(-8.0, 8.0)));
+                        }
+                    }
+                    _ => s.idle(rng.below(40) + 1),
+                }
+            }
+            if matches!(s.app.popup, Popup::Tour(_)) {
+                match rng.below(3) {
+                    0 => s.act("key Escape"),
+                    1 => click_control_at(s, "tour close"),
+                    _ => s.act("click 4 4"),
+                }
+            }
+        }
+        160 => {
+            // From Options' row: the tour or What's New, and straight back out.
+            s.app.popup = Popup::options_at(crate::popups::Section::System);
+            s.idle(3);
+            click_control_at(s, rng.pick(&["tour button", "whats new button"]));
+            s.idle(rng.below(20) + 1);
+            s.act("key Escape");
         }
         _ => {
             s.note("idle".into());
@@ -11104,6 +11166,641 @@ mod journeys {
         s.shot("shelf-small-graphite");
         s.resize(1280.0, 800.0);
         report("shelf", &s);
+    }
+
+    // ---------------------------------------------------------------- welcome tour
+
+    fn tour(s: &Sim) -> &crate::tour::State {
+        match &s.app.popup {
+            Popup::Tour(t) => t,
+            _ => s.fail(&format!("the tour is not open (popup {})", s.app.popup.kind_name())),
+        }
+    }
+
+    /// Nothing of Maia's on disk, as on a first start.
+    fn forget_maia() {
+        for p in [crate::config::config_path(), crate::config::userdata_path(), crate::config::session_path()] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// Wait for the page's film to be on screen (decoded on its own thread).
+    fn film_on(s: &mut Sim) {
+        wait_until(s, "the film shown", 10, |s| tour(s).film_shown());
+        s.idle(12);
+    }
+
+    /// The welcome tour on a first start and never again; What's New on a start after
+    /// an update (a 0.2 home has no record of the version) and not after a newer one; both
+    /// from the palette and Options. Pages by keys, buttons, dots and clicks outside;
+    /// choices on the first page made in place and kept; films played to their end and
+    /// then still, with nothing left waking the window; every page in a wide, a narrow
+    /// and a short window, in a dark and a light theme, and with animations off.
+    #[test]
+    fn welcome_tour_and_whats_new() {
+        if !sandboxed() {
+            return;
+        }
+        struct Off;
+        impl Drop for Off {
+            fn drop(&mut self) {
+                crate::tour::AUTO.with(|a| a.set(false));
+                forget_maia();
+            }
+        }
+        let _off = Off;
+        crate::tour::AUTO.with(|a| a.set(true));
+        let home = fixture("tour");
+        let now = env!("CARGO_PKG_VERSION");
+        let seen = || crate::config::load_userdata().seen_version;
+        // A first start: the tour, its choices at their defaults.
+        forget_maia();
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.idle(3);
+        assert!(tour(&s).kind == crate::tour::Kind::Welcome && tour(&s).auto && tour(&s).page == 0, "the tour on a first start");
+        assert_eq!(seen(), now, "this version written down at once");
+        s.shot("tour-start");
+        for t in ["Welcome to Maia", "Appearance", "Files & folders", "Follow system light/dark", "Font size", "Animations", "Show hidden files"] {
+            assert!(some_text(&s, t), "{t:?} on the first page");
+        }
+        let d = crate::config::Config::default();
+        assert!(s.app.cfg.theme == d.theme && !s.app.cfg.show_hidden && !s.app.cfg.single_click && !s.app.cfg_dirty, "nothing chosen yet");
+        look(&mut s, "tour first page");
+        // A light theme and hidden files, chosen here, take effect behind it.
+        let themes = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == "tour theme").map(|(_, r, _)| *r).collect::<Vec<_>>());
+        assert_eq!(themes.len(), 6, "six themes to pick from");
+        let latte = themes[5];
+        s.act(&format!("click {:.0} {:.0}", latte.center().x, latte.center().y));
+        assert_eq!(s.app.cfg.theme, crate::theme::ThemeName::Latte, "picked");
+        s.idle(2);
+        assert!(!s.app.pal.dark, "the window light at once");
+        click_in_row(&mut s, "switch", "Show hidden files");
+        s.settle();
+        assert!(s.app.cfg.show_hidden && s.tab().view.iter().any(|&i| s.tab().entries[i as usize].name == ".bashrc"), "hidden files shown behind the tour");
+        assert!(s.app.cfg_dirty, "kept as Options keeps it");
+        // On by the keys, the buttons and the dots.
+        s.act("key ArrowRight");
+        assert_eq!(tour(&s).page, 1);
+        film_on(&mut s);
+        assert!(some_text(&s, "Go anywhere by typing") && some_text(&s, "Ctrl+P") && some_text(&s, "Go To"), "the page, its keys as bound");
+        look(&mut s, "tour film page");
+        click_control(&mut s, "tour next");
+        assert_eq!(tour(&s).page, 2);
+        click_control(&mut s, "tour back");
+        assert_eq!(tour(&s).page, 1);
+        s.act("key Enter");
+        assert_eq!(tour(&s).page, 2, "Enter goes on");
+        s.act("key ArrowLeft");
+        s.act("key ArrowLeft");
+        s.act("key ArrowLeft");
+        assert_eq!(tour(&s).page, 0, "and no further back than the first");
+        let dots = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == "tour dot").map(|(_, r, _)| *r).collect::<Vec<_>>());
+        assert_eq!(dots.len(), crate::tour::WELCOME.len(), "a dot a page");
+        let last = dots[dots.len() - 1];
+        s.act(&format!("click {:.0} {:.0}", last.center().x, last.center().y));
+        assert_eq!(tour(&s).page, crate::tour::WELCOME.len() - 1);
+        film_on(&mut s);
+        assert!(some_text(&s, "Done"), "the last page ends it");
+        s.act("key ArrowRight");
+        assert!(s.popup_open(), "Right on the last page stays");
+        // Escape closes it, saying where it is.
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0.contains("Welcome Tour")), "where to find it again");
+        s.app.save_all(&s.ctx.clone());
+        drop(s);
+        // Started again: nothing, and the choices kept.
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.idle(3);
+        assert!(!s.popup_open(), "the tour never comes back by itself");
+        assert!(s.app.cfg.show_hidden && s.app.cfg.theme == crate::theme::ThemeName::Latte, "the choices kept");
+        drop(s);
+        // An update from 0.2: settings there, no version recorded. What's New.
+        forget_maia();
+        crate::config::save_json(&crate::config::config_path(), &crate::config::Config::default()).unwrap();
+        std::fs::write(crate::config::userdata_path(), r#"{"bookmarks":[],"recents":[]}"#).unwrap();
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.idle(3);
+        assert!(tour(&s).kind == crate::tour::Kind::News && tour(&s).auto, "What's New after an update");
+        film_on(&mut s);
+        assert!(some_text(&s, &format!("New in Maia {}", crate::tour::NEWS_VERSION)) && some_text(&s, "Pictures full window") && some_text(&s, "F3"));
+        let n = crate::tour::NEWS.len();
+        for _ in 1..n {
+            s.act("key ArrowRight");
+        }
+        s.idle(12);
+        assert!(some_text(&s, &format!("Also new in {}", crate::tour::NEWS_VERSION)) && some_text(&s, "For everyone"), "the rest, in groups");
+        look(&mut s, "tour list page");
+        // A click outside closes it.
+        s.act("click 20 790");
+        assert!(!s.popup_open(), "a click outside closes it");
+        assert_eq!(seen(), now);
+        drop(s);
+        // A newer version seen (Maia went back a version): nothing.
+        let mut ud = crate::config::load_userdata();
+        ud.seen_version = "99.0.0".into();
+        crate::config::save_json(&crate::config::userdata_path(), &ud).unwrap();
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.idle(3);
+        assert!(!s.popup_open(), "nothing after a newer version");
+        // From the palette, and from Options: no word on closing.
+        s.act("key ctrl+shift+p");
+        s.act("text welcome tour");
+        s.act("key Enter");
+        assert!(tour(&s).kind == crate::tour::Kind::Welcome && !tour(&s).auto, "from the palette");
+        click_control(&mut s, "tour close");
+        assert!(!s.popup_open() && s.app.toast.is_none(), "closed without a word");
+        s.app.popup = Popup::options_at(crate::popups::Section::System);
+        s.idle(3);
+        assert!(some_text(&s, "What's new"), "a row in Startup & system");
+        click_control(&mut s, "whats new button");
+        s.idle(1);
+        assert!(tour(&s).kind == crate::tour::Kind::News, "from Options");
+        // A film plays to its end, then rests, and nothing wakes the window.
+        film_on(&mut s);
+        wait_until(&mut s, "the film over", 60, |s| {
+            tour(s).film_done()
+        });
+        s.idle(3);
+        assert_eq!(s.repaint, std::time::Duration::MAX, "nothing left to draw: {:?}", s.repaint);
+        // A click on it plays it again.
+        click_control(&mut s, "tour film");
+        s.idle(2);
+        assert!(!tour(&s).film_done(), "playing again");
+        s.act("key Escape");
+        // Animations off: each film shows its last state at once, nothing ticking.
+        s.app.cfg.animations = false;
+        s.cmd(WhatsNew);
+        film_on(&mut s);
+        wait_until(&mut s, "the still", 10, |s| tour(s).film_done());
+        s.idle(3);
+        assert_eq!(s.repaint, std::time::Duration::MAX, "a still: {:?}", s.repaint);
+        s.act("key Escape");
+        s.app.cfg.animations = true;
+        // Every page, in a wide, a narrow and a short window, dark and light.
+        let shots = std::env::var_os("MAIA_SIM_SHOTS").is_some();
+        for theme in [crate::theme::ThemeName::Graphite, crate::theme::ThemeName::Paper] {
+            s.app.cfg.theme = theme;
+            for (w, h) in [(1280.0, 800.0), (640.0, 480.0), (900.0, 420.0)] {
+                s.resize(w, h);
+                for (cmd, kind) in [(Welcome, "welcome"), (WhatsNew, "news")] {
+                    s.cmd(cmd);
+                    let n = tour(&s).pages().len();
+                    for p in 0..n {
+                        if !matches!(crate::tour::pages(tour(&s).kind)[p].body, crate::tour::Body::Film(_)) {
+                            s.idle(14);
+                        } else {
+                            film_on(&mut s);
+                        }
+                        look(&mut s, &format!("tour {kind} page {p} {w}x{h}"));
+                        if shots && (w == 1280.0 || p < 2) {
+                            s.shot(&format!("tour-{}-{w}-{kind}-{p}", theme.label().to_lowercase()));
+                        }
+                        s.act("key ArrowRight");
+                    }
+                    s.act("key Escape");
+                    assert!(!s.popup_open());
+                }
+            }
+        }
+        // The first page scrolls in a short window: its last choice reachable.
+        s.resize(900.0, 420.0);
+        s.cmd(Welcome);
+        s.idle(4);
+        let r = s.text_rect("Follow system light/dark");
+        s.act(&format!("scroll {:.0} {:.0} -20", r.center().x, r.center().y));
+        s.idle(6);
+        for t in ["Single click to open", "Search by meaning", "Startup & system", "Default file manager"] {
+            assert!(some_text(&s, t), "{t:?} scrolled to");
+        }
+        s.act("key Escape");
+        report("welcome tour", &s);
+    }
+
+    // ---------------------------------------------------------------- tour films
+
+    /// A made-up landscape photograph: a sky in two colours, a sun with its glow, three
+    /// rows of hills and their reflection in still water. The films need pictures that
+    /// read as pictures, and nothing here may come from anyone's camera.
+    fn landscape(path: &Path, w: u32, h: u32, k: usize) {
+        type C = [f32; 3];
+        // Sky top, sky at the horizon, sun, far, middle and near hills, water.
+        const LOOKS: [[C; 7]; 6] = [
+            [[38.0, 52.0, 110.0], [246.0, 168.0, 112.0], [255.0, 226.0, 170.0], [128.0, 92.0, 132.0], [84.0, 62.0, 108.0], [40.0, 34.0, 70.0], [52.0, 60.0, 112.0]],
+            [[64.0, 128.0, 206.0], [196.0, 226.0, 246.0], [255.0, 252.0, 232.0], [120.0, 160.0, 178.0], [78.0, 128.0, 112.0], [44.0, 92.0, 64.0], [70.0, 128.0, 172.0]],
+            [[16.0, 22.0, 52.0], [84.0, 92.0, 158.0], [236.0, 236.0, 255.0], [62.0, 66.0, 112.0], [38.0, 42.0, 82.0], [20.0, 24.0, 52.0], [30.0, 38.0, 80.0]],
+            [[250.0, 196.0, 128.0], [255.0, 238.0, 206.0], [255.0, 250.0, 236.0], [212.0, 150.0, 120.0], [168.0, 104.0, 86.0], [104.0, 62.0, 58.0], [220.0, 170.0, 140.0]],
+            [[90.0, 160.0, 190.0], [220.0, 236.0, 222.0], [255.0, 250.0, 220.0], [136.0, 168.0, 150.0], [96.0, 140.0, 96.0], [58.0, 100.0, 54.0], [96.0, 150.0, 160.0]],
+            [[120.0, 70.0, 140.0], [250.0, 140.0, 120.0], [255.0, 214.0, 150.0], [150.0, 80.0, 120.0], [104.0, 52.0, 92.0], [56.0, 26.0, 56.0], [110.0, 60.0, 110.0]],
+        ];
+        let c = LOOKS[k % LOOKS.len()];
+        let ph = k as f32 * 1.7;
+        let (wf, hf) = (w as f32, h as f32);
+        let water = hf * (0.70 + (k % 3) as f32 * 0.03);
+        let sun = (wf * (0.25 + (k % 5) as f32 * 0.12), hf * (0.30 + (k % 4) as f32 * 0.07));
+        let ridge = |l: usize, x: f32| -> f32 {
+            let (base, amp, f) = [(0.50, 0.10, 2.1), (0.58, 0.08, 3.3), (0.66, 0.05, 5.2)][l];
+            let x = x / wf * std::f32::consts::TAU;
+            hf * (base + amp * ((x * f * 0.5 + ph + l as f32).sin() * 0.6 + (x * f + ph * 0.7).sin() * 0.3 + (x * f * 2.3 + l as f32 * 2.0).sin() * 0.1))
+        };
+        let mix = |a: C, b: C, t: f32| -> C { std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t.clamp(0.0, 1.0)) };
+        let scene = |x: f32, y: f32| -> C {
+            for l in (0..3).rev() {
+                let top = ridge(l, x);
+                if y >= top {
+                    // Haze: a ridge lightens towards its top.
+                    return mix(c[3 + l], c[1], 0.25 * (1.0 - ((y - top) / (hf * 0.2)).min(1.0)) * (2 - l) as f32 / 2.0);
+                }
+            }
+            let sky = mix(c[0], c[1], (y / water).powf(1.4));
+            let d = ((x - sun.0).powi(2) + (y - sun.1).powi(2)).sqrt() / hf;
+            if d < 0.045 {
+                return c[2];
+            }
+            mix(sky, c[2], (0.35 - d).max(0.0) * 1.6)
+        };
+        let mut px = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let (xf, yf) = (x as f32, y as f32);
+                let col = if yf < water {
+                    scene(xf, yf)
+                } else {
+                    // Still water: the scene upside down, darker, with long ripples.
+                    let ripple = ((yf - water) * 0.9 + (xf * 0.02).sin() * 3.0).sin() * (yf - water) * 0.02;
+                    mix(scene(xf + ripple * 6.0, 2.0 * water - yf), c[6], 0.45)
+                };
+                px.extend(col.map(|v| v.clamp(0.0, 255.0) as u8));
+            }
+        }
+        write_png(path, w as usize, h as usize, &px);
+    }
+
+    /// A home folder as someone keeps it, for the films: no odd names, nothing broken.
+    fn film_home() -> PathBuf {
+        let h = root().join("home/sam");
+        let w = |p: &str, s: &str| {
+            let p = h.join(p);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, s).unwrap();
+        };
+        w("Documents/Garden plan.md", "# Garden plan\n\nWhat goes where this spring, and what it costs.\n\n## Beds\n\n- **North bed**: tomatoes, basil, two rows of beans\n- **South bed**: courgettes and squash\n- **By the fence**: sweet peas\n\n## To buy\n\n| Item | Count | Price |\n|---|---|---|\n| Seed trays | 4 | 12.00 |\n| Compost | 6 bags | 39.00 |\n| Canes | 20 | 9.50 |\n\n> Water in the evening once the seedlings are out.\n");
+        w("Documents/Budget 2026.csv", "Month,Rent,Food,Travel,Saved\nJanuary,950,412,60,300\nFebruary,950,388,120,260\nMarch,950,430,45,310\nApril,950,401,220,180\nMay,950,395,80,290\nJune,950,420,340,150\n");
+        w("Documents/Letter to the landlord.txt", "Dear Ms. Alvarez,\n\nThe kitchen tap has been dripping since Monday. Could someone look at it\nthis week? I am home after five every day.\n\nThank you,\nSam\n");
+        w("Documents/Reading list.md", "# Reading list\n\n1. The Overstory\n2. Piranesi\n3. A Psalm for the Wild-Built\n");
+        w("Documents/Recipes/Lemon cake.md", "# Lemon cake\n\n200 g flour, 200 g sugar, 3 eggs, 2 lemons.\n");
+        w("Documents/Recipes/Bean soup.md", "# Bean soup\n\nSoak overnight.\n");
+        for (m, c) in [("07", "0.25 0.45 0.80"), ("08", "0.80 0.35 0.25"), ("09", "0.25 0.65 0.40")] {
+            w(&format!("Documents/Invoices/Invoice 2026-{m}.pdf"), &sample_pdf(&[c]));
+        }
+        w("Documents/Invoices/Electricity 2026-08.pdf", &sample_pdf(&["0.6 0.5 0.2"]));
+        std::fs::create_dir_all(h.join("Pictures/Lisbon")).unwrap();
+        for i in 0..9 {
+            let png = h.join(format!("Pictures/Lisbon/IMG_{}.png", 2041 + i));
+            landscape(&png, 960, 640, i);
+            let jpg = png.with_extension("jpg");
+            let ok = std::process::Command::new("magick").arg(&png).args(["-quality", "88"]).arg(&jpg).status().is_ok_and(|s| s.success());
+            if ok {
+                let _ = std::fs::remove_file(&png);
+            }
+        }
+        landscape(&h.join("Pictures/Harbour at dusk.png"), 1200, 700, 5);
+        landscape(&h.join("Pictures/Hills in May.png"), 1200, 700, 4);
+        w("Music/Night Drive/01 Coastline.flac", "fLaC");
+        w("Music/Night Drive/02 Long Way Home.flac", "fLaC");
+        w("Downloads/Backup/readme.txt", "Copies of the important things.\n");
+        w("Downloads/tickets.pdf", &sample_pdf(&["0.3 0.3 0.6"]));
+        std::fs::create_dir_all(h.join("Videos")).unwrap();
+        // Room taken, for Space Used: real bytes, so every way of counting agrees.
+        std::fs::write(h.join("Videos/Harbour at dusk.mp4"), vec![7u8; 24 << 20]).unwrap();
+        std::fs::write(h.join("Videos/Birthday.mkv"), vec![8u8; 11 << 20]).unwrap();
+        std::fs::write(h.join("Downloads/ubuntu.iso"), vec![9u8; 16 << 20]).unwrap();
+        // A small project with a history and work in progress.
+        let p = h.join("Code/weather");
+        let wf = |f: &str, s: &str| {
+            let f = p.join(f);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, s).unwrap();
+        };
+        wf("README.md", "# weather\n\nToday's forecast in the terminal.\n");
+        wf("Cargo.toml", "[package]\nname = \"weather\"\nversion = \"0.4.0\"\nedition = \"2024\"\n");
+        wf("src/main.rs", "mod forecast;\nmod units;\n\nfn main() {\n    let f = forecast::today(\"Lisbon\");\n    println!(\"{}\", f.summary());\n}\n");
+        wf("src/forecast.rs", "pub struct Forecast {\n    pub high: f32,\n    pub low: f32,\n}\n\npub fn today(city: &str) -> Forecast {\n    let _ = city;\n    Forecast { high: 24.0, low: 16.0 }\n}\n");
+        wf("src/units.rs", "pub fn to_fahrenheit(c: f32) -> f32 {\n    c * 9.0 / 5.0 + 32.0\n}\n");
+        wf("src/cli/args.rs", "pub struct Args { pub city: String }\n");
+        wf("docs/usage.md", "# Usage\n\n    weather Lisbon\n");
+        let g = |args: &[&str], day: u32| {
+            let date = format!("2026-10-{day:02}T18:30:00+00:00");
+            let ok = std::process::Command::new("git")
+                .args(["-c", "user.name=Sam Rivera", "-c", "user.email=sam@example.invalid", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+                .args(args)
+                .env("GIT_AUTHOR_DATE", &date)
+                .env("GIT_COMMITTER_DATE", &date)
+                .current_dir(&p)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            assert!(ok, "git {args:?}");
+        };
+        g(&["init", "-q"], 1);
+        for (day, msg) in [(9, "Start with today's forecast"), (12, "Read the city from the command line"), (15, "Convert to Fahrenheit")] {
+            g(&["add", "-A"], day);
+            g(&["commit", "-qm", msg], day);
+            std::fs::write(p.join("CHANGES"), msg).unwrap();
+        }
+        wf("src/forecast.rs", "pub struct Forecast {\n    pub high: f32,\n    pub low: f32,\n    pub rain: u8,\n}\n\npub fn today(city: &str) -> Forecast {\n    let _ = city;\n    Forecast { high: 24.0, low: 16.0, rain: 10 }\n}\n");
+        wf("src/wind.rs", "pub fn beaufort(kmh: f32) -> u8 {\n    (kmh / 6.0).min(12.0) as u8\n}\n");
+        h
+    }
+
+    /// A film as a few states of the window, each photographed once it has settled and
+    /// held for a while, with the keys that led to it (or where the pointer clicked) for
+    /// the encoder to draw over it. Only states: the frames of a movement cost nearly a
+    /// whole picture each, which the binary has no room for.
+    struct Film {
+        dir: PathBuf,
+        name: String,
+        rows: Vec<(String, u32, String, Option<Pos2>)>,
+    }
+
+    impl Film {
+        fn new(s: &Sim, name: &str) -> Film {
+            let dir = s.shots_dir().unwrap_or_else(|| s.fail("films need MAIA_SIM_SHOTS")).join("films").join(name);
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Film { dir, name: name.into(), rows: vec![] }
+        }
+
+        /// The window as it is once everything has landed and stopped moving, held for
+        /// `ms`, with `keys` shown over it.
+        fn shot(&mut self, s: &mut Sim, ms: u32, keys: &str) {
+            s.act("move -50 -50");
+            s.settle();
+            // Growing and fading run on the wall clock and the frames' clock both.
+            for _ in 0..8 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                s.idle(12);
+            }
+            // The films ship: no path outside the made-up home may be in them.
+            let sandbox = root().to_string_lossy().into_owned();
+            if let Some((_, t)) = s.texts.iter().find(|(_, t)| t.contains(&sandbox) || t.contains(sandbox.trim_end_matches("/root"))) {
+                s.fail(&format!("film {} shows a real path: {t:?}", self.name));
+            }
+            let Some((w, h, rgb)) = s.pixels() else { return };
+            let file = format!("{:03}.png", self.rows.len());
+            write_png(&self.dir.join(&file), w, h, &rgb);
+            self.rows.push((file, ms, keys.to_string(), None));
+        }
+
+        /// As `shot`, with the pointer drawn where `line` (a click) pressed.
+        fn shot_click(&mut self, s: &mut Sim, line: &str, ms: u32) {
+            let w: Vec<&str> = line.split_whitespace().collect();
+            let n = |i: usize| w.get(i).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+            s.act(line);
+            self.shot(s, ms, "");
+            if let Some(r) = self.rows.last_mut() {
+                r.3 = Some(pos2(n(1) * s.ppp, n(2) * s.ppp));
+            }
+        }
+
+        fn finish(self, s: &Sim) {
+            let p = s.app.pal;
+            let hex = |c: egui::Color32| format!("{:02x}{:02x}{:02x}", c.r(), c.g(), c.b());
+            let mut out = format!("# {} raised={} border={} text={} ppp={}\n", self.name, hex(p.raised), hex(p.border), hex(p.text), s.ppp);
+            for (file, ms, keys, at) in &self.rows {
+                let at = at.map_or("-".to_string(), |a| format!("{:.0},{:.0}", a.x, a.y));
+                out.push_str(&format!("{file}\t{ms}\t{}\t{at}\n", if keys.is_empty() { "-" } else { keys }));
+            }
+            std::fs::write(self.dir.join("frames.txt"), out).unwrap();
+            eprintln!("film {}: {} states", self.name, self.rows.len());
+        }
+    }
+
+    /// A window as the films show it: Graphite, the tour's fonts, 800 by 500 points
+    /// drawn at the scale they are shown at on a 1.6 screen.
+    fn film_window(at: &Path, fonts: bool) -> Sim {
+        let mut s = Sim::new(at, vec2(720.0, 450.0));
+        s.ppp = FILM_PPP;
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.app.cfg.font_size = 15.0;
+        s.app.cfg.inspector_font_size = 13.0;
+        if fonts {
+            s.app.cfg.font_family = "Google Sans Flex".into();
+            s.app.cfg.inspector_font = "Google Sans Code".into();
+        }
+        s.app.cfg.semantic_search = false;
+        // Maia's own icons: the same on every machine the films are made on.
+        s.app.cfg.system_icons = false;
+        // The window behind the tour has the sidebar already: the films leave it out
+        // and give the feature the room (and the binary the bytes).
+        s.app.sidebar = false;
+        s.settle();
+        s.idle(20);
+        s
+    }
+
+    /// The films' scale: shown 540 points wide on a screen at 1.6, over a 720 point
+    /// window, one pixel for one.
+    const FILM_PPP: f32 = 1.6 * 540.0 / 720.0;
+
+    /// Drives for the films' sidebar: the system disk, a camera's card waiting to be
+    /// mounted and a backup drive that is (fake tools only).
+    fn film_drives() -> PathBuf {
+        let d = fake_drives("films");
+        let rows = [
+            "/dev/sdw\t-\t-\t-\t500107862016\t0\t1\tdisk",
+            "/dev/sdw1\tsdw\t-\tvfat\t536870912\t0\t1\tpart",
+            "/dev/sdw2\tsdw\t-\tbtrfs\t499570991104\t0\t1\tpart",
+            "/dev/sdz\t-\t-\t-\t64008609792\t1\t1\tdisk",
+            "/dev/sdz1\tsdz\tPhoto Card\texfat\t64007561216\t1\t1\tpart",
+            "/dev/sdx\t-\t-\t-\t1000204886016\t1\t1\tdisk",
+            "/dev/sdx1\tsdx\tBackup\text4\t1000203837440\t1\t1\tpart",
+        ];
+        std::fs::write(d.join("devices"), rows.join("\n") + "\n").unwrap();
+        let backup = d.join("media/Backup");
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(d.join("mounted/sdx1"), backup.to_str().unwrap()).unwrap();
+        let _ = std::fs::remove_file(d.join("busy/sdx1"));
+        let _ = std::fs::remove_file(d.join("mounted/sdz1"));
+        let table: String = [("sdw1", "/boot", "vfat"), ("sdw2", "/", "btrfs"), ("sdx1", backup.to_str().unwrap(), "ext4")].iter().map(|(n, m, f)| format!("/dev/{n} {} {f} rw 0 0\n", m.replace(' ', "\\040"))).collect();
+        std::fs::write(d.join("mounts"), table).unwrap();
+        d
+    }
+
+    /// The welcome tour's and What's New's films, photographed for tools/tour-media.sh
+    /// (MAIA_TOUR_MEDIA=1 with MAIA_SIM_SHOTS; the fonts in its fonts folder).
+    #[test]
+    fn tour_films() {
+        if !sandboxed() || std::env::var_os("MAIA_TOUR_MEDIA").is_none() || std::env::var_os("MAIA_SIM_SHOTS").is_none() {
+            return;
+        }
+        let shots = PathBuf::from(std::env::var_os("MAIA_SIM_SHOTS").unwrap());
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(film_drives()));
+        // A home of its own, so whatever a film shows is under ~ and never the sandbox's
+        // own folders; settings, caches and the fonts beside it, out of Space Used.
+        let sam = root().join("home/sam");
+        // SAFETY: one test at a time (sim.sh), before this test's first App.
+        unsafe {
+            std::env::set_var("HOME", &sam);
+            for (k, d) in [("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache"), ("XDG_STATE_HOME", "state")] {
+                std::env::set_var(k, root().join("films-xdg").join(d));
+            }
+        }
+        let only = std::env::var("MAIA_TOUR_FILM").unwrap_or_default();
+        let want = |n: &str| only.is_empty() || only.split(',').any(|o| o == n);
+        let h = film_home();
+        // The fonts, where fontconfig looks in this home.
+        let fdir = root().join("films-xdg/data/fonts");
+        std::fs::create_dir_all(&fdir).unwrap();
+        let mut fonts = false;
+        for f in std::fs::read_dir(shots.join("fonts")).into_iter().flatten().flatten() {
+            fonts |= std::fs::copy(f.path(), fdir.join(f.file_name())).is_ok();
+        }
+        let docs = h.join("Documents");
+        let pics = h.join("Pictures/Lisbon");
+        let wait_thumbs = |s: &mut Sim| {
+            let t0 = Instant::now();
+            while t0.elapsed().as_secs() < 10 && s.tab().entries.iter().any(|e| !e.is_dir && s.app.thumbs.dims(&e.path).is_none()) {
+                s.frame(vec![]);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            s.settle();
+        };
+        if want("goto") {
+            // Places visited before, which Go To finds by a few letters.
+            let mut ud = crate::config::UserData::with_defaults();
+            for p in [docs.join("Invoices"), h.join("Code/weather"), pics.clone(), docs.join("Recipes")] {
+                ud.push_recent(&p);
+            }
+            crate::config::save_json(&crate::config::userdata_path(), &ud).unwrap();
+            let mut s = film_window(&h, fonts);
+            let mut f = Film::new(&s, "goto");
+            // Typed into at once: empty, Go To lists the sandbox's own mounts.
+            f.shot(&mut s, 900, "");
+            s.act("key ctrl+p");
+            s.act("text inv");
+            wait_until(&mut s, "Invoices found", 10, |s| s.texts.iter().any(|(r, t)| t == "Invoices" && r.top() < 120.0));
+            f.shot(&mut s, 1500, "Ctrl P");
+            s.act("key Enter");
+            f.shot(&mut s, 2200, "Enter");
+            f.finish(&s);
+            let _ = std::fs::remove_file(crate::config::userdata_path());
+        }
+        if want("palette") {
+            let mut s = film_window(&docs, fonts);
+            let mut f = Film::new(&s, "palette");
+            s.act("key ctrl+shift+p");
+            s.act("text split r");
+            f.shot(&mut s, 1700, "Ctrl Shift P");
+            s.act("key Enter");
+            f.shot(&mut s, 2200, "Enter");
+            f.finish(&s);
+        }
+        if want("split") {
+            let mut s = film_window(&docs, fonts);
+            // Room for two lists side by side in a small window.
+            s.app.sidebar = false;
+            s.cmd(SplitRight);
+            s.settle();
+            go(&mut s, &h.join("Downloads/Backup"));
+            s.act("key Tab");
+            s.settle();
+            select_path(&mut s, &docs.join("Garden plan.md"));
+            let mut f = Film::new(&s, "split");
+            s.act("key ctrl+c");
+            f.shot(&mut s, 1300, "Ctrl C");
+            s.act("key Tab");
+            s.act("key ctrl+v");
+            f.shot(&mut s, 2200, "Tab Ctrl V");
+            f.finish(&s);
+        }
+        if want("preview") {
+            let mut s = film_window(&docs, fonts);
+            select_path(&mut s, &docs.join("Garden plan.md"));
+            let mut f = Film::new(&s, "preview");
+            s.act("key Space");
+            f.shot(&mut s, 1700, "Space");
+            s.act("key ArrowUp");
+            f.shot(&mut s, 2000, "↑");
+            f.finish(&s);
+        }
+        if want("git") && crate::media::have("git") {
+            let p = h.join("Code/weather");
+            let mut s = film_window(&p.join("src"), fonts);
+            wait_until(&mut s, "the changes marked", 10, |s| branch_now(s) == "main" && crate::gitstatus::repo_for(&s.tab().path).is_some_and(|r| !r.marks.is_empty()));
+            let mut f = Film::new(&s, "git");
+            f.shot(&mut s, 1300, "");
+            s.cmd(GitHistory);
+            wait_until(&mut s, "the history", 10, |s| some_text(s, "Changes"));
+            f.shot(&mut s, 2400, "");
+            f.finish(&s);
+        }
+        if want("viewer") {
+            let mut s = film_window(&pics, fonts);
+            s.cmd(ViewLarge);
+            wait_thumbs(&mut s);
+            select_path(&mut s, &pics.join("IMG_2042.jpg"));
+            let mut f = Film::new(&s, "viewer");
+            s.act("key F3");
+            wait_until(&mut s, "decoded", 10, |s| s.app.thumbs.dims(&pics.join("IMG_2042.jpg")).is_some());
+            f.shot(&mut s, 1400, "F3");
+            for (k, n) in ["IMG_2043.jpg", "IMG_2044.jpg"].iter().enumerate() {
+                s.act("key ArrowRight");
+                wait_until(&mut s, "decoded", 10, |s| s.app.thumbs.dims(&pics.join(n)).is_some());
+                f.shot(&mut s, if k == 0 { 1300 } else { 1800 }, "→");
+            }
+            f.finish(&s);
+        }
+        if want("space") {
+            let mut s = film_window(&h, fonts);
+            let mut f = Film::new(&s, "space");
+            s.cmd(SpaceUsed);
+            wait_until(&mut s, "every size counted", 20, |s| matches!(s.app.popup, Popup::SpaceUsed(_)) && !space(s).counting());
+            f.shot(&mut s, 2000, "");
+            s.act("key Enter");
+            wait_until(&mut s, "Videos counted", 20, |s| !space(s).counting());
+            f.shot(&mut s, 2000, "Enter");
+            f.finish(&s);
+        }
+        if want("rename") {
+            let mut s = film_window(&pics, fonts);
+            s.act("key ctrl+a");
+            s.settle();
+            let mut f = Film::new(&s, "rename");
+            s.cmd(BatchRename);
+            assert!(matches!(s.app.popup, Popup::BatchRename(_)), "Batch Rename open");
+            s.act("text Lisbon ###");
+            f.shot(&mut s, 2000, "");
+            s.act("key Enter");
+            wait_until(&mut s, "renamed", 10, |_| pics.join("Lisbon 001.jpg").exists());
+            f.shot(&mut s, 2000, "Enter");
+            f.finish(&s);
+        }
+        if want("letters") {
+            let mut s = film_window(&docs, fonts);
+            let mut f = Film::new(&s, "letters");
+            s.act("key ctrl+j");
+            f.shot(&mut s, 1600, "Ctrl J");
+            let r = s.text_rect("Recipes");
+            let tag = s.app.hints.as_ref().and_then(|hh| hh.targets.iter().find(|(t, _)| t.contains(r.center())).map(|(_, n)| n.clone())).unwrap_or_else(|| s.fail("no tag on Recipes"));
+            s.act(&format!("text {tag}"));
+            s.act("key Enter");
+            f.shot(&mut s, 2000, &tag.to_uppercase());
+            f.finish(&s);
+        }
+        if want("quickopen") && crate::media::have("git") {
+            let p = h.join("Code/weather");
+            let mut s = film_window(&p, fonts);
+            let mut f = Film::new(&s, "quickopen");
+            s.act("key ctrl+o");
+            wait_until(&mut s, "listed", 10, |s| matches!(&s.app.popup, Popup::QuickOpen(q) if q.listed));
+            s.act("text units");
+            f.shot(&mut s, 1600, "Ctrl O");
+            s.act("key Enter");
+            f.shot(&mut s, 2000, "Enter");
+            f.finish(&s);
+        }
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
     }
 
     #[test]

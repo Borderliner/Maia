@@ -3217,8 +3217,9 @@ fn every_option_has_one_section() {
         Opt::IgnoredFiles => 57,
         Opt::TrashAge => 58,
         Opt::PictureViewer => 61,
+        Opt::Tour => 62,
     };
-    let numbered: Vec<usize> = (0..59).chain([61]).collect();
+    let numbered: Vec<usize> = (0..59).chain([61, 62]).collect();
     let mut seen = vec![0; 64];
     for o in OPTS {
         seen[index(o.0)] += 1;
@@ -7505,4 +7506,121 @@ fn convert_uses_the_encoders_ffmpeg_has() {
     let said = String::from_utf8_lossy(&probe.stdout);
     assert!(said.contains("mpeg4,96") && said.contains("aac"), "even sides and both streams: {said}");
     let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn tour_first_start_and_updates() {
+    use crate::tour::{Kind, at_start_kind, version};
+    assert_eq!(version("0.3.0"), [0, 3, 0]);
+    assert_eq!(version("v0.10.2-rc1"), [0, 10, 2]);
+    assert_eq!(version("1"), [1, 0, 0]);
+    assert!(version("0.10.0") > version("0.9.9"), "numbers, not text");
+    // Nothing on disk: the tour, whatever else.
+    assert_eq!(at_start_kind(true, "", "0.3.0"), Some(Kind::Welcome));
+    // A 0.2 home: settings, no version recorded.
+    assert_eq!(at_start_kind(false, "", "0.3.0"), Some(Kind::News));
+    assert_eq!(at_start_kind(false, "0.2.2", "0.3.0"), Some(Kind::News));
+    // Seen already, or newer.
+    assert_eq!(at_start_kind(false, "0.3.0", "0.3.0"), None);
+    assert_eq!(at_start_kind(false, "0.3.1", "0.3.0"), None);
+    // A userdata.json from 0.2.2 reads with no version seen; this one keeps it.
+    let old: crate::config::UserData = serde_json::from_str(r#"{"bookmarks":["/tmp"],"recents":[],"quick":["new_tab"]}"#).unwrap();
+    assert!(old.seen_version.is_empty() && old.bookmarks.len() == 1);
+    let mut ud = crate::config::UserData::with_defaults();
+    ud.seen_version = "0.3.0".into();
+    let back: crate::config::UserData = serde_json::from_str(&serde_json::to_string(&ud).unwrap()).unwrap();
+    assert_eq!(back.seen_version, "0.3.0");
+    assert_eq!(env!("CARGO_PKG_VERSION"), crate::tour::NEWS_VERSION, "What's New describes this version");
+}
+
+/// Every film decodes as made: an animation of a few states of the same window, each
+/// held a second or more, ending on a state other than its first; played through, the
+/// player hands over every frame PLAYS times, the last held for good, and with
+/// animations off only the last. Their bytes stay inside the binary's room for them.
+#[test]
+fn tour_films_decode_and_play() {
+    use crate::tour::{Body, NEWS, PLAYS, WELCOME, play};
+    let mut total = 0;
+    let mut size = None;
+    for p in WELCOME.iter().chain(NEWS) {
+        let Body::Film(bytes) = p.body else { continue };
+        total += bytes.len();
+        let mut d = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes)).unwrap();
+        assert!(d.is_animated(), "{} is a film", p.title);
+        let n = d.num_frames();
+        assert!((2..=4).contains(&n), "{}: {n} states", p.title);
+        let dims = d.dimensions();
+        assert_eq!(*size.get_or_insert(dims), dims, "{}: every film the same size", p.title);
+        let mut buf = vec![0u8; d.output_buffer_size().unwrap()];
+        let mut frames = vec![];
+        let mut ms = 0;
+        for _ in 0..n {
+            let t = d.read_frame(&mut buf).unwrap();
+            assert!(t >= 900, "{}: a state held {t} ms", p.title);
+            ms += t;
+            frames.push(buf.clone());
+        }
+        assert!((3000..=6000).contains(&ms), "{}: {ms} ms in all", p.title);
+        assert!(frames[0] != frames[n as usize - 1], "{}: something happens", p.title);
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let w = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let t = std::thread::spawn(move || play(bytes, false, tx, w, ctx));
+        let got: Vec<crate::tour::Frame> = rx.iter().collect();
+        t.join().unwrap();
+        assert_eq!(got.len(), (n * PLAYS) as usize, "{}: every frame, {PLAYS} times", p.title);
+        assert_eq!(got.last().unwrap().ms, 0, "the last state stays");
+        assert!(got[..got.len() - 1].iter().all(|f| f.ms >= 900));
+        assert_eq!(got[0].img.size, [dims.0 as usize, dims.1 as usize]);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let w = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ctx = egui::Context::default();
+        std::thread::spawn(move || play(bytes, true, tx, w, ctx));
+        let still: Vec<crate::tour::Frame> = rx.iter().collect();
+        assert_eq!(still.len(), 1, "{}: animations off, one picture", p.title);
+        let last = &got[got.len() - 1].img;
+        assert!(still[0].img.pixels == last.pixels, "{}: the last state", p.title);
+    }
+    assert!(total < 300_000, "the films take {total} bytes");
+    // Drawn one pixel for one at 1.6: 540 points wide.
+    assert_eq!(size.map(|s| s.0), Some(864));
+}
+
+/// The pages name commands as the palette does, show keys that exist, and are written as
+/// the README is: no dashes for commas, no words of praise.
+#[test]
+fn tour_words_match_the_app() {
+    use crate::tour::{ALSO, Body, NEWS, WELCOME};
+    let keymap = Keymap::build(&Default::default());
+    let titles: Vec<&str> = commands::ALL.iter().map(|c| c.info().title.trim_end_matches('…')).collect();
+    for p in WELCOME.iter().chain(NEWS) {
+        assert!(!p.title.is_empty());
+        for &c in p.keys {
+            // Shown by its keys, or by its name where it has none.
+            assert!(keymap.label(c).is_some() || titles.contains(&c.info().title.trim_end_matches('…')));
+        }
+        if let Body::Film(_) = p.body {
+            assert!(!p.keys.is_empty(), "{}: how to reach it", p.title);
+        }
+    }
+    // Commands the pages name by name are real ones.
+    for name in ["Go To", "View Pictures", "Show Space Used", "Batch Rename", "Quick Open", "Recent Projects", "Find Duplicates", "Tidy Folder", "Undo History", "Timeline", "Previous Versions", "What's Using This", "Clean Build Folders In Home", "Choose Theme"] {
+        assert!(titles.contains(&name), "{name:?} is a command");
+    }
+    let mut all: Vec<&str> = WELCOME.iter().chain(NEWS).flat_map(|p| [p.title, p.text]).collect();
+    for (g, items) in ALSO {
+        all.push(g);
+        for (a, b) in *items {
+            all.push(a);
+            all.push(b);
+        }
+    }
+    for t in all {
+        assert!(!t.contains('—') && !t.contains('–'), "{t:?}: a dash");
+        for w in ["seamless", "powerful", "robust", "leverage", "utilize", "delve", "elevate", "streamline", "comprehensive", "!"] {
+            assert!(!t.to_lowercase().contains(w), "{t:?}: {w:?}");
+        }
+    }
+    // The choices on the first page are Options' own rows.
+    assert!(crate::popups::OPTS.iter().any(|o| o.0 == crate::popups::Opt::Tour && o.1 == crate::popups::Section::System), "found again in Startup & system");
 }
