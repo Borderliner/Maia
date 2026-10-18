@@ -3138,7 +3138,7 @@ fn tab_search(app: &mut App, ctx: &egui::Context, query: &mut String, sel: &mut 
         rows.push((name, c.path.clone(), None));
     }
     if !q.is_empty() {
-        rows.retain(|(l, p, _)| fuzzy::score(&q, &format!("{l} {}", p.display()).to_lowercase()).is_some());
+        rows.retain(|(l, p, _)| fuzzy::score(&q, &format!("{l} {}", home_short(p)).to_lowercase()).is_some());
     }
     step(sel, rows.len(), &k, |_| false);
     let mut pick = if k.enter { rows.get(*sel).cloned() } else { None };
@@ -3159,7 +3159,8 @@ fn tab_search(app: &mut App, ctx: &egui::Context, query: &mut String, sel: &mut 
                     let g = ui.fonts_mut(|f| f.layout_job(job));
                     let gw = g.size().x;
                     ui.painter().galley(pos2(r.left() + 10.0, r.center().y - g.size().y / 2.0), g, pal.text);
-                    let s = crate::listing::elided(ui, &path.display().to_string(), FontId::proportional(11.5), r.width() - gw - 30.0, pal.text_dim);
+                    // From home as ~, its end kept: the folder's own name matters most.
+                    let s = crate::listing::elided_tail(ui, &home_short(path), FontId::proportional(11.5), r.width() - gw - 30.0, pal.text_dim);
                     ui.painter().galley(pos2(r.left() + 20.0 + gw, r.center().y - s.size().y / 2.0), s, pal.text_dim);
                 });
                 if resp.clicked() {
