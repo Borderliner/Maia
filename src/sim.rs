@@ -7454,7 +7454,10 @@ mod journeys {
             if some_text(&s, "Add to .gitignore") {
                 break;
             }
-            s.act(&format!("scroll {:.0} {:.0} -3", row.center().x + 120.0, s.size.y / 2.0));
+            // Over the menu itself: near the window's foot it opens upward, away from
+            // the middle.
+            let over = s.ctx.memory(|m| m.area_rect(egui::Id::new("ctxmenu"))).map(|r| r.center()).unwrap_or(pos2(row.center().x + 120.0, s.size.y / 2.0));
+            s.act(&format!("scroll {:.0} {:.0} -3", over.x, over.y));
             s.idle(2);
         }
         let at = s.text_rect("Add to .gitignore").center();
