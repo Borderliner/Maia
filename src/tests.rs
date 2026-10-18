@@ -7471,3 +7471,38 @@ fn file_operations_never_lose_what_they_replace() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Converting picks the encoder an ffmpeg build has: one without x264 (as some
+/// distributions ship it) still makes an MP4, through OpenH264 or MPEG-4; one with no
+/// MP3 encoder says so instead of failing halfway. The listing is ffmpeg's own; the
+/// MP4 below is made by the real ffmpeg with what a build without x264 would get.
+#[test]
+fn convert_uses_the_encoders_ffmpeg_has() {
+    use crate::convert::{Target, encoder_names, media_args};
+    let listing = "Encoders:\n V..... = Video\n A..... = Audio\n ------\n V....D libx264              libx264 H.264\n V....D mpeg4                MPEG-4 part 2\n A....D aac                  AAC (Advanced Audio Coding)\n A....D libopus              libopus Opus\n";
+    assert_eq!(encoder_names(listing), ["libx264", "mpeg4", "aac", "libopus"], "the legend's lines are not encoders");
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+    let full = media_args(Target::Mp4, false, &s(&["libx264", "aac"])).unwrap();
+    assert!(full.windows(2).any(|w| w == ["-c:v", "libx264"]));
+    let fedora = media_args(Target::Mp4, false, &s(&["libopenh264", "aac", "libopus"])).unwrap();
+    assert!(fedora.windows(2).any(|w| w == ["-c:v", "libopenh264"]));
+    let bare = media_args(Target::Mp4, false, &s(&["mpeg4", "aac"])).unwrap();
+    assert!(bare.windows(2).any(|w| w == ["-c:v", "mpeg4"]));
+    assert!(media_args(Target::Mp3, false, &s(&["aac", "flac"])).is_err(), "no LAME, said before starting");
+    let own_opus = media_args(Target::Opus, false, &s(&["opus"])).unwrap();
+    assert!(own_opus.windows(2).any(|w| w == ["-strict", "-2"]), "ffmpeg's own Opus is experimental");
+    if !crate::media::have("ffmpeg") || !crate::media::have("ffprobe") {
+        return;
+    }
+    let d = tmpdir("encoders");
+    let src = d.join("clip.mkv");
+    let ok = std::process::Command::new("ffmpeg").args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=97x61:rate=10:duration=1", "-f", "lavfi", "-i", "sine=duration=1", "-shortest", "-c:v", "ffv1", "-c:a", "flac"]).arg(&src).status().unwrap().success();
+    assert!(ok);
+    let out = d.join("clip.mp4");
+    let st = std::process::Command::new("ffmpeg").args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"]).arg(&src).args(&bare).arg(&out).status().unwrap();
+    assert!(st.success(), "an MP4 from MPEG-4 alone");
+    let probe = std::process::Command::new("ffprobe").args(["-v", "error", "-show_entries", "stream=codec_name,width", "-of", "csv=p=0"]).arg(&out).output().unwrap();
+    let said = String::from_utf8_lossy(&probe.stdout);
+    assert!(said.contains("mpeg4,96") && said.contains("aac"), "even sides and both streams: {said}");
+    let _ = std::fs::remove_dir_all(&d);
+}

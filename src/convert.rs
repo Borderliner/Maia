@@ -539,8 +539,33 @@ fn split(t: &Tools, src: &Path, dir: &Path) -> Result<PathBuf, String> {
 
 // ------------------------------------------------------------------ sound and video
 
-/// ffmpeg's arguments after the input for `to`, with or without the cover picture.
-pub fn media_args(to: Target, cover: bool) -> Vec<&'static str> {
+/// The encoders an ffmpeg build has, from `ffmpeg -encoders`: each line's second word.
+pub fn encoder_names(listing: &str) -> Vec<String> {
+    // The legend before the dashes is not a list of encoders.
+    listing.lines().skip_while(|l| l.trim() != "------").skip(1).filter_map(|l| {
+        let mut w = l.split_whitespace();
+        let flags = w.next()?;
+        // " V....D libx264  libx264 H.264 ...": six flag letters, then the name.
+        (flags.len() == 6 && flags.chars().next().is_some_and(|c| "VAS".contains(c))).then(|| w.next().map(str::to_string)).flatten()
+    }).collect()
+}
+
+/// Asked of ffmpeg once per run, on the job's thread.
+fn encoders(t: &Tools) -> Vec<String> {
+    static HAVE: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    HAVE.get_or_init(|| {
+        let mut c = t.cmd("ffmpeg");
+        c.args(["-hide_banner", "-encoders"]);
+        crate::errands::output(c, Duration::from_secs(20)).map(|o| encoder_names(&String::from_utf8_lossy(&o))).unwrap_or_default()
+    }).clone()
+}
+
+/// ffmpeg's arguments after the input for `to`, with or without the cover picture, made
+/// with the best encoder this build has: distributions leave different ones out (one
+/// without x264 still has OpenH264 or MPEG-4 for an MP4). An empty `have` (not known)
+/// asks for the usual ones.
+pub fn media_args(to: Target, cover: bool, have: &[String]) -> Result<Vec<&'static str>, String> {
+    let has = |n: &str| have.is_empty() || have.iter().any(|h| h == n);
     let keep_cover = ["-map", "0:a:0", "-map", "0:v:0?", "-c:v", "copy", "-disposition:v:0", "attached_pic"];
     let mut a: Vec<&'static str> = vec![];
     match to {
@@ -548,16 +573,53 @@ pub fn media_args(to: Target, cover: bool) -> Vec<&'static str> {
         Target::Mp3 | Target::Flac | Target::Opus | Target::SoundMp3 => a.extend(["-map", "0:a:0", "-vn"]),
         _ => a.extend(["-map", "0:v:0", "-map", "0:a:0?"]),
     }
+    let opus = |a: &mut Vec<&'static str>| -> Result<(), String> {
+        if has("libopus") {
+            a.extend(["-c:a", "libopus", "-b:a", "128k"]);
+        } else if has("opus") {
+            // ffmpeg's own, still marked experimental.
+            a.extend(["-c:a", "opus", "-strict", "-2", "-b:a", "128k"]);
+        } else {
+            return Err("This ffmpeg can't write Opus sound".into());
+        }
+        Ok(())
+    };
     match to {
-        Target::Mp3 | Target::SoundMp3 => a.extend(["-c:a", "libmp3lame", "-q:a", "2", "-id3v2_version", "3", "-f", "mp3"]),
-        Target::Opus => a.extend(["-c:a", "libopus", "-b:a", "128k", "-f", "opus"]),
+        Target::Mp3 | Target::SoundMp3 if has("libmp3lame") => a.extend(["-c:a", "libmp3lame", "-q:a", "2", "-id3v2_version", "3", "-f", "mp3"]),
+        Target::Mp3 | Target::SoundMp3 => return Err("This ffmpeg can't write MP3 (it has no LAME)".into()),
+        Target::Opus => {
+            opus(&mut a)?;
+            a.extend(["-f", "opus"]);
+        }
         Target::Flac => a.extend(["-c:a", "flac", "-f", "flac"]),
-        // Even sides: 4:2:0 video can't have an odd width or height.
-        Target::Mp4 => a.extend(["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:v", "libx264", "-crf", "23", "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-f", "mp4"]),
-        Target::Webm => a.extend(["-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0", "-row-mt", "1", "-cpu-used", "4", "-c:a", "libopus", "-b:a", "128k", "-f", "webm"]),
+        Target::Mp4 => {
+            // Even sides: 4:2:0 video can't have an odd width or height.
+            a.extend(["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-pix_fmt", "yuv420p"]);
+            if has("libx264") {
+                a.extend(["-c:v", "libx264", "-crf", "23", "-preset", "medium"]);
+            } else if has("libopenh264") {
+                a.extend(["-c:v", "libopenh264", "-b:v", "6M"]);
+            } else if has("mpeg4") {
+                a.extend(["-c:v", "mpeg4", "-q:v", "3"]);
+            } else {
+                return Err("This ffmpeg can't write MP4 video".into());
+            }
+            a.extend(["-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-f", "mp4"]);
+        }
+        Target::Webm => {
+            if has("libvpx-vp9") {
+                a.extend(["-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0", "-row-mt", "1", "-cpu-used", "4"]);
+            } else if has("libvpx") {
+                a.extend(["-c:v", "libvpx", "-crf", "10", "-b:v", "4M"]);
+            } else {
+                return Err("This ffmpeg can't write WebM video".into());
+            }
+            opus(&mut a)?;
+            a.extend(["-f", "webm"]);
+        }
         _ => {}
     }
-    a
+    Ok(a)
 }
 
 /// ffmpeg's way of naming a file: never read as a protocol or an option.
@@ -585,10 +647,11 @@ fn media(t: &Tools, src: &Path, to: Target, dest: &Path, p: &Mutex<Progress>, ga
     let dur = duration(t, src);
     let part = part_of(dest);
     let cover = matches!(to, Target::Mp3 | Target::Flac);
-    let mut r = ffmpeg(t, src, &media_args(to, cover), &part, dur, p, gate, ctx);
+    let have = encoders(t);
+    let mut r = media_args(to, cover, &have).and_then(|a| ffmpeg(t, src, &a, &part, dur, p, gate, ctx));
     // A cover ffmpeg can't put in this format: the sound alone.
     if cover && r.as_ref().is_err_and(|e| e != CANCELLED) {
-        r = ffmpeg(t, src, &media_args(to, false), &part, dur, p, gate, ctx);
+        r = media_args(to, false, &have).and_then(|a| ffmpeg(t, src, &a, &part, dur, p, gate, ctx));
     }
     let r = r.and_then(|_| finish(&part, dest));
     if r.is_err() {
