@@ -4258,11 +4258,18 @@ pub(crate) fn theme_card(painter: &egui::Painter, r: Rect, p: Palette, rad: u8) 
         bar(row.left() + 5.0, y, row.width() * [0.55, 0.42, 0.62, 0.36, 0.5][k % 5], if k == 1 { p.text } else { p.text.gamma_multiply(0.85) });
         k += 1;
     }
+    // The accent: below the title strip when there is room above the code, else in it
+    // (a small card's code starts right under the strip and the pill sat on it).
     let pill = Rect::from_min_size(pos2(main.right() - 26.0, main.top() + 13.0), vec2(18.0, 7.0));
+    let pill = if pill.bottom() <= code_top - 3.0 { pill } else { Rect::from_min_size(pos2(main.right() - 22.0, main.top() + 2.5), vec2(14.0, 4.0)) };
     painter.rect_filled(pill, CornerRadius::same(4), p.accent);
-    // Code, in the theme's code colours.
+    // Code, in the theme's code colours: a shorter sample where the whole one would be
+    // cut in the middle of a word.
     let s = p.syntax;
-    let lines: [&[(&str, Color32)]; 2] = [&[("fn", s.keyword), (" add", p.text), ("(n: ", p.text), ("u32", s.kind), (")", p.text)], &[("\"sum\"", s.string), (" + ", p.text), ("42", s.number), (" // ok", s.comment)]];
+    let long: [&[(&str, Color32)]; 2] = [&[("fn", s.keyword), (" add", p.text), ("(n: ", p.text), ("u32", s.kind), (")", p.text)], &[("\"sum\"", s.string), (" + ", p.text), ("42", s.number), (" // ok", s.comment)]];
+    let short: [&[(&str, Color32)]; 2] = [&[("fn", s.keyword), (" add", p.text)], &[("\"sum\"", s.string), (" 42", s.number)]];
+    let width = |line: &[(&str, Color32)]| painter.ctx().fonts_mut(|f| f.layout_no_wrap(line.iter().map(|x| x.0).collect(), FontId::monospace(size), p.text).size().x);
+    let lines = if width(long[0]) > main.width() - 12.0 { short } else { long };
     for (k, line) in lines.iter().enumerate() {
         let mut job = egui::text::LayoutJob::default();
         for (t, c) in line.iter() {
