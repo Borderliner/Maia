@@ -4312,15 +4312,39 @@ fn conflict(app: &mut App, ctx: &egui::Context, st: &mut ConflictState) -> bool 
     }
     let Some(item) = st.items.get(st.idx) else { return false };
     let both_dirs = item.src.is_dir() && item.dst.is_dir();
-    let info = |p: &Path| -> String {
-        let e = fsx::Entry::from_path(p);
-        match e {
-            Some(e) if e.is_dir => format!("Folder · modified {}", fsx::fmt_time(e.modified)),
-            Some(e) => format!("{} · modified {}", fsx::fmt_size(e.size), fsx::fmt_time(e.modified)),
-            None => String::new(),
+    let (a, b) = (fsx::Entry::from_path(&item.src), fsx::Entry::from_path(&item.dst));
+    // Which of the two is newer, and bigger, said beside it: what decides it at a glance.
+    let info = |e: &Option<fsx::Entry>, o: &Option<fsx::Entry>| -> String {
+        let Some(e) = e else { return String::new() };
+        let mut v = if e.is_dir { format!("Folder · modified {}", fsx::fmt_time(e.modified)) } else { format!("{} · modified {}", fsx::fmt_size(e.size), fsx::fmt_time(e.modified)) };
+        if let Some(o) = o {
+            if e.modified.zip(o.modified).is_some_and(|(a, b)| a.duration_since(b).is_ok_and(|d| d.as_secs() >= 2)) {
+                v.push_str(" · newer");
+            }
+            if !e.is_dir && e.size > o.size {
+                v.push_str(" · bigger");
+            }
         }
+        v
     };
-    let mut decision: Option<Conflict> = None;
+    // Keys for each choice: a keyboard-first dialog.
+    let keyed = ctx.input_mut(|i| {
+        if i.consume_key(Modifiers::NONE, Key::Enter) {
+            Some(Conflict::KeepBoth)
+        } else if i.consume_key(Modifiers::NONE, Key::R) {
+            Some(Conflict::Overwrite)
+        } else if i.consume_key(Modifiers::NONE, Key::S) {
+            Some(Conflict::Skip)
+        } else if both_dirs && i.consume_key(Modifiers::NONE, Key::M) {
+            Some(Conflict::Merge)
+        } else {
+            None
+        }
+    });
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::A)) {
+        st.apply_all = !st.apply_all;
+    }
+    let mut decision: Option<Conflict> = keyed;
     let mut cancel = false;
     let remaining = st.items.len() - st.idx;
     centered(ctx, "conflict", 520.0, &pal, |ui| {
@@ -4334,20 +4358,30 @@ fn conflict(app: &mut App, ctx: &egui::Context, st: &mut ConflictState) -> bool 
         card(ui, &pal, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
             field_row(ui, key_w, verb, &pal, |ui| {
-                ui.label(info(&item.src));
+                ui.label(info(&a, &b));
             });
             field_row(ui, key_w, "Existing", &pal, |ui| {
-                ui.label(info(&item.dst));
+                ui.label(info(&b, &a));
             });
         });
         if remaining > 1 {
             ui.add_space(4.0);
             ui.checkbox(&mut st.apply_all, format!("Apply to all {remaining} conflicts"));
         }
-        ui.add_space(12.0);
+        let mut keys: Vec<(&str, &str)> = vec![("Enter", "keep both"), ("R", "replace"), ("S", "skip")];
+        if both_dirs {
+            keys.push(("M", "merge"));
+        }
+        if remaining > 1 {
+            keys.push(("A", "all"));
+        }
+        keys.push(("Esc", "cancel"));
+        ui.add_space(4.0);
+        hints(ui, &keys, &pal);
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            if plain_button(ui, "Replace", &pal).clicked() {
+            if plain_button(ui, "Replace", &pal).on_hover_text("The one there goes to the trash; Undo brings it back").clicked() {
                 decision = Some(Conflict::Overwrite);
             }
             if both_dirs && plain_button(ui, "Merge", &pal).on_hover_text("Copy into the existing folder, replacing files").clicked() {

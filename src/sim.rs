@@ -2731,7 +2731,11 @@ mod journeys {
         select_path(&mut s, &src);
         s.act("key F5");
         s.settle();
-        s.click_text("Replace");
+        assert!(s.texts.iter().any(|(_, t)| t.ends_with("· newer · bigger") || t.ends_with("· bigger") || t.ends_with("· newer")), "which is newer or bigger, said");
+        look(&mut s, "conflict");
+        s.shot("conflict-keys");
+        // By its key this time.
+        s.act("key R");
         s.settle();
         assert_eq!(std::fs::read_to_string(dst_dir.join("report.md")).unwrap(), std::fs::read_to_string(&src).unwrap(), "replaced again");
         // F6 (move) into a conflict: Skip leaves the source where it is.
