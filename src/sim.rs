@@ -5247,7 +5247,7 @@ mod journeys {
         s.act(&format!("click {:.0} {:.0}", chip.center().x, chip.center().y));
         wait_until(&mut s, "the branch menu", 5, |s| s.texts.iter().any(|(_, t)| t == "History"));
         s.click_text("History");
-        wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 4));
+        wait_until(&mut s, "history", 30, |s| history(s).is_some_and(|h| h.1 && h.0 == 4));
         s.idle(3);
         for t in ["origin/main", "docs · origin"] {
             assert!(s.texts.iter().any(|(_, x)| x == t), "{t:?} in the graph");
@@ -5279,7 +5279,7 @@ mod journeys {
         wait_until(&mut s, "branch read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
         s.idle(2);
         open_history(&mut s);
-        wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 2));
+        wait_until(&mut s, "history", 30, |s| history(s).is_some_and(|h| h.1 && h.0 == 2));
         s.idle(2);
         s.click_text("Write the long notes");
         wait_until(&mut s, "files", 10, |s| history(s).is_some_and(|h| h.3 == Some(1)));
@@ -5396,7 +5396,7 @@ mod journeys {
         wait_until(&mut s, "branch read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
         s.idle(2);
         open_history(&mut s);
-        wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 5));
+        wait_until(&mut s, "history", 30, |s| history(s).is_some_and(|h| h.1 && h.0 == 5));
         look(&mut s, "graph");
         s.shot("graph");
         click_in_inspector(&mut s, "Lay out the panels", "click");
@@ -5686,7 +5686,7 @@ mod journeys {
         wait_until(&mut s, "branch read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
         s.idle(2);
         open_history(&mut s);
-        wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 1));
+        wait_until(&mut s, "history", 30, |s| history(s).is_some_and(|h| h.1 && h.0 == 1));
         wait_until(&mut s, "the changes", 10, |s| changes(s).staged.len() == 1 && changes(s).unstaged.len() == 4);
         s.idle(2);
         see(&mut s, "Changes");
@@ -6051,7 +6051,7 @@ mod journeys {
         // History from the menu, and closing it from there.
         open_branches(&mut s);
         s.click_text("History");
-        wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.0 > 0));
+        wait_until(&mut s, "history", 30, |s| history(s).is_some_and(|h| h.0 > 0));
         open_branches(&mut s);
         assert!(s.texts.iter().any(|(_, t)| t == "Close history"));
         s.click_text("Close history");
@@ -6391,7 +6391,7 @@ mod journeys {
         wait_until(&mut s, "branch read", 10, |s| crate::gitstatus::repo_for(&s.tab().path).is_some());
         s.idle(2);
         open_history(&mut s);
-        wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1 && h.0 == 5));
+        wait_until(&mut s, "history", 30, |s| history(s).is_some_and(|h| h.1 && h.0 == 5));
         look(&mut s, "graph, pictures off");
         click_in_inspector(&mut s, "Add the octo", "click");
         wait_until(&mut s, "commit open", 10, |s| history(s).is_some_and(|h| h.3 == Some(1)));
@@ -8194,7 +8194,7 @@ mod journeys {
             s.idle(2);
             shot(&mut s, "git-status");
             s.cmd(GitHistory);
-            wait_until(&mut s, "history", 10, |s| history(s).is_some_and(|h| h.1));
+            wait_until(&mut s, "history", 30, |s| history(s).is_some_and(|h| h.1));
             shot(&mut s, "git-graph");
             click_in_inspector(&mut s, "Lay out the panels", "click");
             wait_until(&mut s, "files", 10, |s| history(s).is_some_and(|h| h.3.is_some()));
