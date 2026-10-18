@@ -7581,7 +7581,7 @@ fn tour_films_decode_and_play() {
         let last = &got[got.len() - 1].img;
         assert!(still[0].img.pixels == last.pixels, "{}: the last state", p.title);
     }
-    assert!(total < 300_000, "the films take {total} bytes");
+    assert!(total < 340_000, "the films take {total} bytes");
     // Drawn one pixel for one at 1.6: 540 points wide.
     assert_eq!(size.map(|s| s.0), Some(864));
 }

@@ -58,7 +58,9 @@ for name in sorted(os.listdir(films)):
             dr.polygon([(px + ax * s, py + ay * s) for ax, ay in arrow], fill=(250, 250, 250, 255), outline=(20, 20, 20, 255), width=max(1, round(s)))
         frames.append(im)
         ms.append(int(t))
-    enc = _webp.WebPAnimEncoder(frames[0].size, 0xff000000, 0, True, 0, 0, True, 0)
+    # Every frame whole (a key frame): a frame kept as a lossy difference from the one
+    # before left faint traces of rows that had gone. 17% more bytes for clean frames.
+    enc = _webp.WebPAnimEncoder(frames[0].size, 0xff000000, 0, False, 0, 1, True, 0)
     t = 0
     for im, m in zip(frames, ms):
         enc.add(im.convert("RGBA").getim(), t, False, int(os.environ.get("TOUR_QUALITY", "62")), 100, 6)
