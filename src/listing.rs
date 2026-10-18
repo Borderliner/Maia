@@ -333,7 +333,24 @@ pub fn listing(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         };
         // Cut to the panel: a long error or filter ran past a narrow one.
         let g = elided(&ui, &msg, FontId::proportional(env.cfg.font_size), (rect.width() - 24.0).max(40.0), env.pal.text_dim);
-        ui.painter().galley(rect.center() - g.size() / 2.0, g, env.pal.text_dim);
+        // What kind of empty, at a glance, above the words (when there is room for it).
+        let glyph = if t.error.is_some() {
+            theme::Glyph::Lock
+        } else if !t.filter.is_empty() || t.smart.is_some() || !t.settings.only_types.is_empty() {
+            theme::Glyph::Search
+        } else if t.hidden_count > 0 {
+            theme::Glyph::Eye
+        } else {
+            theme::Glyph::Folder
+        };
+        let side = (env.cfg.font_size * 2.6).round();
+        let tall = rect.height() > side * 3.0 + g.size().y;
+        let top = rect.center().y - g.size().y / 2.0 + if tall { side * 0.6 } else { 0.0 };
+        if tall {
+            let gr = Rect::from_center_size(pos2(rect.center().x, top - side * 0.75), Vec2::splat(side));
+            theme::paint_glyph(ui.painter(), gr, glyph, env.pal.text_dim.gamma_multiply(0.55));
+        }
+        ui.painter().galley(pos2(rect.center().x - g.size().x / 2.0, top), g, env.pal.text_dim);
     } else if t.view.is_empty() && (t.flatten || t.content.busy()) {
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, if t.content.busy() || t.smart.is_some() { "Searching…" } else { "Indexing…" }, FontId::proportional(env.cfg.font_size), env.pal.text_dim);
     }
