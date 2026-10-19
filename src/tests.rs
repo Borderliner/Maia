@@ -8377,3 +8377,4 @@ fn conflicts_if_newer_and_renamed() {
     assert_eq!(std::fs::read_to_string(dst.join("named.txt")).unwrap(), "there");
     let _ = std::fs::remove_dir_all(&d);
 }
+

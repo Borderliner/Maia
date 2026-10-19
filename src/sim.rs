@@ -2819,9 +2819,8 @@ mod journeys {
         // Duplicate in place.
         select_path(&mut s, &src);
         s.cmd(Duplicate);
-        s.settle();
-        let dupes = std::fs::read_dir(home.join("Documents")).unwrap().flatten().filter(|d| d.file_name().to_string_lossy().starts_with("report")).count();
-        assert_eq!(dupes, 2, "duplicate made a second copy");
+        let dupes = || std::fs::read_dir(home.join("Documents")).unwrap().flatten().filter(|d| d.file_name().to_string_lossy().starts_with("report")).count();
+        wait_until(&mut s, "duplicate made a second copy", 10, |_| dupes() == 2);
         report("conflicts", &s);
     }
 
