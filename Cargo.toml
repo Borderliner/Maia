@@ -24,6 +24,8 @@ saphyr-parser = "=0.2.2"
 sctk = { version = "=0.19.2", package = "smithay-client-toolkit", default-features = false, features = ["calloop"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+# Parses what programs write to the terminal pane (alacritty's parser).
+vte = { version = "0.15.0", default-features = false }
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "wayland", "x11"] }
 # The X11 clipboard and drag out, on the same libxcb and libX11 bindings winit uses.
 x11-dl = "2.21.0"

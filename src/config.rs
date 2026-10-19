@@ -535,6 +535,7 @@ pub struct Session {
     pub layout: Option<LayoutSnap>,
     pub sidebar: bool,
     pub sidebar_width: f32,
+    pub terminal_height: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

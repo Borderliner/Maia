@@ -8153,3 +8153,201 @@ fn sync_plans_copies_and_undoes() {
     assert!(!b.join("fresh").exists() && !b.join("sub/new.txt").exists() && b.join("sub/only-there.txt").exists());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A terminal `cols` × `rows` after a program wrote `bytes`.
+fn vt(cols: usize, rows: usize, bytes: &[u8]) -> crate::vt::Term {
+    let mut t = crate::vt::Term::new(cols, rows);
+    t.feed(bytes);
+    t
+}
+
+fn vt_rows(t: &crate::vt::Term) -> Vec<String> {
+    (0..t.screen.rows).map(|y| t.screen.row_text(y)).collect()
+}
+
+fn vt_cell(t: &crate::vt::Term, x: usize, y: usize) -> crate::vt::Cell {
+    t.screen.line(t.screen.view_line(y)).unwrap().cells[x]
+}
+
+#[test]
+fn terminal_writes_wraps_and_moves() {
+    let t = vt(10, 3, b"hello world, wrap me");
+    assert_eq!(vt_rows(&t), ["hello worl", "d, wrap me", ""]);
+    assert!(t.screen.line(t.screen.view_line(0)).unwrap().wrapped);
+    assert_eq!(t.screen.text((0, 0), (1, 9)), "hello world, wrap me", "a wrapped row copies as one line");
+    // The last column holds the cursor until the next character wraps.
+    assert_eq!(t.screen.cursor(), (9, 1));
+    assert_eq!(vt_rows(&vt(20, 3, b"ab\x08c\r\nx\ty\x07")), ["ac", "x       y", ""]);
+    assert_eq!(vt_rows(&vt(10, 3, b"\x1b[2;3Hx\x1b[Hy\x1b[3;9H\x1b[2Dz\x1b[A\x1b[Cw")), ["y", "  x     w", "      z"]);
+    // Rows scrolled off the top are kept above.
+    let t = vt(10, 2, b"1\r\n2\r\n3\r\n4");
+    assert_eq!(vt_rows(&t), ["3", "4"]);
+    assert_eq!((t.screen.history(), t.screen.text((0, 0), (1, 9))), (2, "1\n2".to_string()));
+}
+
+#[test]
+fn terminal_erases_inserts_and_deletes() {
+    assert_eq!(vt_rows(&vt(10, 1, b"abcdef\x1b[3D\x1b[K")), ["abc"]);
+    assert_eq!(vt_rows(&vt(10, 1, b"abcdef\x1b[3D\x1b[1K")), ["    ef"]);
+    assert_eq!(vt_rows(&vt(10, 1, b"abcdef\x1b[2K")), [""]);
+    assert_eq!(vt_rows(&vt(10, 3, b"aa\r\nbbbb\r\ncc\x1b[2;3H\x1b[J")), ["aa", "bb", ""]);
+    assert_eq!(vt_rows(&vt(10, 3, b"aa\r\nbbbb\r\ncc\x1b[2;3H\x1b[1J")), ["", "   b", "cc"]);
+    assert_eq!(vt_rows(&vt(10, 1, b"abcdef\x1b[1;3H\x1b[2@")), ["ab  cdef"]);
+    assert_eq!(vt_rows(&vt(10, 1, b"abcdef\x1b[1;2H\x1b[2P")), ["adef"]);
+    assert_eq!(vt_rows(&vt(10, 1, b"abcdef\x1b[1;2H\x1b[2X")), ["a  def"]);
+    let mut t = vt(10, 3, b"1\r\n2\r\n3\x1b[2;1H\x1b[L");
+    assert_eq!(vt_rows(&t), ["1", "", "2"]);
+    t.feed(b"\x1b[M");
+    assert_eq!(vt_rows(&t), ["1", "2", ""]);
+    // Erased cells keep the background colour set (xterm's bce).
+    let t = vt(10, 1, b"\x1b[44m\x1b[K");
+    assert_eq!(vt_cell(&t, 5, 0).bg, 4);
+}
+
+#[test]
+fn terminal_scroll_region() {
+    let mut t = vt(10, 5, b"1\r\n2\r\n3\r\n4\r\n5\x1b[2;4r\x1b[4;1H\n");
+    assert_eq!(vt_rows(&t), ["1", "3", "4", "", "5"]);
+    assert_eq!(t.screen.history(), 0, "a region's rows don't go to the scrollback");
+    t.feed(b"\x1b[2;1H\x1bM");
+    assert_eq!(vt_rows(&t), ["1", "", "3", "4", "5"]);
+    t.feed(b"\x1b[r\x1b[5;1H\n");
+    assert_eq!(vt_rows(&t), ["", "3", "4", "5", ""]);
+}
+
+#[test]
+fn terminal_alternate_screen() {
+    let mut t = vt(10, 2, b"main text");
+    t.feed(b"\x1b[?1049h");
+    assert!(t.screen.alt());
+    assert_eq!(vt_rows(&t), ["", ""]);
+    t.feed(b"vim\r\n\n\n\n");
+    assert_eq!(t.screen.history(), 0);
+    t.feed(b"\x1b[1;1Hx\x1b[?1049l");
+    assert!(!t.screen.alt());
+    assert_eq!(vt_rows(&t), ["main text", ""]);
+    assert_eq!(t.screen.cursor(), (9, 0));
+}
+
+#[test]
+fn terminal_colors_and_attributes() {
+    use crate::vt::{BOLD, DEFAULT, INVERSE, ITALIC, UNDERLINE, rgb};
+    let t = vt(20, 1, b"\x1b[1;31mA\x1b[0m\x1b[38;5;123mB\x1b[48;2;255;0;0mC\x1b[38:2::0:255:0mD\x1b[7;3;4mE\x1b[0;95;102mF\x1b[mG");
+    let c = |x| vt_cell(&t, x, 0);
+    assert_eq!((c(0).ch(), c(0).fg, c(0).flags() & BOLD), ('A', 1, BOLD));
+    assert_eq!((c(1).fg, c(1).bg, c(1).flags()), (123, DEFAULT, 0));
+    assert_eq!((c(2).fg, c(2).bg), (123, rgb(255, 0, 0)));
+    assert_eq!(c(3).fg, rgb(0, 255, 0));
+    assert_eq!(c(4).flags(), INVERSE | ITALIC | UNDERLINE);
+    assert_eq!((c(5).fg, c(5).bg), (13, 10));
+    assert_eq!(c(6), crate::vt::Cell { c: 'G' as u32, ..crate::vt::Cell::BLANK });
+}
+
+#[test]
+fn terminal_wide_characters() {
+    use crate::vt::{SPACER, WIDE};
+    let mut t = vt(10, 2, "a漢b".as_bytes());
+    assert_eq!(vt_rows(&t)[0], "a漢b");
+    assert_eq!((vt_cell(&t, 1, 0).flags() & WIDE, vt_cell(&t, 2, 0).flags() & SPACER), (WIDE, SPACER));
+    assert_eq!(t.screen.cursor(), (4, 0));
+    // Writing over one half blanks the other.
+    t.feed(b"\x1b[1;3Hx");
+    assert_eq!(vt_rows(&t)[0], "a xb");
+    // One that doesn't fit at the end of a row starts the next.
+    let t = vt(5, 2, "abcd漢".as_bytes());
+    assert_eq!(vt_rows(&t), ["abcd", "漢"]);
+    assert_eq!(t.screen.cursor(), (2, 1));
+    // Combining marks don't take a cell.
+    assert_eq!(vt_rows(&vt(5, 1, "e\u{301}x".as_bytes())), ["ex"]);
+}
+
+#[test]
+fn terminal_resizes() {
+    let mut t = vt(10, 4, b"1\r\n2\r\n3\r\n4");
+    t.screen.resize(10, 2);
+    assert_eq!((vt_rows(&t), t.screen.history(), t.screen.cursor()), (vec!["3".to_string(), "4".into()], 2, (1, 1)));
+    t.screen.resize(10, 4);
+    assert_eq!((vt_rows(&t), t.screen.cursor()), (vec!["1".to_string(), "2".into(), "3".into(), "4".into()], (1, 3)));
+    t.screen.resize(3, 4);
+    t.feed(b"\r\x1b[Kabcdef");
+    assert_eq!(vt_rows(&t)[3], "def");
+    // Rows below the cursor go before any above it do.
+    let mut t = vt(10, 4, b"x");
+    t.screen.resize(10, 2);
+    assert_eq!((vt_rows(&t), t.screen.history()), (vec!["x".to_string(), String::new()], 0));
+    // The alternate screen and the main one under it both fit the new size.
+    let mut t = vt(10, 3, b"a\r\nb\r\nc\x1b[?1049h");
+    t.screen.resize(4, 2);
+    t.feed(b"\x1b[?1049l");
+    assert_eq!(vt_rows(&t), ["b", "c"]);
+}
+
+#[test]
+fn terminal_answers_and_modes() {
+    let mut t = vt(10, 5, b"\x1b[3;5H\x1b[6n\x1b[c");
+    assert_eq!(std::mem::take(&mut t.screen.replies), b"\x1b[3;5R\x1b[?62;22c");
+    t.feed(b"\x1b[?1h\x1b[?2004h\x1b[?25l\x1b[5 q");
+    let s = &t.screen;
+    assert!(s.app_cursor && s.bracketed_paste && !s.cursor_shown && s.shape == crate::vt::Shape::Bar);
+    t.feed(b"\x1b]0;my title\x07\x1b]7;file://host/tmp/a%20b\x1b\\");
+    assert_eq!((t.screen.title.as_str(), t.screen.cwd.as_deref()), ("my title", Some("/tmp/a b")));
+    // Line drawing characters, as ncurses draws boxes.
+    assert_eq!(vt_rows(&vt(10, 1, b"\x1b(0lqk\x1b(Bq")), ["┌─┐q"]);
+}
+
+#[test]
+fn terminal_scrollback_is_bounded() {
+    let mut t = vt(10, 2, b"");
+    for i in 0..6000 {
+        t.feed(format!("{i}\r\n").as_bytes());
+    }
+    let s = &t.screen;
+    assert_eq!(s.history(), crate::vt::SCROLLBACK);
+    assert_eq!(s.dropped, 6000 - crate::vt::SCROLLBACK as u64 - 1);
+    let first = s.line(s.dropped).unwrap();
+    assert_eq!((s.text((s.dropped, 0), (s.dropped, 9)), first.cells.len()), ("999".to_string(), 3), "kept rows hold only what shows");
+    let mut t = vt(10, 2, b"1\r\n2\r\n3\x1b[3J");
+    assert_eq!(t.screen.history(), 0);
+    t.screen.scroll_view(5);
+    assert_eq!(t.screen.scroll, 0);
+}
+
+#[test]
+fn terminal_pty_round_trip() {
+    use crate::terminal::Pty;
+    use std::process::Command;
+    let wait = |p: &Pty, ok: &dyn Fn(&crate::vt::Screen) -> bool| {
+        let t0 = Instant::now();
+        while !ok(&p.shared.term().screen) {
+            assert!(t0.elapsed() < Duration::from_secs(5), "timed out: {:?}", vt_rows(&p.shared.term()));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let ctx = egui::Context::default();
+    let mut sh = Command::new("/bin/sh");
+    sh.args(["-c", "printf hi"]);
+    let p = Pty::spawn(sh, 40, 5, ctx.clone()).unwrap();
+    wait(&p, &|s| s.row_text(0) == "hi");
+    let t0 = Instant::now();
+    while !p.shared.ended() {
+        assert!(t0.elapsed() < Duration::from_secs(5), "the reader sees the end");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The terminal echoes what is typed, then cat writes it back.
+    let mut p = Pty::spawn(Command::new("cat"), 40, 5, ctx.clone()).unwrap();
+    p.write(b"abc\r");
+    wait(&p, &|s| s.row_text(0) == "abc" && s.row_text(1) == "abc");
+    let pid = p.pid().unwrap();
+    drop(p);
+    let t0 = Instant::now();
+    while Path::new(&format!("/proc/{pid}")).exists() {
+        assert!(t0.elapsed() < Duration::from_secs(5), "hung up and reaped");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // A new size reaches the program.
+    let mut sh = Command::new("/bin/sh");
+    sh.args(["-c", "sleep 0.3; stty size"]);
+    let p = Pty::spawn(sh, 40, 5, ctx).unwrap();
+    p.resize(33, 7);
+    wait(&p, &|s| s.row_text(0) == "7 33");
+}
