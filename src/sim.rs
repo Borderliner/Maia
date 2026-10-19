@@ -2688,8 +2688,11 @@ mod journeys {
         v.sort_by(|a, b| a.total_cmp(b));
         let p95 = v.get(v.len() * 95 / 100).copied().unwrap_or(0.0);
         assert!(p95 < 40.0, "frames while streaming: p95 {p95:.1} ms");
+        // A desktop's /usr is near 100k files; a build server's can be several times that,
+        // and filtering and sorting take time in step with it.
+        let budget = 200.0 * (n as f32 / 200_000.0).max(1.0);
         let worst = s.frame_ms.iter().cloned().fold(0.0f32, f32::max);
-        assert!(worst < 200.0, "slowest interaction frame {worst:.1} ms");
+        assert!(worst < budget, "slowest interaction frame {worst:.1} ms of {budget:.0} for {n} files");
     }
 
     /// Tree view, "expand all" over thousands of folders: drawing stays smooth while the

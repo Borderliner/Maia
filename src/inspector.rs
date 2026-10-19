@@ -2437,8 +2437,9 @@ pub(crate) fn syntax_color(k: crate::syntax::Kind, pal: &theme::Palette) -> Colo
 
 /// Rows of wrapped text: each is (line, byte where the row starts in that line).
 pub(crate) struct Wrapped {
-    /// Columns, and which text (its line count and where its lines live) they are for.
-    key: (usize, usize, usize),
+    /// Columns, and which text (its line count, where its lines live, and its first and
+    /// last line's own text) they are for.
+    key: (usize, usize, usize, (usize, usize), (usize, usize)),
     pub(crate) rows: Vec<(u32, u32)>,
 }
 
@@ -2546,7 +2547,9 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
     let rows: Option<&[(u32, u32)]> = match wrapped {
         Some(slot) => {
             let cols = (((inner.max_rect().width() - gutter - 22.0) / cw.max(1.0)) as usize).max(8);
-            let key = (cols, lines.len(), lines.as_ptr() as usize);
+            // The lines' own buffers too: a text read again can get the old list's address.
+            let ends = |l: Option<&String>| l.map_or((0, 0), |l| (l.as_ptr() as usize, l.len()));
+            let key = (cols, lines.len(), lines.as_ptr() as usize, ends(lines.first()), ends(lines.last()));
             if slot.as_ref().map(|w| w.key) != Some(key) {
                 let mut rows = Vec::with_capacity(lines.len());
                 let mut starts = vec![];
@@ -2648,6 +2651,9 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
                 continue;
             };
             let b = b.min(line.len());
+            if a > b || !line.is_char_boundary(a) || !line.is_char_boundary(b) {
+                continue;
+            }
             if marked == Some(li) {
                 p.rect_filled(Rect::from_min_size(pos2(r.left(), top), vec2(r.width(), row_h)), CornerRadius::ZERO, pal.accent.gamma_multiply(0.18));
             }

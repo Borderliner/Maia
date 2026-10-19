@@ -24,8 +24,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg imagemagick exiv2 poppler-utils \
-            p7zip-full zip libarchive-tools sqlite3 woff2 dbus libglib2.0-bin fontconfig ffmpegthumbnailer evince
-          # A desktop's thumbnailer for music covers, which no Ubuntu package installs alone.
+            p7zip-full zip libarchive-tools sqlite3 woff2 dbus libglib2.0-bin fontconfig ffmpegthumbnailer
+          # Thumbnailers a desktop has: music covers (no Ubuntu package installs one alone)
+          # and PDFs (evince's is held to AppArmor's paths, which the sandbox is not on).
+          printf '#!/bin/sh\npdftoppm -png -singlefile -scale-to "$1" "$2" "$3.p" && mv "$3.p.png" "$3"\n' | sudo tee /usr/local/bin/pdf-thumbnail >/dev/null
+          sudo chmod +x /usr/local/bin/pdf-thumbnail
+          printf '[Thumbnailer Entry]\nTryExec=pdf-thumbnail\nExec=pdf-thumbnail %%s %%i %%o\nMimeType=application/pdf;\n' | sudo tee /usr/share/thumbnailers/pdf.thumbnailer >/dev/null
           printf '[Thumbnailer Entry]\nTryExec=ffmpeg\nExec=ffmpeg -loglevel quiet -y -i %%i -an -frames:v 1 -vf scale=%%s:-2 -f image2 -c:v png %%o\nMimeType=audio/mpeg;audio/flac;audio/ogg;audio/mp4;\n' \
             | sudo tee /usr/share/thumbnailers/ffmpeg-audio.thumbnailer >/dev/null
           # Ubuntu's ImageMagick 6 has no magick command; the app and tests call it so.
