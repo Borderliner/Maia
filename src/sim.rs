@@ -6277,6 +6277,181 @@ mod journeys {
         report("gitbranches", &s);
     }
 
+    fn toast_starts(s: &Sim, want: &str) -> bool {
+        s.app.toast.as_ref().is_some_and(|t| t.0.starts_with(want))
+    }
+
+    /// The commit's menu in the history, as someone tidying up a line of work uses it: a
+    /// branch and an annotated tag made at an old commit (both shown on its row at once),
+    /// a commit from another branch cherry-picked by keyboard, stopping at a conflict
+    /// that is settled on the Changes page and continued, the branch reset to the commit
+    /// before it with the uncommitted work kept in the stash, branches deleted from the
+    /// branch menu (one not merged only when asked again), and two lines of a hunk
+    /// picked and staged alone.
+    #[test]
+    fn git_commit_menu() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let home = fixture("gitcommitmenu");
+        let repo = home.join("Code/notes");
+        std::fs::create_dir_all(&repo).unwrap();
+        let g = |args: &[&str]| crate::tests::git(&repo, args);
+        crate::tests::work_repo(&repo);
+        let numbered: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(repo.join("list.txt"), &numbered).unwrap();
+        std::fs::write(repo.join("notes.txt"), "one\ntwo\nthree\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "Start the notes"]);
+        let start = git_out(&repo, &["rev-parse", "HEAD"]);
+        g(&["switch", "-q", "-c", "topic"]);
+        std::fs::write(repo.join("notes.txt"), "one\nTWO from topic\nthree\n").unwrap();
+        g(&["commit", "-qam", "Shout the second note"]);
+        let shout = git_out(&repo, &["rev-parse", "HEAD"]);
+        g(&["switch", "-q", "main"]);
+        std::fs::write(repo.join("notes.txt"), "one\ntwo on main\nthree\n").unwrap();
+        g(&["commit", "-qam", "Reword the second note"]);
+        let reword = git_out(&repo, &["rev-parse", "HEAD"]);
+        let mut s = Sim::new(&repo, vec2(1280.0, 800.0));
+        wait_until(&mut s, "branch read", 10, |s| branch_now(s) == "main");
+        s.idle(2);
+        open_history(&mut s);
+        wait_until(&mut s, "history", 30, |s| history(s).is_some_and(|h| h.1 && h.0 == 3));
+        s.idle(3);
+        // A right click on the first commit: its menu, under its hash and subject.
+        right_click_in_inspector(&mut s, "Start the notes");
+        assert!(matches!(s.app.popup, Popup::GitCommit(_)), "the commit's menu");
+        s.idle(3);
+        for t in [&start[..7], "Check out this commit", "Create branch here…", "Create tag here…", "Cherry-pick onto main", "Revert", "Reset main to here…", "Copy hash"] {
+            assert!(some_text(&s, t), "{t:?} in the menu");
+        }
+        look(&mut s, "commit menu");
+        s.shot("commit-menu");
+        // A branch there, not switched to.
+        s.click_text("Create branch here…");
+        assert!(matches!(s.app.popup, Popup::NewRef(_)));
+        s.act("text spike");
+        s.idle(12);
+        assert!(some_text(&s, &format!("New branch at {}", &start[..7])) && some_text(&s, "Create and switch"));
+        s.shot("commit-new-branch");
+        s.act("key Enter");
+        wait_until(&mut s, "the branch", 10, |s| toast_is(s, &format!("Created spike at {}", &start[..7])));
+        assert_eq!((git_out(&repo, &["rev-parse", "spike"]), branch_now(&s)), (start.clone(), "main".to_string()));
+        wait_until(&mut s, "its pill", 10, |s| some_text(s, "spike"));
+        // A tag with a message: an annotated one.
+        right_click_in_inspector(&mut s, "Start the notes");
+        s.click_text("Create tag here…");
+        s.act("text v0.1");
+        click_control(&mut s, "tag message");
+        s.act("text The first cut");
+        s.idle(12);
+        s.shot("commit-new-tag");
+        s.act("key Enter");
+        wait_until(&mut s, "tagged", 10, |s| toast_is(s, &format!("Tagged {} as v0.1", &start[..7])));
+        assert_eq!(git_out(&repo, &["cat-file", "-t", "v0.1"]), "tag");
+        wait_until(&mut s, "its pill", 10, |s| some_text(s, "v0.1"));
+        // Cherry-picked by keyboard: to the commit, Shift+F10, down to the item, Enter.
+        let at = (0..3).find(|&i| git_hist(&s).hash(i).as_deref() == Some(shout.as_str())).unwrap_or_else(|| s.fail("the topic's commit listed"));
+        s.act("key Home");
+        for _ in 0..at {
+            s.act("key ArrowDown");
+        }
+        s.act("key shift+F10");
+        assert!(matches!(&s.app.popup, Popup::GitCommit(m) if m.hash == shout && m.sel == 0), "the selected commit's menu, ready for the keys");
+        for _ in 0..3 {
+            s.act("key ArrowDown");
+        }
+        s.idle(12);
+        s.shot("commit-menu-keyboard");
+        s.act("key Enter");
+        assert!(!s.popup_open());
+        wait_until(&mut s, "the Changes page", 20, |s| changes(s).open && changes(s).unstaged.contains(&"notes.txt".to_string()));
+        s.idle(3);
+        see(&mut s, "Cherry-picking · 1 file in conflict");
+        click_in_inspector(&mut s, "notes.txt", "click");
+        wait_until(&mut s, "the conflict shown", 10, |s| s.texts.iter().any(|(_, t)| t == "Keep both"));
+        s.idle(3);
+        look(&mut s, "cherry-pick conflict");
+        s.shot("cherry-pick-conflict");
+        click_control(&mut s, "keep theirs");
+        wait_until(&mut s, "settled", 20, |s| changes(s).staged.contains(&"notes.txt".to_string()) && !changes(s).busy);
+        click_control(&mut s, "conflict continue");
+        wait_until(&mut s, "picked", 20, |s| matches!(changes(s).said, Some(Ok(ref m)) if m == "Finished the cherry-pick"));
+        assert_eq!(git_out(&repo, &["log", "-1", "--format=%s"]), "Shout the second note");
+        s.act("key Escape");
+        wait_until(&mut s, "the graph read again", 20, |s| history(s).is_some_and(|h| h.1 && h.0 == 4));
+        // Reset to the commit before, discarding: what isn't committed is stashed first.
+        std::fs::write(repo.join("notes.txt"), "one\nscribbled\nthree\n").unwrap();
+        crate::gitstatus::rescan(&repo);
+        let picked = git_out(&repo, &["rev-parse", "--short", "HEAD"]);
+        right_click_in_inspector(&mut s, "Reword the second note");
+        s.click_text("Reset main to here…");
+        assert!(matches!(s.app.popup, Popup::Choose { .. }), "asked how");
+        s.idle(12);
+        assert!(some_text(&s, "Keep changes") && some_text(&s, "Discard changes"));
+        assert!(matches!(&s.app.popup, Popup::Choose { choices, .. } if !choices[0].1 && choices[1].1), "Discard is the risky one, never Enter's");
+        s.shot("commit-reset");
+        s.click_text("Discard changes");
+        wait_until(&mut s, "reset", 10, |s| toast_starts(s, &format!("Reset main to {} · it was at {picked}", &reword[..7])));
+        assert!(toast_starts(&s, "Reset main") && s.app.toast.as_ref().unwrap().0.ends_with("your changes kept in the stash"));
+        assert_eq!(git_out(&repo, &["rev-parse", "HEAD"]), reword);
+        assert!(git_out(&repo, &["stash", "list"]).contains("Before resetting main in Maia"));
+        wait_until(&mut s, "the graph read again", 20, |s| history(s).is_some_and(|h| h.1 && h.0 == 3));
+        // The branch menu: a branch's own menu on a right click; spike is merged and goes,
+        // topic only when asked again.
+        open_branches(&mut s);
+        let r = s.text_rect("spike");
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        assert!(matches!(s.app.popup, Popup::Branch { .. }), "the branch's menu");
+        s.idle(12);
+        assert!(some_text(&s, "Switch to it") && some_text(&s, "Rename…") && some_text(&s, "Delete"));
+        s.shot("branch-actions");
+        s.click_text("Delete");
+        wait_until(&mut s, "deleted", 10, |s| toast_is(s, &format!("Deleted spike · it was at {}", &start[..7])));
+        open_branches(&mut s);
+        let at = 1 + branch_menu(&s).unwrap().refs.as_ref().unwrap().local.iter().position(|b| b.name == "topic").unwrap();
+        for _ in 0..at {
+            s.act("key ArrowDown");
+        }
+        s.act("key Delete");
+        wait_until(&mut s, "asked again", 10, |s| matches!(s.app.popup, Popup::Choose { .. }));
+        s.idle(12);
+        assert!(some_text(&s, "topic has commits no other branch has"));
+        s.shot("branch-unmerged");
+        s.click_text("Delete anyway");
+        wait_until(&mut s, "deleted anyway", 10, |s| toast_starts(s, "Deleted topic · it was at "));
+        assert_eq!(git_out(&repo, &["branch", "--format=%(refname:short)"]), "main");
+        // Two lines of a hunk staged on their own: the new ones, not the changed one.
+        std::fs::write(repo.join("list.txt"), numbered.replace("line 3\n", "line three\n").replace("line 4\n", "line 4\nnew A\nnew B\n")).unwrap();
+        crate::gitstatus::rescan(&repo);
+        wait_until(&mut s, "the change", 10, |s| changes(s).unstaged == ["list.txt"]);
+        s.idle(3);
+        click_in_inspector(&mut s, "Changes", "click");
+        wait_until(&mut s, "the page", 5, |s| changes(s).open);
+        click_in_inspector(&mut s, "list.txt", "click");
+        wait_until(&mut s, "the diff", 10, |s| changes(s).inline == [(false, "list.txt".to_string(), 1)]);
+        s.idle(3);
+        // A click picks a line and another lets it go; Shift picks the run between.
+        for (label, with) in [("-line 3", ""), ("-line 3", ""), ("+new A", ""), ("+new B", "left shift")] {
+            let r = see(&mut s, label);
+            s.act(&format!("click {:.0} {:.0} {with}", r.center().x, r.center().y));
+            s.idle(2);
+        }
+        see(&mut s, "Stage 2 lines");
+        look(&mut s, "lines picked");
+        s.shot("lines-picked");
+        click_control(&mut s, "stage lines");
+        wait_until(&mut s, "staged", 10, |s| !changes(s).busy && changes(s).staged == ["list.txt"]);
+        assert!(matches!(changes(&s).said, Some(Ok(ref m)) if m == "Staged 2 lines"), "{:?}", changes(&s).said);
+        let cached = git_out(&repo, &["diff", "--cached"]);
+        assert_eq!(&cached[cached.find("@@").unwrap()..], "@@ -2,6 +2,8 @@ line 1\n line 2\n line 3\n line 4\n+new A\n+new B\n line 5\n line 6\n line 7");
+        assert_eq!(changes(&s).unstaged, ["list.txt"], "the changed line stays unstaged");
+        wait_until(&mut s, "the rest read again", 10, |s| !some_text(s, "Stage 2 lines"));
+        look(&mut s, "lines staged");
+        s.shot("lines-staged");
+        report("gitcommitmenu", &s);
+    }
+
     /// The colour `label` was last drawn in.
     fn color_of(s: &Sim, label: &str) -> egui::Color32 {
         let i = s.texts.iter().rposition(|(_, t)| t == label).unwrap_or_else(|| s.fail(&format!("no {label:?} on screen")));
