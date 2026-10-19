@@ -503,6 +503,7 @@ fn move_one(s: &PathBuf, dest: &Path, policy: Conflict, p: &Mutex<Progress>, can
         // Cross-device: copy, put in place, and only then delete the original.
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             p.lock().unwrap().total_bytes += tree_size(s);
+            let skipped = p.lock().unwrap().errors.len();
             let r = copy_tree(s, &d.to, p, cancel, ctx, merge).and_then(|_| match &d.replace {
                 Some(t) => swap_in(&d.to, t),
                 None => Ok(()),
@@ -510,7 +511,7 @@ fn move_one(s: &PathBuf, dest: &Path, policy: Conflict, p: &Mutex<Progress>, can
             if r.is_err() && fresh {
                 let _ = remove_tree(&d.to);
             }
-            r.and_then(|_| remove_tree(s))
+            r.and_then(|_| copy_is_whole(dest, skipped, p)).and_then(|_| remove_tree(s))
         }
         Err(e) => Err(e),
     };
@@ -637,6 +638,20 @@ fn resolve_dest(src: &Path, dest_dir: &Path, conflict: &Conflict, p: &Mutex<Prog
     }
 }
 
+/// Before a cross-device move deletes the original: nothing in it was skipped (a special
+/// file, say), and the copy is on the destination's disk rather than only in the page
+/// cache, where a write error would surface after the original is gone. If not, both stay.
+fn copy_is_whole(dest: &Path, skipped: usize, p: &Mutex<Progress>) -> std::io::Result<()> {
+    if p.lock().unwrap().errors.len() > skipped {
+        return Err(std::io::Error::other("not all of it could be copied, so the original was kept"));
+    }
+    let dir = fs::File::open(dest)?;
+    if unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(&dir)) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Put a finished part in place of what it replaces: the old one to the trash, where it
 /// can be had back (removed only when the trash can't take it), then the part renamed.
 fn swap_in(part: &Path, target: &Path) -> std::io::Result<()> {
@@ -718,7 +733,9 @@ fn copy_tree(
         if !(merge && dst.is_dir()) {
             fs::create_dir(dst)?;
         }
-        for de in fs::read_dir(src)?.flatten() {
+        for de in fs::read_dir(src)? {
+            // An entry that can't be read fails the copy rather than going missing from it.
+            let de = de?;
             let child = dst.join(de.file_name());
             let there = fs::symlink_metadata(&child).ok();
             if merge && there.as_ref().is_some_and(|m| !m.is_dir()) {
