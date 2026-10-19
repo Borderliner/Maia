@@ -5165,7 +5165,7 @@ mod journeys {
             return;
         }
         let home = fixture("themes");
-        std::fs::write(home.join("Documents/main.rs"), "// demo\nfn main() {\n    let x: u32 = 42;\n    println!(\"{x}\");\n}\n").unwrap();
+        std::fs::write(home.join("Documents/main.rs"), "// demo\nfn main() {\n    let x: u32 = 42;\n    println!(\"{x}\\n\");\n}\n\n#[derive(Debug)]\nstruct Point<'a> { name: &'a str, x: f64 }\n\nimpl Point<'_> {\n    const ORIGIN: f64 = 0.0;\n    fn norm(&self) -> Option<f64> { Some(self.x.abs()) }\n}\n").unwrap();
         let mut s = Sim::new(&home.join("Documents"), vec2(1280.0, 800.0));
         use crate::theme::{Syntax, ThemeName};
         assert_eq!(s.app.pal.syntax, Syntax::of(ThemeName::Midnight), "code in the theme's colours by default");
@@ -7449,6 +7449,18 @@ mod journeys {
         assert!(some_text(&s, "fn main() {"), "with the line before it");
         assert!(s.texts.iter().any(|(_, t)| t.starts_with("In ~/codesearch/Code/app · 308 lines in 4 files")), "the status says where and how much: {:?}", s.texts.iter().filter(|t| t.1.starts_with("In ")).collect::<Vec<_>>());
         shot_still(&mut s, "code-search");
+        // Each line in its language's colours, worked out by the search rather than the
+        // frame; a light theme draws them in its own.
+        let main = code(&s).results.iter().find(|f| f.rel == "src/main.rs").unwrap();
+        let kinds: Vec<crate::syntax::Kind> = main.hits.iter().flat_map(|h| h.syntax.iter().flatten().map(|x| x.2)).collect();
+        for k in [crate::syntax::Kind::Keyword, crate::syntax::Kind::Function] {
+            assert!(kinds.contains(&k), "{k:?} among {kinds:?}");
+        }
+        s.app.cfg.theme = crate::theme::ThemeName::Latte;
+        s.idle(3);
+        shot_still(&mut s, "code-search-latte");
+        s.app.cfg.theme = crate::theme::ThemeName::default();
+        s.idle(3);
         // The rest of a long file is counted at its end.
         for _ in 0..60 {
             if some_text(&s, "200 more lines in this file") {

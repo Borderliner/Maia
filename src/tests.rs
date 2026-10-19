@@ -1195,7 +1195,7 @@ fn syntax_highlighting_tokens() {
     }
     let rs = spans("main.rs", &["fn main() { let s = \"a \\\" b\"; // done", "/* multi", " line */ let x: u32 = 42;"]);
     assert!(rs.contains(&(0, "fn".into(), Kind::Keyword)));
-    assert!(rs.contains(&(0, "\"a \\\" b\"".into(), Kind::Str)), "escaped quote stays inside the string: {rs:?}");
+    assert!(rs.contains(&(0, "\"a ".into(), Kind::Str)) && rs.contains(&(0, "\\\"".into(), Kind::Constant)) && rs.contains(&(0, " b\"".into(), Kind::Str)), "an escaped quote stays inside the string, picked out: {rs:?}");
     assert!(rs.contains(&(0, "// done".into(), Kind::Comment)));
     assert!(rs.contains(&(1, "/* multi".into(), Kind::Comment)));
     assert!(rs.contains(&(2, " line */".into(), Kind::Comment)), "block comment carried to the next line");
@@ -1219,10 +1219,118 @@ fn syntax_highlighting_tokens() {
     assert!(lang_for("Makefile").is_some() && lang_for("photo.png").is_none() && lang_for("notes.txt").is_none());
 }
 
+/// What a name is, read from what is around it, in real code of each kind: functions
+/// defined and called, types by declaration and by case, fields after a dot, keys in data,
+/// attributes, macros, decorators, lifetimes, constants, escapes and shell variables.
+#[test]
+fn syntax_highlighting_reads_names_from_their_place() {
+    use crate::syntax::{highlight, lang_for, Kind};
+    let spans = |name: &str, src: &[&str]| {
+        let lines: Vec<String> = src.iter().map(|s| s.to_string()).collect();
+        let hl = highlight(lang_for(name).expect(name), &lines, 1000);
+        hl.iter().enumerate().flat_map(|(n, v)| v.iter().map(|&(a, b, k)| (n, lines[n][a..b].to_string(), k)).collect::<Vec<_>>()).collect::<Vec<_>>()
+    };
+    let has = |got: &[(usize, String, Kind)], n: usize, text: &str, k: Kind| assert!(got.contains(&(n, text.to_string(), k)), "{text:?} as {k:?} on line {n}: {got:?}");
+    let rs = spans("lib.rs", &["#[derive(Debug, Clone)]", "pub struct Point<'a> { name: &'a str }", "fn main() { let p = Point::new(); println!(\"{}\\n\", p.name); let c = '\\n'; const MAX_LEN: usize = 4; }", "for i in 0..10 { x != y }"]);
+    has(&rs, 0, "#[derive(Debug, Clone)]", Kind::Meta);
+    has(&rs, 1, "Point", Kind::Type);
+    has(&rs, 1, "'a", Kind::Meta);
+    has(&rs, 2, "main", Kind::Function);
+    has(&rs, 2, "Point", Kind::Type);
+    has(&rs, 2, "new", Kind::Function);
+    has(&rs, 2, "println!", Kind::Meta);
+    has(&rs, 2, "\\n", Kind::Constant);
+    has(&rs, 2, "name", Kind::Property);
+    has(&rs, 2, "MAX_LEN", Kind::Constant);
+    has(&rs, 3, "0", Kind::Number);
+    has(&rs, 3, "10", Kind::Number);
+    assert!(!rs.iter().any(|(n, t, _)| *n == 3 && t.starts_with('x')), "x != y is no macro: {rs:?}");
+    let py = spans("shapes.py", &["@dataclass", "class Box(Base):", "    def area(self) -> int:", "        return self.w * MAX if x is None else len(self.items)"]);
+    has(&py, 0, "@dataclass", Kind::Meta);
+    has(&py, 1, "Box", Kind::Type);
+    has(&py, 1, "Base", Kind::Type);
+    has(&py, 2, "area", Kind::Function);
+    has(&py, 3, "w", Kind::Property);
+    has(&py, 3, "MAX", Kind::Constant);
+    has(&py, 3, "None", Kind::Constant);
+    has(&py, 3, "len", Kind::Function);
+    has(&py, 3, "items", Kind::Property);
+    let js = spans("app.ts", &["export function load(url: string): Promise<Data> {", "  return new Client(url).fetch(`${url}/x`);"]);
+    has(&js, 0, "load", Kind::Function);
+    has(&js, 0, "string", Kind::Type);
+    has(&js, 0, "Data", Kind::Type);
+    has(&js, 1, "Client", Kind::Type);
+    has(&js, 1, "fetch", Kind::Function);
+    let json = spans("package.json", &["{\"name\": \"maia\", \"n\": 1, \"ok\": true, \"none\": null}"]);
+    has(&json, 0, "\"name\"", Kind::Property);
+    has(&json, 0, "\"maia\"", Kind::Str);
+    has(&json, 0, "1", Kind::Number);
+    has(&json, 0, "true", Kind::Constant);
+    has(&json, 0, "null", Kind::Constant);
+    let yaml = spans("ci.yml", &["jobs:", "  - name: build", "    run: cargo test # all of it", "    enabled: true"]);
+    has(&yaml, 0, "jobs", Kind::Property);
+    has(&yaml, 1, "name", Kind::Property);
+    has(&yaml, 2, "run", Kind::Property);
+    has(&yaml, 2, "# all of it", Kind::Comment);
+    has(&yaml, 3, "true", Kind::Constant);
+    let toml = spans("Cargo.toml", &["[package]", "name = \"maia\"", "edition = 2024"]);
+    has(&toml, 0, "[package]", Kind::Type);
+    has(&toml, 1, "name", Kind::Property);
+    has(&toml, 1, "\"maia\"", Kind::Str);
+    let sh = spans("run.sh", &["echo \"home is $HOME and ${USER}\" '$NOT' $1", "build() { make -j\"$(nproc)\"; }"]);
+    has(&sh, 0, "$HOME", Kind::Property);
+    has(&sh, 0, "${USER}", Kind::Property);
+    has(&sh, 0, "'$NOT'", Kind::Str);
+    has(&sh, 0, "$1", Kind::Property);
+    has(&sh, 1, "build", Kind::Function);
+    let html = spans("page.html", &["<a href=\"x\" data-id='1'>it's &amp; done</a>"]);
+    has(&html, 0, "<a", Kind::Keyword);
+    has(&html, 0, "href", Kind::Property);
+    has(&html, 0, "data-id", Kind::Property);
+    has(&html, 0, "'1'", Kind::Str);
+    has(&html, 0, "&amp;", Kind::Constant);
+    assert!(!html.iter().any(|(_, t, k)| *k == Kind::Str && t.starts_with("'s")), "an apostrophe in text starts no string: {html:?}");
+    let css = spans("site.css", &["a:hover {", "  font-size: -1.5em;", "  color: #fff;", "}"]);
+    has(&css, 1, "font-size", Kind::Property);
+    has(&css, 1, "1.5em", Kind::Number);
+    has(&css, 2, "color", Kind::Property);
+    has(&css, 2, "#fff", Kind::Number);
+    let sql = spans("q.sql", &["SELECT count(*) FROM t WHERE x IS NULL"]);
+    has(&sql, 0, "SELECT", Kind::Keyword);
+    has(&sql, 0, "count", Kind::Function);
+    has(&sql, 0, "IS", Kind::Keyword);
+    has(&sql, 0, "NULL", Kind::Constant);
+    let go = spans("main.go", &["fmt.Println(`raw \\n`, nil)"]);
+    has(&go, 0, "Println", Kind::Function);
+    has(&go, 0, "`raw \\n`", Kind::Str);
+    has(&go, 0, "nil", Kind::Constant);
+    let c = spans("main.c", &["#include <stdio.h>", "if (p == NULL) return MAX(a, b);"]);
+    has(&c, 0, "#include", Kind::Keyword);
+    has(&c, 0, "<stdio.h>", Kind::Str);
+    has(&c, 1, "NULL", Kind::Constant);
+    has(&c, 1, "MAX", Kind::Function);
+    let md = spans("README.md", &["- see [the docs](https://example.org) now", "> quoted", "1. first"]);
+    has(&md, 0, "-", Kind::Meta);
+    has(&md, 0, "[the docs]", Kind::Property);
+    has(&md, 0, "(https://example.org)", Kind::Str);
+    has(&md, 1, "> quoted", Kind::Comment);
+    has(&md, 2, "1.", Kind::Meta);
+    let mk = spans("Makefile", &["\t$(CC) -o $@ $^"]);
+    has(&mk, 0, "$(CC)", Kind::Property);
+    has(&mk, 0, "$@", Kind::Property);
+    let docker = spans("Dockerfile", &["FROM rust:1 AS build", "RUN cargo build --release"]);
+    has(&docker, 0, "FROM", Kind::Keyword);
+    has(&docker, 0, "AS", Kind::Keyword);
+    has(&docker, 1, "RUN", Kind::Keyword);
+    for name in ["CMakeLists.txt", "flake.nix", "Main.hs", "app.ex", "plot.R", "fit.jl", "x.pl", ".vimrc", "api.proto", "schema.graphql", "main.tf", "build.ps1", "lib.ml", "App.svelte", "Containerfile"] {
+        assert!(lang_for(name).is_some(), "{name}");
+    }
+}
+
 #[test]
 fn syntax_highlighting_never_panics_and_spans_stay_on_char_boundaries() {
     use crate::syntax::{highlight, lang_for};
-    let pieces = ["fn", " ", "\"", "'", "`", "\\", "/*", "*/", "//", "#", "<!--", "-->", "\"\"\"", "日本", "é", "😀", "<a", "42", "x", "\t", "--", "--[[", "]]"];
+    let pieces = ["fn", " ", "\"", "'", "`", "\\", "/*", "*/", "//", "#", "<!--", "-->", "\"\"\"", "日本", "é", "😀", "<a", "42", "x", "\t", "--", "--[[", "]]", "#[", "#![", "'a", "$", "${", "$(", "@", "&", ";", "[", "](", ")", "-", ":", "=", "!", "<#", ".", "\\u{", "\\x", "Name", "MAX", "- ", "1. ", ">", "''"];
     let mut x: u64 = 0xdead_beef;
     let mut next = || {
         x ^= x << 13;
@@ -1231,11 +1339,14 @@ fn syntax_highlighting_never_panics_and_spans_stay_on_char_boundaries() {
         x
     };
     let lines: Vec<String> = (0..3000).map(|_| (0..(next() % 14)).map(|_| pieces[(next() % pieces.len() as u64) as usize]).collect()).collect();
-    for name in ["a.rs", "a.c", "a.ts", "a.py", "a.sh", "a.go", "a.java", "a.lua", "a.rb", "a.php", "a.sql", "a.zig", "a.json", "a.toml", "a.yaml", "a.css", "a.html", "a.md", "Makefile"] {
+    for name in ["a.rs", "a.c", "a.ts", "a.py", "a.sh", "a.go", "a.java", "a.lua", "a.rb", "a.php", "a.sql", "a.zig", "a.json", "a.toml", "a.yaml", "a.css", "a.html", "a.md", "Makefile", "Dockerfile", "a.nix", "a.hs", "a.ex", "a.r", "a.jl", "a.pl", "a.vim", "CMakeLists.txt", "a.proto", "a.graphql", "a.tf", "a.ps1", "a.ml"] {
         let hl = highlight(lang_for(name).unwrap(), &lines, 10_000);
         for (line, spans) in lines.iter().zip(&hl) {
+            let mut end = 0;
             for &(a, b, _) in spans {
                 assert!(a < b && b <= line.len() && line.is_char_boundary(a) && line.is_char_boundary(b), "{name}: bad span {a}..{b} in {line:?}");
+                assert!(a >= end, "{name}: spans overlap at {a} in {line:?}: {spans:?}");
+                end = b;
             }
         }
     }
@@ -3298,7 +3409,7 @@ fn themes_and_their_code_colours_are_readable() {
         assert!(contrast(p.text, p.panel) >= 7.0, "{}: text {:.1}", t.label(), contrast(p.text, p.panel));
         assert!(contrast(p.text_dim, p.panel) >= 3.0, "{}: dim text {:.1}", t.label(), contrast(p.text_dim, p.panel));
         for s in [p.syntax, Syntax::classic(p.dark)] {
-            for (what, c, min) in [("keyword", s.keyword, 3.0), ("type", s.kind, 3.0), ("string", s.string, 3.0), ("number", s.number, 3.0), ("comment", s.comment, 2.0)] {
+            for (what, c, min) in [("keyword", s.keyword, 3.0), ("type", s.kind, 3.0), ("string", s.string, 3.0), ("number", s.number, 3.0), ("comment", s.comment, 2.0), ("function", s.function, 3.0), ("property", s.property, 3.0), ("meta", s.meta, 3.0)] {
                 assert!(contrast(c, p.panel) >= min, "{}: {what} {:.2}", t.label(), contrast(c, p.panel));
             }
         }
@@ -4121,6 +4232,35 @@ fn code_search_context_lines() {
     // The first line has nothing before it.
     let (h, _) = hits_in("needle\nnext\n", &Matcher::new("needle", false, false, false).unwrap(), None, 100, &mut low, &mut sp);
     assert_eq!((h[0].before.as_deref(), h[0].after.as_deref()), (None, Some("next")));
+}
+
+/// Search Code colours what it finds as the file's language: a match inside a block
+/// comment reads as comment (the file is read from its top), the code around a match is
+/// highlighted too, and a file in no known language stays plain.
+#[test]
+fn code_search_highlights_its_lines() {
+    use crate::syntax::Kind;
+    let d = tmpdir("code-colours");
+    touch(&d.join("src/main.rs"), "fn main() {\n    /* the start\n       needle inside it */\n    let needle = MAX.len();\n    run();\n}\n");
+    touch(&d.join("notes.txt"), "a needle in a note\n");
+    let ctx = egui::Context::default();
+    let q = crate::codesearch::Query { text: "needle".into(), ..Default::default() };
+    let found = crate::codesearch::Search::start(d.clone(), false, &q, &ctx).unwrap().wait();
+    let file = |rel: &str| found.iter().find(|f| f.rel == rel).unwrap_or_else(|| panic!("{rel} in {:?}", found.iter().map(|f| &f.rel).collect::<Vec<_>>()));
+    let rs = file("src/main.rs");
+    let kinds = |text: &str, spans: &[(usize, usize, Kind)]| spans.iter().map(|&(a, b, k)| (text[a..b].to_string(), k)).collect::<Vec<_>>();
+    let inside = &rs.hits[0];
+    assert_eq!(inside.line, 3);
+    assert_eq!(kinds(&inside.text, &inside.syntax[1]), [("needle inside it */".to_string(), Kind::Comment)]);
+    assert_eq!(kinds(inside.before.as_deref().unwrap(), &inside.syntax[0]), [("/* the start".to_string(), Kind::Comment)]);
+    let code = &rs.hits[1];
+    let got = kinds(&code.text, &code.syntax[1]);
+    for want in [("let", Kind::Keyword), ("MAX", Kind::Constant), ("len", Kind::Function)] {
+        assert!(got.contains(&(want.0.to_string(), want.1)), "{want:?} in {got:?}");
+    }
+    assert_eq!(kinds(code.after.as_deref().unwrap(), &code.syntax[2]), [("run".to_string(), Kind::Function)]);
+    assert!(file("notes.txt").hits[0].syntax.iter().all(Vec::is_empty), "plain text has no colours");
+    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// A search stops at MAX_MATCHES lines and says so; a file shows PER_FILE lines and
@@ -9119,3 +9259,4 @@ fn a_dropped_watch_lets_go_of_its_descriptor() {
     assert_eq!(fds(), before, "both closed, with or without a folder watched");
     let _ = std::fs::remove_dir_all(&d);
 }
+

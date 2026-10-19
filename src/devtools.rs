@@ -248,27 +248,53 @@ impl CodeState {
     }
 }
 
-/// One matching line: the text in the theme's colour, the matches in the accent on a
-/// tint of it.
-fn line_job(h: &Hit, font: &FontId, col: Color32, mark: Color32, tint: Color32, width: f32) -> egui::text::LayoutJob {
+/// One matching line: the text in the theme's code colours (`code`, unless the row is
+/// selected) or its text colour, the matches in the accent on a tint of it.
+fn line_job(h: &Hit, font: &FontId, col: Color32, mark: Color32, tint: Color32, width: f32, code: Option<&Palette>) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let plain = egui::TextFormat { font_id: font.clone(), color: col, ..Default::default() };
-    let hit = egui::TextFormat { font_id: font.clone(), color: mark, background: tint, ..Default::default() };
     if h.cut.0 {
         job.append("…", 0.0, plain.clone());
     }
     let t = &h.text;
-    let mut at = 0;
-    for &(s, e) in &h.spans {
-        let (s, e) = (s.max(at).min(t.len()), e.min(t.len()));
-        if s >= e || !t.is_char_boundary(s) || !t.is_char_boundary(e) {
+    let syn = if code.is_some() { &h.syntax[1][..] } else { &[] };
+    let mut cuts: Vec<usize> = h.spans.iter().flat_map(|&(s, e)| [s, e]).chain(syn.iter().flat_map(|&(s, e, _)| [s, e])).chain([0, t.len()]).map(|x| x.min(t.len())).collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    for w in cuts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if !t.is_char_boundary(a) || !t.is_char_boundary(b) {
             continue;
         }
-        job.append(&t[at..s], 0.0, plain.clone());
-        job.append(&t[s..e], 0.0, hit.clone());
-        at = e;
+        let hit = h.spans.iter().any(|&(s, e)| s <= a && b <= e);
+        let kind = syn.iter().find(|&&(s, e, _)| s <= a && b <= e).map(|x| x.2);
+        let color = match (hit, code, kind) {
+            (true, ..) => mark,
+            (false, Some(pal), Some(k)) => crate::inspector::syntax_color(k, pal),
+            _ => col,
+        };
+        job.append(&t[a..b], 0.0, egui::TextFormat { color, background: if hit { tint } else { Color32::TRANSPARENT }, ..plain.clone() });
     }
-    job.append(&t[at..], 0.0, plain);
+    job.wrap = egui::text::TextWrapping { max_width: width.max(10.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    job
+}
+
+/// A line beside a match, a step back from it: its code colours faded, or `col`.
+fn context_job(text: &str, spans: &[(usize, usize, crate::syntax::Kind)], font: &FontId, col: Color32, code: Option<&Palette>, width: f32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let fmt = |color: Color32| egui::TextFormat { font_id: font.clone(), color, ..Default::default() };
+    let mut at = 0;
+    if let Some(pal) = code {
+        for &(s, e, k) in spans {
+            if s < at || e > text.len() || !text.is_char_boundary(s) || !text.is_char_boundary(e) {
+                continue;
+            }
+            job.append(&text[at..s], 0.0, fmt(col));
+            job.append(&text[s..e], 0.0, fmt(crate::inspector::syntax_color(k, pal).gamma_multiply(0.75)));
+            at = e;
+        }
+    }
+    job.append(&text[at..], 0.0, fmt(col));
     job.wrap = egui::text::TextWrapping { max_width: width.max(10.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
     job
 }
@@ -546,24 +572,24 @@ pub fn code_search_popup(app: &mut App, ctx: &egui::Context, st: &mut CodeState)
                             let x = r.left() + gutter + 10.0;
                             let room = r.right() - 8.0 - x;
                             let mut y = r.top() + 3.0;
-                            let context = |y: f32, n: u32, s: &str| {
+                            // Code colours on the list's background; a selected row keeps its own.
+                            let code = (!on).then_some(&pal);
+                            let context = |y: f32, n: u32, s: &str, spans: &[(usize, usize, crate::syntax::Kind)]| {
                                 p.text(pos2(r.left() + gutter, y + 0.5), Align2::RIGHT_TOP, n.to_string(), mono_small.clone(), dim.gamma_multiply(0.7));
-                                let mut job = egui::text::LayoutJob::simple_singleline(s.to_string(), mono_small.clone(), dim.gamma_multiply(0.85));
-                                job.wrap = egui::text::TextWrapping { max_width: room.max(10.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-                                let g = p.layout_job(job);
+                                let g = p.layout_job(context_job(s, spans, &mono_small, dim.gamma_multiply(0.85), code, room));
                                 p.galley(pos2(x, y + 0.5), g, dim);
                             };
                             if before {
-                                context(y, h.line - 1, h.before.as_deref().unwrap_or(""));
+                                context(y, h.line - 1, h.before.as_deref().unwrap_or(""), &h.syntax[0]);
                                 y += ctx_h + 1.0;
                             }
                             p.text(pos2(r.left() + gutter, y + (mono_h - ctx_h) / 2.0), Align2::RIGHT_TOP, h.line.to_string(), mono_small.clone(), dim);
                             let tint = if on { pal.on_sel().gamma_multiply(0.2) } else { pal.accent.gamma_multiply(0.22) };
-                            let g = p.layout_job(line_job(h, &mono, text, mark, tint, room));
+                            let g = p.layout_job(line_job(h, &mono, text, mark, tint, room, code));
                             p.galley(pos2(x, y), g, text);
                             y += mono_h + 1.0;
                             if after {
-                                context(y, h.line + 1, h.after.as_deref().unwrap_or(""));
+                                context(y, h.line + 1, h.after.as_deref().unwrap_or(""), &h.syntax[2]);
                             }
                         }
                         Row::More(fi) => {

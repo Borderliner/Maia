@@ -49,6 +49,9 @@ pub struct Hit {
     /// The lines on either side, when they hold anything.
     pub before: Option<String>,
     pub after: Option<String>,
+    /// Highlighting for the line before, this one and the one after, when the file is
+    /// code Maia knows.
+    pub syntax: [crate::syntax::Spans; 3],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -720,7 +723,7 @@ fn make_hit(text: &str, line: u32, ls: usize, le: usize, spans: &[(usize, usize)
         let ne = b[ns..].iter().position(|&c| c == b'\n').map_or(b.len(), |i| ns + i);
         neighbour(ns, ne)
     }).flatten();
-    Hit { line, text: text[start..end].to_string(), spans, cut: (cut_left, end < le), before, after }
+    Hit { line, text: text[start..end].to_string(), spans, cut: (cut_left, end < le), before, after, syntax: Default::default() }
 }
 
 /// Read and search one file. None: no match, unreadable, too big, or binary when only
@@ -742,9 +745,12 @@ fn search_file(path: &Path, m: &Matcher, also: Option<&Matcher>, todo: bool, all
         return None;
     }
     let text: Cow<str> = String::from_utf8_lossy(buf);
-    let (hits, total) = hits_in(&text, m, also, if binary { 0 } else { limit }, low, spans);
+    let (mut hits, total) = hits_in(&text, m, also, if binary { 0 } else { limit }, low, spans);
     if total == 0 {
         return None;
+    }
+    if let Some(lang) = path.file_name().and_then(|n| n.to_str()).and_then(crate::syntax::lang_for) {
+        highlight_hits(lang, &text, &mut hits);
     }
     let mut tags = [0u32; 4];
     if todo {
@@ -755,6 +761,33 @@ fn search_file(path: &Path, m: &Matcher, also: Option<&Matcher>, todo: bool, all
         }
     }
     Some((hits, total, binary, tags))
+}
+
+/// Colour each hit and its neighbours as the file's language, reading the file from its
+/// top to the last hit so a line inside a block comment or a long string is one.
+pub fn highlight_hits(lang: &crate::syntax::Lang, text: &str, hits: &mut [Hit]) {
+    let Some(last) = hits.last().map(|h| h.line + 1) else { return };
+    let mut st = crate::syntax::State::default();
+    let mut h = 0;
+    for (n, line) in text.lines().enumerate().take(last as usize) {
+        let n = n as u32 + 1;
+        while h < hits.len() && hits[h].line + 1 < n {
+            h += 1;
+        }
+        // The hits this line is part of: as the line before one, the line itself, the one after.
+        for hit in hits[h..].iter_mut().take_while(|x| x.line <= n + 1) {
+            let (slot, shown) = match hit.line as i64 - n as i64 {
+                1 => (0, hit.before.as_deref()),
+                0 => (1, Some(hit.text.as_str())),
+                -1 => (2, hit.after.as_deref()),
+                _ => continue,
+            };
+            if let Some(shown) = shown {
+                hit.syntax[slot] = crate::syntax::line_spans(lang, shown, &mut st.clone());
+            }
+        }
+        crate::syntax::line_spans(lang, line, &mut st);
+    }
 }
 
 // ------------------------------------------------------------------ the search

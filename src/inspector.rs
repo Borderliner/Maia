@@ -2431,7 +2431,10 @@ pub(crate) fn syntax_color(k: crate::syntax::Kind, pal: &theme::Palette) -> Colo
         Kind::Type => s.kind,
         Kind::Str => s.string,
         Kind::Comment => s.comment,
-        Kind::Number => s.number,
+        Kind::Number | Kind::Constant => s.number,
+        Kind::Function => s.function,
+        Kind::Property => s.property,
+        Kind::Meta => s.meta,
     }
 }
 
