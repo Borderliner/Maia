@@ -1,0 +1,34 @@
+# Every push and pull request: the build (with and without the screen reader), the
+# unit tests, and the simulated users in their sandbox.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+      - name: Build
+        run: |
+          cargo build --locked
+          cargo check --locked --features screen-reader
+      - name: Unit tests
+        run: cargo test --locked --features testkit -- --skip "sim::"
+      - name: Simulated users
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          # Ubuntu 24.04 keeps unprivileged namespaces, which bwrap needs, behind AppArmor.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          tools/sim.sh sim::

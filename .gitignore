@@ -35,12 +35,13 @@
 !/packaging/*.desktop
 !/packaging/*.metainfo.xml
 
-# The release workflow, by name.
+# The workflows, by name.
 !/.github/
 /.github/**
 !/.github/workflows/
 /.github/workflows/**
 !/.github/workflows/release.yml
+!/.github/workflows/ci.yml
 
 # The README screenshot, allowed by name once it exists.
 !/docs/
