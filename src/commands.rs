@@ -254,6 +254,7 @@ commands! {
     InspectorBlame, "inspector_blame", Inspector, "Toggle Inspector Blame", "Who last changed each line of a file in a git repository, and when.", [];
     InspectorFollow, "inspector_follow", Inspector, "Toggle Inspector Follow", "Keep the preview of a growing file, such as a log, at its end as lines arrive.", [];
     EditInPreview, "edit_in_preview", Inspector, "Edit in Preview", "Change a text file right in the preview, with find and replace; Ctrl+S saves, and Undo brings back the file as it was.", ["Shift+F4"];
+    CustomActions, "custom_actions", Misc, "Custom Actions", "Make and change your own commands for the right-click menu.", [];
     FindInPreview, "find_in_preview", Inspector, "Find in Preview", "Search the text shown in the preview: Enter for the next match, Shift+Enter for the one before. Ctrl+F does it too once the preview was clicked.", [];
     InspectorMinimap, "inspector_minimap", Inspector, "Toggle Inspector Image Minimap", "Show or hide the overview while zoomed into an image.", [];
     GitHistory, "show_git_history", Inspector, "Show Git History", "The commits of this folder's repository as a graph, in the inspector.", [];

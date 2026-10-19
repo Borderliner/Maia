@@ -810,7 +810,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                     }
                 }
             }
-            Act::OtherApp => app.actions.push(Action::Open(Popup::OpenWith { paths: st.targets.iter().filter(|p| !p.is_dir()).cloned().collect(), query: String::new(), all: true })),
+            Act::OtherApp => app.actions.push(Action::Open(Popup::OpenWith { paths: st.targets.iter().filter(|p| !p.is_dir()).cloned().collect(), query: String::new(), all: true, command: String::new() })),
             Act::Custom(i) => run_custom(app, i, &st.targets),
             Act::Terminal(dir) => {
                 if let Err(e) = crate::mime::open_terminal(&dir) {
@@ -900,6 +900,12 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
 
 fn run_custom(app: &mut App, i: usize, targets: &[PathBuf]) {
     let Some(a) = app.cfg.custom_actions.get(i).cloned() else { return };
+    run_command(app, a, targets);
+}
+
+/// Run a command over `targets`, its placeholders filled in: a custom action, or one typed
+/// in Open With.
+pub fn run_command(app: &mut App, a: crate::config::CustomAction, targets: &[PathBuf]) {
     let dir = app.panels.get(&app.active).map(|p| p.path()).unwrap_or_default();
     let q = |p: &std::path::Path| crate::clipboard::quote_if_needed(&p.to_string_lossy());
     let cmdline = a
@@ -908,6 +914,7 @@ fn run_custom(app: &mut App, i: usize, targets: &[PathBuf]) {
         .replace("%f", &targets.first().map(|p| q(p)).unwrap_or_default())
         .replace("%d", &q(&dir))
         .replace("%n", &targets.iter().filter_map(|p| p.file_name()).map(|n| crate::clipboard::quote_if_needed(&n.to_string_lossy())).collect::<Vec<_>>().join(" "));
+    let (a_confirm, a_name) = (a.confirm, a.name.clone());
     let exec = move |app: &mut App| {
         let res = if a.terminal {
             let entry = crate::mime::App { id: "custom".into(), name: a.name.clone(), exec: format!("sh -c \"{}\"", cmdline.replace('"', "\\\"")), mimes: vec![], terminal: true, hidden: false, icon: String::new() };
@@ -922,9 +929,8 @@ fn run_custom(app: &mut App, i: usize, targets: &[PathBuf]) {
             Err(e) => app.toast(format!("“{}” failed: {e}", a.name)),
         }
     };
-    if app.cfg.custom_actions[i].confirm {
-        let name = app.cfg.custom_actions[i].name.clone();
-        app.actions.push(Action::Open(Popup::confirm(format!("Run “{name}” on {} item(s)?", targets.len()), "Run", Box::new(exec))));
+    if a_confirm {
+        app.actions.push(Action::Open(Popup::confirm(format!("Run “{a_name}” on {} item(s)?", targets.len()), "Run", Box::new(exec))));
     } else {
         exec(app);
     }

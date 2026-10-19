@@ -186,7 +186,10 @@ pub enum Popup {
     /// Sync To Other Panel: what it will do, worked out first.
     Sync(Box<crate::compare::SyncState>),
     Properties(PropState),
-    OpenWith { paths: Vec<PathBuf>, query: String, all: bool },
+    /// Open With: the apps for the type, and a command typed instead.
+    OpenWith { paths: Vec<PathBuf>, query: String, all: bool, command: String },
+    /// Custom actions, made and changed: the one selected.
+    Actions { sel: usize },
     RunExec { path: PathBuf },
     MainMenu,
     QuickMenu,
@@ -391,6 +394,7 @@ impl Popup {
             Popup::Sync(..) => "Sync",
             Popup::Properties(..) => "Properties",
             Popup::OpenWith { .. } => "OpenWith",
+            Popup::Actions { .. } => "Actions",
             Popup::RunExec { .. } => "RunExec",
             Popup::Connect(..) => "Connect",
             Popup::ArchivePassword(..) => "ArchivePassword",
@@ -485,7 +489,7 @@ impl Popup {
         Popup::Properties(PropState { paths, change: Default::default(), deep: false, ids: None, apply: None, snap: None, expected: String::new(), sum_job: None, sum: None })
     }
     pub fn open_with(paths: Vec<PathBuf>) -> Popup {
-        Popup::OpenWith { paths, query: String::new(), all: false }
+        Popup::OpenWith { paths, query: String::new(), all: false, command: String::new() }
     }
     pub fn connect(uri: String, error: Option<String>) -> Popup {
         Popup::Connect(ConnectState { uri, user: String::new(), password: String::new(), anonymous: false, error, focus: true })
@@ -957,7 +961,8 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::Conflict(st) => conflict(app, ctx, st),
         Popup::Sync(st) => sync(app, ctx, st),
         Popup::Properties(st) => properties(app, ctx, st),
-        Popup::OpenWith { paths, query, all } => open_with(app, ctx, paths, query, all),
+        Popup::OpenWith { paths, query, all, command } => open_with(app, ctx, paths, query, all, command),
+        Popup::Actions { sel } => actions(app, ctx, sel),
         Popup::RunExec { path } => run_exec(app, ctx, path),
         Popup::Connect(st) => connect(app, ctx, st),
         Popup::ArchivePassword(st) => archive_password(app, ctx, st),
@@ -2150,6 +2155,7 @@ pub(crate) enum Opt {
     Install,
     Editor,
     Tour,
+    CustomActions,
 }
 
 /// The pages of Options, in the order of its left column.
@@ -2261,6 +2267,7 @@ pub(crate) const OPTS: &[(Opt, Section, &str, &str, &str)] = &[
     (Opt::HighlightRecents, Section::Files, "Recents", "Highlight recents", "Mark recently used items with a dot."),
     (Opt::RecentsOnTop, Section::Files, "Recents", "Recents on top", "Sort recently used items first."),
     (Opt::TrashAge, Section::Files, "Trash", "Empty the trash", "What stays longer goes for good. Off unless you choose."),
+    (Opt::CustomActions, Section::Files, "Right-click menu", "Custom actions", "Your own commands for the files you right-click."),
     (Opt::SingleClick, Section::Mouse, "Clicks", "Single click to open", "Open items with one click."),
     (Opt::SingleClickFolders, Section::Mouse, "Clicks", "Folders only", "Files still open with a double click."),
     (Opt::ActOnPress, Section::Mouse, "Clicks", "Act on press", "Select on mouse down, not on release."),
@@ -2496,7 +2503,7 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
         // Lives in the desktop's settings, not Maia's: nothing to reset.
         Opt::DefaultFm => true,
         // Buttons, not settings.
-        Opt::ConfigFile | Opt::ResetAll | Opt::Install | Opt::Updates | Opt::Tour => true,
+        Opt::ConfigFile | Opt::ResetAll | Opt::Install | Opt::Updates | Opt::Tour | Opt::CustomActions => true,
         Opt::SingleInstance => f!(single_instance),
         Opt::Meaning => f!(semantic_search),
         Opt::MeaningFolders => f!(semantic_folders),
@@ -2651,6 +2658,16 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
                     app.actions.push(Action::Cmd(c));
                 }
             }
+            false
+        }
+        Opt::CustomActions => {
+            let b = ui.button("Edit…");
+            crate::ui::note_control(ui, b.rect, "option button");
+            if b.clicked() {
+                app.actions.push(Action::Cmd(Cmd::CustomActions));
+            }
+            let n = c.custom_actions.len();
+            ui.label(egui::RichText::new(if n == 0 { "None yet".to_string() } else { format!("{n} action{}", if n == 1 { "" } else { "s" }) }).color(pal.text_dim));
             false
         }
         Opt::ConfigFile | Opt::ResetAll | Opt::Install => {
@@ -2932,6 +2949,7 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
                     Opt::ResetAll => cmd = Some(Cmd::ResetConfig),
                     Opt::Install => cmd = Some(Cmd::Install),
                     Opt::Tour => cmd = Some(Cmd::WhatsNew),
+                    Opt::CustomActions => cmd = Some(Cmd::CustomActions),
                     Opt::Updates => {
                         if let crate::update::State::Available(r) = app.updater.state() {
                             app.updater.install(r, ctx);
@@ -4734,6 +4752,96 @@ fn sync(app: &mut App, ctx: &egui::Context, st: &mut crate::compare::SyncState) 
     !(close || clicked_outside(ctx, rect))
 }
 
+/// Custom actions: the list on the left, the one selected on the right, saved as typed.
+fn actions(app: &mut App, ctx: &egui::Context, sel: &mut usize) -> bool {
+    let pal = app.pal;
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        return false;
+    }
+    let mut close = false;
+    let mut changed = false;
+    let (_, rect) = centered(ctx, "actions", 660.0, &pal, |ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        dialog_title(ui, "Custom actions", Some("Your own commands, in the right-click menu under Custom actions"), &pal);
+        ui.add_space(6.0);
+        let list = &mut app.cfg.custom_actions;
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.vertical(|ui| {
+                ui.set_width(180.0);
+                for (i, a) in list.iter().enumerate() {
+                    let name = if a.name.trim().is_empty() { "Untitled".to_string() } else { a.name.clone() };
+                    let r = row(ui, 28.0, i == *sel, &pal, |ui, r| {
+                        let col = if i == *sel { pal.on_sel() } else { pal.text };
+                        let g = crate::listing::elided(ui, &name, FontId::proportional(13.0), r.width() - 20.0, col);
+                        ui.painter().galley(pos2(r.left() + 10.0, r.center().y - g.size().y / 2.0), g, col);
+                    });
+                    crate::ui::note_control(ui, r.rect, "action row");
+                    if r.clicked() {
+                        *sel = i;
+                    }
+                }
+                ui.add_space(4.0);
+                if plain_button(ui, "New action", &pal).clicked() {
+                    list.push(crate::config::CustomAction { name: "New action".into(), files: true, ..Default::default() });
+                    *sel = list.len() - 1;
+                    changed = true;
+                }
+            });
+            ui.vertical(|ui| {
+                let Some(a) = list.get_mut(*sel) else {
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("No actions yet: make one, then right-click files to run it.").color(pal.text_dim));
+                    return;
+                };
+                let body = egui::TextStyle::Body.resolve(ui.style());
+                let key_w = ["Name", "Command", "Only for"].iter().map(|k| ui.painter().layout_no_wrap(k.to_string(), body.clone(), pal.text_dim).size().x).fold(0.0, f32::max).ceil();
+                let mut delete = false;
+                card(ui, &pal, |ui| {
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    let w = ui.available_width() - key_w - 12.0;
+                    field_row(ui, key_w, "Name", &pal, |ui| {
+                        changed |= ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(w)).changed();
+                    });
+                    field_row(ui, key_w, "Command", &pal, |ui| {
+                        let r = ui.add(egui::TextEdit::singleline(&mut a.command).hint_text("gimp %F").font(egui::TextStyle::Monospace).desired_width(w));
+                        crate::ui::note_control(ui, r.rect, "action command");
+                        changed |= r.changed();
+                        ui.label(egui::RichText::new("%f the first item · %F all of them · %d the folder · %n their names").small().color(pal.text_dim));
+                    });
+                    field_row(ui, key_w, "Only for", &pal, |ui| {
+                        changed |= ui.add(egui::TextEdit::singleline(&mut a.extensions).hint_text("jpg, png (empty: any file)").desired_width(w)).changed();
+                    });
+                });
+                card(ui, &pal, |ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    for (label, on) in [("Offer it for files", &mut a.files), ("Offer it for folders", &mut a.folders), ("Run it in a terminal", &mut a.terminal), ("Ask before running it", &mut a.confirm)] {
+                        ui.horizontal(|ui| {
+                            ui.label(label);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| changed |= toggle(ui, on, &pal));
+                        });
+                    }
+                });
+                ui.add_space(2.0);
+                let b = ui.add(egui::Button::new(egui::RichText::new("Delete this action").color(pal.danger)).fill(pal.card()).stroke(Stroke::new(1.0, pal.card_line())));
+                if b.clicked() {
+                    delete = true;
+                }
+                if delete {
+                    list.remove(*sel);
+                    *sel = sel.saturating_sub(1);
+                    changed = true;
+                }
+            });
+        });
+        dialog_buttons(ui, |ui| close = primary_button(ui, "Done", true, &pal).clicked());
+    });
+    if changed {
+        app.cfg_dirty = true;
+    }
+    !(close || clicked_outside(ctx, rect))
+}
+
 fn properties(app: &mut App, ctx: &egui::Context, st: &mut PropState) -> bool {
     let pal = app.pal;
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
@@ -5059,7 +5167,7 @@ fn checksum_row(ui: &mut Ui, ctx: &egui::Context, p: &Path, st: &mut PropState, 
     }
 }
 
-fn open_with(app: &mut App, ctx: &egui::Context, paths: &mut Vec<PathBuf>, query: &mut String, all: &mut bool) -> bool {
+fn open_with(app: &mut App, ctx: &egui::Context, paths: &mut Vec<PathBuf>, query: &mut String, all: &mut bool, command: &mut String) -> bool {
     let pal = app.pal;
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
         return false;
@@ -5072,7 +5180,10 @@ fn open_with(app: &mut App, ctx: &egui::Context, paths: &mut Vec<PathBuf>, query
     let q = fuzzy::Query::new(query);
     let mut launch: Option<crate::mime::App> = None;
     let mut set_def: Option<String> = None;
-    let mut focus = true;
+    let mut run: Option<String> = None;
+    // Typing filters the apps, unless the command field has the keyboard.
+    let cmd_id = Id::new("openwith-command");
+    let mut focus = !ctx.memory(|m| m.has_focus(cmd_id));
     let (_, rect) = centered(ctx, "openwith", 480.0, &pal, |ui| {
         ui.label(egui::RichText::new(format!("Open {} with…", if paths.len() == 1 { first.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() } else { format!("{} files", paths.len()) })).strong());
         ui.label(egui::RichText::new(format!("{} ({mime})", db.comment(&mime))).small().color(pal.text_dim));
@@ -5099,7 +5210,22 @@ fn open_with(app: &mut App, ctx: &egui::Context, paths: &mut Vec<PathBuf>, query
             }
         });
         ui.checkbox(all, "Show all applications");
+        // Or any command, the files after it (or where %f / %F put them).
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let r = ui.add(egui::TextEdit::singleline(command).id(cmd_id).hint_text("Or a command, like gimp %F").font(egui::TextStyle::Monospace).desired_width(ui.available_width() - 64.0));
+            crate::ui::note_control(ui, r.rect, "open with command");
+            let go = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            if (ui.add_enabled(!command.trim().is_empty(), egui::Button::new("Run")).clicked() || go) && !command.trim().is_empty() {
+                run = Some(command.trim().to_string());
+            }
+        });
     });
+    if let Some(c) = run {
+        let command = if c.contains('%') { c.clone() } else { format!("{c} %F") };
+        crate::ctxmenu::run_command(app, crate::config::CustomAction { name: c, command, files: true, folders: true, ..Default::default() }, paths);
+        return false;
+    }
     if let Some(id) = set_def {
         match crate::mime::set_default(&id, &mime) {
             Ok(()) => app.toast(format!("Default for {mime} updated")),

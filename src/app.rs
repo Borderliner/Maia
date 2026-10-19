@@ -2051,6 +2051,7 @@ impl App {
                 let f = i.find.get_or_insert_with(|| crate::findbar::Finder::new(String::new()));
                 f.focus = true;
             }
+            Cmd::CustomActions => self.popup = Popup::Actions { sel: 0 },
             Cmd::EditInPreview => {
                 let id = self.active;
                 let p = self.panel();
