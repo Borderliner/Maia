@@ -20,7 +20,7 @@ use crate::popups::{self as pp, Opt, Popup};
 use crate::theme::{Palette, ThemeName};
 
 /// The version What's New describes. A start that has seen an older one shows it.
-pub const NEWS_VERSION: &str = "0.3.0";
+pub const NEWS_VERSION: &str = "0.4.0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -52,11 +52,11 @@ const PALETTE: &[u8] = include_bytes!("../assets/tour/palette.webp");
 const SPLIT: &[u8] = include_bytes!("../assets/tour/split.webp");
 const PREVIEW: &[u8] = include_bytes!("../assets/tour/preview.webp");
 const GIT: &[u8] = include_bytes!("../assets/tour/git.webp");
-const VIEWER: &[u8] = include_bytes!("../assets/tour/viewer.webp");
-const SPACE: &[u8] = include_bytes!("../assets/tour/space.webp");
-const RENAME: &[u8] = include_bytes!("../assets/tour/rename.webp");
-const LETTERS: &[u8] = include_bytes!("../assets/tour/letters.webp");
-const QUICKOPEN: &[u8] = include_bytes!("../assets/tour/quickopen.webp");
+const FIND: &[u8] = include_bytes!("../assets/tour/find.webp");
+const EDIT: &[u8] = include_bytes!("../assets/tour/edit.webp");
+const TERMINAL: &[u8] = include_bytes!("../assets/tour/terminal.webp");
+const SYNC: &[u8] = include_bytes!("../assets/tour/sync.webp");
+const UNLOCK: &[u8] = include_bytes!("../assets/tour/unlock.webp");
 
 pub const WELCOME: &[Page] = &[
     Page {
@@ -99,79 +99,67 @@ pub const WELCOME: &[Page] = &[
 
 pub const NEWS: &[Page] = &[
     Page {
-        title: "Pictures full window",
-        text: "View Pictures shows a folder's pictures in a viewer of their own: the arrows step through them and Space plays a slideshow. A picture's menu turns, resizes and crops it.",
-        body: Body::Film(VIEWER),
-        keys: &[Cmd::ViewPictures],
+        title: "Find in any preview",
+        text: "Find marks every match in the file shown, counts them and steps through them with Enter. It reads files of any size, a whole log included, and the bytes of anything that isn't text.",
+        body: Body::Film(FIND),
+        keys: &[Cmd::FindInPreview],
     },
     Page {
-        title: "What fills a folder",
-        text: "Show Space Used, in a folder's menu, lists what is inside it biggest first, a bar for each. Open a folder to go in, or move what you check to the trash.",
-        body: Body::Film(SPACE),
-        keys: &[Cmd::SpaceUsed],
+        title: "Edit without opening",
+        text: "A small text file can be changed right in the preview, with find and replace. Ctrl+S saves it, keeping its permissions and tags, and Undo brings back the file as it was.",
+        body: Body::Film(EDIT),
+        keys: &[Cmd::EditInPreview],
     },
     Page {
-        title: "Rename many at once",
-        text: "Batch Rename numbers the selected files, or finds and replaces in their names, and shows every new name before anything changes. One Undo puts them back.",
-        body: Body::Film(RENAME),
-        keys: &[Cmd::BatchRename, Cmd::UndoHistory],
+        title: "A terminal under your files",
+        text: "The terminal panel opens under the folder shown and follows it as you go. Its keys are the shell's while you type in it.",
+        body: Body::Film(TERMINAL),
+        keys: &[Cmd::TerminalPanel],
     },
     Page {
-        title: "Click anything by letters",
-        text: "Every control on screen gets a tag of letters; type one to click it, with a capital last letter to right-click. A place can be marked by a letter too.",
-        body: Body::Film(LETTERS),
-        keys: &[Cmd::Hints, Cmd::SetMark, Cmd::GoToMark],
+        title: "Two folders in step",
+        text: "Compare Panels marks what differs, all the way down. Sync lists every copy before it makes one; Mirror also moves what only the other side has to the trash, and one Undo takes it all back.",
+        body: Body::Film(SYNC),
+        keys: &[Cmd::ComparePanels, Cmd::SyncPanels],
     },
     Page {
-        title: "Any file in the project",
-        text: "Quick Open finds a file anywhere in the git project by a few letters of its path. Recent Projects opens each project as you left it.",
-        body: Body::Film(QUICKOPEN),
-        keys: &[Cmd::QuickOpen, Cmd::RecentProjects],
+        title: "Encrypted drives",
+        text: "A locked drive shows a padlock. Open it, type its passphrase, and it is unlocked, mounted and opened; Eject locks it again.",
+        body: Body::Film(UNLOCK),
+        keys: &[Cmd::Computer],
     },
     Page { title: "Also new", text: "", body: Body::List, keys: &[] },
 ];
 
-/// Everything else 0.3.0 added: (group, [(name, one line)]).
+/// Everything else 0.4.0 added: (group, [(name, one line)]).
 pub const ALSO: &[(&str, &[(&str, &str)])] = &[
     (
         "For everyone",
         &[
-            ("Turn, resize and crop pictures", "In place or as copies beside them; Undo brings the original back."),
-            ("Convert", "Pictures to JPG, PNG, WebP or one PDF; sound to MP3, Opus or FLAC; video to MP4 or WebM."),
-            ("Find Duplicates", "Files with the same contents, whatever their names; the extra copies go to the trash."),
-            ("Tidy Folder", "Loose files into folders by kind, or photos into a folder for each month."),
-            ("The shelf", "Gather files from several folders, then move or copy them together."),
-            ("Undo History", "Every change Undo can take back, by what it did; take back several at once."),
-            ("Timeline", "The files changed in the last month anywhere in your home, by day."),
-            ("Smart folders", "A search kept in the sidebar, run again each time it opens."),
-            ("More previews", "Office documents, e-books, comics, fonts, where a photo was taken, and formulas in Markdown."),
-            ("Previous Versions", "Earlier copies of a file from the disk's snapshots, to look at and restore."),
-            ("Compress with a password", "A zip locked with AES-256, or a 7z that hides the names too."),
-            ("Music tags", "Title, artist, album, track, year, genre and cover, and the tags in Batch Rename's names."),
-            ("Email, Print, Set As Wallpaper", "In a file's menu."),
-            ("Empty the trash by age", "What has been in it 7, 30 or 90 days goes, if you choose (Options, Files & folders)."),
-            ("Format a USB drive", "FAT32, exFAT or ext4, once you type the drive's name."),
-            ("Forty more themes", "A hundred in all, side by side in Choose Theme."),
-            ("Updates for every package", "A .deb or .rpm updates through your package manager after your password; an AppImage replaces itself."),
-            ("Replace keeps the old file", "A copy or move over a file puts the one there in the trash; Undo brings it back."),
-            ("Name conflicts by key", "Enter keeps both, R replaces, S skips; each side says whether it is the newer one."),
+            ("Faster copies that keep tags", "Copies clone the file where the disk allows, and keep its tags, permissions and dates."),
+            ("Clearer conflicts", "Both pictures side by side, Replace if newer (N), and Rename with the name ready to type (F2)."),
+            ("Restore asks first", "Restoring from the trash onto a name taken again keeps both, or replaces, as you choose."),
+            ("Permissions and owner", "Properties sets them for many items at once, and for everything inside a folder too."),
+            ("HEIC, AVIF and TIFF", "Shown in the preview and the viewer, turned the right way up."),
+            ("Moving pictures", "GIF, WebP and APNG animations play in the preview and the viewer."),
+            ("Light and dark with the desktop", "With Follow system light/dark on, the theme changes the moment the desktop's does."),
+            ("Copy and drag files on X11", "Files copied in Maia paste into other apps, and drag out of the window into them."),
         ],
     ),
     (
         "For power users",
         &[
-            ("What's Using This", "The programs that hold a file, folder, drive or port open, and a way to stop your own."),
-            ("A clearer palette", "Commands in categories, one line each."),
-            ("Marks", "Ctrl+M and a letter marks a place; Ctrl+' and the letter goes back to it."),
+            ("Custom actions", "Your own commands in the right-click menu, made and changed in their own editor (Options, Files & folders)."),
+            ("Open With any command", "Type a command in Open With; %f and %F put the files where you want them."),
+            ("Hex", "Every byte of a file that isn't text, with what it reads as beside it."),
         ],
     ),
     (
         "For developers",
         &[
-            ("Pull, push and conflicts", "From the branch menu; a file in conflict shows both sides on the Changes page."),
-            ("Only changed files", "The listing narrowed to what git marks as changed."),
-            ("Recent Projects", "Each with its unsaved work, opened as it was left."),
-            ("Clean Build Folders In Home", "Build output and installed packages in every project under your home folder."),
+            ("Diffs side by side", "Old on the left, new on the right, the changed part of each line marked."),
+            ("Git from the history", "A commit's menu checks it out, branches or tags from it, cherry-picks, reverts or resets."),
+            ("Stage lines", "Pick single lines of a change to stage; branches can be deleted from their menu."),
         ],
     ),
 ];

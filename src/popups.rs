@@ -4772,8 +4772,12 @@ fn sync(app: &mut App, ctx: &egui::Context, st: &mut crate::compare::SyncState) 
                     ui.label(text);
                 });
             };
-            dot(ui, pal.accent, format!("{} to copy over ({})", count(plan.copy.len(), "new item", "new items"), fsx::fmt_size(plan.bytes)));
-            dot(ui, crate::gitstatus::GREEN, format!("{} here, replacing the older ones there (to the trash)", count(plan.update.len(), "newer file", "newer files")));
+            if !plan.copy.is_empty() {
+                dot(ui, pal.accent, format!("{} to copy over ({})", count(plan.copy.len(), "new item", "new items"), fsx::fmt_size(plan.bytes)));
+            }
+            if !plan.update.is_empty() {
+                dot(ui, crate::gitstatus::GREEN, format!("{} here, replacing the older ones there (to the trash)", count(plan.update.len(), "newer file", "newer files")));
+            }
             if extra > 0 {
                 let text = egui::RichText::new(format!("Mirror: also move {} only there to the trash", count(extra, "item", "items"))).color(if st.mirror { pal.danger } else { pal.text });
                 if boxed_check(ui, st.mirror, text, "mirror", &pal) {

@@ -11926,7 +11926,7 @@ mod journeys {
         s.idle(3);
         assert!(tour(&s).kind == crate::tour::Kind::News && tour(&s).auto, "What's New after an update");
         film_on(&mut s);
-        assert!(some_text(&s, &format!("New in Maia {}", crate::tour::NEWS_VERSION)) && some_text(&s, "Pictures full window") && some_text(&s, "F3"));
+        assert!(some_text(&s, &format!("New in Maia {}", crate::tour::NEWS_VERSION)) && some_text(&s, "Find in any preview") && some_text(&s, "Find in Preview"));
         let n = crate::tour::NEWS.len();
         for _ in 1..n {
             s.act("key ArrowRight");
@@ -12378,70 +12378,102 @@ mod journeys {
             f.shot(&mut s, 2400, "");
             f.finish(&s);
         }
-        if want("viewer") {
-            let mut s = film_window(&pics, fonts);
-            s.cmd(ViewLarge);
-            wait_thumbs(&mut s);
-            select_path(&mut s, &pics.join("IMG_2042.jpg"));
-            let mut f = Film::new(&s, "viewer");
-            s.act("key F3");
-            wait_until(&mut s, "decoded", 10, |s| s.app.thumbs.dims(&pics.join("IMG_2042.jpg")).is_some());
-            f.shot(&mut s, 1400, "F3");
-            for (k, n) in ["IMG_2043.jpg", "IMG_2044.jpg"].iter().enumerate() {
-                s.act("key ArrowRight");
-                wait_until(&mut s, "decoded", 10, |s| s.app.thumbs.dims(&pics.join(n)).is_some());
-                f.shot(&mut s, if k == 0 { 1300 } else { 1800 }, "→");
-            }
-            f.finish(&s);
-        }
-        if want("space") {
-            let mut s = film_window(&h, fonts);
-            let mut f = Film::new(&s, "space");
-            s.cmd(SpaceUsed);
-            wait_until(&mut s, "every size counted", 20, |s| matches!(s.app.popup, Popup::SpaceUsed(_)) && !space(s).counting());
-            f.shot(&mut s, 2000, "");
-            s.act("key Enter");
-            wait_until(&mut s, "Videos counted", 20, |s| !space(s).counting());
-            f.shot(&mut s, 2000, "Enter");
-            f.finish(&s);
-        }
-        if want("rename") {
-            let mut s = film_window(&pics, fonts);
-            s.act("key ctrl+a");
+        if want("find") && crate::media::have("git") {
+            let src = h.join("Code/weather/src");
+            let mut s = film_window(&src, fonts);
+            select_path(&mut s, &src.join("forecast.rs"));
+            let mut f = Film::new(&s, "find");
+            s.act("key Space");
             s.settle();
-            let mut f = Film::new(&s, "rename");
-            s.cmd(BatchRename);
-            assert!(matches!(s.app.popup, Popup::BatchRename(_)), "Batch Rename open");
-            s.act("text Lisbon ###");
-            f.shot(&mut s, 2000, "");
+            let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("the preview"));
+            s.act(&format!("click {:.0} {:.0}", ir.center().x, ir.center().y));
+            s.act("key ctrl+f");
+            s.act("text forecast");
+            wait_until(&mut s, "found", 5, |s| inspector(s).find.as_ref().is_some_and(|f| f.hits.len() == 3));
+            f.shot(&mut s, 2100, "Space Ctrl F");
             s.act("key Enter");
-            wait_until(&mut s, "renamed", 10, |_| pics.join("Lisbon 001.jpg").exists());
-            f.shot(&mut s, 2000, "Enter");
+            s.act("key Enter");
+            f.shot(&mut s, 1900, "Enter Enter");
             f.finish(&s);
         }
-        if want("letters") {
+        if want("edit") {
             let mut s = film_window(&docs, fonts);
-            let mut f = Film::new(&s, "letters");
-            s.act("key ctrl+j");
-            f.shot(&mut s, 1600, "Ctrl J");
-            let r = s.text_rect("Recipes");
-            let tag = s.app.hints.as_ref().and_then(|hh| hh.targets.iter().find(|(t, _)| t.contains(r.center())).map(|(_, n)| n.clone())).unwrap_or_else(|| s.fail("no tag on Recipes"));
-            s.act(&format!("text {tag}"));
-            s.act("key Enter");
-            f.shot(&mut s, 2000, &tag.to_uppercase());
+            select_path(&mut s, &docs.join("Reading list.md"));
+            s.act("key Space");
+            s.settle();
+            let mut f = Film::new(&s, "edit");
+            s.act("key shift+F4");
+            wait_until(&mut s, "editing", 5, |s| inspector(s).edit.as_ref().is_some_and(|e| e.focused));
+            f.shot(&mut s, 1400, "Shift F4");
+            s.act("key ctrl+End");
+            s.act("text 4. Klara and the Sun");
+            s.act("key ctrl+s");
+            wait_until(&mut s, "saved", 5, |_| std::fs::read_to_string(docs.join("Reading list.md")).is_ok_and(|t| t.contains("Klara")));
+            f.shot(&mut s, 2000, "Ctrl S");
             f.finish(&s);
         }
-        if want("quickopen") && crate::media::have("git") {
+        if want("terminal") && crate::media::have("git") {
+            // A plain prompt: the films show nothing of the machine they were made on.
+            // SAFETY: one test at a time, before the shell starts.
+            unsafe {
+                std::env::set_var("SHELL", "/bin/sh");
+                std::env::set_var("PS1", "$ ");
+            }
             let p = h.join("Code/weather");
             let mut s = film_window(&p, fonts);
-            let mut f = Film::new(&s, "quickopen");
-            s.act("key ctrl+o");
-            wait_until(&mut s, "listed", 10, |s| matches!(&s.app.popup, Popup::QuickOpen(q) if q.listed));
-            s.act("text units");
-            f.shot(&mut s, 1600, "Ctrl O");
-            s.act("key Enter");
-            f.shot(&mut s, 2000, "Enter");
+            let mut f = Film::new(&s, "terminal");
+            s.act("key ctrl+Backtick");
+            wait_until(&mut s, "the prompt", 10, |s| s.app.terminal.pty.as_ref().is_some_and(|t| t.idle()) && s.app.terminal.text().contains('$'));
+            f.shot(&mut s, 1500, "Ctrl `");
+            s.act("text git log --oneline");
+            s.act("key enter");
+            wait_until(&mut s, "the log", 10, |s| s.app.terminal.text().contains("Start with today"));
+            wait_until(&mut s, "the prompt again", 10, |s| s.app.terminal.pty.as_ref().is_some_and(|t| t.idle()));
+            f.shot(&mut s, 2300, "Enter");
+            s.act("key ctrl+Backtick");
             f.finish(&s);
+            // SAFETY: as above.
+            unsafe { std::env::remove_var("PS1") };
+        }
+        if want("sync") {
+            let mut s = film_window(&docs, fonts);
+            s.cmd(SplitRight);
+            s.settle();
+            go(&mut s, &h.join("Downloads/Backup"));
+            s.act("key Tab");
+            s.settle();
+            let mut f = Film::new(&s, "sync");
+            s.act("key ctrl+shift+p");
+            s.act("text sync to");
+            s.act("key Enter");
+            wait_until(&mut s, "the plan", 10, |s| matches!(&s.app.popup, Popup::Sync(st) if st.plan.is_some()));
+            f.shot(&mut s, 2300, "Ctrl Shift P");
+            s.act("key Enter");
+            wait_until(&mut s, "synced", 10, |_| h.join("Downloads/Backup/Garden plan.md").exists());
+            f.shot(&mut s, 1800, "Enter");
+            f.finish(&s);
+        }
+        if want("unlock") {
+            let d = film_drives();
+            fake_encrypted_drive(&d);
+            let mut s = film_window(&h, fonts);
+            s.cmd(Computer);
+            wait_until(&mut s, "the locked drive", 10, |s| s.tab().entries.iter().any(|e| e.name == "Encrypted 500 GB"));
+            select_name(&mut s, "Encrypted 500 GB");
+            let mut f = Film::new(&s, "unlock");
+            f.shot(&mut s, 1100, "");
+            s.act("key Enter");
+            s.act("text correct horse");
+            f.shot(&mut s, 1600, "Enter");
+            s.act("key Enter");
+            wait_until(&mut s, "unlocked", 10, |s| s.tab().entries.iter().any(|e| e.name == "readme.txt"));
+            // Back in Computer: the drive inside is shown by its name, where it is opened
+            // from (a made-up mount point would show the sandbox's folders).
+            s.act("key alt+ArrowLeft");
+            wait_until(&mut s, "the drive unlocked", 10, |s| s.tab().entries.iter().any(|e| e.name == "Vault"));
+            f.shot(&mut s, 2000, "Enter Alt ←");
+            f.finish(&s);
+            crate::drives::FAKE.with(|fk| *fk.borrow_mut() = Some(film_drives()));
         }
         crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
     }
