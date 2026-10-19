@@ -52,6 +52,7 @@ pub struct VolInfo {
     pub mounted: bool,
     /// Removable media (offers Eject).
     pub removable: bool,
+    pub crypt: crate::drives::Crypt,
 }
 
 /// Inputs that affect which entries are visible and in what order.
@@ -316,8 +317,9 @@ impl Tab {
                 let (total, free) = fsx::disk_space(&m.path).unwrap_or((0, 0));
                 e.set_name(volume_label(&m.device, &m.path));
                 e.size = total.saturating_sub(free);
-                let removable = crate::drives::at_mount(&drives, &m.path).is_some_and(|d| d.removable);
-                self.vols.insert(m.path.clone(), VolInfo { total, free, fstype: m.fstype.clone(), device: m.device.clone(), mounted: true, removable });
+                let d = crate::drives::at_mount(&drives, &m.path);
+                let (removable, crypt) = (d.is_some_and(|d| d.removable), d.map(|d| d.crypt.clone()).unwrap_or_default());
+                self.vols.insert(m.path.clone(), VolInfo { total, free, fstype: m.fstype.clone(), device: m.device.clone(), mounted: true, removable, crypt });
                 entries.push(e);
             }
         }
@@ -325,7 +327,7 @@ impl Tab {
         for d in drives.iter().filter(|d| d.offer_mount()) {
             let path = PathBuf::from(format!("{DRIVE}{}", d.dev));
             entries.push(Entry::placeholder(path.clone(), d.title(), true));
-            self.vols.insert(path, VolInfo { total: d.size, free: d.size, fstype: d.fstype.clone(), device: d.dev.clone(), mounted: false, removable: d.removable });
+            self.vols.insert(path, VolInfo { total: d.size, free: d.size, fstype: d.fstype.clone(), device: d.dev.clone(), mounted: false, removable: d.removable, crypt: d.crypt.clone() });
         }
         self.set_entries(entries);
     }

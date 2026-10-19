@@ -222,6 +222,8 @@ pub enum Popup {
     ArchivePassword(PasswordState),
     /// Compress With Password: the format and the password, typed twice.
     Lock(LockState),
+    /// The passphrase of an encrypted drive being opened.
+    Unlock(UnlockState),
     Meaning(MeaningState),
     /// The theme picker: every theme as a small window, with its code colours.
     Themes,
@@ -329,6 +331,22 @@ pub struct PasswordState {
     pub wrong: bool,
 }
 
+/// The passphrase of an encrypted drive, asked as it is opened. The dialog stays up while
+/// udisks tries it, to say if it was wrong.
+pub struct UnlockState {
+    pub drive: crate::drives::Drive,
+    /// Where to show the drive once mounted (see `App::drive_op`).
+    pub open_in: Option<(u64, bool)>,
+    pub pass: crate::drives::Passphrase,
+    pub error: Option<String>,
+}
+
+impl UnlockState {
+    pub fn new(drive: crate::drives::Drive, open_in: Option<(u64, bool)>) -> UnlockState {
+        UnlockState { drive, open_in, pass: Default::default(), error: None }
+    }
+}
+
 /// What Compress With Password asks before it packs.
 pub struct LockState {
     pub srcs: Vec<PathBuf>,
@@ -399,6 +417,7 @@ impl Popup {
             Popup::Connect(..) => "Connect",
             Popup::ArchivePassword(..) => "ArchivePassword",
             Popup::Lock(..) => "Lock",
+            Popup::Unlock(..) => "Unlock",
             Popup::Meaning(..) => "Meaning",
             Popup::Themes => "Themes",
             Popup::CodeSearch(..) => "CodeSearch",
@@ -967,6 +986,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::Connect(st) => connect(app, ctx, st),
         Popup::ArchivePassword(st) => archive_password(app, ctx, st),
         Popup::Lock(st) => lock(app, ctx, st),
+        Popup::Unlock(st) => unlock_drive(app, ctx, st),
         Popup::Meaning(st) => meaning(app, ctx, st),
         Popup::Themes => themes(app, ctx),
         Popup::CodeSearch(st) => crate::devtools::code_search_popup(app, ctx, st),
@@ -3599,6 +3619,59 @@ fn archive_password(app: &mut App, ctx: &egui::Context, st: &mut PasswordState) 
             None => {}
         }
         return false;
+    }
+    !cancel
+}
+
+/// An encrypted drive's passphrase, hidden as typed, handed to the unlock job as it is
+/// (the field's undo history, which keeps copies of it, goes too). Meanwhile the dialog
+/// waits; a wrong passphrase comes back here, over an empty field.
+fn unlock_drive(app: &mut App, ctx: &egui::Context, st: &mut UnlockState) -> bool {
+    let pal = app.pal;
+    let id = Id::new("unlock passphrase");
+    let forget = || ctx.data_mut(|d| d.remove::<egui::text_edit::TextEditState>(id));
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        forget();
+        return false;
+    }
+    let busy = crate::drives::busy(&st.drive.dev);
+    let ok = !st.pass.0.is_empty() && !busy;
+    let mut go = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) && ok;
+    let mut cancel = false;
+    let sub = format!("{} encrypted drive · {}", fsx::fmt_size(st.drive.size), st.drive.dev);
+    centered(ctx, "unlock drive", 400.0, &pal, |ui| {
+        dialog_title(ui, &format!("Unlock “{}”", st.drive.title()), Some(&sub), &pal);
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Passphrase").small().color(pal.text_dim));
+        let r = ui.add_enabled(!busy, egui::TextEdit::singleline(&mut st.pass.0).id(id).password(true).desired_width(f32::INFINITY));
+        crate::ui::note_control(ui, r.rect, "unlock passphrase");
+        if !busy {
+            r.request_focus();
+        }
+        if r.changed() {
+            st.error = None;
+        }
+        let note = if busy { Some(("Unlocking…", pal.text_dim)) } else { st.error.as_deref().map(|e| (e, pal.danger)) };
+        if let Some((text, col)) = note {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(text).color(col));
+        }
+        dialog_buttons(ui, |ui| {
+            let b = primary_button(ui, "Unlock", ok, &pal);
+            crate::ui::note_control(ui, b.rect, "unlock button");
+            go |= b.clicked() && ok;
+            cancel = plain_button(ui, "Cancel", &pal).clicked();
+        });
+    });
+    if go || cancel {
+        forget();
+    }
+    if go {
+        st.error = None;
+        match crate::drives::Job::unlock(st.drive.clone(), std::mem::take(&mut st.pass), st.open_in, ctx) {
+            Ok(j) => app.drive_jobs.push(j),
+            Err(e) => st.error = Some(e),
+        }
     }
     !cancel
 }

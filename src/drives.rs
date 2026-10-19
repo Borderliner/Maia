@@ -1,6 +1,6 @@
-//! Block devices (lsblk) and mounting, unmounting and ejecting them through udisks
-//! (udisksctl): the same service desktop file managers use, so permissions and password
-//! prompts behave as the user expects.
+//! Block devices (lsblk) and mounting, unmounting, ejecting, unlocking and locking them
+//! through udisks (udisksctl): the same service desktop file managers use, so permissions
+//! and password prompts behave as the user expects.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -81,6 +81,19 @@ pub struct Drive {
     /// Can be powered off: removable media or a hot-pluggable disk that holds no part of
     /// the running system.
     pub removable: bool,
+    pub crypt: Crypt,
+}
+
+/// Encryption, as far as it shows on a drive.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum Crypt {
+    #[default]
+    Plain,
+    /// An encrypted volume (LUKS) not unlocked yet: opening it asks for its passphrase.
+    Locked,
+    /// The filesystem inside an unlocked encrypted volume: that volume's device, which
+    /// locking closes again.
+    Open(String),
 }
 
 /// Mount points that mean "this disk runs the system": never offer to eject it.
@@ -115,18 +128,41 @@ pub fn parse_lsblk(text: &str) -> Vec<Drive> {
         let mounts = get("MOUNTPOINTS").split('\n').filter(|m| !m.is_empty()).map(PathBuf::from).collect();
         rows.push(Row { path, pk: get("PKNAME"), label: get("LABEL"), fstype: get("FSTYPE"), size: get("SIZE").parse().unwrap_or(0), rm: get("RM") == "1", hotplug: get("HOTPLUG") == "1", kind: get("TYPE"), mounts });
     }
-    let disk_of = |r: &Row| if r.pk.is_empty() { r.path.clone() } else { format!("/dev/{}", r.pk) };
+    // A row's parent: the one whose kernel name its PKNAME gives.
+    let parent = |r: &Row| rows.iter().find(|o| !r.pk.is_empty() && o.path.rsplit('/').next() == Some(r.pk.as_str()));
+    // The whole disk, up through the parents: a partition's, or the one under the
+    // partition an unlocked volume opens.
+    let disks: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            let mut at = r;
+            for _ in 0..8 {
+                match parent(at) {
+                    Some(p) => at = p,
+                    None if at.pk.is_empty() => break,
+                    None => return format!("/dev/{}", at.pk),
+                }
+            }
+            at.path.clone()
+        })
+        .collect();
     let mut out = vec![];
-    for r in &rows {
+    for (r, disk) in rows.iter().zip(&disks) {
         if !matches!(r.kind.as_str(), "part" | "disk" | "crypt" | "loop" | "rom") {
             continue;
         }
-        let disk = disk_of(r);
         // A disk carrying any system mount is never "removable", whatever it reports.
-        let system = rows.iter().any(|o| (o.path == disk || disk_of(o) == disk) && o.mounts.iter().any(|m| system_mount(m)));
-        let disk_row = rows.iter().find(|o| o.path == disk);
+        let system = rows.iter().zip(&disks).any(|(o, od)| (o.path == *disk || od == disk) && o.mounts.iter().any(|m| system_mount(m)));
+        let disk_row = rows.iter().find(|o| o.path == *disk);
         let rm = r.rm || r.hotplug || disk_row.is_some_and(|d| d.rm || d.hotplug);
-        out.push(Drive { dev: r.path.clone(), disk, label: r.label.clone(), fstype: r.fstype.clone(), size: r.size, mounts: r.mounts.clone(), removable: rm && !system });
+        let crypt = if r.kind == "crypt" {
+            Crypt::Open(parent(r).map_or_else(|| format!("/dev/{}", r.pk), |p| p.path.clone()))
+        } else if r.fstype == "crypto_LUKS" && !rows.iter().any(|o| parent(o).is_some_and(|p| p.path == r.path)) {
+            Crypt::Locked
+        } else {
+            Crypt::Plain
+        };
+        out.push(Drive { dev: r.path.clone(), disk: disk.clone(), label: r.label.clone(), fstype: r.fstype.clone(), size: r.size, mounts: r.mounts.clone(), removable: rm && !system, crypt });
     }
     out
 }
@@ -173,22 +209,25 @@ impl Drive {
         !self.mounts.is_empty()
     }
 
-    /// Name for lists: the label, else "500 GB Volume".
+    /// Name for lists: the label, else "500 GB Volume" (or "Encrypted 500 GB" while locked).
     pub fn title(&self) -> String {
         if !self.label.trim().is_empty() {
             self.label.clone()
+        } else if self.crypt == Crypt::Locked {
+            format!("Encrypted {}", crate::fsx::fmt_size(self.size))
         } else {
             format!("{} Volume", crate::fsx::fmt_size(self.size))
         }
     }
 
-    /// An unmounted filesystem worth offering: not swap/encrypted/LVM containers, not
+    /// An unmounted filesystem worth offering, or a locked encrypted volume (once
+    /// unlocked, the filesystem inside is offered instead): not swap/LVM containers, not
     /// tiny boot partitions (EFI, MSR) on internal disks.
     pub fn offer_mount(&self) -> bool {
         if self.mounted() || self.fstype.is_empty() {
             return false;
         }
-        if matches!(self.fstype.as_str(), "swap" | "crypto_LUKS" | "LVM2_member" | "linux_raid_member" | "zfs_member" | "BitLocker") {
+        if self.crypt != Crypt::Locked && matches!(self.fstype.as_str(), "swap" | "crypto_LUKS" | "LVM2_member" | "linux_raid_member" | "zfs_member" | "BitLocker") {
             return false;
         }
         self.removable || self.size >= 1 << 30
@@ -202,8 +241,18 @@ pub fn list(t: &Tools) -> Vec<Drive> {
 }
 
 /// Output of a command (stdout on success; the error text otherwise).
-fn run(mut c: Command, timeout: Duration) -> Result<String, String> {
-    let mut child = c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+fn run(c: Command, timeout: Duration) -> Result<String, String> {
+    run_fed(c, timeout, None)
+}
+
+/// `run`, with `input` written to the command's stdin: how a secret reaches it without
+/// showing on its command line.
+fn run_fed(mut c: Command, timeout: Duration, input: Option<&[u8]>) -> Result<String, String> {
+    let mut child = c.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    // Closed once written, so the command sees where it ends.
+    if let (Some(mut i), Some(data)) = (child.stdin.take(), input) {
+        let _ = std::io::Write::write_all(&mut i, data);
+    }
     let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
     let ro = std::thread::spawn(move || {
         let mut s = String::new();
@@ -258,35 +307,108 @@ pub enum Op {
     Eject,
     /// Erase a removable drive and make one filesystem on it (`Job::format`).
     Format,
+    /// Open an encrypted volume with its passphrase and mount what it holds (`Job::unlock`).
+    Unlock,
+    /// Unmount the filesystem inside an unlocked volume and close the volume again.
+    Lock,
+}
+
+/// udisksctl with `args`. Password prompts can take a while; a stuck udisks shouldn't
+/// hang forever.
+fn udisks(tools: &Tools, args: &[&str]) -> Result<String, String> {
+    let mut c = tools.cmd("udisksctl");
+    c.args(args);
+    run(c, Duration::from_secs(120))
 }
 
 /// Run an operation (may wait for a password prompt). Mount returns where it mounted.
 pub fn perform(tools: &Tools, op: Op, d: &Drive, all: &[Drive]) -> Result<Option<PathBuf>, String> {
-    // Password prompts can take a while; a stuck udisks shouldn't hang forever.
-    let t = Duration::from_secs(120);
-    let ctl = |args: &[&str]| {
-        let mut c = tools.cmd("udisksctl");
-        c.args(args);
-        run(c, t)
-    };
     match op {
-        Op::Mount => {
-            let out = ctl(&["mount", "-b", &d.dev])?;
-            // "Mounted /dev/sdb1 at /run/media/user/LABEL"
-            let at = out.split(" at ").nth(1).map(|s| PathBuf::from(s.trim().trim_end_matches('.')));
-            Ok(at.or_else(|| list(tools).into_iter().find(|x| x.dev == d.dev).and_then(|x| x.mounts.first().cloned())))
+        Op::Mount => mount(tools, d),
+        Op::Unmount => {
+            udisks(tools, &["unmount", "-b", &d.dev])?;
+            lock(tools, d).map(|_| None)
         }
-        Op::Unmount => ctl(&["unmount", "-b", &d.dev]).map(|_| None),
+        Op::Lock => release(tools, &[d]).map(|_| None),
         Op::Eject => {
             if !d.removable {
                 return Err("This drive can't be ejected".into());
             }
-            for p in all.iter().filter(|x| x.disk == d.disk && x.mounted()) {
-                ctl(&["unmount", "-b", &p.dev])?;
-            }
-            ctl(&["power-off", "-b", &d.disk]).map(|_| None)
+            release(tools, &all.iter().filter(|x| x.disk == d.disk).collect::<Vec<_>>())?;
+            udisks(tools, &["power-off", "-b", &d.disk]).map(|_| None)
         }
         Op::Format => Err("Formatting needs a filesystem and a label".into()),
+        Op::Unlock => Err("Unlocking needs the passphrase".into()),
+    }
+}
+
+fn mount(tools: &Tools, d: &Drive) -> Result<Option<PathBuf>, String> {
+    let out = udisks(tools, &["mount", "-b", &d.dev])?;
+    // "Mounted /dev/sdb1 at /run/media/user/LABEL"
+    let at = out.split(" at ").nth(1).map(|s| PathBuf::from(s.trim().trim_end_matches('.')));
+    Ok(at.or_else(|| list(tools).into_iter().find(|x| x.dev == d.dev).and_then(|x| x.mounts.first().cloned())))
+}
+
+/// Close the encrypted volume `d` was unlocked from, if it was.
+fn lock(tools: &Tools, d: &Drive) -> Result<(), String> {
+    match &d.crypt {
+        Crypt::Open(from) => udisks(tools, &["lock", "-b", from]).map(|_| ()),
+        _ => Ok(()),
+    }
+}
+
+/// Unmount whichever of `parts` are mounted, then lock the volumes any were unlocked
+/// from: all a disk needs before it is powered off or erased.
+fn release(tools: &Tools, parts: &[&Drive]) -> Result<(), String> {
+    for p in parts.iter().filter(|x| x.mounted()) {
+        udisks(tools, &["unmount", "-b", &p.dev])?;
+    }
+    parts.iter().try_for_each(|p| lock(tools, p))
+}
+
+/// A passphrase on its way to udisks: never printed or copied, and zeroed when dropped.
+pub struct Passphrase(pub String);
+
+impl Default for Passphrase {
+    /// Room for a long one up front, so typing never moves it and leaves a copy behind.
+    fn default() -> Self {
+        Passphrase(String::with_capacity(256))
+    }
+}
+
+impl Drop for Passphrase {
+    fn drop(&mut self) {
+        let mut b = std::mem::take(&mut self.0).into_bytes();
+        let n = b.capacity();
+        b.clear();
+        b.resize(n, 0);
+        // Otherwise a write nobody reads may be optimised away.
+        std::hint::black_box(&b);
+    }
+}
+
+/// How an unlock refused for its passphrase comes back.
+pub const WRONG_PASSPHRASE: &str = "Wrong passphrase";
+
+/// udisks' error means the passphrase didn't open the volume (cryptsetup's words for
+/// it vary between versions).
+pub fn wrong_passphrase(err: &str) -> bool {
+    let e = err.to_lowercase();
+    ["passphrase", "operation not permitted", "no key available"].iter().any(|w| e.contains(w))
+}
+
+/// Unlock the encrypted volume `d` with `pass` and mount the filesystem inside it,
+/// returning where. udisksctl reads the passphrase from its input as a key file, so it
+/// never shows on a command line.
+pub fn unlock(tools: &Tools, d: &Drive, pass: &Passphrase) -> Result<Option<PathBuf>, String> {
+    let mut c = tools.cmd("udisksctl");
+    c.args(["unlock", "-b", &d.dev, "--key-file", "/dev/stdin"]);
+    run_fed(c, Duration::from_secs(120), Some(pass.0.as_bytes())).map_err(|e| if wrong_passphrase(&e) { WRONG_PASSPHRASE.to_string() } else { e })?;
+    let inside = list(tools).into_iter().find(|x| x.crypt == Crypt::Open(d.dev.clone())).ok_or("Unlocked, but nothing inside showed up")?;
+    // The desktop may have mounted it already.
+    match inside.mounts.first() {
+        Some(m) => Ok(Some(m.clone())),
+        None => mount(tools, &inside),
     }
 }
 
@@ -396,12 +518,7 @@ pub fn format(tools: &Tools, d: &Drive, fs: Fs, label: &str) -> Result<(), Strin
     if !d.disk.starts_with("/dev/") || !d.disk[5..].bytes().all(|b| b.is_ascii_alphanumeric()) {
         return Err("Not a drive Maia can format".into());
     }
-    let t = Duration::from_secs(120);
-    for p in parts.iter().filter(|x| x.mounted()) {
-        let mut c = tools.cmd("udisksctl");
-        c.args(["unmount", "-b", &p.dev]);
-        run(c, t)?;
-    }
+    release(tools, &parts)?;
     for args in format_calls(&d.disk, fs, &label) {
         let mut c = tools.cmd("gdbus");
         c.args(&args);
@@ -417,6 +534,8 @@ impl Op {
             Op::Unmount => "unmount",
             Op::Eject => "eject",
             Op::Format => "format",
+            Op::Unlock => "unlock",
+            Op::Lock => "lock",
         }
     }
 }
@@ -441,27 +560,27 @@ pub struct Job {
 
 impl Job {
     pub fn start(op: Op, drive: Drive, all: Vec<Drive>, open_in: Option<(u64, bool)>, ctx: &egui::Context) -> Result<Job, String> {
-        let tools = Tools::current().ok_or("Drive tools are unavailable")?;
-        if busy(&drive.dev) {
-            return Err(format!("{} is busy", drive.title()));
-        }
-        BUSY.with(|b| b.borrow_mut().push(drive.dev.clone()));
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (d, ctx) = (drive.clone(), ctx.clone());
-        std::thread::spawn(move || {
-            let _ = tx.send(perform(&tools, op, &d, &all));
-            ctx.request_repaint();
-        });
-        Ok(Job { op, drive, open_in, rx })
+        Job::spawn(op, drive, open_in, ctx, move |tools, d| perform(tools, op, d, &all))
     }
 
     /// Format the disk `drive` is on (see `format`), on a worker: udisks may ask for a
     /// password, and making a filesystem takes a while.
     pub fn format(drive: Drive, fs: Fs, label: String, ctx: &egui::Context) -> Result<Job, String> {
-        let tools = Tools::current().ok_or("Drive tools are unavailable")?;
-        if !tools.has("gdbus") {
+        if Tools::current().is_some_and(|t| !t.has("gdbus")) {
             return Err("Formatting needs gdbus (from GLib)".into());
         }
+        Job::spawn(Op::Format, drive, None, ctx, move |tools, d| format(tools, d, fs, &label).map(|_| None))
+    }
+
+    /// Unlock the encrypted `drive` with `pass` and mount what it holds (see `unlock`),
+    /// on a worker, which zeroes the passphrase once udisks has it.
+    pub fn unlock(drive: Drive, pass: Passphrase, open_in: Option<(u64, bool)>, ctx: &egui::Context) -> Result<Job, String> {
+        Job::spawn(Op::Unlock, drive, open_in, ctx, move |tools, d| unlock(tools, d, &pass))
+    }
+
+    /// Run `work` on a worker, the drive marked busy meanwhile.
+    fn spawn(op: Op, drive: Drive, open_in: Option<(u64, bool)>, ctx: &egui::Context, work: impl FnOnce(&Tools, &Drive) -> Result<Option<PathBuf>, String> + Send + 'static) -> Result<Job, String> {
+        let tools = Tools::current().ok_or("Drive tools are unavailable")?;
         if busy(&drive.dev) {
             return Err(format!("{} is busy", drive.title()));
         }
@@ -469,10 +588,10 @@ impl Job {
         let (tx, rx) = std::sync::mpsc::channel();
         let (d, ctx) = (drive.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(format(&tools, &d, fs, &label).map(|_| None));
+            let _ = tx.send(work(&tools, &d));
             ctx.request_repaint();
         });
-        Ok(Job { op: Op::Format, drive, open_in: None, rx })
+        Ok(Job { op, drive, open_in, rx })
     }
 
     /// The result once the operation finished (the device stops being busy).
@@ -495,4 +614,10 @@ pub fn at_mount<'a>(all: &'a [Drive], p: &Path) -> Option<&'a Drive> {
 /// Can be unmounted from Maia: mounted somewhere that isn't part of the system.
 pub fn can_unmount(d: &Drive) -> bool {
     d.mounted() && !d.mounts.iter().any(|m| system_mount(m))
+}
+
+/// Can be locked from Maia: unlocked from an encrypted volume, and not mounted as part
+/// of the system.
+pub fn can_lock(d: &Drive) -> bool {
+    matches!(d.crypt, Crypt::Open(_)) && (!d.mounted() || can_unmount(d))
 }

@@ -93,18 +93,26 @@ impl Item {
             crate::drives::Op::Unmount => "Unmount",
             crate::drives::Op::Eject => "Eject",
             crate::drives::Op::Format => "Format…",
+            crate::drives::Op::Unlock => "Unlock…",
+            crate::drives::Op::Lock => "Lock",
         };
         Item { id: format!("drive_{}", op.verb()), label: label.into(), act: Act::Drive(op), children: vec![] }
     }
-    /// Mount / Unmount / Eject, as they apply to these drives.
+    /// Mount / Unlock / Unmount / Lock / Eject, as they apply to these drives.
     fn drive_items(drives: &[crate::drives::Drive]) -> Vec<Item> {
-        use crate::drives::{Op, can_unmount};
+        use crate::drives::{Crypt, Op, can_lock, can_unmount};
         let mut v = vec![];
-        if drives.iter().any(|d| !d.mounted()) {
+        if drives.iter().any(|d| !d.mounted() && d.crypt != Crypt::Locked) {
             v.push(Item::drive(Op::Mount));
+        }
+        if drives.iter().any(|d| d.crypt == Crypt::Locked) {
+            v.push(Item::drive(Op::Unlock));
         }
         if drives.iter().any(can_unmount) {
             v.push(Item::drive(Op::Unmount));
+        }
+        if drives.iter().any(can_lock) {
+            v.push(Item::drive(Op::Lock));
         }
         if drives.iter().any(|d| d.removable) {
             v.push(Item::drive(Op::Eject));
@@ -868,8 +876,10 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                 for t in &st.targets {
                     if let Some(d) = app.drive_at(t) {
                         let applies = match op {
-                            crate::drives::Op::Mount => !d.mounted(),
+                            crate::drives::Op::Mount => !d.mounted() && d.crypt != crate::drives::Crypt::Locked,
+                            crate::drives::Op::Unlock => d.crypt == crate::drives::Crypt::Locked,
                             crate::drives::Op::Unmount => crate::drives::can_unmount(&d),
+                            crate::drives::Op::Lock => crate::drives::can_lock(&d),
                             crate::drives::Op::Eject => d.removable,
                             crate::drives::Op::Format => false,
                         };

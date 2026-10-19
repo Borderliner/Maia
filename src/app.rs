@@ -742,8 +742,9 @@ impl App {
         }
     }
 
-    /// Mount, unmount or eject the drive with this device node, in the background.
-    /// `open_in`: once mounted, show it in this panel (in a new tab when true).
+    /// Mount, unmount, eject or lock the drive with this device node, in the background;
+    /// a locked one asks for its passphrase first. `open_in`: once mounted, show it in
+    /// this panel (in a new tab when true).
     pub fn drive_op(&mut self, op: crate::drives::Op, dev: &str, open_in: Option<(u64, bool)>) {
         use crate::drives::Op;
         let all = crate::sidebar::drives();
@@ -751,6 +752,10 @@ impl App {
             self.toast("That drive is no longer connected");
             return;
         };
+        if matches!(op, Op::Mount | Op::Unlock) && d.crypt == crate::drives::Crypt::Locked {
+            self.popup = Popup::Unlock(crate::popups::UnlockState::new(d, open_in));
+            return;
+        }
         if op != Op::Mount {
             // Tabs showing the drive move to Computer first, so nothing holds it busy.
             let gone: Vec<PathBuf> = if op == Op::Eject { all.iter().filter(|x| x.disk == d.disk).flat_map(|x| x.mounts.clone()).collect() } else { d.mounts.clone() };
@@ -830,8 +835,20 @@ impl App {
             let job = self.drive_jobs.remove(i);
             crate::sidebar::invalidate();
             let name = job.drive.title();
+            // The passphrase dialog waits on its unlock: it closes, or says what went wrong.
+            if let Popup::Unlock(st) = &mut self.popup {
+                if st.drive.dev == job.drive.dev && job.op == Op::Unlock {
+                    match &r {
+                        Ok(_) => self.popup = Popup::None,
+                        Err(e) => {
+                            st.error = Some(e.clone());
+                            continue;
+                        }
+                    }
+                }
+            }
             match (job.op, r) {
-                (Op::Mount, Ok(Some(at))) if job.open_in.is_some() => {
+                (Op::Mount | Op::Unlock, Ok(Some(at))) if job.open_in.is_some() => {
                     let (panel, new_tab) = job.open_in.unwrap_or_default();
                     if new_tab {
                         self.actions.push(Action::NewTab { panel, path: at, select: None, focus: false });
@@ -840,7 +857,10 @@ impl App {
                     }
                 }
                 (Op::Mount, Ok(_)) => self.toast(format!("Mounted {name}")),
+                (Op::Unlock, Ok(_)) => self.toast(format!("Unlocked {name}")),
+                (Op::Unmount, Ok(_)) if matches!(job.drive.crypt, crate::drives::Crypt::Open(_)) => self.toast(format!("Unmounted and locked {name}")),
                 (Op::Unmount, Ok(_)) => self.toast(format!("Unmounted {name}")),
+                (Op::Lock, Ok(_)) => self.toast(format!("Locked {name}")),
                 (Op::Eject, Ok(_)) => self.toast(format!("{name} can be safely removed")),
                 (Op::Format, Ok(_)) => self.toast(format!("Formatted {name}")),
                 (op, Err(e)) => {
