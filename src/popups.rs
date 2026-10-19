@@ -2330,6 +2330,10 @@ fn update_control(ui: &mut Ui, app: &mut App, pal: &Palette) {
             dim(ui, &format!("Downloading {}…", v.trim_start_matches('v')));
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
+        State::Installing(v) => {
+            dim(ui, &format!("Installing {}…", v.trim_start_matches('v')));
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
         State::Ready(v) => {
             if button(ui, "Restart", true).clicked() {
                 app.updater.restart(&ctx);

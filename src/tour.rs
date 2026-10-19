@@ -152,6 +152,7 @@ pub const ALSO: &[(&str, &[(&str, &str)])] = &[
             ("Empty the trash by age", "What has been in it 7, 30 or 90 days goes, if you choose (Options, Files & folders)."),
             ("Format a USB drive", "FAT32, exFAT or ext4, once you type the drive's name."),
             ("Forty more themes", "A hundred in all, side by side in Choose Theme."),
+            ("Updates for every package", "A .deb or .rpm updates through your package manager after your password; an AppImage replaces itself."),
             ("Replace keeps the old file", "A copy or move over a file puts the one there in the trash; Undo brings it back."),
             ("Name conflicts by key", "Enter keeps both, R replaces, S skips; each side says whether it is the newer one."),
         ],

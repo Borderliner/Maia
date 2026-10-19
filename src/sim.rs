@@ -4950,6 +4950,89 @@ mod journeys {
         assert!(s.texts.iter().any(|(_, t)| t == "Update it where you installed it"));
         look(&mut s, "update elsewhere");
         s.shot("update-cant-write");
+        // Installed from the .deb: the package goes to dpkg through pkexec, which asks for
+        // the password while the row says it is installing.
+        use crate::update::Installed;
+        use std::os::unix::fs::PermissionsExt;
+        let deb = Installed::Deb.package("v9.9.9").unwrap();
+        let app = Installed::AppImage(PathBuf::new()).package("v9.9.9").unwrap();
+        let (deb_bytes, app_bytes) = (b"!<arch>\nthe new package".to_vec(), b"\x7fELF the new AppImage".to_vec());
+        let sum_of = |b: &[u8]| {
+            std::fs::write(&f, b).unwrap();
+            String::from_utf8_lossy(&std::process::Command::new("sha256sum").arg(&f).output().unwrap().stdout).split_whitespace().next().unwrap().to_string()
+        };
+        let sums = format!("{}  {deb}\n{}  {app}\n", sum_of(&deb_bytes), sum_of(&app_bytes));
+        let packaged: Fetch = {
+            let (sum, deb, app, deb_bytes, app_bytes, build) = (sum.clone(), deb.clone(), app.clone(), deb_bytes.clone(), app_bytes.clone(), build.clone());
+            std::sync::Arc::new(move |url: &str, to: Option<&Path>| {
+                let name = url.rsplit('/').next().unwrap_or("").to_string();
+                let body = if url.contains("api.github.com") {
+                    let assets: Vec<String> = ["maia-linux-x86_64", "maia-linux-x86_64.sha256", &deb, &app, "SHA256SUMS"].iter().map(|n| format!(r#"{{"name":"{n}","browser_download_url":"https://github.com/yappologistic/Maia/releases/download/v9.9.9/{n}"}}"#)).collect();
+                    format!(r#"{{"tag_name":"v9.9.9","body":"New themes.","assets":[{}]}}"#, assets.join(",")).into_bytes()
+                } else if name == "SHA256SUMS" {
+                    sums.clone().into_bytes()
+                } else if name.ends_with(".sha256") {
+                    format!("{sum}  maia-linux-x86_64").into_bytes()
+                } else if name == deb {
+                    deb_bytes.clone()
+                } else if name == app {
+                    app_bytes.clone()
+                } else {
+                    build.clone()
+                };
+                match to {
+                    Some(p) => std::fs::write(p, &body).map(|_| vec![]).map_err(|e| e.to_string()),
+                    None => Ok(body),
+                }
+            })
+        };
+        let tools = root().join("updates-tools");
+        let _ = std::fs::remove_dir_all(&tools);
+        std::fs::create_dir_all(&tools).unwrap();
+        for (name, body) in [
+            ("dpkg-query", "echo \"maia: $2\"".to_string()),
+            ("dpkg", format!("cp \"$2\" {}/installed", tools.display())),
+            ("pkexec", format!("echo \"pkexec $*\" >> {}/log; sleep 1; exec \"$@\"", tools.display())),
+        ] {
+            std::fs::write(tools.join(name), format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(tools.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let sysbin = root().join("updates-system/usr/bin");
+        std::fs::create_dir_all(&sysbin).unwrap();
+        std::fs::write(sysbin.join("maia"), b"\x7fELF old").unwrap();
+        std::fs::set_permissions(&sysbin, std::fs::Permissions::from_mode(0o555)).unwrap();
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(tools.clone()));
+        s.app.updater = Updater::for_test(packaged.clone(), sysbin.join("maia"));
+        click_control(&mut s, "update button");
+        wait_until(&mut s, "a release for the .deb", 5, |s| matches!(s.app.updater.state(), State::Available(_)));
+        s.idle(2);
+        click_control(&mut s, "update button");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        wait_until(&mut s, "the password asked", 10, |s| matches!(s.app.updater.state(), State::Installing(_)));
+        s.idle(3);
+        assert!(s.texts.iter().any(|(_, t)| t == "Installing 9.9.9…"));
+        look(&mut s, "update installing");
+        s.shot("update-installing");
+        wait_until(&mut s, "the package installed", 10, |s| matches!(s.app.updater.state(), State::Ready(_)));
+        s.idle(3);
+        assert_eq!(std::fs::read(tools.join("installed")).unwrap(), deb_bytes, "dpkg was given the release's package");
+        assert!(std::fs::read_to_string(tools.join("log")).unwrap().contains(" -i "));
+        assert!(s.texts.iter().any(|(_, t)| t == "Restart"));
+        std::fs::set_permissions(&sysbin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Run from an AppImage: its file replaced, no password.
+        let apps = root().join("updates-apps");
+        std::fs::create_dir_all(&apps).unwrap();
+        let file = apps.join("Maia.AppImage");
+        std::fs::write(&file, b"\x7fELF old AppImage").unwrap();
+        s.app.updater = Updater::for_test(packaged, PathBuf::from("/proc/maia")).with_appimage(file.clone());
+        click_control(&mut s, "update button");
+        wait_until(&mut s, "a release for the AppImage", 5, |s| matches!(s.app.updater.state(), State::Available(_)));
+        s.idle(2);
+        click_control(&mut s, "update button");
+        wait_until(&mut s, "the AppImage replaced", 10, |s| matches!(s.app.updater.state(), State::Ready(_)));
+        s.idle(3);
+        assert_eq!(std::fs::read(&file).unwrap(), app_bytes);
+        assert!(s.texts.iter().any(|(_, t)| t == "9.9.9 installed"));
         report("updates", &s);
     }
 

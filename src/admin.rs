@@ -66,7 +66,7 @@ impl Task {
 }
 
 /// `/usr/bin/cp` and the like: the first match on PATH.
-fn program(name: &str) -> PathBuf {
+pub fn program(name: &str) -> PathBuf {
     std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(name)).find(|f| f.is_file())).unwrap_or_else(|| PathBuf::from(name))
 }
 
@@ -77,8 +77,14 @@ pub fn denied(e: &std::io::Error) -> bool {
 
 /// Run the task through pkexec. Waits for the password dialog.
 pub fn run(t: &Tools, task: &Task) -> Result<(), String> {
+    run_argv(t, &task.argv())
+}
+
+/// One command as root through pkexec, its program by absolute path. Waits for the
+/// password dialog; the error is the command's last line, or that access was refused.
+pub fn run_argv(t: &Tools, argv: &[OsString]) -> Result<(), String> {
     let mut c = t.cmd("pkexec");
-    c.args(task.argv()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    c.args(argv).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     let out = c.output().map_err(|e| format!("pkexec: {e}"))?;
     match out.status.code() {
         Some(0) => Ok(()),

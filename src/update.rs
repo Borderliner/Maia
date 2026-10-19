@@ -1,8 +1,10 @@
 //! Updates from the project's releases on GitHub, only when asked. "Check for updates"
 //! looks at the latest release; "Update" downloads its build, checks it against the
 //! release's checksum and puts it in place of the installed one, which the next start
-//! runs. Nothing is sent but the requests themselves; curl does them, never with the
-//! user's own settings or credentials.
+//! runs. The program alone and an AppImage are replaced by renaming over them; a .deb or
+//! .rpm install gets the release's package, handed to dpkg or rpm through pkexec, so the
+//! package manager keeps knowing what is installed. Nothing is sent but the requests
+//! themselves; curl does them, never with the user's own settings or credentials.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -20,6 +22,17 @@ pub const ASSET: &str = "maia-linux-x86_64";
 pub const SUMS: &str = "maia-linux-aarch64.sha256";
 #[cfg(not(target_arch = "aarch64"))]
 pub const SUMS: &str = "maia-linux-x86_64.sha256";
+/// This machine's processor as the packages name it.
+#[cfg(target_arch = "aarch64")]
+const ARCH: &str = "aarch64";
+#[cfg(not(target_arch = "aarch64"))]
+const ARCH: &str = "x86_64";
+#[cfg(target_arch = "aarch64")]
+const DEB_ARCH: &str = "arm64";
+#[cfg(not(target_arch = "aarch64"))]
+const DEB_ARCH: &str = "amd64";
+/// Every package's checksum, one `sha256sum` line each.
+const ALL_SUMS: &str = "SHA256SUMS";
 /// A build is a few megabytes; anything near this is not one.
 const MAX_BIN: u64 = 64 << 20;
 
@@ -30,6 +43,91 @@ pub struct Release {
     pub notes: String,
     pub bin: String,
     pub sum: String,
+    /// Every download of the project's in the release, by name.
+    pub assets: Vec<(String, String)>,
+}
+
+impl Release {
+    fn url(&self, name: &str) -> Option<&str> {
+        self.assets.iter().find(|(n, _)| n == name).map(|(_, u)| u.as_str())
+    }
+}
+
+/// How this copy of Maia was installed, which says how to replace it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Installed {
+    /// The program alone, in a folder this user can write.
+    Own,
+    /// An AppImage, in a folder this user can write: the file the system runs, not the
+    /// program inside it, which is on a read-only mount.
+    AppImage(PathBuf),
+    /// By dpkg or rpm, from the release's package.
+    Deb,
+    Rpm,
+    /// Somewhere this user can't write that no package Maia makes put it.
+    Elsewhere(PathBuf),
+}
+
+impl Installed {
+    /// The release's file for this kind of install ("maia_0.4.0_amd64.deb").
+    pub fn package(&self, version: &str) -> Option<String> {
+        let v = version.trim_start_matches(['v', 'V']);
+        match self {
+            Installed::AppImage(_) => Some(format!("Maia-{v}-{ARCH}.AppImage")),
+            Installed::Deb => Some(format!("maia_{v}_{DEB_ARCH}.deb")),
+            Installed::Rpm => Some(format!("maia-{v}-1.{ARCH}.rpm")),
+            Installed::Own | Installed::Elsewhere(_) => None,
+        }
+    }
+}
+
+/// Whether a file can be made in `dir` (tried, since permissions alone don't say: a
+/// read-only mount, say).
+fn writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".maia-write-check-{}", std::process::id()));
+    let ok = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
+/// The AppImage this process runs from: the runtime says which file in `APPIMAGE` and
+/// where it is mounted in `APPDIR`, and the program has to be inside that mount (a
+/// program started from an AppImage inherits both).
+fn running_appimage(exe: &Path) -> Option<PathBuf> {
+    let dir = std::env::var_os("APPDIR")?;
+    let file = PathBuf::from(std::env::var_os("APPIMAGE")?);
+    (exe.starts_with(&dir) && file.is_absolute()).then_some(file)
+}
+
+/// How `exe` was installed. Asks dpkg and rpm, so it runs on a thread: a package's
+/// program is one its manager lists as owned by the package "maia".
+pub fn installed(exe: &Path, appimage: Option<&Path>, tools: Option<&crate::drives::Tools>) -> Installed {
+    if let Some(a) = appimage {
+        let dir = a.parent().map(Path::to_path_buf).unwrap_or_default();
+        return if a.is_file() && writable(&dir) { Installed::AppImage(a.to_path_buf()) } else { Installed::Elsewhere(dir) };
+    }
+    let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
+    if writable(&dir) {
+        return Installed::Own;
+    }
+    if let Some(t) = tools {
+        let ask = |name: &str, args: &[&str]| {
+            if !t.has(name) {
+                return String::new();
+            }
+            let mut c = crate::media::tool_cmd(t.cmd(name));
+            c.args(args).arg(exe);
+            crate::media::output(c, Duration::from_secs(10)).map(|o| String::from_utf8_lossy(&o).trim().to_string()).unwrap_or_default()
+        };
+        // "maia: /usr/bin/maia"
+        if ask("dpkg-query", &["-S"]).split(':').next() == Some("maia") {
+            return Installed::Deb;
+        }
+        if ask("rpm", &["-qf", "--queryformat", "%{NAME}"]) == "maia" {
+            return Installed::Rpm;
+        }
+    }
+    Installed::Elsewhere(dir)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -40,10 +138,12 @@ pub enum State {
     Latest,
     Available(Release),
     Downloading(String),
+    /// Handed to the package manager, which asks for the password.
+    Installing(String),
     /// Installed; the next start runs it.
     Ready(String),
     Failed(String),
-    /// The program's folder can't be written (installed by a package manager, say).
+    /// The program's folder can't be written, and no package of Maia's put it there.
     CantWrite(PathBuf),
 }
 
@@ -79,7 +179,13 @@ pub fn parse_release(body: &[u8]) -> Option<Release> {
         v["assets"].as_array()?.iter().find(|a| a["name"].as_str() == Some(name)).and_then(|a| a["browser_download_url"].as_str()).filter(|u| u.starts_with(&prefix)).map(str::to_string)
     };
     let notes = v["body"].as_str().unwrap_or("").trim().to_string();
-    Some(Release { version: tag, notes, bin: url(ASSET)?, sum: url(SUMS)? })
+    let assets = v["assets"].as_array()?.iter().filter_map(|a| Some((a["name"].as_str()?.to_string(), a["browser_download_url"].as_str().filter(|u| u.starts_with(&prefix))?.to_string()))).collect();
+    Some(Release { version: tag, notes, bin: url(ASSET)?, sum: url(SUMS)?, assets })
+}
+
+/// The checksum `SHA256SUMS` gives the file `name`, lowercase.
+pub fn sum_for(text: &str, name: &str) -> Option<String> {
+    text.lines().find(|l| l.split_whitespace().nth(1).map(|n| n.trim_start_matches('*')) == Some(name)).and_then(parse_sum)
 }
 
 /// The checksum in a `sha256sum` line ("<64 hex>  name"), lowercase.
@@ -129,7 +235,8 @@ fn curl(_: &str, _: Option<&Path>) -> Result<Vec<u8>, String> {
 #[cfg(not(test))]
 fn runs(path: &Path, version: &str) -> bool {
     let mut c = std::process::Command::new(path);
-    c.arg("--version");
+    // An AppImage unpacked rather than mounted, so a system without FUSE can try it too.
+    c.arg("--version").env("APPIMAGE_EXTRACT_AND_RUN", "1");
     crate::media::output(c, Duration::from_secs(10)).is_some_and(|out| String::from_utf8_lossy(&out).trim() == format!("maia {}", version.trim_start_matches(['v', 'V'])))
 }
 
@@ -151,11 +258,24 @@ pub struct Updater {
     fetch: Fetch,
     /// The program to replace.
     exe: PathBuf,
+    /// The AppImage it runs from, if it does.
+    appimage: Option<PathBuf>,
+    /// Where a package waits for its manager.
+    work: PathBuf,
+}
+
+/// Where downloaded packages wait (tests run outside the sandbox too: never the real
+/// cache).
+fn work_dir() -> PathBuf {
+    let base = if cfg!(test) { None } else { dirs::cache_dir() };
+    base.unwrap_or_else(std::env::temp_dir).join("maia/updates")
 }
 
 impl Default for Updater {
     fn default() -> Self {
-        Updater { state: Arc::new(Mutex::new(State::Idle)), fetch: Arc::new(curl), exe: std::env::current_exe().unwrap_or_default() }
+        let exe = std::env::current_exe().unwrap_or_default();
+        let appimage = running_appimage(&exe);
+        Updater { state: Arc::new(Mutex::new(State::Idle)), fetch: Arc::new(curl), exe, appimage, work: work_dir() }
     }
 }
 
@@ -165,7 +285,7 @@ impl Updater {
     }
 
     fn busy(&self) -> bool {
-        matches!(self.state(), State::Checking | State::Downloading(_))
+        matches!(self.state(), State::Checking | State::Downloading(_) | State::Installing(_))
     }
 
     /// Ask GitHub for the latest release, on a thread.
@@ -195,19 +315,22 @@ impl Updater {
         if self.busy() {
             return;
         }
-        let dir = self.exe.parent().map(Path::to_path_buf).unwrap_or_default();
-        let probe = dir.join(format!(".maia-write-check-{}", std::process::id()));
-        if std::fs::write(&probe, b"").is_err() {
-            *self.state.lock().unwrap_or_else(|e| e.into_inner()) = State::CantWrite(dir);
-            return;
-        }
-        let _ = std::fs::remove_file(&probe);
         *self.state.lock().unwrap_or_else(|e| e.into_inner()) = State::Downloading(r.version.clone());
-        let (state, fetch, exe, ctx) = (self.state.clone(), self.fetch.clone(), self.exe.clone(), ctx.clone());
+        // The tools are this thread's (a simulation's fakes are set per thread).
+        let tools = crate::drives::Tools::current();
+        let (state, fetch, exe, appimage, work, ctx) = (self.state.clone(), self.fetch.clone(), self.exe.clone(), self.appimage.clone(), self.work.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let next = match put_in_place(&r, &exe, &fetch) {
-                Ok(()) => State::Ready(r.version.clone()),
-                Err(e) => State::Failed(e),
+            let how = installed(&exe, appimage.as_deref(), tools.as_ref());
+            let installing = || {
+                *state.lock().unwrap_or_else(|e| e.into_inner()) = State::Installing(r.version.clone());
+                ctx.request_repaint();
+            };
+            let next = match &how {
+                Installed::Elsewhere(dir) => State::CantWrite(dir.clone()),
+                _ => match apply(&r, &how, &exe, &work, &fetch, tools.as_ref(), &installing) {
+                    Ok(()) => State::Ready(r.version.clone()),
+                    Err(e) => State::Failed(e),
+                },
             };
             *state.lock().unwrap_or_else(|e| e.into_inner()) = next;
             ctx.request_repaint();
@@ -216,7 +339,8 @@ impl Updater {
 
     /// Start the new version in a moment and close this one (its window, and so the app).
     pub fn restart(&self, ctx: &egui::Context) {
-        let exe = self.exe.clone();
+        // An AppImage's program is on a mount that goes away with this process.
+        let exe = self.appimage.clone().unwrap_or_else(|| self.exe.clone());
         let mut c = std::process::Command::new("setsid");
         c.args(["sh", "-c", "sleep 1; exec \"$0\""]).arg(&exe).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         if cfg!(not(test)) && c.spawn().is_ok() {
@@ -226,7 +350,16 @@ impl Updater {
 
     #[cfg(test)]
     pub fn for_test(fetch: Fetch, exe: PathBuf) -> Updater {
-        Updater { state: Arc::new(Mutex::new(State::Idle)), fetch, exe }
+        // Beside the program's folder, which a test may make read-only.
+        let work = exe.parent().and_then(Path::parent).map(|d| d.join("updates")).unwrap_or_default();
+        Updater { state: Arc::new(Mutex::new(State::Idle)), fetch, exe, appimage: None, work }
+    }
+
+    /// The same, run from the AppImage `file`.
+    #[cfg(test)]
+    pub fn with_appimage(mut self, file: PathBuf) -> Updater {
+        self.appimage = Some(file);
+        self
     }
 }
 
@@ -241,34 +374,98 @@ pub fn update_now() -> Result<String, String> {
     if !newer(current, &r.version) {
         return Ok(format!("Maia {current} is the latest"));
     }
-    let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
-    let probe = dir.join(format!(".maia-write-check-{}", std::process::id()));
-    std::fs::write(&probe, b"").map_err(|_| format!("Can't write to {}: update Maia the way it was installed", dir.display()))?;
-    let _ = std::fs::remove_file(&probe);
-    put_in_place(&r, &exe, &fetch)?;
+    let tools = crate::drives::Tools::current();
+    let how = installed(&exe, running_appimage(&exe).as_deref(), tools.as_ref());
+    if let Installed::Elsewhere(dir) = &how {
+        return Err(format!("Can't write to {}: update Maia the way it was installed", dir.display()));
+    }
+    apply(&r, &how, &exe, &work_dir(), &fetch, tools.as_ref(), &|| {})?;
     Ok(format!("Updated Maia {current} to {}; start it again to use it", r.version.trim_start_matches('v')))
 }
 
-/// The download, checked, made runnable, and renamed over the program (a rename on the
-/// same filesystem: the running program keeps its old file until it exits).
+/// Put release `r` in place for an install of kind `how`. `installing` is told when the
+/// package manager takes over (and asks for the password).
+fn apply(r: &Release, how: &Installed, exe: &Path, work: &Path, fetch: &Fetch, tools: Option<&crate::drives::Tools>, installing: &dyn Fn()) -> Result<(), String> {
+    match how {
+        Installed::Own => put_in_place(r, exe, fetch),
+        Installed::AppImage(file) => {
+            let name = how.package(&r.version).unwrap_or_default();
+            let url = r.url(&name).ok_or("The latest release has no AppImage for this system")?;
+            let want = release_sum(r, fetch, &name)?;
+            replace_checked(file, url, &want, fetch, &r.version)
+        }
+        Installed::Deb | Installed::Rpm => {
+            let t = tools.ok_or("No package manager to install with")?;
+            let name = how.package(&r.version).unwrap_or_default();
+            let url = r.url(&name).ok_or("The latest release has no package for this system")?;
+            let want = release_sum(r, fetch, &name)?;
+            std::fs::create_dir_all(work).map_err(|e| e.to_string())?;
+            // The program alone, tried first: a package that can't run here would leave
+            // nothing to come back to.
+            let trial = work.join(format!("maia-trial-{}", std::process::id()));
+            let tried = replace_checked(&trial, &r.bin, &fetch_sum(&r.sum, fetch)?, fetch, &r.version);
+            let _ = std::fs::remove_file(&trial);
+            tried?;
+            let pkg = work.join(&name);
+            let done = (|| {
+                fetch(url, Some(&pkg))?;
+                let head = std::fs::read(&pkg).map_err(|e| e.to_string())?;
+                let magic: &[u8] = if *how == Installed::Deb { b"!<arch>\n" } else { b"\xed\xab\xee\xdb" };
+                if !head.starts_with(magic) {
+                    return Err("The download isn't a package".to_string());
+                }
+                if sha256(&pkg).as_deref() != Some(want.as_str()) {
+                    return Err("The download doesn't match the release's checksum".to_string());
+                }
+                installing();
+                let argv: Vec<std::ffi::OsString> = match how {
+                    Installed::Deb => vec![t.program("dpkg").into(), "-i".into(), pkg.clone().into()],
+                    _ => vec![t.program("rpm").into(), "-U".into(), pkg.clone().into()],
+                };
+                crate::admin::run_argv(t, &argv)
+            })();
+            let _ = std::fs::remove_file(&pkg);
+            done
+        }
+        Installed::Elsewhere(dir) => Err(format!("Can't write to {}", dir.display())),
+    }
+}
+
+/// The checksum the release's `SHA256SUMS` gives `name`.
+fn release_sum(r: &Release, fetch: &Fetch, name: &str) -> Result<String, String> {
+    let url = r.url(ALL_SUMS).ok_or("The release's checksums couldn't be read")?;
+    fetch(url, None).ok().and_then(|b| sum_for(&String::from_utf8_lossy(&b), name)).ok_or_else(|| "The release's checksum couldn't be read".to_string())
+}
+
+/// The checksum in a `.sha256` file.
+fn fetch_sum(url: &str, fetch: &Fetch) -> Result<String, String> {
+    fetch(url, None).ok().and_then(|b| parse_sum(&String::from_utf8_lossy(&b))).ok_or_else(|| "The release's checksum couldn't be read".to_string())
+}
+
+/// The program alone, checked and renamed over the installed one.
 fn put_in_place(r: &Release, exe: &Path, fetch: &Fetch) -> Result<(), String> {
-    let want = fetch(&r.sum, None).ok().and_then(|b| parse_sum(&String::from_utf8_lossy(&b))).ok_or("The release's checksum couldn't be read")?;
-    let tmp = exe.with_file_name(format!(".maia-update-{}", std::process::id()));
+    replace_checked(exe, &r.bin, &fetch_sum(&r.sum, fetch)?, fetch, &r.version)
+}
+
+/// `url` downloaded beside `target`, checked, made runnable, tried, and renamed over it (a
+/// rename on the same filesystem: the running program keeps its old file until it exits).
+fn replace_checked(target: &Path, url: &str, want: &str, fetch: &Fetch, version: &str) -> Result<(), String> {
+    let tmp = target.with_file_name(format!(".maia-update-{}", std::process::id()));
     let done = (|| {
-        fetch(&r.bin, Some(&tmp))?;
+        fetch(url, Some(&tmp))?;
         let head = std::fs::read(&tmp).map_err(|e| e.to_string())?;
         if !head.starts_with(b"\x7fELF") {
             return Err("The download isn't a program".to_string());
         }
-        if sha256(&tmp).as_deref() != Some(want.as_str()) {
+        if sha256(&tmp).as_deref() != Some(want) {
             return Err("The download doesn't match the release's checksum".to_string());
         }
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
-        if !runs(&tmp, &r.version) {
+        if !runs(&tmp, version) {
             return Err("This release doesn't run on this system; Maia is unchanged".to_string());
         }
-        std::fs::rename(&tmp, exe).map_err(|e| e.to_string())
+        std::fs::rename(&tmp, target).map_err(|e| e.to_string())
     })();
     if done.is_err() {
         let _ = std::fs::remove_file(&tmp);

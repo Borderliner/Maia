@@ -46,6 +46,15 @@ impl Tools {
         }
     }
 
+    /// `path_of`, but absolute for the system's tools (found on PATH now), as pkexec
+    /// wants its program.
+    pub fn program(&self, name: &str) -> PathBuf {
+        match &self.dir {
+            Some(d) => d.join(name),
+            None => crate::admin::program(name),
+        }
+    }
+
     pub fn cmd(&self, name: &str) -> Command {
         match &self.dir {
             Some(d) => Command::new(d.join(name)),

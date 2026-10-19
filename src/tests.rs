@@ -3366,7 +3366,146 @@ fn updates_check_compare_and_install() {
     // A program in a folder Maia can't write: said so, nothing fetched.
     let u = Updater::for_test(serve(build.clone(), String::new()), PathBuf::from("/proc/maia"));
     u.install(r, &ctx);
-    assert!(matches!(u.state(), State::CantWrite(_)));
+    assert!(matches!(wait(&u), State::CantWrite(_)));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Updates of a packaged Maia: a .deb or .rpm install is found by asking dpkg or rpm who
+/// owns the program, and gets the release's package, checked against SHA256SUMS and
+/// handed to dpkg -i or rpm -U through pkexec once the program alone has been tried. An
+/// AppImage replaces its own file. All of it on fakes: no package manager is run.
+#[test]
+fn updates_through_packages() {
+    use crate::update::{Fetch, Installed, State, Updater, parse_release, sum_for};
+    use std::os::unix::fs::PermissionsExt;
+    let d = tmpdir("update-pkg");
+    let sum = |b: &[u8]| {
+        let f = d.join("sum-input");
+        std::fs::write(&f, b).unwrap();
+        let out = std::process::Command::new("sha256sum").arg(&f).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap().to_string()
+    };
+    let (deb, rpm, app) = (Installed::Deb.package("v9.9.9").unwrap(), Installed::Rpm.package("v9.9.9").unwrap(), Installed::AppImage(PathBuf::new()).package("v9.9.9").unwrap());
+    assert!(deb.starts_with("maia_9.9.9_") && deb.ends_with(".deb") && rpm.starts_with("maia-9.9.9-1.") && app.starts_with("Maia-9.9.9-"));
+    let names = [crate::update::ASSET.to_string(), crate::update::SUMS.to_string(), deb.clone(), rpm.clone(), app.clone(), "SHA256SUMS".into()];
+    let json = format!(r#"{{"tag_name":"v9.9.9","body":"","assets":[{}]}}"#, names.iter().map(|n| format!(r#"{{"name":"{n}","browser_download_url":"https://github.com/yappologistic/Maia/releases/download/v9.9.9/{n}"}}"#)).collect::<Vec<_>>().join(","));
+    let r = parse_release(json.as_bytes()).expect("a release");
+    assert_eq!(r.assets.len(), 6, "every download kept");
+    let build = b"\x7fELF the new build".to_vec();
+    let deb_bytes = b"!<arch>\ndebian-binary the new package".to_vec();
+    let rpm_bytes = b"\xed\xab\xee\xdb the new package".to_vec();
+    let app_bytes = b"\x7fELF AI\x02 the new AppImage".to_vec();
+    let sums = format!("{}  {deb}\n{}  {rpm}\n{}  {app}\n{}  {}\n", sum(&deb_bytes), sum(&rpm_bytes), sum(&app_bytes), sum(&build), crate::update::ASSET);
+    assert_eq!(sum_for(&sums, &rpm), Some(sum(&rpm_bytes)));
+    assert_eq!(sum_for(&sums, "maia_1.0.0_amd64.deb"), None);
+    // A stand-in for GitHub, serving `files` by name (a tampered one, say).
+    let serve = |files: Vec<(String, Vec<u8>)>| -> Fetch {
+        let (api, sums, bsum) = (json.clone(), sums.clone(), format!("{}  {}", sum(&build), crate::update::ASSET));
+        std::sync::Arc::new(move |url: &str, to: Option<&Path>| {
+            let name = url.rsplit('/').next().unwrap_or("");
+            let body = if url.contains("api.github.com") {
+                api.clone().into_bytes()
+            } else if name == "SHA256SUMS" {
+                sums.clone().into_bytes()
+            } else if name.ends_with(".sha256") {
+                bsum.clone().into_bytes()
+            } else {
+                files.iter().find(|(n, _)| n == name).map(|(_, b)| b.clone()).ok_or("404")?
+            };
+            match to {
+                Some(p) => std::fs::write(p, &body).map(|_| vec![]).map_err(|e| e.to_string()),
+                None => Ok(body),
+            }
+        })
+    };
+    let all = || vec![(crate::update::ASSET.to_string(), build.clone()), (deb.clone(), deb_bytes.clone()), (rpm.clone(), rpm_bytes.clone()), (app.clone(), app_bytes.clone())];
+    let wait = |u: &Updater| {
+        let t0 = Instant::now();
+        while matches!(u.state(), State::Downloading(_) | State::Installing(_)) {
+            assert!(t0.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        u.state()
+    };
+    // The program where only root writes, as a package puts it.
+    let bin = d.join("usr/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let exe = bin.join("maia");
+    std::fs::write(&exe, b"\x7fELF old").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // Fakes: the manager's answer to who owns the program, its install (which keeps a
+    // copy of what it was given), and pkexec, which logs and runs it or refuses.
+    let fakes = |name: &str, owner: &str| {
+        let f = d.join(name);
+        std::fs::create_dir_all(&f).unwrap();
+        let script = |p: &str, body: &str| {
+            std::fs::write(f.join(p), format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(f.join(p), std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let keep = format!("echo \"$0 $*\" >> {0}/log; cp \"$2\" {0}/installed", f.display());
+        if owner == "dpkg" {
+            script("dpkg-query", "echo \"maia: $2\"");
+            script("dpkg", &keep);
+        } else {
+            script("rpm", &format!("[ \"$1\" = -qf ] && {{ printf maia; exit 0; }}\n{keep}"));
+        }
+        script("pkexec", &format!("echo \"pkexec $*\" >> {0}/log; [ -e {0}/deny ] && exit 126; exec \"$@\"", f.display()));
+        f
+    };
+    let ctx = egui::Context::default();
+    let run = |fake: Option<&Path>, u: &Updater| {
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = fake.map(Path::to_path_buf));
+        u.install(r.clone(), &ctx);
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        wait(u)
+    };
+    // A .deb install: the package, checked, to dpkg -i through pkexec; nothing left behind.
+    let f = fakes("deb-tools", "dpkg");
+    let u = Updater::for_test(serve(all()), exe.clone());
+    assert_eq!(run(Some(&f), &u), State::Ready("v9.9.9".into()));
+    let log = std::fs::read_to_string(f.join("log")).unwrap();
+    assert!(log.starts_with(&format!("pkexec {} -i {}", f.join("dpkg").display(), d.join("usr/updates").join(&deb).display())), "{log}");
+    assert_eq!(std::fs::read(f.join("installed")).unwrap(), deb_bytes, "the release's package installed");
+    assert!(!d.join("usr/updates").join(&deb).exists(), "the download removed");
+    assert_eq!(std::fs::read(&exe).unwrap(), b"\x7fELF old", "the program itself left to dpkg");
+    // The password dialog dismissed: said so.
+    std::fs::write(f.join("deny"), b"").unwrap();
+    let u = Updater::for_test(serve(all()), exe.clone());
+    assert!(matches!(run(Some(&f), &u), State::Failed(e) if e.contains("not given")));
+    // A tampered package never reaches pkexec.
+    std::fs::remove_file(f.join("deny")).unwrap();
+    std::fs::remove_file(f.join("log")).unwrap();
+    let mut bad = all();
+    bad[1].1 = b"!<arch>\ntampered".to_vec();
+    let u = Updater::for_test(serve(bad), exe.clone());
+    assert!(matches!(run(Some(&f), &u), State::Failed(e) if e.contains("checksum")));
+    assert!(!f.join("log").exists(), "pkexec not asked");
+    // A program alone that's broken stops the update before the package is fetched.
+    let mut bad = all();
+    bad[0].1 = b"\x7fELF broken".to_vec();
+    let u = Updater::for_test(serve(bad), exe.clone());
+    assert!(matches!(run(Some(&f), &u), State::Failed(e) if e.contains("checksum")));
+    assert!(!f.join("log").exists());
+    // An .rpm install: rpm -U.
+    let f = fakes("rpm-tools", "rpm");
+    let u = Updater::for_test(serve(all()), exe.clone());
+    assert_eq!(run(Some(&f), &u), State::Ready("v9.9.9".into()));
+    assert!(std::fs::read_to_string(f.join("log")).unwrap().contains(&format!("{} -U ", f.join("rpm").display())));
+    assert_eq!(std::fs::read(f.join("installed")).unwrap(), rpm_bytes);
+    // Neither manager owns it: nothing to do but say so.
+    let u = Updater::for_test(serve(all()), exe.clone());
+    assert_eq!(run(None, &u), State::CantWrite(bin.clone()));
+    // An AppImage: its own file replaced, the program inside it untouched.
+    let apps = d.join("Applications");
+    std::fs::create_dir_all(&apps).unwrap();
+    let file = apps.join("Maia.AppImage");
+    std::fs::write(&file, b"\x7fELF old AppImage").unwrap();
+    let u = Updater::for_test(serve(all()), exe.clone()).with_appimage(file.clone());
+    assert_eq!(run(None, &u), State::Ready("v9.9.9".into()));
+    assert_eq!(std::fs::read(&file).unwrap(), app_bytes);
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o755);
+    assert_eq!(std::fs::read(&exe).unwrap(), b"\x7fELF old");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     let _ = std::fs::remove_dir_all(&d);
 }
 

@@ -25,7 +25,7 @@ these for x86_64 and ARM64:
 | `maia-VERSION-1.x86_64.rpm` | Fedora, RHEL, openSUSE: `sudo dnf install ./maia-*.rpm` |
 | `Maia-VERSION-x86_64.AppImage` | any distribution: make it executable and run it |
 | `maia-VERSION-linux-x86_64.tar.gz` | unpack and run `install.sh` (to `~/.local`, or `/usr/local` as root) |
-| `maia-linux-x86_64` | the program alone, which updates itself: run it with `--install` |
+| `maia-linux-x86_64` | the program alone: run it with `--install` |
 
 To build it yourself you need Rust 1.88 or newer:
 
@@ -77,8 +77,8 @@ adds a tab to that window.
 
 Options > Startup & system > Check for updates fetches a newer release, checks it
 against its checksum and runs it once before swapping it in; `maia --update` does the
-same. Maia never checks on its own, and a copy installed from a package is updated the
-way it was installed. Settings live in `~/.config/maia/config.json`.
+same. Maia never checks on its own. An install from the .deb or .rpm gets the new
+package through your package manager, after your password; an AppImage replaces itself. Settings live in `~/.config/maia/config.json`.
 
 ## When something goes wrong
 
