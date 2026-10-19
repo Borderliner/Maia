@@ -512,9 +512,10 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 // A drive that is not mounted has a second line: the name moves up a little
                 // so the two lines don't touch.
                 let ic = Rect::from_center_size(pos2(r.left() + 36.0, r.top() + row_h / 2.0 + if mounted { 1.0 } else { -1.0 }), Vec2::splat(15.0));
-                let g = if drive.is_some_and(|d| d.removable) { Glyph::Usb } else { Glyph::Drive };
+                let crypt = drive.map_or(&crate::drives::Crypt::Plain, |d| &d.crypt);
                 let icol = if sel { pal.on_sel() } else if mounted { pal.text_dim } else { pal.text_dim.gamma_multiply(0.6) };
-                paint_glyph(ui.painter(), ic, g, icol);
+                let ring = if sel { pal.selected } else if row_hover || ctx_target.as_deref() == Some(p.as_path()) { pal.hover } else { pal.sidebar };
+                crate::ui::paint_drive(ui.painter(), ic, drive.is_some_and(|d| d.removable), crypt, icol, ring);
                 // Room on the right for the eject button (or the spinner while busy).
                 let btn = Rect::from_center_size(pos2(r.right() - 20.0, ic.center().y), Vec2::splat(20.0));
                 let reserve = if eject.is_some() || busy { 26.0 } else { 0.0 };
@@ -522,7 +523,8 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 let lg = crate::listing::elided(ui, label, font.clone(), r.width() - 60.0 - reserve, tcol);
                 ui.painter().galley(pos2(r.left() + 52.0, ic.center().y - lg.size().y / 2.0), lg, tcol);
                 if !mounted {
-                    let sub = crate::listing::elided(ui, &format!("{} · Not mounted", fsx::fmt_size(*total)), FontId::proportional(app.cfg.font_size - 3.0), r.width() - 60.0 - reserve, pal.text_dim);
+                    let state = if *crypt == crate::drives::Crypt::Locked { "Locked" } else { "Not mounted" };
+                    let sub = crate::listing::elided(ui, &format!("{} · {state}", fsx::fmt_size(*total)), FontId::proportional(app.cfg.font_size - 3.0), r.width() - 60.0 - reserve, pal.text_dim);
                     ui.painter().galley(pos2(r.left() + 52.0, r.bottom() - 3.0 - sub.size().y), sub, pal.text_dim);
                 } else if *total > 0 {
                     let frac = (total - free) as f32 / *total as f32;
@@ -550,7 +552,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                     }
                     let _ = b.on_hover_text(if op == crate::drives::Op::Eject { format!("Eject {}", d.title()) } else { format!("Unmount {}", d.title()) });
                 }
-                let tip = if mounted { format!("{}\n{} free of {}", p.display(), fsx::fmt_size(*free), fsx::fmt_size(*total)) } else { format!("{}\nClick to mount", drive.map(|d| d.dev.clone()).unwrap_or_default()) };
+                let tip = if mounted { format!("{}\n{} free of {}", p.display(), fsx::fmt_size(*free), fsx::fmt_size(*total)) } else { format!("{}\nClick to {}", drive.map(|d| d.dev.clone()).unwrap_or_default(), if *crypt == crate::drives::Crypt::Locked { "unlock" } else { "mount" }) };
                 let resp = resp.on_hover_text(tip);
                 nav(&mut actions, &resp, p);
                 if mounted {

@@ -303,6 +303,26 @@ pub fn spinner(p: &egui::Painter, c: egui::Pos2, r: f32, col: Color32, t: f64) {
     p.add(egui::Shape::line(pts, Stroke::new(1.6, col)));
 }
 
+/// A drive's icon: a padlock while it is encrypted and locked, else a USB stick for
+/// removable media or a disk, which wears a small open padlock (ringed in `bg`) once
+/// unlocked.
+pub fn paint_drive(p: &egui::Painter, r: Rect, removable: bool, crypt: &crate::drives::Crypt, col: Color32, bg: Color32) {
+    use crate::drives::Crypt;
+    let g = match crypt {
+        Crypt::Locked => Glyph::Lock,
+        _ if removable => Glyph::Usb,
+        _ => Glyph::Drive,
+    };
+    paint_glyph(p, r, g, col);
+    if matches!(crypt, Crypt::Open(_)) {
+        // On the corner, so the drive still reads as one.
+        let s = (r.width() * 0.5).clamp(9.0, 24.0);
+        let mark = Rect::from_center_size(r.right_bottom(), Vec2::splat(s));
+        p.circle_filled(mark.center(), s * 0.55, bg);
+        paint_glyph(p, mark, Glyph::LockOpen, col);
+    }
+}
+
 impl App {
     pub fn draw(&mut self, ctx: &egui::Context) {
         // Whether the files being dragged were picked up with the right button (their drop

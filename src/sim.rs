@@ -217,7 +217,7 @@ while IFS=$'\t' read -r path pk label fs size rm hp type; do
   [ -z "$path" ] && continue
   [ "$pk" = - ] && pk=""; [ "$label" = - ] && label=""; [ "$fs" = - ] && fs=""
   name="${path##*/}"; disk="${pk:-$name}"
-  [ -e "$D/gone/$disk" ] && continue
+  [ -e "$D/gone/${disk%%[0-9]*}" ] && continue
   mp=""; [ -f "$D/mounted/$name" ] && mp="$(cat "$D/mounted/$name")"
   printf 'PATH="%s" PKNAME="%s" LABEL="%s" FSTYPE="%s" SIZE="%s" RM="%s" HOTPLUG="%s" TYPE="%s" MOUNTPOINTS="%s"\n' "$path" "$pk" "${label// /\\x20}" "$fs" "$size" "$rm" "$hp" "$type" "${mp// /\\x20}"
 done < "$D/devices"
@@ -231,8 +231,8 @@ regen() {
   local f n m
   for f in "$D"/mounted/*; do
     [ -f "$f" ] || continue
-    n="${f##*/}"; m="$(cat "$f")"
-    echo "/dev/$n ${m// /\\040} $(field 4 "/dev/$n") rw 0 0"
+    n="${f##*/}"; m="$(cat "$f")"; p="$(awk -F'\t' -v n="$n" '{k=$1; sub(/.*\//,"",k)} k==n{print $1}' "$D/devices")"
+    echo "${p:=/dev/$n} ${m// /\\040} $(field 4 "$p") rw 0 0"
   done > "$D/mounts.new"; mv "$D/mounts.new" "$D/mounts"
 }
 sleep 0.15
@@ -250,6 +250,15 @@ case "$op" in
     mp="$(cat "$D/mounted/$name")"; rm -f "$D/mounted/$name"; regen; rm -rf "$mp" ;;
   power-off)
     touch "$D/gone/$name" ;;
+  unlock)
+    # The passphrase comes as a key file on stdin, exactly (no newline added).
+    [ "$4 $5" = "--key-file /dev/stdin" ] || { echo "Error unlocking $dev: no key file" >&2; exit 1; }
+    if [ "$(cat; echo .)" != "$(cat "$D/passphrase")." ]; then echo "Error unlocking $dev: GDBus.Error:org.freedesktop.UDisks2.Error.Failed: Error unlocking $dev: Failed to activate device: Operation not permitted" >&2; exit 1; fi
+    printf '/dev/mapper/luks-%s\t%s\tVault\text4\t%s\t0\t0\tcrypt\n' "$name" "$name" "$(field 5)" >> "$D/devices"
+    echo "Unlocked $dev as /dev/dm-0." ;;
+  lock)
+    if [ -f "$D/mounted/luks-$name" ]; then echo "Error locking $dev: GDBus.Error:org.freedesktop.UDisks2.Error.Failed: Cannot lock $dev as the cleartext device is mounted" >&2; exit 1; fi
+    awk -F'\t' -v n="$name" '$2!=n' "$D/devices" > "$D/devices.new" && mv "$D/devices.new" "$D/devices" ;;
   *) echo "unknown $op" >&2; exit 1 ;;
 esac
 "#;
@@ -292,6 +301,15 @@ esac
     let table: String = [("sdw1", "/boot", "vfat"), ("sdw2", "/", "btrfs"), ("sdx1", busy.to_str().unwrap(), "ext4")].iter().map(|(n, m, f)| format!("/dev/{n} {} {f} rw 0 0\n", m.replace(' ', "\\040"))).collect();
     std::fs::write(d.join("mounts"), table).unwrap();
     d
+}
+
+/// Plugs a locked LUKS drive into fake drives `d`, as lsblk lists one: `/dev/sdv1` on a
+/// 500 GB USB disk, which the passphrase "correct horse" unlocks to an ext4 "Vault".
+pub fn fake_encrypted_drive(d: &Path) {
+    let mut rows = std::fs::read_to_string(d.join("devices")).unwrap();
+    rows.push_str("/dev/sdv\t-\t-\t-\t536870912000\t0\t1\tdisk\n/dev/sdv1\tsdv\t-\tcrypto_LUKS\t536869863424\t0\t1\tpart\n");
+    std::fs::write(d.join("devices"), rows).unwrap();
+    std::fs::write(d.join("passphrase"), "correct horse").unwrap();
 }
 
 /// A fake `gio` for network tests: a phone that can be mounted, a share on "nas" that
@@ -4013,6 +4031,100 @@ mod journeys {
         }
         assert!(!drive_log(&d).lines().any(|l| l.contains("/dev/sdw")), "the system disk was never touched");
         report("drives", &s);
+    }
+
+    /// An encrypted drive: listed locked, with a padlock, in Computer and the sidebar;
+    /// opening it asks for the passphrase. A wrong one is said so in the dialog over an
+    /// empty field, still focused; the right one unlocks and mounts it and shows its
+    /// files, the drive now wearing an open padlock. No passphrase ever reaches a command
+    /// line. Ejecting unmounts, locks and only then powers it off.
+    #[test]
+    fn encrypted_drive_unlock_open_eject() {
+        if !sandboxed() {
+            return;
+        }
+        let d = fake_drives("vault");
+        fake_encrypted_drive(&d);
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(d.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let home = fixture("vault");
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        // Pictures in a dark theme and a light one.
+        let shots = |s: &mut Sim, name: &str| {
+            for (theme, look) in [(crate::theme::ThemeName::Midnight, "dark"), (crate::theme::ThemeName::Paper, "light")] {
+                s.app.cfg.theme = theme;
+                shot_still(s, &format!("{name}-{look}"));
+            }
+            s.app.cfg.theme = crate::theme::ThemeName::Midnight;
+            s.idle(2);
+        };
+        s.cmd(Computer);
+        wait_until(&mut s, "locked drive listed", 10, |s| s.tab().entries.iter().any(|e| e.name == "Encrypted 500 GB"));
+        assert!(sidebar_text(&s, "Encrypted 500 GB").is_some(), "offered in the sidebar");
+        assert!(some_text(&s, "500 GB · Locked"), "marked as locked");
+        look(&mut s, "a locked drive");
+        shots(&mut s, "encrypted-locked");
+        let r = list_text(&s, "Encrypted 500 GB");
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(20);
+        assert!(some_text(&s, "Unlock…") && some_text(&s, "Eject") && !some_text(&s, "Mount") && !some_text(&s, "Lock"), "a locked drive unlocks");
+        s.act("key Escape");
+
+        // Opened: the passphrase is asked; a wrong one is refused in the dialog.
+        select_name(&mut s, "Encrypted 500 GB");
+        s.act("key Enter");
+        s.idle(2);
+        assert!(matches!(s.app.popup, Popup::Unlock(_)), "passphrase asked");
+        assert!(some_text(&s, "Unlock “Encrypted 500 GB”"));
+        s.act("text battery staple");
+        shots(&mut s, "encrypted-passphrase");
+        s.act("key Enter");
+        assert!(crate::drives::busy("/dev/sdv1"), "unlocking");
+        wait_until(&mut s, "wrong passphrase said", 10, |s| some_text(s, "Wrong passphrase"));
+        assert!(matches!(&s.app.popup, Popup::Unlock(st) if st.pass.0.is_empty()), "field emptied");
+        assert_eq!(s.ctx.memory(|m| m.focused()), Some(egui::Id::new("unlock passphrase")), "and ready for another try");
+        shots(&mut s, "encrypted-wrong");
+
+        // The right one: unlocked, mounted and opened.
+        s.act("text correct horse");
+        s.act("key Enter");
+        let vault = d.join("media/Vault");
+        wait_until(&mut s, "vault opened", 10, |s| s.tab().path == vault);
+        s.settle();
+        assert!(!s.popup_open(), "dialog gone");
+        assert!(s.tab().entries.iter().any(|e| e.name == "readme.txt"), "its files listed");
+        let log = drive_log(&d);
+        assert!(log.contains("udisksctl unlock -b /dev/sdv1 --key-file /dev/stdin") && log.contains("udisksctl mount -b /dev/mapper/luks-sdv1"), "{log}");
+        assert!(!log.contains("horse") && !log.contains("staple"), "no passphrase on a command line: {log}");
+        wait_until(&mut s, "vault in the sidebar", 10, |s| sidebar_text(s, "Vault").is_some());
+        look(&mut s, "inside the unlocked drive");
+        shots(&mut s, "encrypted-unlocked");
+        let r = sidebar_text(&s, "Vault").unwrap();
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(20);
+        assert!(some_text(&s, "Lock") && some_text(&s, "Eject"), "an unlocked drive locks");
+        s.act("key Escape");
+        s.cmd(Computer);
+        wait_until(&mut s, "vault in Computer", 10, |s| s.tab().entries.iter().any(|e| e.path == vault));
+        look(&mut s, "the unlocked drive in Computer");
+        shots(&mut s, "encrypted-unlocked-computer");
+
+        // Eject: unmounted, locked, then powered off.
+        let r = sidebar_text(&s, "Vault").unwrap();
+        s.act(&format!("move {:.0} {:.0}", r.center().x, r.center().y));
+        click_control(&mut s, "eject button");
+        wait_until(&mut s, "ejected", 10, |s| toast_is(s, "Vault can be safely removed"));
+        let log = drive_log(&d);
+        let at = |what: &str| log.find(what).unwrap_or_else(|| s.fail(&format!("{what} not in {log}")));
+        assert!(at("udisksctl unmount -b /dev/mapper/luks-sdv1") < at("udisksctl lock -b /dev/sdv1") && at("udisksctl lock -b /dev/sdv1") < at("udisksctl power-off -b /dev/sdv"), "{log}");
+        wait_until(&mut s, "drive gone", 10, |s| !s.tab().entries.iter().any(|e| e.path == vault || e.name.starts_with("Encrypted")) && sidebar_text(s, "Vault").is_none());
+        report("encrypted drive", &s);
     }
 
     /// Drag and drop with other apps: files dragged in from "another app" land on the

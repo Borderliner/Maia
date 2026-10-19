@@ -1264,6 +1264,96 @@ PATH=\"/dev/sdd1\" PKNAME=\"sdd\" LABEL=\"\" FSTYPE=\"ext4\" SIZE=\"7999000000\"
     assert!(!crate::drives::can_unmount(d.iter().find(|x| x.dev == "/dev/sdd1").unwrap()));
 }
 
+/// Encrypted volumes as lsblk lists them: a locked LUKS partition is offered (as
+/// "Encrypted …" with no label), an unlocked one is not, the filesystem inside it is,
+/// on the disk under it and lockable; a system disk unlocked at boot offers nothing.
+#[test]
+fn lsblk_encrypted_volumes_locked_and_unlocked() {
+    use crate::drives::{Crypt, can_lock, parse_lsblk};
+    let text = r#"PATH="/dev/nvme0n1" PKNAME="" LABEL="" FSTYPE="" SIZE="1024209543168" RM="0" HOTPLUG="0" TYPE="disk" MOUNTPOINTS=""
+PATH="/dev/nvme0n1p1" PKNAME="nvme0n1" LABEL="" FSTYPE="vfat" SIZE="629145600" RM="0" HOTPLUG="0" TYPE="part" MOUNTPOINTS="/boot/efi"
+PATH="/dev/nvme0n1p2" PKNAME="nvme0n1" LABEL="" FSTYPE="crypto_LUKS" SIZE="807453851648" RM="0" HOTPLUG="0" TYPE="part" MOUNTPOINTS=""
+PATH="/dev/nvme0n1p3" PKNAME="nvme0n1" LABEL="" FSTYPE="crypto_LUKS" SIZE="214748364800" RM="0" HOTPLUG="0" TYPE="part" MOUNTPOINTS=""
+PATH="/dev/mapper/luks-8c2b7d51-4c1e-4f0a-9d63-0f6e2a7b9c11" PKNAME="nvme0n1p2" LABEL="" FSTYPE="btrfs" SIZE="807437074432" RM="0" HOTPLUG="0" TYPE="crypt" MOUNTPOINTS="/home\x0a/"
+PATH="/dev/sdv" PKNAME="" LABEL="" FSTYPE="" SIZE="536870912000" RM="0" HOTPLUG="1" TYPE="disk" MOUNTPOINTS=""
+PATH="/dev/sdv1" PKNAME="sdv" LABEL="" FSTYPE="crypto_LUKS" SIZE="536869863424" RM="0" HOTPLUG="1" TYPE="part" MOUNTPOINTS=""
+PATH="/dev/mapper/luks-3f6c0e5a-8d2b-4c1e-9a7f-2b5d8e1c4a90" PKNAME="sdv1" LABEL="Vault" FSTYPE="ext4" SIZE="536853086208" RM="0" HOTPLUG="0" TYPE="crypt" MOUNTPOINTS="/run/media/me/Vault"
+PATH="/dev/sdw" PKNAME="" LABEL="" FSTYPE="" SIZE="64023257088" RM="1" HOTPLUG="1" TYPE="disk" MOUNTPOINTS=""
+PATH="/dev/sdw1" PKNAME="sdw" LABEL="Diary" FSTYPE="crypto_LUKS" SIZE="64022208512" RM="1" HOTPLUG="1" TYPE="part" MOUNTPOINTS="""#;
+    let d = parse_lsblk(text);
+    let get = |dev: &str| d.iter().find(|x| x.dev == dev).unwrap_or_else(|| panic!("{dev}"));
+    let offered: Vec<&str> = d.iter().filter(|x| x.offer_mount()).map(|x| x.dev.as_str()).collect();
+    assert_eq!(offered, ["/dev/nvme0n1p3", "/dev/sdw1"], "locked volumes; not the open ones, nor what is mounted");
+    assert_eq!(get("/dev/nvme0n1p3").crypt, Crypt::Locked);
+    assert_eq!(get("/dev/nvme0n1p3").title(), "Encrypted 200 GB");
+    assert_eq!(get("/dev/sdw1").title(), "Diary", "a LUKS2 label is its name");
+    assert_eq!(get("/dev/sdv1").crypt, Crypt::Plain, "unlocked: what's inside stands for it");
+    let vault = get("/dev/mapper/luks-3f6c0e5a-8d2b-4c1e-9a7f-2b5d8e1c4a90");
+    assert_eq!(vault.crypt, Crypt::Open("/dev/sdv1".into()));
+    assert_eq!(vault.disk, "/dev/sdv", "the disk under the partition it opens, to power off");
+    assert!(vault.removable && can_lock(vault) && vault.title() == "Vault");
+    let root = get("/dev/mapper/luks-8c2b7d51-4c1e-4f0a-9d63-0f6e2a7b9c11");
+    assert_eq!(root.disk, "/dev/nvme0n1");
+    assert!(!root.removable && !can_lock(root), "the system, unlocked at boot, stays as it is");
+}
+
+/// Unlocking through stand-ins for lsblk and udisksctl: the passphrase goes in on
+/// udisksctl's input as a key file, exactly as typed, never on a command line; a wrong
+/// one comes back as such and changes nothing; the right one unlocks and mounts what is
+/// inside. Unmount, Lock and Eject close the volume again, after unmounting and before
+/// the power goes.
+#[test]
+fn unlock_an_encrypted_drive_with_its_passphrase() {
+    use crate::drives::{Crypt, Op, Passphrase, WRONG_PASSPHRASE, list, perform, unlock, wrong_passphrase};
+    let d = tmpdir("unlock");
+    let rows = [
+        r#"PATH="/dev/sdv" PKNAME="" LABEL="" FSTYPE="" SIZE="536870912000" RM="0" HOTPLUG="1" TYPE="disk" MOUNTPOINTS="""#,
+        r#"PATH="/dev/sdv1" PKNAME="sdv" LABEL="" FSTYPE="crypto_LUKS" SIZE="536869863424" RM="0" HOTPLUG="1" TYPE="part" MOUNTPOINTS="""#,
+    ];
+    std::fs::write(d.join("rows"), rows.join("\n") + "\n").unwrap();
+    let inside = r#"PATH="/dev/mapper/luks-3f6c" PKNAME="sdv1" LABEL="Vault" FSTYPE="ext4" SIZE="536853086208" RM="0" HOTPLUG="0" TYPE="crypt" MOUNTPOINTS="""#;
+    std::fs::write(d.join("inside"), format!("{inside}\n")).unwrap();
+    fake_tool(&d, "lsblk", "cat \"$D/rows\"");
+    let udisks = r#"case "$1" in
+  unlock)
+    if [ "$(cat; echo .)" = "correct horse." ]; then cat "$D/inside" >> "$D/rows"; echo "Unlocked $3 as /dev/dm-0."
+    else echo "Error unlocking $3: GDBus.Error:org.freedesktop.UDisks2.Error.Failed: Error unlocking $3: Failed to activate device: Operation not permitted" >&2; exit 1; fi ;;
+  mount) echo "Mounted $3 at /run/media/me/Vault." ;;
+esac"#;
+    fake_tool(&d, "udisksctl", udisks);
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(d.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    let locked = list(&t).into_iter().find(|x| x.dev == "/dev/sdv1").unwrap();
+    assert_eq!(locked.crypt, Crypt::Locked);
+    let pass = |s: &str| Passphrase(s.to_string());
+    assert_eq!(unlock(&t, &locked, &pass("correct horse\n")).err().as_deref(), Some(WRONG_PASSPHRASE), "exactly as typed");
+    assert_eq!(unlock(&t, &locked, &pass("battery staple")).err().as_deref(), Some(WRONG_PASSPHRASE));
+    assert_eq!(list(&t).len(), 2, "still locked");
+    assert_eq!(unlock(&t, &locked, &pass("correct horse")).unwrap(), Some(PathBuf::from("/run/media/me/Vault")));
+    let calls = fake_calls(&d);
+    assert!(calls.iter().filter(|c| c[0] == "udisksctl").all(|c| !c.iter().any(|a| a.contains("horse") || a.contains("staple"))), "{calls:?}");
+    let progs: Vec<&[String]> = calls.iter().filter(|c| c[0] == "udisksctl").map(|c| &c[1..]).collect();
+    assert_eq!(progs.len(), 4);
+    assert_eq!(progs[2], ["unlock", "-b", "/dev/sdv1", "--key-file", "/dev/stdin"]);
+    assert_eq!(progs[3], ["mount", "-b", "/dev/mapper/luks-3f6c"]);
+    // Closing it again: whatever is mounted comes off first, the power goes last.
+    let all = list(&t);
+    let mut vault = all.iter().find(|x| x.dev == "/dev/mapper/luks-3f6c").unwrap().clone();
+    assert_eq!((vault.crypt.clone(), vault.disk.as_str()), (Crypt::Open("/dev/sdv1".into()), "/dev/sdv"));
+    let _ = std::fs::remove_file(d.join("calls.log"));
+    perform(&t, Op::Lock, &vault, &all).unwrap();
+    vault.mounts = vec![PathBuf::from("/run/media/me/Vault")];
+    perform(&t, Op::Unmount, &vault, &all).unwrap();
+    let all: Vec<_> = all.into_iter().map(|x| if x.dev == vault.dev { vault.clone() } else { x }).collect();
+    perform(&t, Op::Eject, &vault, &all).unwrap();
+    let calls: Vec<String> = fake_calls(&d).iter().map(|c| c[1..].join(" ")).collect();
+    assert_eq!(calls, ["lock -b /dev/sdv1", "unmount -b /dev/mapper/luks-3f6c", "lock -b /dev/sdv1", "unmount -b /dev/mapper/luks-3f6c", "lock -b /dev/sdv1", "power-off -b /dev/sdv"]);
+    // cryptsetup's words for a wrong passphrase, old and new.
+    assert!(wrong_passphrase("Failed to activate device: Incorrect passphrase") && wrong_passphrase("No key available with this passphrase"));
+    assert!(!wrong_passphrase("Not authorized to perform operation"));
+}
+
 #[test]
 fn uri_lists_round_trip_any_file_name() {
     use crate::clipboard::{parse_uri_list, path_to_uri, uri_list};

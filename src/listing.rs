@@ -392,8 +392,8 @@ fn unmounted(t: &Tab, e: &Entry) -> bool {
     t.vols.get(&e.path).is_some_and(|v| !v.mounted)
 }
 
-/// Drive icon in the Computer view: a USB stick for removable media, a spinner while
-/// it is being mounted or ejected.
+/// Drive icon in the Computer view (`ui::paint_drive`), a spinner while it is being
+/// mounted, unlocked or ejected.
 fn paint_drive(ui: &Ui, r: Rect, t: &Tab, e: &Entry, col: Color32) {
     let v = t.vols.get(&e.path);
     if v.is_some_and(|v| crate::drives::busy(&v.device)) {
@@ -401,7 +401,7 @@ fn paint_drive(ui: &Ui, r: Rect, t: &Tab, e: &Entry, col: Color32) {
         ui.ctx().request_repaint();
         return;
     }
-    theme::paint_glyph(ui.painter(), r, if v.is_some_and(|v| v.removable) { theme::Glyph::Usb } else { theme::Glyph::Drive }, col);
+    crate::ui::paint_drive(ui.painter(), r, v.is_some_and(|v| v.removable), v.map_or(&crate::drives::Crypt::Plain, |v| &v.crypt), col, ui.visuals().extreme_bg_color);
 }
 
 fn entry_size_text(e: &Entry, t: &Tab, env: &Env) -> String {

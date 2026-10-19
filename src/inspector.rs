@@ -2776,9 +2776,9 @@ fn folder_view(ui: &mut Ui, body: Rect, entries: &[Entry], env: &mut Env) {
 
 fn volume_view(ui: &mut Ui, body: Rect, e: &Entry, v: Option<&tab::VolInfo>, pal: &theme::Palette) {
     let c = body.center();
-    let g = if v.is_some_and(|v| v.removable) { Glyph::Usb } else { Glyph::Drive };
     let mounted = v.is_none_or(|v| v.mounted);
-    theme::paint_glyph(ui.painter(), Rect::from_center_size(c - vec2(0.0, 60.0), Vec2::splat(64.0)), g, if mounted { pal.text_dim } else { pal.text_dim.gamma_multiply(0.55) });
+    let crypt = v.map_or(&crate::drives::Crypt::Plain, |v| &v.crypt);
+    crate::ui::paint_drive(ui.painter(), Rect::from_center_size(c - vec2(0.0, 60.0), Vec2::splat(64.0)), v.is_some_and(|v| v.removable), crypt, if mounted { pal.text_dim } else { pal.text_dim.gamma_multiply(0.55) }, pal.bg);
     ui.painter().text(c - vec2(0.0, 14.0), Align2::CENTER_CENTER, &e.name, FontId::proportional(16.0), pal.text);
     if let Some(v) = v {
         let lines = if v.mounted {
@@ -2788,6 +2788,8 @@ fn volume_view(ui: &mut Ui, body: Rect, e: &Entry, v: Option<&tab::VolInfo>, pal
             ui.painter().rect_filled(bar, CornerRadius::same(4), pal.raised);
             ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * frac, 8.0)), CornerRadius::same(4), if frac > 0.9 { pal.danger } else { pal.accent });
             [format!("{} free of {}", fsx::fmt_size(v.free), fsx::fmt_size(v.total)), format!("{} · {}", v.fstype, v.device), e.path.display().to_string()]
+        } else if *crypt == crate::drives::Crypt::Locked {
+            [format!("{} · Locked", fsx::fmt_size(v.total)), format!("Encrypted · {}", v.device), "Open it to unlock".into()]
         } else {
             [format!("{} · Not mounted", fsx::fmt_size(v.total)), format!("{} · {}", v.fstype, v.device), "Open it to mount".into()]
         };
