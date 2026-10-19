@@ -78,6 +78,7 @@ pub fn glyph_button_as(ui: &mut Ui, g: Glyph, tip: &str, enabled: bool, pal: &Pa
     }
     let (rect, resp) = ui.allocate_exact_size(vec2(26.0, 24.0), if enabled { Sense::click() } else { Sense::hover() });
     note_control(ui, rect, what);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tip));
     if resp.hovered() && enabled {
         // Toolbar buttons light up with a tint of the accent.
         ui.painter().rect_filled(rect, CornerRadius::same(5), pal.row_hover);

@@ -30,6 +30,16 @@ enum UserEvent {
     Repaint(Duration),
     /// SIGTERM/SIGHUP/SIGINT: close like the window's close button (session is saved).
     Quit,
+    /// A screen reader asking for what the window shows, or for an action on it.
+    #[cfg(feature = "screen-reader")]
+    Access(egui_winit::accesskit_winit::Event),
+}
+
+#[cfg(feature = "screen-reader")]
+impl From<egui_winit::accesskit_winit::Event> for UserEvent {
+    fn from(e: egui_winit::accesskit_winit::Event) -> Self {
+        UserEvent::Access(e)
+    }
 }
 
 /// GL state. Field order is drop order: the EGL surface and context must go before the
@@ -253,7 +263,12 @@ impl ApplicationHandler<UserEvent> for Runner {
         }
         let gl = create_gl(el, &self.opts);
         let painter = egui_glow::Painter::new(gl.glow.clone(), "", None, true).or_die("Could not create the painter");
-        let state = egui_winit::State::new(self.ctx.clone(), egui::ViewportId::ROOT, el, Some(gl.window.scale_factor() as f32), el.system_theme(), Some(painter.max_texture_side()));
+        #[allow(unused_mut)]
+        let mut state = egui_winit::State::new(self.ctx.clone(), egui::ViewportId::ROOT, el, Some(gl.window.scale_factor() as f32), el.system_theme(), Some(painter.max_texture_side()));
+        // Before the window is shown, as the accessibility bus wants. The tree is only
+        // built once a screen reader asks for it.
+        #[cfg(feature = "screen-reader")]
+        state.init_accesskit(el, &gl.window, self.proxy.clone());
         let proxy = self.proxy.clone();
         self.ctx.set_request_repaint_callback(move |info| {
             let _ = proxy.send_event(UserEvent::Repaint(info.delay));
@@ -352,6 +367,20 @@ impl ApplicationHandler<UserEvent> for Runner {
         let delay = match ev {
             UserEvent::Repaint(d) => d,
             UserEvent::Quit => return self.exit(el),
+            #[cfg(feature = "screen-reader")]
+            UserEvent::Access(e) => {
+                use egui_winit::accesskit_winit::WindowEvent as A;
+                match e.window_event {
+                    A::InitialTreeRequested => self.ctx.enable_accesskit(),
+                    A::ActionRequested(r) => {
+                        if let Some(s) = self.state.as_mut() {
+                            s.on_accesskit_action_request(r);
+                        }
+                    }
+                    A::AccessibilityDeactivated => self.ctx.disable_accesskit(),
+                }
+                Duration::ZERO
+            }
         };
         if delay.is_zero() {
             if let Some(gl) = self.gl.as_ref() {

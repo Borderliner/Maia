@@ -212,6 +212,7 @@ pub fn bar(ui: &mut Ui, body: Rect, f: &mut Finder, count: &str, any: bool, id: 
 fn icon_button(ui: &mut Ui, icon: Glyph, tip: &'static str, enabled: bool, pal: &Palette) -> bool {
     let (r, resp) = ui.allocate_exact_size(vec2(22.0, 20.0), if enabled { Sense::click() } else { Sense::hover() });
     crate::ui::note_control(ui, r, tip);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tip));
     if enabled && resp.hovered() {
         ui.painter().rect_filled(r, CornerRadius::same(4), pal.hover);
     }

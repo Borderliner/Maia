@@ -847,6 +847,7 @@ pub(crate) fn seg_button(ui: &mut Ui, on: bool, tip: &'static str, pal: &theme::
     }
     let (r, resp) = ui.allocate_exact_size(vec2(24.0, 20.0), Sense::click());
     crate::ui::note_control(ui, r, tip);
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, tip));
     if on {
         ui.painter().rect_filled(r, CornerRadius::same(4), pal.accent.gamma_multiply(0.85));
     } else if resp.hovered() {

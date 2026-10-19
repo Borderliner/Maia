@@ -880,6 +880,8 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                     let resp = ui.interact(rr, Id::new(("row", t.id, idx)), Sense::click_and_drag());
                     let e = t.entries[idx as usize].clone();
                     let selected = t.selected.contains(&idx);
+                    // For a screen reader (only asked while one listens): the name, picked or not.
+                    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &e.name));
                     let is_cursor = t.cursor == Some(idx);
                     if is_cursor {
                         cursor_row = Some(rr);
@@ -1243,6 +1245,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
             let e = t.entries[idx as usize].clone();
             let resp = ui.interact(r, Id::new(("cell", t.id, idx)), Sense::click_and_drag());
             let selected = t.selected.contains(&idx);
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &e.name));
             let is_cursor = t.cursor == Some(idx);
             if is_cursor {
                 cursor_rect = Some(r);

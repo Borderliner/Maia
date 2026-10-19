@@ -266,6 +266,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         let section = |ui: &mut Ui, app: &mut App, key: &str, title: &str, glyph: Glyph| -> bool {
             let collapsed = app.ud.sidebar_collapsed.iter().any(|s| s == key) && fq.is_empty();
             let (r, resp) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, title));
             // Section headers stay quiet: dim icon, label and chevron (brighter on hover).
             let col = if resp.hovered() { pal.text } else { pal.text_dim };
             paint_glyph(ui.painter(), Rect::from_center_size(pos2(r.left() + 18.0, r.center().y), Vec2::splat(14.0)), glyph, col);
@@ -294,6 +295,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         };
         let item = |ui: &mut Ui, label: &str, glyph: Option<Glyph>, path: &Path, dim: bool, link: bool| -> egui::Response {
             let (r, resp) = ui.allocate_exact_size(vec2(width, row_h), Sense::click_and_drag());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
             // Items sit indented under their section header; the current folder is not
             // highlighted (only hover is): the path bar already says where you are.
             let _ = &current;
@@ -450,6 +452,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 }
                 let key = crate::ctxmenu::smart_key(id);
                 let (r, resp) = ui.allocate_exact_size(vec2(width, row_h), Sense::click());
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
                 let r2 = r.shrink2(vec2(6.0, 1.0));
                 if ctx_target.as_deref() == Some(key.as_path()) {
                     ui.painter().rect_filled(r2, CornerRadius::same(5), pal.selected);
@@ -500,6 +503,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 // Removable media ejects; other user mounts (a second internal disk) unmount.
                 let eject = drive.filter(|d| mounted && (d.removable || crate::drives::can_unmount(d))).map(|d| if d.removable { crate::drives::Op::Eject } else { crate::drives::Op::Unmount });
                 let (r, resp) = ui.allocate_exact_size(vec2(width, row_h + 8.0), Sense::click_and_drag());
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
                 let sel = *p == current;
                 let r2 = r.shrink2(vec2(6.0, 1.0));
                 // Hover covers the eject button too (it sits on top of the row).
@@ -568,6 +572,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                     continue;
                 }
                 let (r, resp) = ui.allocate_exact_size(vec2(width, row_h), Sense::click());
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
                 let row_hover = ui.rect_contains_pointer(r) && app.drag.is_none();
                 if row_hover || (ctx_target.is_some() && ctx_target == place.path) {
                     ui.painter().rect_filled(r.shrink2(vec2(6.0, 1.0)), CornerRadius::same(5), pal.row_hover);
