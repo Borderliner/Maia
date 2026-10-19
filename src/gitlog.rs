@@ -865,6 +865,8 @@ pub struct History {
     open: Option<Open>,
     /// Where the open diff's wrapped rows start, when wrapping.
     wrapped: Option<crate::inspector::Wrapped>,
+    /// A file's diff side by side: its rows, worked out once.
+    side: crate::sidediff::View,
     /// Many files are shown by folder (the toggle above them switches).
     tree: bool,
     want: Option<Want>,
@@ -972,7 +974,7 @@ impl History {
 impl History {
     pub fn new(root: PathBuf, branch: String, opened: bool) -> History {
         let changes = crate::gitchanges::Changes::new(root.clone());
-        History { root, branch, opened, list: List::new(None), all: None, keyed: false, reveal: false, open: None, wrapped: None, tree: true, want: None, changes, on_changes: false, menu_at: Pos2::ZERO }
+        History { root, branch, opened, list: List::new(None), all: None, keyed: false, reveal: false, open: None, wrapped: None, side: Default::default(), tree: true, want: None, changes, on_changes: false, menu_at: Pos2::ZERO }
     }
 
     /// Read the history again from the top: HEAD moved (a commit, a switch).
@@ -1459,11 +1461,17 @@ pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, wrap: &mut bool, env: &mut
             _ => {}
         }
     }
-    // A diff wraps like a code preview, from the same button.
+    // A diff wraps like a code preview, from the same button; a file's own diff can also
+    // be shown side by side.
     if h.wraps() {
         hui.add_space(4.0);
+        let side = env.cfg.diff_side;
+        let whole = h.open.as_ref().is_some_and(|o| o.diff.is_some());
         crate::inspector::seg_frame(&mut hui, &pal, |ui| {
-            if crate::inspector::seg_button(ui, *wrap, "Wrap lines", &pal, |p, r, c| crate::theme::paint_glyph(p, r, Glyph::Wrap, c)) {
+            if whole && crate::filediff::diff_layout(ui, side, &pal) {
+                env.actions.push(crate::app::Action::Run(Box::new(crate::filediff::toggle_side)));
+            }
+            if !(whole && side) && crate::inspector::seg_button(ui, *wrap, "Wrap lines", &pal, |p, r, c| crate::theme::paint_glyph(p, r, Glyph::Wrap, c)) {
                 *wrap = !*wrap;
             }
         });
@@ -2183,6 +2191,7 @@ fn whole(ui: &mut Ui, body: Rect, h: &mut History, wrap: bool, env: &mut Env) {
     match &d.text {
         None => dim(ui, body, "Loading…", fs, &pal),
         Some(View::Lines(l, ..)) if l.is_empty() => dim(ui, body, if blob { "Empty file" } else { "No text changes" }, fs, &pal),
+        Some(View::Lines(lines, ..)) if env.cfg.diff_side && matches!(d.text, Some(View::Lines(.., true))) => crate::sidediff::view(ui, body, lines, &mut h.side, env.cfg.inspector_font_size, env.cfg.preview_line_spacing, &pal),
         Some(View::Lines(lines, spans, cut, is_diff)) => {
             if !wrap {
                 h.wrapped = None;
