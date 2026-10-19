@@ -2993,6 +2993,7 @@ impl App {
                 } else if let Some(i) = p.inspector.as_mut() {
                     i.edit = None;
                     i.find = None;
+                    i.keys = true;
                     i.invalidate();
                 }
             }

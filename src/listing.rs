@@ -428,7 +428,7 @@ fn entry_size_text(e: &Entry, t: &Tab, env: &Env) -> String {
 
 fn type_text(e: &Entry, t: &Tab) -> String {
     if let Some(v) = t.vols.get(&e.path) {
-        return v.fstype.clone();
+        return if v.fstype == "crypto_LUKS" { "Encrypted (LUKS)".into() } else { v.fstype.clone() };
     }
     if e.is_dir {
         return "Folder".into();

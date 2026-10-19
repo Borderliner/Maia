@@ -4955,7 +4955,7 @@ fn properties(app: &mut App, ctx: &egui::Context, st: &mut PropState) -> bool {
                 kv(ui, "Location", p.parent().map(|x| x.display().to_string()).unwrap_or_default());
                 if e.is_dir {
                     match app.stats.map.get(&p) {
-                        Some(s) => kv(ui, "Size", format!("{} ({} bytes)\n{} files, {} folders", fsx::fmt_size(s.size), s.size, s.files, s.folders)),
+                        Some(s) => kv(ui, "Size", format!("{} ({} bytes)\n{} file{}, {} folder{}", fsx::fmt_size(s.size), s.size, s.files, if s.files == 1 { "" } else { "s" }, s.folders, if s.folders == 1 { "" } else { "s" })),
                         None => {
                             app.stats.request(&p);
                             kv(ui, "Size", "Calculating…".into())
@@ -5089,13 +5089,14 @@ fn perms_card(ui: &mut Ui, st: &mut PropState, items: &[(u32, u32, u32, bool)], 
             let cx = head.left() + key_w + 12.0 + col_w * (k as f32 + 0.5);
             ui.painter().text(pos2(cx, head.center().y), Align2::CENTER_CENTER, *h, FontId::proportional(11.5), pal.text_dim);
         }
-        for (who, shift) in [("Owner", 6), ("Group", 3), ("Others", 0)] {
+        for (who, shift, names) in [("Owner", 6, ["owner read", "owner write", "owner execute"]), ("Group", 3, ["group read", "group write", "group execute"]), ("Others", 0, ["others read", "others write", "others execute"])] {
             let (r, _) = ui.allocate_exact_size(vec2(key_w + 12.0 + 3.0 * col_w, row_h), Sense::hover());
             ui.painter().text(pos2(r.left(), r.center().y), Align2::LEFT_CENTER, who, body.clone(), pal.text);
             for (k, bit) in [4u32, 2, 1].into_iter().enumerate() {
                 let mask = bit << shift;
                 let cx = r.left() + key_w + 12.0 + col_w * (k as f32 + 0.5);
                 let br = Rect::from_center_size(pos2(cx, r.center().y), Vec2::splat(16.0));
+                crate::ui::note_control(ui, br, names[k]);
                 if boxed(ui, br, Id::new(("perm", shift, bit)), shown(&st.change, mask)) {
                     toggle(&mut st.change, mask);
                 }

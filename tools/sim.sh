@@ -16,9 +16,12 @@ F=${1:-sim::}; [ $# -gt 0 ] && shift
 # root is a 1 GB in-memory folder (not the disk), the other scratch mounts are tiny,
 # and the whole run lives in a transient systemd scope capped at 4 GB of memory. The
 # /home skeleton is read-only: a session must not be able to rename the folders that
-# lead to the sim root (it once moved the 1 GB mount out of reach).
+# lead to the sim root (it once moved the 1 GB mount out of reach). A machine with no
+# user session to cap (a CI runner, thrown away after) runs it without the scope.
 GB=1073741824
-exec systemd-run --user --scope --quiet -p MemoryMax=4G -p MemorySwapMax=0 \
+SCOPE="systemd-run --user --scope --quiet -p MemoryMax=4G -p MemorySwapMax=0"
+systemctl --user show-environment >/dev/null 2>&1 || SCOPE=
+exec $SCOPE \
   bwrap --ro-bind / / --dev /dev --proc /proc \
   --size 67108864 --tmpfs /tmp --size 1048576 --tmpfs /run --size 1048576 --tmpfs /home \
   --ro-bind "$C/target" "$C/target" --size $GB --tmpfs "$SIM" --remount-ro /home --remount-ro /run \

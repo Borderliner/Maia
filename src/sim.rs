@@ -12732,5 +12732,140 @@ mod journeys {
         assert!(dst.join("holiday (1).png").exists() && std::fs::read_to_string(&trashed).unwrap() == "a new one", "both kept");
         report("conflict_rename_newer_and_restore", &s);
     }
-}
 
+    /// The new features in one sitting, each meeting the others: the terminal open while
+    /// a file is edited in the preview and found in, a file the shell made synced to the
+    /// other panel with its tag, permissions changed all the way down there, then a
+    /// custom action made and run from the right-click menu, and a command from Open With.
+    #[test]
+    fn new_features_together() {
+        if !sandboxed() {
+            return;
+        }
+        use crate::compare::{Diff, mark};
+        use std::os::unix::fs::PermissionsExt;
+        let home = fixture("together");
+        let (a, b) = (home.join("Work"), home.join("Backup"));
+        std::fs::create_dir_all(a.join("sub")).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::copy(home.join("Documents/notes.txt"), a.join("notes.txt")).unwrap();
+        std::fs::write(a.join("sub/inner.txt"), "inside\n").unwrap();
+        crate::tags::write(&a.join("notes.txt"), &["Red".into()]).unwrap();
+        let mut s = Sim::new(&a, vec2(1280.0, 800.0));
+        s.act("key ctrl+shift+s");
+        s.settle();
+        go(&mut s, &b);
+        s.act("key Tab");
+        s.settle();
+        assert_eq!(s.tab().path, a);
+        let idle = |s: &Sim| s.app.terminal.pty.as_ref().is_some_and(|p| p.idle());
+        s.act("key ctrl+Backtick");
+        wait_until(&mut s, "the prompt", 10, |s| idle(s) && !s.app.terminal.text().trim().is_empty());
+        // The files take the keyboard back; the preview's editor gets the typing, not the shell.
+        let row_in = |s: &Sim, name: &str, panel: u64| {
+            let list = s.app.panels[&panel].list_rect;
+            s.texts.iter().find(|(r, t)| t == name && list.contains(r.center())).map(|(r, _)| *r).unwrap_or_else(|| s.fail(&format!("{name} not on screen")))
+        };
+        let pa = s.app.active;
+        let r = row_in(&s, "notes.txt", pa);
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        assert!(!s.app.terminal.focused, "the click took the keyboard");
+        s.cmd(ToggleInspector);
+        wait_until(&mut s, "notes shown", 10, |s| inspector(s).text_lines().is_some_and(|l| l.0.len() == 400));
+        s.act("key shift+F4");
+        wait_until(&mut s, "editing", 5, |s| inspector(s).edit.as_ref().is_some_and(|e| e.focused));
+        s.act("text Edited: ");
+        s.act("key ctrl+s");
+        wait_until(&mut s, "saved", 5, |_| std::fs::read_to_string(a.join("notes.txt")).unwrap().starts_with("Edited: line of notes\n"));
+        assert!(!s.app.terminal.text().contains("Edited"), "the shell got none of it");
+        assert_eq!(crate::tags::read(&a.join("notes.txt")), vec!["Red".to_string()], "saving kept the tag");
+        s.idle(10);
+        s.shot("together-edit-and-terminal");
+        s.act("key escape");
+        assert!(inspector(&s).edit.is_none(), "saved, so Escape just leaves");
+        s.act("key ctrl+f");
+        s.act("text Edited");
+        wait_until(&mut s, "found", 5, |s| inspector(s).find.as_ref().is_some_and(|f| f.hits.len() == 1));
+        s.act("key escape");
+        // The shell sees the edit and makes a file; the panel shows it.
+        s.act("key ctrl+Backtick");
+        assert!(s.app.terminal.focused, "the key gives the shell the keyboard");
+        s.act("text head -1 notes.txt; echo made > shell.txt");
+        s.act("key enter");
+        wait_until(&mut s, "the shell read the edit", 10, |s| s.app.terminal.text().lines().any(|l| l.trim() == "Edited: line of notes"));
+        wait_until(&mut s, "the panel shows its file", 10, |s| s.tab().entries.iter().any(|e| e.name == "shell.txt"));
+        // Compare and sync to the other panel: everything copied, tag and date kept.
+        let r = row_in(&s, "shell.txt", pa);
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        palette_run(&mut s, "Compare Panels");
+        assert_eq!(mark(&a.join("shell.txt")), Some(Diff::Only));
+        palette_run(&mut s, "Sync To Other Panel");
+        wait_until(&mut s, "the plan", 10, |s| matches!(&s.app.popup, Popup::Sync(st) if st.plan.is_some()));
+        s.act("key Enter");
+        wait_until(&mut s, "synced", 10, |_| b.join("notes.txt").exists() && b.join("shell.txt").exists() && b.join("sub/inner.txt").exists());
+        s.settle();
+        assert_eq!(crate::tags::read(&b.join("notes.txt")), vec!["Red".to_string()], "the tag went with it");
+        let mt = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
+        assert_eq!(mt(&b.join("notes.txt")), mt(&a.join("notes.txt")), "and its date");
+        // There: group write for the folder and everything in it, no file made runnable.
+        s.act("key Tab");
+        s.settle();
+        assert_eq!(s.tab().path, b);
+        select_name(&mut s, "sub");
+        s.cmd(Properties);
+        wait_until(&mut s, "properties", 5, |s| matches!(s.app.popup, Popup::Properties(_)));
+        s.idle(2);
+        click_control(&mut s, "group write");
+        s.click_text("Change everything inside too");
+        s.idle(2);
+        s.shot("together-permissions");
+        s.click_text("Apply");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        wait_until(&mut s, "applied", 10, |_| mode(&b.join("sub")) == 0o775 && mode(&b.join("sub/inner.txt")) & 0o020 != 0);
+        assert_eq!(mode(&b.join("sub/inner.txt")) & 0o111, 0, "a document stays a document");
+        s.act("key escape");
+        s.settle();
+        // A custom action, made in its editor and run from the right-click menu.
+        s.cmd(CustomActions);
+        assert!(matches!(s.app.popup, Popup::Actions { .. }));
+        s.idle(1);
+        s.click_text("New action");
+        click_control(&mut s, "action command");
+        s.act("text cp %f %f.bak");
+        s.idle(1);
+        s.shot("together-custom-action");
+        s.click_text("Done");
+        s.settle();
+        assert_eq!(s.app.cfg.custom_actions.last().map(|a| a.command.as_str()), Some("cp %f %f.bak"));
+        let pb = s.app.active;
+        let r = row_in(&s, "notes.txt", pb);
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(2);
+        s.click_text("Custom actions");
+        s.idle(2);
+        s.shot("together-menu");
+        s.click_text("New action");
+        s.settle();
+        let ran = |want: &str| crate::mime::LAUNCHED.lock().unwrap().iter().any(|c| c.contains(want));
+        let (nb, sb) = (b.join("notes.txt").display().to_string(), b.join("shell.txt").display().to_string());
+        assert!(ran(&format!("cp {nb} {nb}.bak")), "the action, with the file put in: {:?}", crate::mime::LAUNCHED.lock().unwrap());
+        // Any command from Open With.
+        s.settle();
+        select_name(&mut s, "shell.txt");
+        s.cmd(OpenWith);
+        s.idle(2);
+        click_control(&mut s, "open with command");
+        s.act("text cp %f %f.with");
+        s.act("key Enter");
+        s.settle();
+        assert!(ran(&format!("cp {sb} {sb}.with")), "the command run: {:?}", crate::mime::LAUNCHED.lock().unwrap());
+        s.settle();
+        // The shell still answers, and closes with exit.
+        s.act("key ctrl+Backtick");
+        s.act("text exit");
+        s.act("key enter");
+        wait_until(&mut s, "the pane closed", 10, |s| s.app.terminal.pty.is_none());
+        look(&mut s, "after everything together");
+        report("new_features_together", &s);
+    }
+}
