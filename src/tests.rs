@@ -8351,3 +8351,29 @@ fn terminal_pty_round_trip() {
     p.resize(33, 7);
     wait(&p, &|s| s.row_text(0) == "7 33");
 }
+
+/// Conflicts settled as "if newer" (replaced only by a newer file, else skipped) and by
+/// a name typed for the one coming.
+#[test]
+fn conflicts_if_newer_and_renamed() {
+    let ctx = egui::Context::default();
+    let d = tmpdir("conflict-more");
+    let (src, dst) = (d.join("src"), d.join("dst"));
+    for (name, body) in [("new.txt", "newer"), ("old.txt", "older"), ("named.txt", "mine")] {
+        touch(&src.join(name), body);
+        touch(&dst.join(name), "there");
+    }
+    let past = std::time::SystemTime::now() - Duration::from_secs(3600);
+    for p in [dst.join("new.txt"), src.join("old.txt")] {
+        std::fs::File::options().write(true).open(p).unwrap().set_modified(past).unwrap();
+    }
+    let decide = HashMap::from([(src.join("new.txt"), Conflict::Newer), (src.join("old.txt"), Conflict::Newer), (src.join("named.txt"), Conflict::Rename("kept.txt".into()))]);
+    let j = ops::spawn(1, OpKind::Copy { srcs: ["new.txt", "old.txt", "named.txt"].iter().map(|n| src.join(n)).collect(), dest: dst.clone(), decide }, ctx);
+    wait_job(&j);
+    assert!(j.progress.lock().unwrap().errors.is_empty());
+    assert_eq!(std::fs::read_to_string(dst.join("new.txt")).unwrap(), "newer", "newer: replaced");
+    assert_eq!(std::fs::read_to_string(dst.join("old.txt")).unwrap(), "there", "older: skipped");
+    assert_eq!(std::fs::read_to_string(dst.join("kept.txt")).unwrap(), "mine", "renamed");
+    assert_eq!(std::fs::read_to_string(dst.join("named.txt")).unwrap(), "there");
+    let _ = std::fs::remove_dir_all(&d);
+}

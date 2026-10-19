@@ -12257,5 +12257,69 @@ mod journeys {
         assert_eq!(std::fs::read_to_string(&notes).unwrap(), before, "Undo: the file as it was");
         report("find_page_and_edit_in_previews", &s);
     }
+
+    /// Conflicts settled by the new choices: pictures compared by their thumbnails, one
+    /// renamed by typing a name (F2), one replaced only if newer (N); then restoring from
+    /// the trash onto a name taken again asks, and keeps both.
+    #[test]
+    fn conflict_rename_newer_and_restore() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("conflicts-more");
+        let (src, dst) = (home.join("Pictures/Trip"), home.join("Documents"));
+        for n in ["img00.png", "img01.png"] {
+            std::fs::copy(src.join("img05.png"), dst.join(n)).unwrap();
+        }
+        // The copy there of img01 is newer: "if newer" keeps it.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(dst.join("img01.png")).unwrap().set_modified(later).unwrap();
+        let before = std::fs::read(dst.join("img01.png")).unwrap();
+        let mut s = Sim::new(&src, vec2(1280.0, 800.0));
+        s.cmd(SplitRight);
+        go(&mut s, &dst);
+        s.act("key Tab");
+        s.settle();
+        select_path(&mut s, &src.join("img00.png"));
+        let i = s.tab().entries.iter().position(|e| e.name == "img01.png").unwrap() as u32;
+        let id = s.app.active;
+        s.app.panels.get_mut(&id).unwrap().tab_mut().selected.insert(i);
+        s.act("key F5");
+        wait_until(&mut s, "the conflict", 10, |s| matches!(s.app.popup, Popup::Conflict(_)));
+        // Their pictures come from the thumbnail workers.
+        for _ in 0..30 {
+            s.idle(1);
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        s.shot("conflict-pictures");
+        look(&mut s, "conflict with pictures");
+        s.act("key F2");
+        let field = crate::ui::CONTROLS.with(|c| c.borrow().iter().any(|(_, _, w)| *w == "new name"));
+        assert!(field, "a field for the name");
+        s.act("text holiday");
+        s.shot("conflict-rename");
+        s.act("key Enter");
+        s.settle();
+        s.act("key N");
+        wait_until(&mut s, "copied", 10, |_| dst.join("holiday.png").exists());
+        s.settle();
+        assert_eq!(std::fs::read(dst.join("img01.png")).unwrap(), before, "the newer one there kept");
+        assert_eq!(std::fs::read(dst.join("holiday.png")).unwrap(), std::fs::read(src.join("img00.png")).unwrap());
+        // Trashed, then the name taken again: restoring asks.
+        let trashed = dst.join("holiday.png");
+        crate::trashcan::delete(&trashed).unwrap();
+        std::fs::write(&trashed, "a new one").unwrap();
+        let item = crate::trashcan::list().into_iter().find(|it| it.original == trashed).unwrap_or_else(|| s.fail("in the trash"));
+        go(&mut s, item.file.parent().unwrap());
+        select_path(&mut s, &item.file);
+        s.cmd(RestoreTrash);
+        assert!(matches!(s.app.popup, Popup::Choose { .. }), "asked");
+        s.idle(1);
+        s.shot("restore-asks");
+        s.click_text("Keep both");
+        s.settle();
+        assert!(dst.join("holiday (1).png").exists() && std::fs::read_to_string(&trashed).unwrap() == "a new one", "both kept");
+        report("conflict_rename_newer_and_restore", &s);
+    }
 }
 

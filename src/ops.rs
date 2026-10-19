@@ -9,14 +9,18 @@ use std::sync::{Arc, Mutex};
 
 use crate::fsx::unique_dest;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Conflict {
     /// Keep both: "name (1).ext".
     KeepBoth,
     Overwrite,
+    /// Replace only when the one coming is newer; else skip it.
+    Newer,
     Skip,
     /// Folders only: copy into the existing folder, replacing files.
     Merge,
+    /// Land under this name instead.
+    Rename(String),
 }
 
 #[derive(Clone, Debug)]
@@ -185,8 +189,8 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 if cancel.stop() {
                     break;
                 }
-                let policy = decide.get(s).copied().unwrap_or(Conflict::KeepBoth);
-                let Some(d) = resolve_dest(s, dest, policy, p) else { continue };
+                let policy = decide.get(s).cloned().unwrap_or(Conflict::KeepBoth);
+                let Some(d) = resolve_dest(s, dest, &policy, p) else { continue };
                 if s.is_dir() && inside(d.landed(), s) {
                     p.lock().unwrap().errors.push(format!("Can't copy {} into itself", s.display()));
                     continue;
@@ -227,7 +231,7 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 if cancel.stop() {
                     break;
                 }
-                move_one(s, dest, decide.get(s).copied().unwrap_or(Conflict::KeepBoth), p, cancel, ctx);
+                move_one(s, dest, decide.get(s).cloned().unwrap_or(Conflict::KeepBoth), p, cancel, ctx);
             }
         }
         OpKind::Sort { moves, .. } => {
@@ -461,7 +465,7 @@ fn move_one(s: &PathBuf, dest: &Path, policy: Conflict, p: &Mutex<Progress>, can
         p.lock().unwrap().errors.push(format!("Can't move {} into itself", s.display()));
         return;
     }
-    let Some(d) = resolve_dest(s, dest, policy, p) else { return };
+    let Some(d) = resolve_dest(s, dest, &policy, p) else { return };
     p.lock().unwrap().current = name_of(s);
     let merge = policy == Conflict::Merge && d.replace.is_none() && d.to.is_dir();
     let fresh = fs::symlink_metadata(&d.to).is_err();
@@ -583,22 +587,30 @@ impl Dest {
     }
 }
 
-fn resolve_dest(src: &Path, dest_dir: &Path, conflict: Conflict, p: &Mutex<Progress>) -> Option<Dest> {
-    let name = name_of(src);
+fn resolve_dest(src: &Path, dest_dir: &Path, conflict: &Conflict, p: &Mutex<Progress>) -> Option<Dest> {
+    let name = match conflict {
+        Conflict::Rename(n) => n.clone(),
+        _ => name_of(src),
+    };
     let target = dest_dir.join(&name);
     let exists = fs::symlink_metadata(&target).is_ok();
     // Copying a file onto itself always duplicates.
     if !exists || target == src {
         return Some(Dest { to: if exists { unique_dest(dest_dir, &name) } else { target }, replace: None });
     }
+    let newer = || fs::metadata(src).and_then(|m| m.modified()).ok() > fs::metadata(&target).and_then(|m| m.modified()).ok().and_then(|t| t.checked_add(std::time::Duration::from_secs(1)));
     match conflict {
-        Conflict::KeepBoth => Some(Dest { to: unique_dest(dest_dir, &name), replace: None }),
+        Conflict::KeepBoth | Conflict::Rename(_) => Some(Dest { to: unique_dest(dest_dir, &name), replace: None }),
+        Conflict::Newer if !newer() => {
+            p.lock().unwrap().done_items += 1;
+            None
+        }
         Conflict::Skip => {
             p.lock().unwrap().done_items += 1;
             None
         }
         Conflict::Merge if target.is_dir() && src.is_dir() => Some(Dest { to: target, replace: None }),
-        Conflict::Merge | Conflict::Overwrite => Some(Dest { to: unique_dest(dest_dir, &format!(".{name}.maia-part")), replace: Some(target) }),
+        Conflict::Merge | Conflict::Overwrite | Conflict::Newer => Some(Dest { to: unique_dest(dest_dir, &format!(".{name}.maia-part")), replace: Some(target) }),
     }
 }
 

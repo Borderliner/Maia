@@ -3086,16 +3086,50 @@ impl App {
             self.toast("Select items inside the trash to restore");
             return;
         }
-        let n = wanted.len();
+        // Those whose place is taken again are asked about; the rest go back now.
+        let (taken, free): (Vec<_>, Vec<_>) = wanted.into_iter().partition(|it| std::fs::symlink_metadata(&it.original).is_ok());
+        self.restore(free, false);
+        let Some(first) = taken.first() else { return };
+        let msg = match taken.len() {
+            1 => format!("“{}” is back where it came from already", first.original.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+            n => format!("{n} items are back where they came from already"),
+        };
+        let both = taken.clone();
+        let choices: Vec<(String, bool, Option<Box<dyn FnOnce(&mut App)>>)> = vec![
+            ("Keep both".to_string(), false, Some(Box::new(move |app: &mut App| app.restore(both, false)))),
+            ("Replace".to_string(), false, Some(Box::new(move |app: &mut App| app.restore(taken, true)))),
+        ];
+        self.popup = Popup::Choose { msg, sub: "Keep both (the one from the trash under a new name), or put the one there in the trash in its place.".into(), choices };
+    }
+
+    /// Put trashed items back: where their place is taken, beside it under a free name,
+    /// or (`replace`) in its place, what is there going to the trash.
+    fn restore(&mut self, items: Vec<crate::trashcan::Item>, replace: bool) {
+        if items.is_empty() {
+            return;
+        }
+        let n = items.len();
         let mut back = vec![];
-        let errs: Vec<String> = wanted
+        let errs: Vec<String> = items
             .iter()
-            .filter_map(|it| match crate::trashcan::restore(it) {
-                Ok(()) => {
-                    back.push((it.file.clone(), it.original.clone()));
-                    None
+            .filter_map(|it| {
+                let taken = std::fs::symlink_metadata(&it.original).is_ok();
+                let to = match (taken, it.original.parent(), it.original.file_name()) {
+                    (true, Some(dir), Some(name)) if !replace => fsx::unique_dest(dir, &name.to_string_lossy()),
+                    _ => it.original.clone(),
+                };
+                if taken && replace {
+                    if let Err(e) = crate::trashcan::delete(&it.original) {
+                        return Some(e.to_string());
+                    }
                 }
-                Err(e) => Some(e.to_string()),
+                match crate::trashcan::restore_as(it, &to) {
+                    Ok(()) => {
+                        back.push((it.file.clone(), to));
+                        None
+                    }
+                    Err(e) => Some(e.to_string()),
+                }
             })
             .collect();
         // Every tab showing where they come back to, not only this one.

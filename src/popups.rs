@@ -105,6 +105,9 @@ pub struct ConflictState {
     pub idx: usize,
     pub decide: HashMap<PathBuf, Conflict>,
     pub apply_all: bool,
+    /// The name being typed for the item at hand (Rename…).
+    pub rename: Option<String>,
+    focus_name: bool,
 }
 
 pub struct PropState {
@@ -427,7 +430,7 @@ impl Popup {
         Popup::Confirm { msg, ok: ok.into(), on_ok: Some(on_ok) }
     }
     pub fn conflict(srcs: Vec<PathBuf>, dest: PathBuf, mv: bool, items: Vec<ConflictItem>) -> Popup {
-        Popup::Conflict(ConflictState { srcs, dest, mv, items, idx: 0, decide: HashMap::new(), apply_all: false })
+        Popup::Conflict(ConflictState { srcs, dest, mv, items, idx: 0, decide: HashMap::new(), apply_all: false, rename: None, focus_name: false })
     }
     pub fn properties(paths: Vec<PathBuf>) -> Popup {
         Popup::Properties(PropState { paths, mode: None, snap: None, expected: String::new(), sum_job: None, sum: None })
@@ -4356,9 +4359,6 @@ fn choose(app: &mut App, ctx: &egui::Context, msg: &str, sub: &str, choices: &mu
 
 fn conflict(app: &mut App, ctx: &egui::Context, st: &mut ConflictState) -> bool {
     let pal = app.pal;
-    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-        return false;
-    }
     let Some(item) = st.items.get(st.idx) else { return false };
     let both_dirs = item.src.is_dir() && item.dst.is_dir();
     let (a, b) = (fsx::Entry::from_path(&item.src), fsx::Entry::from_path(&item.dst));
@@ -4376,77 +4376,174 @@ fn conflict(app: &mut App, ctx: &egui::Context, st: &mut ConflictState) -> bool 
         }
         v
     };
-    // Keys for each choice: a keyboard-first dialog.
-    let keyed = ctx.input_mut(|i| {
-        if i.consume_key(Modifiers::NONE, Key::Enter) {
-            Some(Conflict::KeepBoth)
-        } else if i.consume_key(Modifiers::NONE, Key::R) {
-            Some(Conflict::Overwrite)
-        } else if i.consume_key(Modifiers::NONE, Key::S) {
-            Some(Conflict::Skip)
-        } else if both_dirs && i.consume_key(Modifiers::NONE, Key::M) {
-            Some(Conflict::Merge)
-        } else {
-            None
-        }
-    });
-    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::A)) {
-        st.apply_all = !st.apply_all;
-    }
-    let mut decision: Option<Conflict> = keyed;
+    let mut decision: Option<Conflict> = None;
     let mut cancel = false;
+    // A free name beside it, offered to start from.
+    let free = |dest: &Path| fsx::unique_dest(dest, &item.dst.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // Typing a new name: Enter takes it, Escape goes back to the choices.
+    if st.rename.is_some() {
+        ctx.input_mut(|i| {
+            if i.consume_key(Modifiers::NONE, Key::Escape) {
+                st.rename = None;
+            } else if i.consume_key(Modifiers::NONE, Key::Enter) {
+                decision = st.rename.clone().filter(|n| !n.trim().is_empty() && !n.contains('/')).map(|n| Conflict::Rename(n.trim().to_string()));
+            }
+        });
+    } else {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            return false;
+        }
+        // Keys for each choice: a keyboard-first dialog.
+        decision = ctx.input_mut(|i| {
+            if i.consume_key(Modifiers::NONE, Key::Enter) {
+                Some(Conflict::KeepBoth)
+            } else if i.consume_key(Modifiers::NONE, Key::R) {
+                Some(Conflict::Overwrite)
+            } else if !both_dirs && i.consume_key(Modifiers::NONE, Key::N) {
+                Some(Conflict::Newer)
+            } else if i.consume_key(Modifiers::NONE, Key::S) {
+                Some(Conflict::Skip)
+            } else if both_dirs && i.consume_key(Modifiers::NONE, Key::M) {
+                Some(Conflict::Merge)
+            } else {
+                None
+            }
+        });
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::A)) {
+            st.apply_all = !st.apply_all;
+        }
+        if !st.apply_all && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F2)) {
+            st.rename = Some(free(&st.dest));
+            st.focus_name = true;
+        }
+    }
     let remaining = st.items.len() - st.idx;
-    centered(ctx, "conflict", 520.0, &pal, |ui| {
+    let thumbs = &mut app.thumbs;
+    centered(ctx, "conflict", 560.0, &pal, |ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
         let name = item.dst.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         dialog_title(ui, &format!("“{name}” already exists"), Some(&format!("in {}", home_short(&st.dest))), &pal);
         ui.add_space(6.0);
         let verb = if st.mv { "Moving" } else { "Copying" };
-        let body = egui::TextStyle::Body.resolve(ui.style());
-        let key_w = [verb, "Existing"].iter().map(|k| ui.painter().layout_no_wrap(k.to_string(), body.clone(), pal.text_dim).size().x).fold(0.0, f32::max).ceil();
         card(ui, &pal, |ui| {
-            ui.spacing_mut().item_spacing.y = 8.0;
-            field_row(ui, key_w, verb, &pal, |ui| {
-                ui.label(info(&a, &b));
-            });
-            field_row(ui, key_w, "Existing", &pal, |ui| {
-                ui.label(info(&b, &a));
-            });
+            ui.spacing_mut().item_spacing.y = 10.0;
+            // Each side with its picture (or icon), so two photos can be told apart.
+            for (label, e, o) in [(verb, &a, &b), ("Existing", &b, &a)] {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
+                    if let Some(e) = e {
+                        let pic = (!e.is_dir && crate::thumbs::can_thumb(e)).then(|| thumbs.get(&e.path, e.modified, 40.0)).flatten();
+                        match pic {
+                            Some(t) => {
+                                let s = (40.0 / t.dims[0].max(t.dims[1]).max(1) as f32).min(1.0);
+                                let sz = vec2(t.dims[0] as f32 * s, t.dims[1] as f32 * s).max(Vec2::splat(4.0));
+                                let ir = Rect::from_center_size(r.center(), sz);
+                                ui.painter().image(t.tex.id(), ir, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                                ui.painter().rect_stroke(ir, CornerRadius::same(3), Stroke::new(1.0, pal.card_line()), StrokeKind::Outside);
+                            }
+                            None => {
+                                if !crate::icons::entry(ui.painter(), r, e) {
+                                    theme::paint_icon(ui.painter(), r, theme::categorize(&e.ext(), e.is_dir, e.is_executable()), &e.ext(), e.is_link);
+                                }
+                            }
+                        }
+                    }
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(egui::RichText::new(label).color(pal.text_dim));
+                        ui.label(info(e, o));
+                    });
+                });
+            }
         });
-        if remaining > 1 {
+        if let Some(n) = st.rename.as_mut() {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("New name").color(pal.text_dim));
+                let id = Id::new("conflict-rename");
+                let r = ui.add(egui::TextEdit::singleline(n).id(id).desired_width(ui.available_width()));
+                crate::ui::note_control(ui, r.rect, "new name");
+                if std::mem::take(&mut st.focus_name) {
+                    r.request_focus();
+                    // The name without its extension selected, as renaming does.
+                    let stem = n.rfind('.').filter(|&i| i > 0).unwrap_or(n.len());
+                    if let Some(mut s) = egui::TextEdit::load_state(ui.ctx(), id) {
+                        s.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(n[..stem].chars().count()))));
+                        s.store(ui.ctx(), id);
+                    }
+                }
+            });
+        } else if remaining > 1 {
             ui.add_space(4.0);
             ui.checkbox(&mut st.apply_all, format!("Apply to all {remaining} conflicts"));
         }
-        let mut keys: Vec<(&str, &str)> = vec![("Enter", "keep both"), ("R", "replace"), ("S", "skip")];
-        if both_dirs {
-            keys.push(("M", "merge"));
+        let mut keys: Vec<(&str, &str)> = if st.rename.is_some() {
+            vec![("Enter", "use this name"), ("Esc", "back")]
+        } else {
+            let mut k = vec![("Enter", "keep both"), ("R", "replace")];
+            if !both_dirs {
+                k.push(("N", "if newer"));
+            }
+            k.push(("S", "skip"));
+            if both_dirs {
+                k.push(("M", "merge"));
+            }
+            if !st.apply_all {
+                k.push(("F2", "rename"));
+            }
+            if remaining > 1 {
+                k.push(("A", "all"));
+            }
+            k
+        };
+        if st.rename.is_none() {
+            keys.push(("Esc", "cancel"));
         }
-        if remaining > 1 {
-            keys.push(("A", "all"));
-        }
-        keys.push(("Esc", "cancel"));
         ui.add_space(4.0);
         hints(ui, &keys, &pal);
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            if plain_button(ui, "Replace", &pal).on_hover_text("The one there goes to the trash; Undo brings it back").clicked() {
-                decision = Some(Conflict::Overwrite);
-            }
-            if both_dirs && plain_button(ui, "Merge", &pal).on_hover_text("Copy into the existing folder, replacing files").clicked() {
-                decision = Some(Conflict::Merge);
-            }
-            if plain_button(ui, "Skip", &pal).clicked() {
-                decision = Some(Conflict::Skip);
+            if st.rename.is_none() {
+                if plain_button(ui, "Replace", &pal).on_hover_text("The one there goes to the trash; Undo brings it back").clicked() {
+                    decision = Some(Conflict::Overwrite);
+                }
+                if !both_dirs && plain_button(ui, "If newer", &pal).on_hover_text("Replace it only when the one coming is newer; else skip").clicked() {
+                    decision = Some(Conflict::Newer);
+                }
+                if both_dirs && plain_button(ui, "Merge", &pal).on_hover_text("Copy into the existing folder, replacing files").clicked() {
+                    decision = Some(Conflict::Merge);
+                }
+                if plain_button(ui, "Skip", &pal).clicked() {
+                    decision = Some(Conflict::Skip);
+                }
+                if !st.apply_all && plain_button(ui, "Rename…", &pal).clicked() {
+                    st.rename = Some(free(&st.dest));
+                    st.focus_name = true;
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                // Keeping both loses nothing: the main button.
-                if primary_button(ui, "Keep both", true, &pal).clicked() {
-                    decision = Some(Conflict::KeepBoth);
-                }
-                if plain_button(ui, "Cancel", &pal).clicked() {
-                    cancel = true;
+                match st.rename.as_ref() {
+                    Some(n) => {
+                        let ok = !n.trim().is_empty() && !n.contains('/');
+                        if primary_button(ui, "Use this name", ok, &pal).clicked() {
+                            decision = Some(Conflict::Rename(n.trim().to_string()));
+                        }
+                        if plain_button(ui, "Back", &pal).clicked() {
+                            st.rename = None;
+                        }
+                    }
+                    None => {
+                        // Keeping both loses nothing: the main button.
+                        if primary_button(ui, "Keep both", true, &pal).clicked() {
+                            decision = Some(Conflict::KeepBoth);
+                        }
+                        if plain_button(ui, "Cancel", &pal).clicked() {
+                            cancel = true;
+                        }
+                    }
                 }
             });
         });
@@ -4455,10 +4552,16 @@ fn conflict(app: &mut App, ctx: &egui::Context, st: &mut ConflictState) -> bool 
         return false;
     }
     if let Some(d) = decision {
+        st.rename = None;
         let range = if st.apply_all { st.idx..st.items.len() } else { st.idx..st.idx + 1 };
         for i in range {
             let it = &st.items[i];
-            let d = if d == Conflict::Merge && !(it.src.is_dir() && it.dst.is_dir()) { Conflict::Overwrite } else { d };
+            let d = match &d {
+                Conflict::Merge if !(it.src.is_dir() && it.dst.is_dir()) => Conflict::Overwrite,
+                // A folder is never older or newer as a whole: replaced, as asked for all.
+                Conflict::Newer if it.src.is_dir() => Conflict::Overwrite,
+                d => d.clone(),
+            };
             st.decide.insert(it.src.clone(), d);
         }
         st.idx = if st.apply_all { st.items.len() } else { st.idx + 1 };

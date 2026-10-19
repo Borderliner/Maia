@@ -158,13 +158,18 @@ pub fn list() -> Vec<Item> {
 }
 
 pub fn restore(it: &Item) -> std::io::Result<()> {
-    if fs::symlink_metadata(&it.original).is_ok() {
-        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{} already exists", it.original.display())));
+    restore_as(it, &it.original)
+}
+
+/// Put `it` back at `to` (its own place, or another name beside it).
+pub fn restore_as(it: &Item, to: &Path) -> std::io::Result<()> {
+    if fs::symlink_metadata(to).is_ok() {
+        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{} already exists", to.display())));
     }
-    if let Some(p) = it.original.parent() {
+    if let Some(p) = to.parent() {
         fs::create_dir_all(p)?;
     }
-    fs::rename(&it.file, &it.original)?;
+    fs::rename(&it.file, to)?;
     fs::remove_file(&it.info)
 }
 
