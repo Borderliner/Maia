@@ -12643,6 +12643,22 @@ mod journeys {
         wait_until(&mut s, "their bytes read", 10, |s| s.texts.iter().any(|(_, t)| t.contains("4d 41 49 41")));
         s.shot("hex-view");
         s.act("key escape");
+        // A long log opens at its end; finding in it finds in all of it, and closing the
+        // bar goes back to the end.
+        let mut log = String::with_capacity(4 << 20);
+        for i in 0..60_000 {
+            log.push_str(&format!("{i:06} {} worker request handled\n", if i % 1000 == 7 { "ERROR" } else { "INFO" }));
+        }
+        std::fs::write(d.join("app.log"), &log).unwrap();
+        wait_until(&mut s, "the log listed", 10, |s| s.tab().entries.iter().any(|e| e.name == "app.log"));
+        select_name(&mut s, "app.log");
+        wait_until(&mut s, "the log's end", 10, |s| inspector(s).text_lines().is_some_and(|l| l.0.last().is_some_and(|x| x.starts_with("059999"))));
+        s.cmd(FindInPreview);
+        s.act("text ERROR");
+        wait_until(&mut s, "every error in the log", 20, |s| inspector(s).big_state().and_then(|b| b.1).is_some_and(|f| f.0 == 60 && f.1));
+        wait_until(&mut s, "the first on screen", 10, |s| some_text_at(s, "000007 ERROR worker request handled"));
+        s.act("key escape");
+        wait_until(&mut s, "back at the end", 10, |s| inspector(s).text_lines().is_some_and(|l| l.0.last().is_some_and(|x| x.starts_with("059999"))));
         // Edit in place: replace, save, Undo brings the original back.
         let notes = d.join("notes.txt");
         let before = std::fs::read_to_string(&notes).unwrap();

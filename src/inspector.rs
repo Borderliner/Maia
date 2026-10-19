@@ -160,6 +160,8 @@ pub struct Inspector {
     /// Keep a growing file's preview at its end (the toolbar's Follow).
     pub follow: bool,
     tail: Option<crate::tail::Tail>,
+    /// A long log, shown from its end, paged whole while it is found in.
+    paged_log: bool,
     /// Bytes after the last line break that arrived, waiting for the rest of their line.
     carry: Vec<u8>,
     /// The file grew while it was shown: Follow is offered for it.
@@ -447,6 +449,7 @@ impl Default for Inspector {
             blame: None,
             follow: false,
             tail: None,
+            paged_log: false,
             carry: vec![],
             grew: false,
             shown_size: 0,
@@ -472,6 +475,7 @@ impl Inspector {
     /// Show `c`. A big text, tree or table goes away on a thread of its own: freeing a
     /// few hundred thousand strings is a stall a frame should not wait for.
     fn set(&mut self, c: Content) {
+        self.paged_log = false;
         let old = std::mem::replace(&mut self.content, c);
         if let Content::Text { lines, rich, spans, .. } = old {
             if lines.len() > 2000 || rich.is_some() {
@@ -1269,6 +1273,19 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         bui.painter().text(body.center(), Align2::CENTER_CENTER, "Nothing to preview", FontId::proportional(env.cfg.font_size), pal.text_dim);
         return;
     };
+    // A long log shows its end; finding in it pages the whole file instead, and closing
+    // the bar goes back to the end.
+    let finding = ins.find.as_ref().is_some_and(|f| !f.query.is_empty());
+    if finding && matches!(ins.content, Content::Text { from_end: true, .. }) {
+        if let Some(v) = std::fs::metadata(&e.path).ok().and_then(|m| crate::bigfile::Pager::open(&e.path, m.len(), false, ui.ctx())) {
+            ins.set(Content::Big(Box::new(v)));
+            ins.tail = None;
+            ins.paged_log = true;
+        }
+    } else if ins.paged_log && ins.find.is_none() {
+        ins.paged_log = false;
+        ins.invalidate();
+    }
     match &mut ins.content {
         Content::Pdf(v) => {
             pdf_view(&mut bui, body, v, &pal);
