@@ -192,6 +192,8 @@ pub struct Inspector {
     pub keys: bool,
     /// A text file being changed in the preview (it stays on it while the cursor moves).
     pub edit: Option<Box<crate::quickedit::Edit>>,
+    /// The picture shown, playing, when it moves.
+    anim: Option<crate::anim::Player>,
 }
 
 /// Test-only views of the preview state (simulations check behaviour, not pixels).
@@ -240,6 +242,14 @@ impl Inspector {
             Content::Media(v) => v.player.as_ref().map(|p| (p.playing(), p.position(), p.duration, p.pids(), v.seq)),
             _ => None,
         }
+    }
+    /// (frame shown, frames held, bytes they hold, decoded again each time round,
+    /// playing) for an animated picture.
+    pub fn anim_state(&self) -> Option<(usize, usize, usize, bool, bool)> {
+        self.anim.as_ref().filter(|a| a.moving()).map(|a| {
+            let (at, n, bytes, streaming, _) = a.state();
+            (at, n, bytes, streaming, a.playing)
+        })
     }
     pub fn media_probe(&self) -> Option<crate::media::Probe> {
         match &self.content {
@@ -453,6 +463,7 @@ impl Default for Inspector {
             find: None,
             keys: false,
             edit: None,
+            anim: None,
         }
     }
 }
@@ -507,6 +518,7 @@ impl Inspector {
         self.pan = Vec2::ZERO;
         self.fit = Fit::Fit;
         self.pending = None;
+        self.anim = None;
         if computer {
             self.set(Content::Volume);
             return;
@@ -588,6 +600,11 @@ impl Inspector {
         }
         if !e.is_dir && thumbs::can_thumb(e) {
             self.set(Content::Image);
+            return;
+        }
+        // A photo nothing installed reads: what would.
+        if let Some(n) = crate::extpic::install_note(e.ext()).filter(|_| !e.is_dir) {
+            self.set(Content::Note(n.into()));
             return;
         }
         // A database: its tables through sqlite3, once its first bytes say it is one.
@@ -1034,6 +1051,16 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
     });
     match ins.content {
         Content::Image => {
+            if let Some(a) = ins.anim.as_mut().filter(|a| a.moving()) {
+                seg_frame(&mut hui, &pal, |ui| {
+                    let (tip, icon) = if a.playing { ("Pause", "pause") } else { ("Play", "play") };
+                    if seg_button(ui, false, tip, &pal, |p, r, c| {
+                        theme::paint_lucide(p, r, icon, c);
+                    }) {
+                        a.toggle();
+                    }
+                });
+            }
             seg_frame(&mut hui, &pal, |ui| {
                 for (f, tip) in [(Fit::Fit, "Zoom to fit"), (Fit::Actual, "Actual pixels (1:1)"), (Fit::Fill, "Fill the inspector")] {
                     let on = ins.fit == f && ins.zoom == 1.0;
@@ -1976,15 +2003,22 @@ fn image_view(ui: &mut Ui, body: Rect, e: &Entry, ins: &mut Inspector, env: &mut
     let pal = *env.pal;
     let ppp = ui.ctx().pixels_per_point();
     let area = body.shrink(10.0);
-    let want = (area.width().max(area.height()) * ppp * ins.zoom.max(1.0)).min(4096.0);
-    let Some(l) = env.thumbs.get(&e.path, e.modified, want) else {
+    let fit_px = area.width().max(area.height()) * ppp;
+    let want = (fit_px * ins.zoom.max(1.0)).min(4096.0);
+    // An animated picture plays (not under the viewer); its first frame shows meanwhile.
+    if !crate::anim::may_animate(e.ext()) {
+        ins.anim = None;
+    } else if ins.anim.as_ref().is_none_or(|a| !a.is_for(&e.path, e.modified, fit_px)) {
+        ins.anim = Some(crate::anim::Player::start(&e.path, e.modified, fit_px, env.thumbs.budget_bytes, ui.ctx()));
+    }
+    let live = !crate::viewer::covers(ui.ctx());
+    let moving = ins.anim.as_mut().and_then(|a| a.frame(live));
+    let Some((tex, dims)) = moving.or_else(|| env.thumbs.get(&e.path, e.modified, want).map(|l| (l.tex.id(), l.dims))) else {
         let msg = if env.thumbs.failed(&e.path) { "Can't decode this image" } else { "Loading…" };
         ui.painter().text(body.center(), Align2::CENTER_CENTER, msg, FontId::proportional(13.0), pal.text_dim);
         return;
     };
-    let [ow, oh] = [l.dims[0] as f32, l.dims[1] as f32];
-    let tex = l.tex.id();
-    let dims = l.dims;
+    let [ow, oh] = [dims[0] as f32, dims[1] as f32];
     let base = match ins.fit {
         // A drawing scales without losing anything: it fills the preview however small
         // it says it is. A picture stops at 8 pixels for one.

@@ -1,8 +1,9 @@
 //! The picture viewer: the pictures of a folder full window over Maia, in the listing's
 //! order. Pictures come through the thumbnail cache (decoded on its workers, the right
 //! way up, within the asset cache's budget), the neighbours asked for ahead. Nothing
-//! repaints while it is still: the slideshow's timer runs only while it plays, and the
-//! name fades away once the pointer rests.
+//! repaints while it is still: the slideshow's timer runs only while it plays, an
+//! animated picture's only until its next frame (K pauses it), and the name fades away
+//! once the pointer rests.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -22,7 +23,12 @@ const SHOW: f64 = 2.0;
 const HIDE: f64 = 0.4;
 
 pub fn is_picture(ext: &str) -> bool {
-    crate::thumbs::is_image_ext(ext) || ext == "svg"
+    crate::thumbs::is_image_ext(ext) || ext == "svg" || crate::extpic::is_ext(ext) && crate::drives::Tools::current().is_some_and(|t| crate::extpic::can(&t, ext))
+}
+
+/// Whether the viewer covers the window (what is under it needn't move).
+pub fn covers(ctx: &egui::Context) -> bool {
+    ctx.memory(|m| m.areas().visible_last_frame(&egui::LayerId::new(egui::Order::Foreground, Id::new("picture viewer"))))
 }
 
 pub struct Pic {
@@ -39,6 +45,8 @@ pub struct State {
     pub zoom: f32,
     pub pan: Vec2,
     pub playing: bool,
+    /// The picture shown, playing, when it moves.
+    pub anim: Option<crate::anim::Player>,
     /// When the slideshow moves on.
     next_at: f64,
     /// The picture fading out, and when it started to.
@@ -50,7 +58,7 @@ pub struct State {
 
 impl State {
     pub fn new(panel: u64, pics: Vec<Pic>, at: usize, now: f64) -> State {
-        State { panel, pics, at, zoom: 1.0, pan: Vec2::ZERO, playing: false, next_at: 0.0, from: None, stirred: now, last_pointer: None }
+        State { panel, pics, at, zoom: 1.0, pan: Vec2::ZERO, playing: false, anim: None, next_at: 0.0, from: None, stirred: now, last_pointer: None }
     }
 
     /// The picture fading out, while one is.
@@ -128,7 +136,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
     let shift_key = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, k));
     let (esc, left, right, space, home, end) = (key(Key::Escape), key(Key::ArrowLeft), key(Key::ArrowRight), key(Key::Space), key(Key::Home), key(Key::End));
     let zoom_in = key(Key::Plus) || key(Key::Equals) || shift_key(Key::Equals) || shift_key(Key::Plus);
-    let (zoom_out, fit, actual) = (key(Key::Minus), key(Key::Num0), key(Key::Num1));
+    let (zoom_out, fit, actual, pause) = (key(Key::Minus), key(Key::Num0), key(Key::Num1), key(Key::K));
     if esc {
         close(app, st);
         return false;
@@ -176,7 +184,17 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         }
     }
     let cur = &st.pics[st.at];
-    let shown = app.thumbs.get(&cur.path, cur.modified, want(st.zoom)).map(|l| (l.tex.id(), l.dims));
+    let ext = cur.path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if !crate::anim::may_animate(&ext) {
+        st.anim = None;
+    } else if st.anim.as_ref().is_none_or(|a| !a.is_for(&cur.path, cur.modified, want(1.0))) {
+        st.anim = Some(crate::anim::Player::start(&cur.path, cur.modified, want(1.0), app.thumbs.budget_bytes, ctx));
+    }
+    if let Some(a) = st.anim.as_mut().filter(|_| pause) {
+        a.toggle();
+    }
+    let moving = st.anim.as_mut().and_then(|a| a.frame(true));
+    let shown = moving.or_else(|| app.thumbs.get(&cur.path, cur.modified, want(st.zoom)).map(|l| (l.tex.id(), l.dims)));
     let failed = shown.is_none() && app.thumbs.failed(&cur.path);
     // Zoom by keys, around the middle.
     if let Some((_, dims)) = shown {

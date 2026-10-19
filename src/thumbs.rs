@@ -13,14 +13,15 @@ pub fn is_image_ext(ext: &str) -> bool {
 }
 
 /// Whether a thumbnail can be made for this item: built-in image formats, SVG (own
-/// renderer) or anything an installed desktop thumbnailer handles (video, PDF, HEIF,
-/// JPEG XL, office documents, audio covers…).
+/// renderer), photos an installed tool decodes (HEIC, AVIF, TIFF, JPEG XL, RAW) or
+/// anything an installed desktop thumbnailer handles (video, PDF, office documents,
+/// audio covers…).
 pub fn can_thumb(e: &crate::fsx::Entry) -> bool {
     if e.is_dir || e.special {
         return false;
     }
     let ext = e.ext();
-    is_image_ext(ext) || ext == "svg" || crate::thumbcache::thumbnailer_for(&crate::mime::mime_db().for_name(&e.name, false, false)).is_some()
+    is_image_ext(ext) || ext == "svg" || crate::drives::Tools::current().is_some_and(|t| crate::extpic::can(&t, ext)) || crate::thumbcache::thumbnailer_for(&crate::mime::mime_db().for_name(&e.name, false, false)).is_some()
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -71,18 +72,21 @@ impl Thumbs {
         let queue: Arc<Mutex<VecDeque<Job>>> = Arc::new(Mutex::new(VecDeque::new()));
         let (wake_tx, wake_rx) = channel::<()>();
         let wake_rx = Arc::new(Mutex::new(wake_rx));
+        // The tools photos are decoded with (fakes under test, set on this thread).
+        let tools = crate::drives::Tools::current();
         for _ in 0..workers.max(1) {
             let q = queue.clone();
             let tx = tx.clone();
             let ctx = ctx.clone();
             let wake_rx = wake_rx.clone();
+            let tools = tools.clone();
             std::thread::spawn(move || {
                 loop {
                     // LIFO: the most recently requested (visible) items first.
                     let job = q.lock().unwrap().pop_back();
                     match job {
                         Some(j) => {
-                            let result = decode(&j.key.path, j.key.size, j.key.mtime);
+                            let result = decode(&j.key.path, j.key.size, j.key.mtime, tools.as_ref());
                             if tx.send(Done { key: j.key, result }).is_err() {
                                 return;
                             }
@@ -186,7 +190,7 @@ impl Thumbs {
     }
 }
 
-fn bucket(want: f32) -> u32 {
+pub fn bucket(want: f32) -> u32 {
     for b in [64, 128, 256, 512, 1024, 2048, 4096] {
         if want <= b as f32 {
             return b;
@@ -196,10 +200,10 @@ fn bucket(want: f32) -> u32 {
 }
 
 /// Thumbnail pipeline for one request: the shared cache, then the built-in decoders (and
-/// SVG renderer), then an installed thumbnailer. New thumbnails up to 1024 px go back to
-/// the shared cache; failures are remembered (until the file changes) so nothing is
-/// retried every frame.
-fn decode(path: &Path, max: u32, mtime: Option<SystemTime>) -> Option<(ColorImage, [u32; 2])> {
+/// SVG renderer), then an installed tool or thumbnailer. New thumbnails up to 1024 px go
+/// back to the shared cache; failures are remembered (until the file changes) so nothing
+/// is retried every frame.
+fn decode(path: &Path, max: u32, mtime: Option<SystemTime>, tools: Option<&crate::drives::Tools>) -> Option<(ColorImage, [u32; 2])> {
     use crate::thumbcache as tc;
     let cacheable = max <= 1024;
     if cacheable {
@@ -223,16 +227,23 @@ fn decode(path: &Path, max: u32, mtime: Option<SystemTime>) -> Option<(ColorImag
         None
     } else {
         let mime = crate::mime::mime_db().for_name(&name, false, false);
-        let t = tc::thumbnailer_for(&mime)?;
-        let img = tc::run_external(t, path, flavor_px.min(1024), std::time::Duration::from_secs(12));
-        if img.is_none() {
+        let thumbnailer = tc::thumbnailer_for(&mime);
+        // A photo a tool decodes at the size shown; the small ones a desktop thumbnailer
+        // makes, when there is one, are quicker.
+        let tool = tools.filter(|t| crate::extpic::can(t, &ext) && (max > 256 || thumbnailer.is_none()));
+        if tool.is_none() && thumbnailer.is_none() {
+            return None;
+        }
+        let made = tool.and_then(|t| crate::extpic::load(t, path, if cacheable { flavor_px } else { max })).or_else(|| {
+            let img = tc::run_external(thumbnailer?, path, flavor_px.min(1024), std::time::Duration::from_secs(12))?;
+            let img = if img.w > flavor_px || img.h > flavor_px { crate::imgdec::downscale(&img, flavor_px) } else { img };
+            let d = [img.w, img.h];
+            Some((img, d))
+        });
+        if made.is_none() {
             tc::mark_failed(path, mtime);
         }
-        img.map(|i| {
-            let i = if i.w > flavor_px || i.h > flavor_px { crate::imgdec::downscale(&i, flavor_px) } else { i };
-            let d = [i.w, i.h];
-            (i, d)
-        })
+        made
     };
     let (img, dims) = made?;
     if cacheable {

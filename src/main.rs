@@ -1,6 +1,7 @@
 //! Maia: a fast, keyboard-first file manager for Linux.
 
 mod admin;
+mod anim;
 mod app;
 mod checksum;
 mod codesearch;
@@ -25,6 +26,7 @@ mod datatree;
 mod envfile;
 mod errands;
 mod exif;
+mod extpic;
 mod config;
 mod convert;
 mod devtools;

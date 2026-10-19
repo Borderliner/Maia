@@ -11258,6 +11258,131 @@ mod journeys {
         report("viewer", &s);
     }
 
+    /// Animated pictures and photos only other tools read: an animated GIF plays in the
+    /// inspector on its own timer (never faster than its frames), pauses and plays from
+    /// the toolbar and holds still under the viewer; the viewer plays it too, K pausing
+    /// it, then steps on to an AVIF and a TIFF stored turned, decoded upright by
+    /// ImageMagick on a worker (when it is here); with nothing to read it, a HEIC says
+    /// what to install. No slow frames.
+    #[test]
+    fn animated_pictures_and_photos() {
+        if !sandboxed() {
+            return;
+        }
+        let d = root().join("home/anim");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("dance.gif"), crate::tests::gif_run(240, 160, 12, 8, gif::Repeat::Infinite)).unwrap();
+        png_file(&d.join("still.png"), 120, 80, 2);
+        std::fs::write(d.join("photo.heic"), "not a photo").unwrap();
+        let tools = crate::tests::any_imagemagick_tools(&root().join("anim-tools"));
+        let mut avif = false;
+        if let Some((t, im)) = &tools {
+            let made = std::process::Command::new(t.join(im)).args(["-size", "600x200", "xc:#d63", "-size", "600x200", "xc:#36c", "-append", "-orient", "RightTop"]).arg(d.join("turned.tiff")).status();
+            assert!(made.is_ok_and(|s| s.success()), "a TIFF made");
+            avif = std::process::Command::new("ffmpeg").args(["-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x240", "-frames:v", "1"]).arg(d.join("photo.avif")).status().is_ok_and(|s| s.success());
+            crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(t.clone()));
+        } else {
+            eprintln!("sim: photos skipped (no ImageMagick)");
+        }
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.cmd(ToggleInspector);
+        select_path(&mut s, &d.join("dance.gif"));
+        wait_until(&mut s, "the GIF playing", 10, |s| inspector(s).anim_state().is_some());
+        let at = |s: &Sim| inspector(s).anim_state().map_or(usize::MAX, |a| a.0);
+        let mut shown = std::collections::HashSet::new();
+        for _ in 0..90 {
+            s.idle(1);
+            shown.insert(at(&s));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(shown.len() >= 12, "frames move on with time: {shown:?}");
+        assert!(s.repaint > std::time::Duration::ZERO && s.repaint <= std::time::Duration::from_millis(80), "woken for the next frame only: {:?}", s.repaint);
+        toolbar_centred(&mut s, "animated", &[]);
+        s.act("move -50 -50");
+        s.idle(2);
+        s.shot("animated-gif-inspector-graphite");
+        click_control(&mut s, "Pause");
+        let still = at(&s);
+        s.idle(30);
+        assert_eq!((at(&s), inspector(&s).anim_state().unwrap().4), (still, false), "paused");
+        // Memory goes back to the system two seconds (real ones) after decodes settle.
+        std::thread::sleep(std::time::Duration::from_millis(2200));
+        s.idle(3);
+        assert_eq!(s.repaint, std::time::Duration::MAX, "nothing ticks while paused");
+        click_control(&mut s, "Play");
+        s.idle(20);
+        assert_ne!(at(&s), still, "playing again");
+        // The viewer plays it; the inspector under it holds still.
+        s.act("key F3");
+        let vat = |s: &Sim| viewer(s).anim.as_ref().filter(|a| a.moving()).map_or(usize::MAX, |a| a.state().0);
+        wait_until(&mut s, "the viewer playing", 10, |s| vat(s) != usize::MAX);
+        let under = at(&s);
+        let mut shown = std::collections::HashSet::new();
+        for _ in 0..60 {
+            s.idle(1);
+            shown.insert(vat(&s));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(shown.len() >= 8, "the viewer's frames move on: {shown:?}");
+        assert_eq!(at(&s), under, "the inspector holds still under the viewer");
+        s.idle(2);
+        shot_still(&mut s, "animated-gif-viewer-graphite");
+        s.act("key K");
+        let held = vat(&s);
+        s.idle(30);
+        assert_eq!(vat(&s), held, "K pauses");
+        assert!(!viewer(&s).playing, "not the slideshow");
+        s.act("key K");
+        s.idle(20);
+        assert_ne!(vat(&s), held, "K plays");
+        if tools.is_some() {
+            // Name order: dance.gif, photo.avif, photo.heic, still.png, turned.tiff.
+            s.act("key End");
+            wait_until(&mut s, "the TIFF decoded", 20, |s| s.app.thumbs.dims(&d.join("turned.tiff")).is_some());
+            assert_eq!(s.app.thumbs.dims(&d.join("turned.tiff")), Some([400, 600]), "upright");
+            assert!(viewer(&s).anim.is_none(), "nothing plays for a photo");
+            s.idle(2);
+            shot_still(&mut s, "photo-viewer-graphite");
+            s.act("key ArrowLeft");
+            s.act("key ArrowLeft");
+            wait_until(&mut s, "the HEIC tried", 20, |s| s.app.thumbs.failed(&d.join("photo.heic")));
+            s.idle(2);
+            assert!(some_text(&s, "Can't show this picture"));
+            if avif {
+                s.act("key ArrowLeft");
+                wait_until(&mut s, "the AVIF decoded", 20, |s| s.app.thumbs.dims(&d.join("photo.avif")).is_some());
+                assert_eq!(s.app.thumbs.dims(&d.join("photo.avif")), Some([320, 240]));
+            }
+            s.act("key Escape");
+            select_path(&mut s, &d.join("turned.tiff"));
+            s.idle(3);
+            look(&mut s, "a TIFF in the inspector");
+            s.shot("photo-inspector-graphite");
+        } else {
+            s.act("key Escape");
+        }
+        // Nothing to read a HEIC: what to install.
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        select_path(&mut s, &d.join("still.png"));
+        select_path(&mut s, &d.join("photo.heic"));
+        wait_until(&mut s, "the install note", 5, |s| some_text(s, "Install ImageMagick to see HEIC photos"));
+        look(&mut s, "a HEIC without ImageMagick");
+        for (ms, step) in &s.slow {
+            eprintln!("  slow frame {ms:.0} ms after: {step}");
+        }
+        assert!(s.slow.is_empty(), "stalled");
+        report("animated pictures", &s);
+    }
+
     fn control_rect(s: &mut Sim, what: &str) -> Rect {
         s.idle(1);
         crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == what).map(|(_, r, _)| *r)).unwrap_or_else(|| s.fail(&format!("no {what} on screen")))

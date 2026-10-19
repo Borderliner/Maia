@@ -147,15 +147,22 @@ fn png_frame(mut r: png::Reader<Cursor<&[u8]>>) -> Option<Rgba> {
     let mut buf = vec![0u8; r.output_buffer_size()];
     let info = r.next_frame(&mut buf).ok()?;
     buf.truncate(info.buffer_size());
-    let (w, h) = (info.width, info.height);
-    let px = match info.color_type {
-        png::ColorType::Rgba => buf,
-        png::ColorType::Rgb => expand(&buf, 3, |p| [p[0], p[1], p[2], 255]),
-        png::ColorType::Grayscale => expand(&buf, 1, |p| [p[0], p[0], p[0], 255]),
-        png::ColorType::GrayscaleAlpha => expand(&buf, 2, |p| [p[0], p[0], p[0], p[1]]),
-        png::ColorType::Indexed => return None, // expanded by normalize_to_color8
-    };
-    Some(Rgba { w, h, px })
+    // Indexed colour is expanded by normalize_to_color8.
+    if info.color_type == png::ColorType::Indexed {
+        return None;
+    }
+    Some(Rgba { w: info.width, h: info.height, px: rgba_from(buf, info.color_type.samples())? })
+}
+
+/// 8-bit gray, gray and alpha, RGB or RGBA samples as RGBA.
+pub(crate) fn rgba_from(buf: Vec<u8>, channels: usize) -> Option<Vec<u8>> {
+    Some(match channels {
+        4 => buf,
+        3 => expand(&buf, 3, |p| [p[0], p[1], p[2], 255]),
+        2 => expand(&buf, 2, |p| [p[0], p[0], p[0], p[1]]),
+        1 => expand(&buf, 1, |p| [p[0], p[0], p[0], 255]),
+        _ => return None,
+    })
 }
 
 fn expand(src: &[u8], n: usize, f: impl Fn(&[u8]) -> [u8; 4]) -> Vec<u8> {
