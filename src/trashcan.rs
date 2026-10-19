@@ -41,7 +41,9 @@ fn topdir(p: &Path) -> PathBuf {
 
 fn trash_dir_for(p: &Path) -> std::io::Result<PathBuf> {
     let home = home_trash();
-    let home_dev = fs::metadata(home.parent().unwrap_or(Path::new("/"))).map(|m| m.dev()).ok();
+    // The home trash may not exist yet (nor ~/.local/share, on a new account): the disk
+    // it will be made on is the nearest folder above it that does.
+    let home_dev = home.ancestors().find_map(|a| fs::metadata(a).ok()).map(|m| m.dev());
     let dev = fs::symlink_metadata(p)?.dev();
     if Some(dev) == home_dev {
         return Ok(home);
