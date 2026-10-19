@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.yappologistic.Maia</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Maia</name>
+  <summary>Fast, keyboard-first file manager</summary>
+  <description>
+    <p>A file manager for Linux, drawn on the GPU, with split panels, tabs, live filtering,
+    previews of pictures, video, PDFs, Office documents, books and code, git history and
+    staging, and background file operations that Undo takes back.</p>
+  </description>
+  <launchable type="desktop-id">io.github.yappologistic.Maia.desktop</launchable>
+  <url type="homepage">https://github.com/yappologistic/Maia</url>
+  <url type="bugtracker">https://github.com/yappologistic/Maia/issues</url>
+  <developer id="io.github.yappologistic">
+    <name>yappologistic</name>
+  </developer>
+  <categories>
+    <category>System</category>
+    <category>FileTools</category>
+  </categories>
+  <provides>
+    <binary>maia</binary>
+    <mediatype>inode/directory</mediatype>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.3.0" date="2026-10-18"/>
+  </releases>
+</component>

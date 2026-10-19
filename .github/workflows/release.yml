@@ -1,7 +1,9 @@
 # A version tag (v0.2.1) builds Maia for x86_64 and ARM64 Linux on Ubuntu 22.04, so
-# the downloads run on glibc 2.35 and newer, and publishes them as that tag's release
-# with their checksums and the crates' licence notices. The tag's message is the
-# release text. The nightly is pinned: build-dist.sh's size flags are nightly-only.
+# the downloads run on glibc 2.35 and newer, and publishes them as that tag's release:
+# the program alone (what Update fetches), a tarball, a .deb, an .rpm and an AppImage
+# for each, their checksums, and the crates' licence notices. Each package is installed
+# or run once before it is published. The tag's message is the release text. The
+# nightly is pinned: build-dist.sh's size flags are nightly-only.
 name: Release
 
 on:
@@ -51,11 +53,46 @@ jobs:
             echo "needs a newer glibc than 2.35"; exit 1
           fi
 
+      - name: Packaging tools
+        run: |
+          sudo apt-get install -y --no-install-recommends rpm
+          # appimagetool 1.9.0, checked against the copy it was tried with.
+          case "${{ matrix.arch }}" in
+            x86_64) sum=46fdd785094c7f6e545b61afcfb0f3d98d8eab243f644b4b17698c01d06083d1 ;;
+            aarch64) sum=04f45ea45b5aa07bb2b071aed9dbf7a5185d3953b11b47358c1311f11ea94a96 ;;
+          esac
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" "https://github.com/AppImage/appimagetool/releases/download/1.9.0/appimagetool-${{ matrix.arch }}.AppImage"
+          echo "$sum  $RUNNER_TEMP/appimagetool" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/appimagetool"
+
       - name: Package
+        env:
+          APPIMAGETOOL: ${{ runner.temp }}/appimagetool
         run: |
           mkdir out
           cp dist/maia "out/maia-linux-${{ matrix.arch }}"
-          cd out && sha256sum "maia-linux-${{ matrix.arch }}" > "maia-linux-${{ matrix.arch }}.sha256"
+          (cd out && sha256sum "maia-linux-${{ matrix.arch }}" > "maia-linux-${{ matrix.arch }}.sha256")
+          tools/package.sh "${GITHUB_REF_NAME#v}" "${{ matrix.arch }}" out
+          ls -l out
+
+      - name: Check the packages
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          # Every format was made.
+          ls out/*.tar.gz out/*.deb out/*.rpm out/*.AppImage
+          # The .deb installs with its dependencies and runs.
+          sudo apt-get install -y ./out/maia_*.deb
+          maia --version | grep -qx "maia $v"
+          sudo apt-get remove -y maia
+          # The .rpm says what it is and holds what it should.
+          rpm -qip out/maia-*.rpm
+          rpm -qlp out/maia-*.rpm | grep -qx /usr/bin/maia
+          # The AppImage starts (unpacked: the runner has no FUSE).
+          APPIMAGE_EXTRACT_AND_RUN=1 ./out/Maia-*.AppImage --version | grep -qx "maia $v"
+          # The tarball installs where it's told.
+          mkdir t && tar -C t -xzf out/maia-*.tar.gz
+          PREFIX="$PWD/t/prefix" sh t/maia-*/install.sh
+          t/prefix/bin/maia --version | grep -qx "maia $v"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -80,4 +117,5 @@ jobs:
           # checkout leaves the tag lightweight, which would give the commit's message.
           git fetch --force origin "+refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           cp assets/THIRD-PARTY-NOTICES.txt out/
+          (cd out && sha256sum maia-* Maia-* | grep -v '\.sha256$' > SHA256SUMS && cat SHA256SUMS)
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "Maia ${GITHUB_REF_NAME#v}" --notes-from-tag out/*

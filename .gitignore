@@ -15,6 +15,7 @@
 /assets/**
 !/assets/*.ttf
 !/assets/*.txt
+!/assets/*.svg
 # The tour's films: built into the binary, made by tools/tour-media.sh.
 !/assets/tour/
 !/assets/tour/*.webp
@@ -26,6 +27,13 @@
 !/tools/lucide_subset.py
 !/tools/notices.py
 !/tools/tour-media.sh
+!/tools/package.sh
+
+# What the packages install besides the program.
+!/packaging/
+/packaging/**
+!/packaging/*.desktop
+!/packaging/*.metainfo.xml
 
 # The release workflow, by name.
 !/.github/

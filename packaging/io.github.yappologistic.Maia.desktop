@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Maia
+GenericName=File Manager
+Comment=Fast, keyboard-first file manager
+Exec=maia %U
+Icon=io.github.yappologistic.Maia
+Terminal=false
+Categories=System;FileTools;FileManager;
+MimeType=inode/directory;
+Keywords=files;folders;explorer;browser;
+StartupWMClass=io.github.yappologistic.Maia
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=maia --window

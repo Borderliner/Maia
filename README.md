@@ -14,9 +14,29 @@ background file operations.
 
 ## Install
 
-You need a Wayland or X11 desktop with OpenGL. The releases have builds for x86_64
-and ARM64 (`maia-linux-aarch64`) that run on glibc 2.35 or newer, so Ubuntu 22.04,
-Debian 12, Fedora 36 and anything later:
+You need a Wayland or X11 desktop with OpenGL. Every release has packages for x86_64
+and ARM64 (`aarch64`) that run on glibc 2.35 or newer, so Ubuntu 22.04, Debian 12,
+Fedora 36 and anything later. From the
+[latest release](https://github.com/yappologistic/Maia/releases/latest):
+
+```bash
+sudo apt install ./maia_0.3.0_amd64.deb             # Debian, Ubuntu, Mint, Pop!_OS
+```
+
+```bash
+sudo dnf install ./maia-0.3.0-1.x86_64.rpm          # Fedora, RHEL; zypper on openSUSE
+```
+
+```bash
+chmod +x Maia-0.3.0-x86_64.AppImage && ./Maia-0.3.0-x86_64.AppImage
+```
+
+```bash
+tar xzf maia-0.3.0-linux-x86_64.tar.gz && sh maia-0.3.0-linux-x86_64/install.sh
+```
+
+The tarball installs to `~/.local`, or `/usr/local` as root. On Arch and anything
+else, the program alone works too, and it is the one that updates itself:
 
 ```bash
 curl -LO https://github.com/yappologistic/Maia/releases/latest/download/maia-linux-x86_64
