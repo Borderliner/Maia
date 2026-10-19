@@ -24,7 +24,7 @@ systemctl --user show-environment >/dev/null 2>&1 || SCOPE=
 exec $SCOPE \
   bwrap --ro-bind / / --dev /dev --proc /proc \
   --size 67108864 --tmpfs /tmp --size 1048576 --tmpfs /run --size 1048576 --tmpfs /home \
-  --ro-bind "$C/target" "$C/target" --size $GB --tmpfs "$SIM" --remount-ro /home --remount-ro /run \
+  --ro-bind "$C/target" "$C/target" --ro-bind "$C/assets" "$C/assets" --size $GB --tmpfs "$SIM" --remount-ro /home --remount-ro /run \
   --unshare-all --die-with-parent --new-session \
   --unsetenv WAYLAND_DISPLAY --unsetenv DISPLAY --unsetenv DBUS_SESSION_BUS_ADDRESS \
   ${MAIA_SIM_SHOTS:+--bind "$MAIA_SIM_SHOTS" "$MAIA_SIM_SHOTS" --setenv MAIA_SIM_SHOTS "$MAIA_SIM_SHOTS"} \

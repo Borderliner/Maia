@@ -1,5 +1,6 @@
 # Every push and pull request: the build (with and without the screen reader), the
-# unit tests, and the simulated users in their sandbox.
+# unit tests, and the simulated users in their sandbox, with the tools the previews,
+# conversions and archives use installed as a desktop would have them.
 name: CI
 
 on:
@@ -19,6 +20,21 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg imagemagick exiv2 poppler-utils \
+            p7zip-full zip libarchive-tools sqlite3 woff2 dbus libglib2.0-bin fontconfig ffmpegthumbnailer evince
+          # A desktop's thumbnailer for music covers, which no Ubuntu package installs alone.
+          printf '[Thumbnailer Entry]\nTryExec=ffmpeg\nExec=ffmpeg -loglevel quiet -y -i %%i -an -frames:v 1 -vf scale=%%s:-2 -f image2 -c:v png %%o\nMimeType=audio/mpeg;audio/flac;audio/ogg;audio/mp4;\n' \
+            | sudo tee /usr/share/thumbnailers/ffmpeg-audio.thumbnailer >/dev/null
+          # Ubuntu's ImageMagick 6 has no magick command; the app and tests call it so.
+          if ! command -v magick; then
+            printf '#!/bin/sh\nexec convert "$@"\n' | sudo tee /usr/local/bin/magick >/dev/null
+            sudo chmod +x /usr/local/bin/magick
+          fi
+          git config --global user.name CI
+          git config --global user.email ci@example.invalid
       - name: Build
         run: |
           cargo build --locked
@@ -27,8 +43,6 @@ jobs:
         run: cargo test --locked --features testkit -- --skip "sim::"
       - name: Simulated users
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap
           # Ubuntu 24.04 keeps unprivileged namespaces, which bwrap needs, behind AppArmor.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          tools/sim.sh sim::
+          tools/sim.sh "sim::"
