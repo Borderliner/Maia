@@ -3386,8 +3386,9 @@ fn every_option_has_one_section() {
         Opt::TrashAge => 58,
         Opt::PictureViewer => 61,
         Opt::Tour => 62,
+        Opt::CustomActions => 63,
     };
-    let numbered: Vec<usize> = (0..59).chain([61, 62]).collect();
+    let numbered: Vec<usize> = (0..59).chain([61, 62, 63]).collect();
     let mut seen = vec![0; 64];
     for o in OPTS {
         seen[index(o.0)] += 1;
