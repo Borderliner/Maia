@@ -7755,6 +7755,35 @@ mod journeys {
         s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", r.left() + 1.0, r.center().y, r.right() - 1.0, r.center().y));
         s.act("key ctrl+shift+c");
         assert_eq!(s.copied.last().map(String::as_str), Some("maia-ok"));
+        // A line longer than a narrow window and the icons a prompt draws: narrowed, the
+        // line wraps at the new width and the shell is told it; widened, it is one row.
+        let long: String = (0..30).map(|i| format!("w{i:02}-")).collect();
+        let rows = |s: &Sim| s.app.terminal.text();
+        s.act("text printf 'w%02d-' $(seq 0 29); echo; printf '\\uf07b \\ue0a0 \\uf015 \\uf017\\n'");
+        s.act("key enter");
+        wait_until(&mut s, "the long line", 10, |s| idle(s) && rows(s).lines().any(|l| l.contains(&long)));
+        s.idle(10);
+        s.shot("terminal-icons");
+        s.resize(560.0, 800.0);
+        let size = |s: &Sim| s.app.terminal.pty.as_ref().map(|p| {
+            let t = p.shared.term();
+            (t.screen.cols, t.screen.rows)
+        }).unwrap_or_default();
+        let (cols, lines) = size(&s);
+        assert!(cols < long.len(), "{cols} columns hold the line");
+        wait_until(&mut s, "the line rewrapped", 10, |s| {
+            let t = rows(s);
+            !t.contains(&long) && t.lines().any(|l| l.starts_with("w00-") && l.len() == cols) && t.contains("w29-")
+        });
+        s.act("text stty size");
+        s.act("key enter");
+        let told = format!("{lines} {cols}");
+        wait_until(&mut s, "the shell's new size", 10, |s| rows(s).lines().any(|l| l.trim() == told));
+        s.shot("terminal-narrow");
+        s.resize(1280.0, 800.0);
+        wait_until(&mut s, "the line whole again", 10, |s| rows(s).lines().any(|l| l.contains(&long)));
+        s.act("key ctrl+l");
+        wait_until(&mut s, "the prompt after clear", 10, idle);
         // The panel moves on: the shell, waiting at its prompt, follows.
         wait_until(&mut s, "the prompt again", 10, idle);
         go(&mut s, &docs);

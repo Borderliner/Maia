@@ -336,17 +336,26 @@ impl Screen {
     }
 
     /// Fit to `cols` × `rows`. Rows below the cursor go first, then the top ones go into
-    /// the scrollback; growing brings them back. Lines are cut or padded, not rewrapped.
+    /// the scrollback; growing brings them back. A new width rewraps the main screen's
+    /// text, scrollback included; the alternate screen's program draws itself again.
     pub fn resize(&mut self, cols: usize, rows: usize) {
         let (cols, rows) = (cols.max(2), rows.max(1));
         if (cols, rows) == (self.cols, self.rows) {
             return;
         }
-        let alt = self.alt();
-        fit(&mut self.lines, self.rows, rows, cols, &mut self.cur.y, !alt);
+        let (old_cols, old_rows) = (self.cols, self.rows);
+        let main = |lines: &mut VecDeque<Row>, cur: &mut Cursor| {
+            if cols == old_cols {
+                fit(lines, old_rows, rows, cols, &mut cur.y, true);
+            } else {
+                (cur.x, cur.y) = rewrap(lines, old_rows, rows, old_cols, cols, (cur.x, cur.y));
+            }
+        };
         if let Some((lines, cur)) = &mut self.main {
-            fit(lines, self.rows, rows, cols, &mut cur.y, true);
-            cur.x = cur.x.min(cols - 1);
+            main(lines, cur);
+            fit(&mut self.lines, old_rows, rows, cols, &mut self.cur.y, false);
+        } else {
+            main(&mut self.lines, &mut self.cur);
         }
         (self.cols, self.rows) = (cols, rows);
         self.cur.x = self.cur.x.min(cols - 1);
@@ -466,6 +475,64 @@ fn fit(lines: &mut VecDeque<Row>, old: usize, rows: usize, cols: usize, y: &mut 
             *c = Cell::BLANK;
         }
     }
+}
+
+/// Rewrap the main screen, `old_rows` of `old_cols` at the end of `lines`, to `rows` of
+/// `cols`: rows that ran on join into the line they were written as, which is cut again
+/// at the new width. The cursor (column, row) keeps its place in its line; blank rows
+/// under it are room, not text, and go first. Returns where the cursor is now.
+fn rewrap(lines: &mut VecDeque<Row>, old_rows: usize, rows: usize, old_cols: usize, cols: usize, cur: (usize, usize)) -> (usize, usize) {
+    let at = lines.len() - old_rows + cur.1;
+    while lines.len() > at + 1 && lines.back().is_some_and(|r| !r.wrapped && r.cells.iter().all(|c| c.empty())) {
+        lines.pop_back();
+    }
+    let old: Vec<Row> = lines.drain(..).collect();
+    let (mut line, mut mark, mut pos) = (Vec::<Cell>::new(), None, (0, 0));
+    for (i, row) in old.iter().enumerate() {
+        if i == at {
+            mark = Some(line.len() + cur.0);
+        }
+        line.extend_from_slice(&row.cells);
+        if row.wrapped && i + 1 < old.len() {
+            // A row kept in the scrollback lost its trailing blanks, which were text.
+            line.resize(line.len() + old_cols.saturating_sub(row.cells.len()), Cell::BLANK);
+            // A wide character that did not fit at the edge left it blank and went on.
+            if old[i + 1].cells.first().is_some_and(|c| c.flags() & WIDE != 0) && line.last().is_some_and(|c| c.empty()) {
+                line.pop();
+            }
+            continue;
+        }
+        while line.last().is_some_and(|c| c.empty()) {
+            line.pop();
+        }
+        let mut row = Vec::with_capacity(cols);
+        for (j, &c) in line.iter().enumerate() {
+            let w = if c.flags() & WIDE != 0 { 2 } else { 1 };
+            if row.len() + w > cols && c.flags() & SPACER == 0 {
+                row.resize(cols, Cell::BLANK);
+                lines.push_back(Row { cells: std::mem::replace(&mut row, Vec::with_capacity(cols)), wrapped: true });
+            }
+            if mark == Some(j) {
+                pos = (row.len(), lines.len());
+            }
+            row.push(c);
+        }
+        if let Some(m) = mark.filter(|&m| m >= line.len()) {
+            pos = ((row.len() + m - line.len()).min(cols - 1), lines.len());
+        }
+        mark = None;
+        lines.push_back(Row { cells: row, wrapped: false });
+        line.clear();
+    }
+    // Text under the cursor stays on the screen with it, as much as fits.
+    lines.truncate((pos.1 + rows).min(lines.len()));
+    while lines.len() < rows {
+        lines.push_back(Row::default());
+    }
+    let top = lines.len() - rows;
+    lines.range_mut(..top).for_each(trim);
+    lines.range_mut(top..).for_each(|r| r.cells.resize(cols, Cell::BLANK));
+    (pos.0, pos.1 - top)
 }
 
 /// An extended colour after 38 or 48: `5;n` (palette) or `2;r;g;b`, each also written

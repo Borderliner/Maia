@@ -559,6 +559,8 @@ pub fn pane(app: &mut App, ui: &mut Ui, full: Rect, above: f32) {
     if let Some(pty) = pane.pty.as_mut().filter(|_| (cols, rows) != pane.size) {
         pty.resize(cols, rows);
         pane.size = (cols, rows);
+        // Rewrapped rows are numbered anew: a selection would land on other text.
+        pane.sel = None;
     }
     if pane.pty.as_mut().is_some_and(|p| p.flush()) {
         ctx.request_repaint_after(std::time::Duration::from_millis(10));

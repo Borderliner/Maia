@@ -2593,6 +2593,30 @@ pub fn apply(ctx: &egui::Context, p: &Palette, font_size: f32, spacing: f32, ani
     });
 }
 
+/// Codepoints every Nerd Font has: the powerline branch, a house and a folder.
+const NERD_CHARS: &str = ":charset=e0a0 f015 f07b";
+
+/// From `fc-list` lines of style|family|file, a Nerd Font's regular face: the symbols-only
+/// one first, then the full-size ones. A Mono face shrinks each icon into one cell, half
+/// the size a prompt means it at; the terminal keeps text on its columns either way.
+pub fn pick_nerd_font(list: &str) -> Option<&str> {
+    let rank = |family: &str| match family {
+        "Symbols Nerd Font" => 0,
+        f if f.ends_with(" Nerd Font") => 1,
+        "Symbols Nerd Font Mono" => 2,
+        f if f.ends_with("Nerd Font Mono") => 3,
+        _ => 4,
+    };
+    list.lines()
+        .filter_map(|l| {
+            let mut it = l.splitn(3, '|');
+            Some((it.next()?, it.next()?, it.next()?))
+        })
+        .filter(|(style, ..)| *style == "Regular")
+        .min_by_key(|&(_, family, file)| (rank(family), family, file))
+        .map(|(.., file)| file)
+}
+
 /// Fonts come from the system (so text matches the desktop); a tiny embedded
 /// Noto subset (OFL) is the last resort so the UI always renders.
 pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
@@ -2651,6 +2675,12 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
     if let Some(b) = sys_mono {
         add(&mut fonts, "mono", b, &mut mono);
         prop.push("mono".into()); // box-drawing and arrows for proportional text too
+    }
+    // Shell prompts and system summaries draw icons from the Nerd Fonts' private-use
+    // range, which no ordinary font fills: a Nerd Font on the system does, in the terminal.
+    let nerd = std::process::Command::new("fc-list").args(["--format=%{style[0]}|%{family[0]}|%{file}\n", NERD_CHARS]).output().ok();
+    if let Some(b) = nerd.and_then(|o| pick_nerd_font(&String::from_utf8_lossy(&o.stdout)).and_then(|f| map_font(std::path::Path::new(f)))) {
+        add(&mut fonts, "nerd", b, &mut mono);
     }
     for p in ["/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"] {
         if let Some(b) = map_font(std::path::Path::new(p)) {

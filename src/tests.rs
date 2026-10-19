@@ -1549,6 +1549,41 @@ fn x11_clipboard_and_drag_out() {
     assert!(conn.poll_for_event().unwrap().is_none(), "no XDND to Maia itself");
 }
 
+/// The terminal's icons come from a Nerd Font: one is picked from fontconfig's list (lines
+/// as a system with three of them installed gives them), and where one is installed the
+/// monospace text has the glyphs a prompt draws rather than boxes.
+#[test]
+fn terminal_icons_come_from_a_nerd_font() {
+    use crate::theme::pick_nerd_font as pick;
+    let list = "Bold|GeistMono Nerd Font Mono|/usr/share/fonts/OTF/GeistMonoNerdFontMono-Bold.otf
+Regular|FantasqueSansM Nerd Font Propo|/usr/share/fonts/TTF/FantasqueSansMNerdFontPropo-Regular.ttf
+Regular|MesloLGM Nerd Font|/usr/share/fonts/TTF/MesloLGMNerdFont-Regular.ttf
+Regular|MesloLGM Nerd Font Mono|/usr/share/fonts/TTF/MesloLGMNerdFontMono-Regular.ttf
+Italic|MesloLGM Nerd Font Mono|/usr/share/fonts/TTF/MesloLGMNerdFontMono-Italic.ttf
+Regular|GeistMono Nerd Font Mono|/usr/share/fonts/OTF/GeistMonoNerdFontMono-Regular.otf
+";
+    assert_eq!(pick(list), Some("/usr/share/fonts/TTF/MesloLGMNerdFont-Regular.ttf"), "full size before Mono and Propo");
+    let symbols = format!("{list}Regular|Symbols Nerd Font|/usr/share/fonts/TTF/SymbolsNerdFont-Regular.ttf\n");
+    assert_eq!(pick(&symbols), Some("/usr/share/fonts/TTF/SymbolsNerdFont-Regular.ttf"));
+    let mono = "Regular|GeistMono Nerd Font Mono|/usr/share/fonts/OTF/GeistMonoNerdFontMono-Regular.otf\nBold|MesloLGM Nerd Font|/usr/share/fonts/TTF/MesloLGMNerdFont-Bold.ttf\n";
+    assert_eq!(pick(mono), Some("/usr/share/fonts/OTF/GeistMonoNerdFontMono-Regular.otf"), "a Mono face rather than none");
+    assert_eq!(pick(""), None);
+    let any = std::process::Command::new("fc-list").args([":charset=e0a0 f015 f07b", "file"]).output().is_ok_and(|o| !o.stdout.is_empty());
+    if !any {
+        eprintln!("nerd font: skipped (none installed)");
+        return;
+    }
+    let ctx = egui::Context::default();
+    let cfg = crate::config::Config::default();
+    crate::theme::install_fonts(&ctx, &cfg.font_family, &cfg.inspector_font);
+    let _ = ctx.run(egui::RawInput::default(), |_| {});
+    let font = egui::FontId::monospace(13.0);
+    // The powerline branch, a house, a folder and a clock, as prompts draw them.
+    for c in ['\u{e0a0}', '\u{f015}', '\u{f07b}', '\u{f017}'] {
+        assert!(ctx.fonts_mut(|f| f.has_glyph(&font, c)), "U+{:04X} has a glyph", c as u32);
+    }
+}
+
 #[test]
 fn drag_picture_is_a_clean_premultiplied_card() {
     let ctx = egui::Context::default();
@@ -8600,6 +8635,38 @@ fn terminal_resizes() {
     t.screen.resize(4, 2);
     t.feed(b"\x1b[?1049l");
     assert_eq!(vt_rows(&t), ["b", "c"]);
+}
+
+/// A new width rewraps what was written, scrollback included, and the cursor keeps its
+/// place in its line; going back to the old width gives the old rows back.
+#[test]
+fn terminal_rewraps_on_resize() {
+    let mut t = vt(10, 4, b"hello world, it wraps\r\n$ ");
+    assert_eq!((vt_rows(&t), t.screen.cursor()), (vec!["hello worl".to_string(), "d, it wrap".into(), "s".into(), "$".into()], (2, 3)));
+    t.screen.resize(25, 4);
+    assert_eq!((vt_rows(&t), t.screen.cursor()), (vec!["hello world, it wraps".to_string(), "$".into(), "".into(), "".into()], (2, 1)));
+    t.screen.resize(10, 4);
+    assert_eq!((vt_rows(&t), t.screen.cursor()), (vec!["hello worl".to_string(), "d, it wrap".into(), "s".into(), "$".into()], (2, 3)));
+    // Narrower than the screen holds: the top rows go into the scrollback, and a row
+    // kept there that ended in a space still has it when the line is joined again.
+    t.screen.resize(6, 4);
+    assert_eq!((vt_rows(&t), t.screen.history(), t.screen.cursor()), (vec!["world,".to_string(), " it wr".into(), "aps".into(), "$".into()], 1, (2, 3)));
+    t.screen.resize(25, 4);
+    assert_eq!((vt_rows(&t)[..2].to_vec(), t.screen.history(), t.screen.cursor()), (vec!["hello world, it wraps".to_string(), "$".into()], 0, (2, 1)));
+    // Typing goes on where the cursor is.
+    t.feed(b"ls");
+    assert_eq!(vt_rows(&t)[1], "$ ls");
+    // A wide character pushed to the next row by the edge rejoins its line.
+    let mut t = vt(5, 2, "abcd漢".as_bytes());
+    t.screen.resize(10, 2);
+    assert_eq!((vt_rows(&t), t.screen.cursor()), (vec!["abcd漢".to_string(), "".into()], (6, 0)));
+    t.screen.resize(5, 2);
+    assert_eq!(vt_rows(&t), ["abcd", "漢"]);
+    // The main screen rewraps under a full-screen program, which redraws its own.
+    let mut t = vt(10, 3, b"hello world\x1b[?1049h");
+    t.screen.resize(20, 3);
+    t.feed(b"\x1b[?1049l");
+    assert_eq!((vt_rows(&t)[0].as_str(), t.screen.cursor()), ("hello world", (11, 0)));
 }
 
 #[test]
