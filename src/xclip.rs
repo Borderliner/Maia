@@ -38,8 +38,6 @@ x11rb::atom_manager! {
         XdndDrop,
         XdndFinished,
         XdndActionCopy,
-        XdndActionMove,
-        XdndActionLink,
     }
 }
 
@@ -190,9 +188,8 @@ struct DragOut {
     offers: Vec<Offer>,
     paths: Vec<PathBuf>,
     scale: f32,
-    /// The pointer: root position, keys and buttons held, time; `moved` until followed.
+    /// The pointer: root position and time; `moved` until followed.
     at: (i16, i16),
-    state: KeyButMask,
     time: Timestamp,
     moved: bool,
     target: Option<Target>,
@@ -257,9 +254,9 @@ impl State {
             Event::SelectionClear(e) if e.selection == self.atoms.CLIPBOARD => self.clip.clear(),
             Event::SelectionNotify(e) if e.requestor == self.win => self.loaded(e),
             Event::PropertyNotify(e) => self.property(e),
-            Event::MotionNotify(e) => self.pointer(e.root_x, e.root_y, e.state, e.time),
+            Event::MotionNotify(e) => self.pointer(e.root_x, e.root_y, e.time),
             Event::ButtonRelease(e) if self.drag.as_ref().is_some_and(|d| d.released.is_none()) => {
-                self.pointer(e.root_x, e.root_y, e.state, e.time);
+                self.pointer(e.root_x, e.root_y, e.time);
                 self.pointer_moved();
                 self.release();
             }
@@ -464,7 +461,7 @@ impl State {
         let types: Vec<Atom> = offers.iter().map(|o| o.atom).collect();
         let _ = self.conn.change_property32(PropMode::REPLACE, self.win, self.atoms.XdndTypeList, AtomEnum::ATOM, &types);
         let _ = self.conn.set_selection_owner(self.win, self.atoms.XdndSelection, CURRENT_TIME);
-        self.drag = Some(DragOut { offers, paths, scale, at: (p.root_x, p.root_y), state: p.mask, time: CURRENT_TIME, moved: true, target: None, home: None, released: None });
+        self.drag = Some(DragOut { offers, paths, scale, at: (p.root_x, p.root_y), time: CURRENT_TIME, moved: true, target: None, home: None, released: None });
         self.pointer_moved();
         // Let go before the grab took hold: dropped where it is.
         if u16::from(p.mask) & BUTTONS == 0 {
@@ -472,11 +469,10 @@ impl State {
         }
     }
 
-    fn pointer(&mut self, x: i16, y: i16, state: KeyButMask, time: Timestamp) {
+    fn pointer(&mut self, x: i16, y: i16, time: Timestamp) {
         if let Some(d) = self.drag.as_mut().filter(|d| d.released.is_none()) {
-            // Buttons aside: a release where the pointer already was moves nothing.
-            d.moved |= (x, y) != d.at || (u16::from(state) ^ u16::from(d.state)) & !BUTTONS != 0;
-            (d.at, d.state, d.time) = ((x, y), state, time);
+            d.moved |= (x, y) != d.at;
+            (d.at, d.time) = ((x, y), time);
         }
     }
 
@@ -517,14 +513,9 @@ impl State {
         };
         t.waiting = true;
         d.moved = false;
-        // As for drops into Maia from other apps: copied, moved with Shift, linked with Ctrl+Shift.
-        let action = match (d.state.contains(KeyButMask::SHIFT), d.state.contains(KeyButMask::CONTROL)) {
-            (true, true) => a.XdndActionLink,
-            (true, false) => a.XdndActionMove,
-            _ => a.XdndActionCopy,
-        };
+        // Copy only, as on Wayland: whoever takes the files must never make them vanish from here.
         let (x, y) = d.at;
-        xdnd(&self.conn, t.win, a.XdndPosition, [self.win, 0, (x as u16 as u32) << 16 | y as u16 as u32, d.time, action]);
+        xdnd(&self.conn, t.win, a.XdndPosition, [self.win, 0, (x as u16 as u32) << 16 | y as u16 as u32, d.time, a.XdndActionCopy]);
     }
 
     /// The XDND-aware window under a root position, its version, and the position in it:
