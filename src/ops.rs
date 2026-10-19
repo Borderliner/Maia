@@ -654,46 +654,118 @@ fn copy_tree(
             }
             copy_tree(&de.path(), &child, p, cancel, ctx, merge)?;
         }
+        copy_xattrs(src, dst);
         fs::set_permissions(dst, m.permissions())?;
+        if !merge
+            && let (Ok(mt), Ok(d)) = (m.modified(), fs::File::open(dst))
+        {
+            let _ = d.set_modified(mt);
+        }
     } else {
         p.lock().unwrap().current = name_of(src);
-        let mut r = fs::File::open(src)?;
-        let mut w = fs::File::create(dst)?;
-        let mut buf = vec![0u8; 1 << 20];
-        let mut since_repaint = 0u64;
-        loop {
-            if cancel.stop() {
-                drop(w);
-                let _ = fs::remove_file(dst);
-                return Err(std::io::Error::other("cancelled"));
-            }
-            // A failed read or write (disk full, device gone) must not leave a truncated
-            // file behind that looks like a finished copy.
-            let step = r.read(&mut buf).and_then(|n| w.write_all(&buf[..n]).map(|_| n));
-            let n = match step {
-                Ok(n) => n,
-                Err(e) => {
-                    drop(w);
-                    let _ = fs::remove_file(dst);
-                    return Err(e);
-                }
-            };
-            if n == 0 {
-                break;
-            }
-            p.lock().unwrap().done_bytes += n as u64;
-            since_repaint += n as u64;
-            if since_repaint > 8 << 20 {
-                ctx.request_repaint();
-                since_repaint = 0;
-            }
+        let r = fs::File::open(src)?;
+        let w = fs::File::create(dst)?;
+        if let Err(e) = copy_data(&r, &w, m.len(), p, cancel, ctx) {
+            drop(w);
+            // A failed copy (disk full, device gone, cancelled) must not leave a
+            // truncated file behind that looks like a finished one.
+            let _ = fs::remove_file(dst);
+            return Err(e);
         }
+        // Before the permissions: a read-only file takes no attributes.
+        copy_xattrs(src, dst);
         fs::set_permissions(dst, m.permissions())?;
         if let Ok(mt) = m.modified() {
             let _ = w.set_modified(mt);
         }
     }
     Ok(())
+}
+
+/// The bytes of `r` into `w`: shared extents where the drive can (btrfs, XFS: instant),
+/// else copied in the kernel, else through a buffer.
+fn copy_data(r: &fs::File, w: &fs::File, len: u64, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    const FICLONE: libc::c_ulong = 0x4004_9409;
+    let (rf, wf) = (r.as_raw_fd(), w.as_raw_fd());
+    if len > 0 && unsafe { libc::ioctl(wf, FICLONE, rf) } == 0 {
+        p.lock().unwrap().done_bytes += len;
+        return Ok(());
+    }
+    let mut since_repaint = 0u64;
+    let mut step = |n: u64| {
+        p.lock().unwrap().done_bytes += n;
+        since_repaint += n;
+        if since_repaint > 8 << 20 {
+            ctx.request_repaint();
+            since_repaint = 0;
+        }
+    };
+    let (mut kernel, mut done) = (true, 0u64);
+    let mut buf = vec![];
+    loop {
+        if cancel.stop() {
+            return Err(std::io::Error::other("cancelled"));
+        }
+        let n = if kernel {
+            let n = unsafe { libc::copy_file_range(rf, std::ptr::null_mut(), wf, std::ptr::null_mut(), 4 << 20, 0) };
+            let e = std::io::Error::last_os_error();
+            // Not offered between these two files, or a file that only tells its size
+            // when read (/proc): the plain way, from where it got to.
+            if (n < 0 && matches!(e.raw_os_error(), Some(libc::EXDEV | libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP | libc::EPERM))) || (n == 0 && done == 0) {
+                kernel = false;
+                buf = vec![0u8; len.clamp(64 << 10, 1 << 20) as usize];
+                continue;
+            }
+            if n < 0 {
+                return Err(e);
+            }
+            n as usize
+        } else {
+            let n = (&*r).read(&mut buf)?;
+            (&*w).write_all(&buf[..n])?;
+            n
+        };
+        if n == 0 {
+            return Ok(());
+        }
+        done += n as u64;
+        step(n as u64);
+    }
+}
+
+/// Extended attributes (Maia's tags among them) copied over; those the target can't keep
+/// (another file system, or `security.*` without the right) are left behind.
+pub fn copy_xattrs(src: &Path, dst: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let (Ok(s), Ok(d)) = (std::ffi::CString::new(src.as_os_str().as_bytes()), std::ffi::CString::new(dst.as_os_str().as_bytes())) else { return };
+    let mut names = vec![0u8; 1024];
+    let n = loop {
+        let n = unsafe { libc::llistxattr(s.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+        if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ERANGE) && names.len() < 1 << 16 {
+            names.resize(names.len() * 4, 0);
+            continue;
+        }
+        break n;
+    };
+    if n <= 0 {
+        return;
+    }
+    let mut val = vec![0u8; 4096];
+    for name in names[..n as usize].split(|&b| b == 0).filter(|n| !n.is_empty()) {
+        let Ok(name) = std::ffi::CString::new(name) else { continue };
+        let mut len = unsafe { libc::lgetxattr(s.as_ptr(), name.as_ptr(), val.as_mut_ptr().cast(), val.len()) };
+        if len < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ERANGE) {
+            let need = unsafe { libc::lgetxattr(s.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+            if need > 0 {
+                val.resize(need as usize, 0);
+                len = unsafe { libc::lgetxattr(s.as_ptr(), name.as_ptr(), val.as_mut_ptr().cast(), val.len()) };
+            }
+        }
+        if len >= 0 {
+            unsafe { libc::lsetxattr(d.as_ptr(), name.as_ptr(), val.as_ptr().cast(), len as usize, 0) };
+        }
+    }
 }
 
 pub fn remove_tree(p: &Path) -> std::io::Result<()> {

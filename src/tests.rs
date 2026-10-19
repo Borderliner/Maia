@@ -229,6 +229,39 @@ fn copy_move_merge_and_conflicts() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// A copy keeps what the file carries besides its bytes: tags (extended attributes),
+/// read-only files' tags too, folder dates, and big files whole.
+#[test]
+fn copy_keeps_tags_dates_and_bytes() {
+    let ctx = egui::Context::default();
+    let d = tmpdir("xattr");
+    let src = d.join("src");
+    touch(&src.join("sub/a.txt"), "a");
+    let big: Vec<u8> = (0..5_000_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    std::fs::write(src.join("big.bin"), &big).unwrap();
+    if crate::tags::write(&src.join("sub/a.txt"), &["red".into(), "work".into()]).is_err() {
+        return; // this file system keeps no tags
+    }
+    crate::tags::write(&src.join("sub"), &["blue".into()]).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(src.join("sub/a.txt"), std::fs::Permissions::from_mode(0o444)).unwrap();
+    let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+    std::fs::File::open(src.join("sub")).unwrap().set_modified(old).unwrap();
+    let out = d.join("out");
+    std::fs::create_dir(&out).unwrap();
+    let j = ops::spawn(1, OpKind::Copy { srcs: vec![src.join("sub"), src.join("big.bin")], dest: out.clone(), decide: HashMap::new() }, ctx);
+    wait_job(&j);
+    assert!(j.progress.lock().unwrap().errors.is_empty(), "{:?}", j.progress.lock().unwrap().errors);
+    assert_eq!(crate::tags::read(&out.join("sub/a.txt")), vec!["red".to_string(), "work".to_string()]);
+    assert_eq!(crate::tags::read(&out.join("sub")), vec!["blue".to_string()]);
+    assert_eq!(std::fs::metadata(out.join("sub")).unwrap().modified().unwrap(), old);
+    assert_eq!(std::fs::read(out.join("big.bin")).unwrap(), big);
+    assert_eq!(j.progress.lock().unwrap().done_bytes, big.len() as u64 + 1);
+    std::fs::set_permissions(out.join("sub/a.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(src.join("sub/a.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// A finished move takes what it moved out of every listing that showed it, whichever
 /// tab it is in: a plain listing and a tree are read again, a flattened one drops the
 /// rows at once, the destination shows them, and a listing it did not touch stays put.
