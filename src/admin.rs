@@ -16,6 +16,9 @@ pub enum Task {
     NewFolder(PathBuf),
     NewFile(PathBuf),
     Rename { from: PathBuf, to: PathBuf },
+    /// A new owner and group as chown takes them ("alice:staff", ":staff"), then
+    /// permissions as chmod does ("u+rwX,g-w"); all the way down when `deep`.
+    Perms { paths: Vec<PathBuf>, owner: Option<String>, mode: Option<String>, deep: bool },
 }
 
 impl Task {
@@ -29,11 +32,13 @@ impl Task {
             Task::Delete { .. } => push("rm"),
             Task::NewFolder(_) => push("mkdir"),
             Task::NewFile(_) => push("touch"),
+            Task::Perms { owner, .. } => push(if owner.is_some() { "chown" } else { "chmod" }),
         }
         let flags: &[&str] = match self {
             Task::Copy { .. } => &["-a", "--"],
             Task::Delete { .. } => &["-rf", "--"],
             Task::Rename { .. } => &["-T", "--"],
+            Task::Perms { deep: true, .. } => &["-R", "--"],
             _ => &["--"],
         };
         v.extend(flags.iter().map(OsString::from));
@@ -48,6 +53,10 @@ impl Task {
                 v.push(from.clone().into_os_string());
                 v.push(to.clone().into_os_string());
             }
+            Task::Perms { paths, owner, mode, .. } => {
+                v.extend(owner.as_ref().or(mode.as_ref()).map(OsString::from));
+                v.extend(paths.iter().map(|s| s.clone().into_os_string()));
+            }
         }
         v
     }
@@ -61,6 +70,7 @@ impl Task {
             Task::NewFolder(_) => "Creating a folder as administrator".into(),
             Task::NewFile(_) => "Creating a file as administrator".into(),
             Task::Rename { .. } => "Renaming as administrator".into(),
+            Task::Perms { paths, .. } => format!("Changing permissions of {} as administrator", n(paths.len())),
         }
     }
 }
@@ -77,7 +87,12 @@ pub fn denied(e: &std::io::Error) -> bool {
 
 /// Run the task through pkexec. Waits for the password dialog.
 pub fn run(t: &Tools, task: &Task) -> Result<(), String> {
-    run_argv(t, &task.argv())
+    run_argv(t, &task.argv())?;
+    // A new owner first, then the permissions (chown may clear set-ID bits).
+    if let Task::Perms { paths, owner: Some(_), mode: Some(m), deep } = task {
+        run_argv(t, &Task::Perms { paths: paths.clone(), owner: None, mode: Some(m.clone()), deep: *deep }.argv())?;
+    }
+    Ok(())
 }
 
 /// One command as root through pkexec, its program by absolute path. Waits for the

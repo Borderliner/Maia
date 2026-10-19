@@ -8850,3 +8850,36 @@ fn photos_through_external_tools() {
     assert!(load(&t, &d.join("junk.tiff"), 64).is_none());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Permissions changed for several items and all the way down: bits set and cleared,
+/// files inside given Execute only where they had it, the owner changed, and the same
+/// written for chmod and chown when it has to run as administrator.
+#[test]
+fn permissions_set_cleared_and_deep() {
+    use crate::perms::Change;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let c = Change { set: 0o111 | 0o4000, clear: 0o022, owner: None, group: None };
+    assert_eq!(c.mode(0o664, false), 0o4755);
+    assert_eq!(c.mode(0o664, true), 0o4644, "a document inside stays a document");
+    assert_eq!(c.mode(0o700, true), 0o4711, "a program inside stays one");
+    assert_eq!(c.symbolic(false).as_deref(), Some("u+xs,g+x,g-w,o+x,o-w"));
+    assert_eq!(c.symbolic(true).as_deref(), Some("u+Xs,g+X,g-w,o+X,o-w"));
+    let d = tmpdir("perms");
+    touch(&d.join("top/doc.txt"), "x");
+    touch(&d.join("top/sub/run.sh"), "x");
+    let set = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    set(&d.join("top/doc.txt"), 0o666);
+    set(&d.join("top/sub/run.sh"), 0o744);
+    let gid = std::fs::metadata(&d).unwrap().gid();
+    let c = Change { set: 0o011, clear: 0o002, owner: None, group: Some(gid) };
+    let j = ops::spawn(1, OpKind::Perms { paths: vec![d.join("top")], change: c, deep: true }, egui::Context::default());
+    wait_job(&j);
+    assert!(j.progress.lock().unwrap().errors.is_empty(), "{:?}", j.progress.lock().unwrap().errors);
+    let mode = |p: &str| std::fs::metadata(d.join(p)).unwrap().mode() & 0o7777;
+    assert_eq!((mode("top"), mode("top/sub"), mode("top/doc.txt"), mode("top/sub/run.sh")), (0o755, 0o755, 0o664, 0o755));
+    let t = Change { set: 0o100, clear: 0, owner: Some(0), group: None }.admin(vec![d.join("top")], true).unwrap();
+    let argv: Vec<String> = t.argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    assert!(argv[0].ends_with("chown") && argv[1..4] == ["-R", "--", "root"], "{argv:?}");
+    assert!(matches!(t, crate::admin::Task::Perms { mode: Some(ref m), .. } if m == "u+X"));
+    let _ = std::fs::remove_dir_all(&d);
+}

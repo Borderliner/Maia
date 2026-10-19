@@ -130,7 +130,7 @@ pub fn differs(a: &Path, b: &Path, stop: &AtomicBool) -> bool {
     la.iter().any(|(name, ma)| match lb.get(name) {
         None => true,
         Some(mb) if ma.is_dir() != mb.is_dir() || ma.is_symlink() != mb.is_symlink() => true,
-        Some(mb) if ma.is_dir() && !ma.is_symlink() => differs(&a.join(name), &b.join(name), stop),
+        Some(_) if ma.is_dir() && !ma.is_symlink() => differs(&a.join(name), &b.join(name), stop),
         Some(mb) => ma.len() != mb.len() || newer(ma.modified().ok(), mb.modified().ok()) || newer(mb.modified().ok(), ma.modified().ok()),
     })
 }

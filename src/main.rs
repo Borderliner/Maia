@@ -61,6 +61,7 @@ mod office;
 mod ollama;
 mod ops;
 mod panel;
+mod perms;
 mod picfix;
 mod popups;
 mod project;

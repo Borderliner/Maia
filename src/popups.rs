@@ -112,7 +112,14 @@ pub struct ConflictState {
 
 pub struct PropState {
     pub paths: Vec<PathBuf>,
-    pub mode: Option<u32>,
+    /// Permissions and owners being changed, before Apply.
+    pub change: crate::perms::Change,
+    /// Change everything inside the folders too.
+    pub deep: bool,
+    /// People and groups to pick from (read when first wanted).
+    ids: Option<(Vec<(u32, String)>, Vec<(u32, String)>)>,
+    /// The change Apply asked for, started once the dialog is drawn.
+    apply: Option<OpKind>,
     /// File details read at most once a second (not on every frame).
     snap: Option<PropSnap>,
     /// A checksum to compare with, as pasted.
@@ -128,6 +135,8 @@ struct PropSnap {
     link: Option<String>,
     /// Several items: (is a folder, size of a file).
     multi: Vec<(bool, u64)>,
+    /// Every item's (mode, owner, group, is a folder), for the permissions.
+    perms: Vec<(u32, u32, u32, bool)>,
 }
 
 impl PropState {
@@ -136,7 +145,7 @@ impl PropState {
         if fresh {
             return;
         }
-        let mut s = PropSnap { at: Instant::now(), single: None, vol: None, link: None, multi: vec![] };
+        let mut s = PropSnap { at: Instant::now(), single: None, vol: None, link: None, multi: vec![], perms: vec![] };
         if self.paths.len() == 1 {
             let p = &self.paths[0];
             if let (Ok(m), Some(e)) = (std::fs::symlink_metadata(p), fsx::Entry::from_path(p)) {
@@ -151,6 +160,8 @@ impl PropState {
                 Err(_) => (false, 0),
             }).collect();
         }
+        use std::os::unix::fs::MetadataExt;
+        s.perms = self.paths.iter().filter_map(|p| std::fs::symlink_metadata(p).ok()).map(|m| (m.mode() & 0o7777, m.uid(), m.gid(), m.is_dir())).collect();
         self.snap = Some(s);
     }
 }
@@ -471,7 +482,7 @@ impl Popup {
         Popup::Conflict(ConflictState { srcs, dest, mv, items, idx: 0, decide: HashMap::new(), apply_all: false, rename: None, focus_name: false })
     }
     pub fn properties(paths: Vec<PathBuf>) -> Popup {
-        Popup::Properties(PropState { paths, mode: None, snap: None, expected: String::new(), sum_job: None, sum: None })
+        Popup::Properties(PropState { paths, change: Default::default(), deep: false, ids: None, apply: None, snap: None, expected: String::new(), sum_job: None, sum: None })
     }
     pub fn open_with(paths: Vec<PathBuf>) -> Popup {
         Popup::OpenWith { paths, query: String::new(), all: false }
@@ -4723,20 +4734,7 @@ fn sync(app: &mut App, ctx: &egui::Context, st: &mut crate::compare::SyncState) 
     !(close || clicked_outside(ctx, rect))
 }
 
-fn user_name(uid: u32, file: &str) -> String {
-    std::fs::read_to_string(file)
-        .ok()
-        .and_then(|s| s.lines().find_map(|l| {
-            let mut it = l.split(':');
-            let name = it.next()?;
-            it.next();
-            (it.next()?.parse::<u32>().ok()? == uid).then(|| name.to_string())
-        }))
-        .unwrap_or_else(|| uid.to_string())
-}
-
 fn properties(app: &mut App, ctx: &egui::Context, st: &mut PropState) -> bool {
-    use std::os::unix::fs::MetadataExt;
     let pal = app.pal;
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
         return false;
@@ -4807,67 +4805,15 @@ fn properties(app: &mut App, ctx: &egui::Context, st: &mut PropState) -> bool {
                 kv(ui, "Created", fsx::fmt_time(e.created));
                 kv(ui, "Modified", fsx::fmt_time(e.modified));
                 kv(ui, "Accessed", fsx::fmt_time(m.accessed().ok()));
-                kv(ui, "Owner", format!("{} : {}", user_name(m.uid(), "/etc/passwd"), user_name(m.gid(), "/etc/group")));
             });
             if m.is_file() {
                 group_label(ui, "Checksum", &pal);
                 card(ui, &pal, |ui| checksum_row(ui, ctx, &p, st, &pal));
             }
-            // Permissions: who may read, write and run it, in columns under their names.
             group_label(ui, "Permissions", &pal);
-            let mode = st.mode.get_or_insert(m.mode() & 0o7777);
-            card(ui, &pal, |ui| {
-                ui.spacing_mut().item_spacing.y = 6.0;
-                let col_w = 72.0;
-                let row_h = 22.0;
-                let (head, _) = ui.allocate_exact_size(vec2(key_w + 12.0 + 3.0 * col_w, 18.0), Sense::hover());
-                for (k, h) in ["Read", "Write", "Execute"].iter().enumerate() {
-                    let cx = head.left() + key_w + 12.0 + col_w * (k as f32 + 0.5);
-                    ui.painter().text(pos2(cx, head.center().y), Align2::CENTER_CENTER, *h, FontId::proportional(11.5), pal.text_dim);
-                }
-                for (who, shift) in [("Owner", 6), ("Group", 3), ("Others", 0)] {
-                    let (r, _) = ui.allocate_exact_size(vec2(key_w + 12.0 + 3.0 * col_w, row_h), Sense::hover());
-                    ui.painter().text(pos2(r.left(), r.center().y), Align2::LEFT_CENTER, who, body.clone(), pal.text);
-                    for (k, bit) in [4u32, 2, 1].into_iter().enumerate() {
-                        let mask = bit << shift;
-                        let on = *mode & mask != 0;
-                        let cx = r.left() + key_w + 12.0 + col_w * (k as f32 + 0.5);
-                        let br = Rect::from_center_size(pos2(cx, r.center().y), Vec2::splat(16.0));
-                        let resp = ui.interact(br.expand(3.0), Id::new(("perm", shift, bit)), Sense::click());
-                        checkbox_glyph(ui.painter(), br, on, &pal);
-                        if resp.hovered() && !on {
-                            ui.painter().rect_stroke(br, CornerRadius::same(3), Stroke::new(1.2, pal.text_dim), StrokeKind::Inside);
-                        }
-                        if resp.has_focus() {
-                            ui.painter().rect_stroke(br.expand(2.5), CornerRadius::same(5), Stroke::new(1.5, pal.accent), StrokeKind::Inside);
-                        }
-                        if resp.clicked() {
-                            *mode ^= mask;
-                        }
-                    }
-                }
-                ui.add_space(2.0);
-                let shown = *mode;
-                ui.label(egui::RichText::new(format!("{:04o}  {}", shown, fsx::fmt_mode(shown, e.is_dir))).monospace().color(pal.text_dim));
-            });
-            let orig = m.mode() & 0o7777;
-            let mode = *mode;
-            dialog_buttons(ui, |ui| {
-                if mode != orig {
-                    if primary_button(ui, "Apply", true, &pal).clicked() {
-                        use std::os::unix::fs::PermissionsExt;
-                        match std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)) {
-                            Ok(()) => app.toast("Permissions updated"),
-                            Err(err) => app.toast(format!("Couldn't change permissions: {err}")),
-                        }
-                    }
-                    if plain_button(ui, "Close", &pal).clicked() {
-                        close = true;
-                    }
-                } else if primary_button(ui, "Close", true, &pal).clicked() {
-                    close = true;
-                }
-            });
+            if perms_card(ui, st, &snap.perms, key_w, &pal) {
+                close = true;
+            }
         } else {
             let mut total = 0u64;
             let mut pending = false;
@@ -4903,12 +4849,146 @@ fn properties(app: &mut App, ctx: &egui::Context, st: &mut PropState) -> bool {
                     });
                 }
             });
-            dialog_buttons(ui, |ui| close = primary_button(ui, "Close", true, &pal).clicked());
+            group_label(ui, "Permissions", &pal);
+            if perms_card(ui, st, &snap.perms, key_w, &pal) {
+                close = true;
+            }
         }
     });
     ctx.request_repaint_after(std::time::Duration::from_millis(300));
-    st.snap = snap;
+    if let Some(kind) = st.apply.take() {
+        app.actions.push(Action::StartJob(kind));
+        // Read again at once, to show what the job did.
+        st.snap = None;
+    } else {
+        st.snap = snap;
+    }
     !(close || clicked_outside(ctx, rect))
+}
+
+/// Who may read, write and run the items, in columns under their names, with the special
+/// bits and the owner and group below; Apply starts the change. A box where the items
+/// differ shows a dash until clicked. True when Close was clicked.
+fn perms_card(ui: &mut Ui, st: &mut PropState, items: &[(u32, u32, u32, bool)], key_w: f32, pal: &Palette) -> bool {
+    let body = egui::TextStyle::Body.resolve(ui.style());
+    // A bit as the items have it: all on, all off, or some of each (None).
+    let base = |mask: u32| -> Option<bool> {
+        let on = items.iter().filter(|i| i.0 & mask != 0).count();
+        (on == 0 || on == items.len()).then_some(on > 0)
+    };
+    let shown = |c: &crate::perms::Change, mask: u32| if c.set & mask != 0 { Some(true) } else if c.clear & mask != 0 { Some(false) } else { base(mask) };
+    let toggle = |c: &mut crate::perms::Change, mask: u32| {
+        let on = !shown(c, mask).unwrap_or(false);
+        (c.set, c.clear) = (c.set & !mask, c.clear & !mask);
+        // Only what differs from how they all are already is a change.
+        if base(mask) != Some(on) {
+            if on { c.set |= mask } else { c.clear |= mask }
+        }
+    };
+    let boxed = |ui: &mut Ui, r: Rect, id: Id, state: Option<bool>| -> bool {
+        let resp = ui.interact(r.expand(3.0), id, Sense::click());
+        match state {
+            Some(on) => checkbox_glyph(ui.painter(), r, on, pal),
+            None => {
+                ui.painter().rect_stroke(r, CornerRadius::same(3), Stroke::new(1.2, pal.accent), StrokeKind::Inside);
+                ui.painter().line_segment([r.center() - vec2(4.0, 0.0), r.center() + vec2(4.0, 0.0)], Stroke::new(1.8, pal.accent));
+            }
+        }
+        if resp.hovered() && state != Some(true) {
+            ui.painter().rect_stroke(r, CornerRadius::same(3), Stroke::new(1.2, pal.text_dim), StrokeKind::Inside);
+        }
+        if resp.has_focus() {
+            ui.painter().rect_stroke(r.expand(2.5), CornerRadius::same(5), Stroke::new(1.5, pal.accent), StrokeKind::Inside);
+        }
+        resp.clicked()
+    };
+    let col_w = 72.0;
+    let row_h = 22.0;
+    let dirs = items.iter().any(|i| i.3);
+    card(ui, pal, |ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        let (head, _) = ui.allocate_exact_size(vec2(key_w + 12.0 + 3.0 * col_w, 18.0), Sense::hover());
+        for (k, h) in ["Read", "Write", "Execute"].iter().enumerate() {
+            let cx = head.left() + key_w + 12.0 + col_w * (k as f32 + 0.5);
+            ui.painter().text(pos2(cx, head.center().y), Align2::CENTER_CENTER, *h, FontId::proportional(11.5), pal.text_dim);
+        }
+        for (who, shift) in [("Owner", 6), ("Group", 3), ("Others", 0)] {
+            let (r, _) = ui.allocate_exact_size(vec2(key_w + 12.0 + 3.0 * col_w, row_h), Sense::hover());
+            ui.painter().text(pos2(r.left(), r.center().y), Align2::LEFT_CENTER, who, body.clone(), pal.text);
+            for (k, bit) in [4u32, 2, 1].into_iter().enumerate() {
+                let mask = bit << shift;
+                let cx = r.left() + key_w + 12.0 + col_w * (k as f32 + 0.5);
+                let br = Rect::from_center_size(pos2(cx, r.center().y), Vec2::splat(16.0));
+                if boxed(ui, br, Id::new(("perm", shift, bit)), shown(&st.change, mask)) {
+                    toggle(&mut st.change, mask);
+                }
+            }
+        }
+        // The special bits, by what they do.
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for (label, tip, mask) in [("Run as owner", "Set user ID: it runs with its owner's rights", 0o4000), ("Run as group", "Set group ID: it runs with its group's rights; inside a folder, new items take its group", 0o2000), ("Sticky", "In a folder, only an item's owner may delete or rename it", 0o1000)] {
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                if boxed(ui, r, Id::new(("perm-special", mask)), shown(&st.change, mask)) {
+                    toggle(&mut st.change, mask);
+                }
+                ui.add(egui::Label::new(egui::RichText::new(label).size(12.0).color(pal.text_dim)).selectable(false)).on_hover_text(tip);
+                ui.add_space(8.0);
+            }
+        });
+        // One item: its mode as numbers and letters, as it will be.
+        if let [(mode, _, _, is_dir)] = items {
+            let m = st.change.mode(*mode, false);
+            ui.label(egui::RichText::new(format!("{m:04o}  {}", fsx::fmt_mode(m, *is_dir))).monospace().color(pal.text_dim));
+        }
+        // Owner and group: who they are now (or "Several"), picked from those on this computer.
+        let (users, groups) = st.ids.get_or_insert_with(|| (crate::perms::users(), crate::perms::groups()));
+        let same = |f: fn(&(u32, u32, u32, bool)) -> u32| items.first().map(f).filter(|v| items.iter().all(|i| f(i) == *v));
+        let (now_u, now_g) = (st.change.owner.or(same(|i| i.1)), st.change.group.or(same(|i| i.2)));
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(vec2(key_w + 6.0, row_h), Sense::hover());
+            ui.painter().text(pos2(r.left(), r.center().y), Align2::LEFT_CENTER, "Owner", body.clone(), pal.text);
+            for (id, now, list, field, current) in [("owner", now_u, &*users, 0, same(|i| i.1)), ("group", now_g, &*groups, 1, same(|i| i.2))] {
+                let text = now.map_or("Several".to_string(), |n| list.iter().find(|x| x.0 == n).map_or_else(|| n.to_string(), |x| x.1.clone()));
+                let r = egui::ComboBox::from_id_salt(("prop", id)).selected_text(text).width(132.0).height(260.0).show_ui(ui, |ui| {
+                    for (uid, name) in list {
+                        if ui.selectable_label(now == Some(*uid), name).clicked() {
+                            let v = (current != Some(*uid)).then_some(*uid);
+                            if field == 0 { st.change.owner = v } else { st.change.group = v }
+                        }
+                    }
+                });
+                crate::ui::note_control(ui, r.response.rect, if field == 0 { "owner" } else { "group" });
+                if field == 0 {
+                    ui.label(egui::RichText::new(":").color(pal.text_dim));
+                }
+            }
+        });
+        if dirs {
+            ui.add_space(2.0);
+            ui.checkbox(&mut st.deep, "Change everything inside too");
+            if st.deep && st.change.set & 0o111 != 0 {
+                ui.label(egui::RichText::new("Files inside get Execute only where they had it").small().color(pal.text_dim));
+            }
+        }
+    });
+    let mut close = false;
+    let changed = !st.change.is_empty();
+    dialog_buttons(ui, |ui| {
+        if changed {
+            if primary_button(ui, "Apply", true, pal).clicked() {
+                st.apply = Some(OpKind::Perms { paths: st.paths.clone(), change: std::mem::take(&mut st.change), deep: st.deep });
+            }
+            if plain_button(ui, "Close", pal).clicked() {
+                close = true;
+            }
+        } else if primary_button(ui, "Close", true, pal).clicked() {
+            close = true;
+        }
+    });
+    close
 }
 
 /// Paste a checksum to compare (its length picks the algorithm), or work out SHA-256.

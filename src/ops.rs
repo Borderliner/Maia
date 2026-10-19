@@ -46,6 +46,9 @@ pub enum OpKind {
     /// A folder synced into another: each (from, to) copied, over what is at `to` (which
     /// goes to the trash); `remove` to the trash after (mirroring).
     Sync { copies: Vec<(PathBuf, PathBuf)>, remove: Vec<PathBuf> },
+    /// Permission bits set and cleared, and a new owner and group, on `paths` (and, when
+    /// `deep`, everything inside them).
+    Perms { paths: Vec<PathBuf>, change: crate::perms::Change, deep: bool },
 }
 
 impl OpKind {
@@ -61,6 +64,7 @@ impl OpKind {
             OpKind::Convert { .. } => "Converting",
             OpKind::Sort { .. } => "Moving",
             OpKind::Sync { .. } => "Syncing",
+            OpKind::Perms { .. } => "Changing permissions of",
         }
     }
 }
@@ -116,6 +120,7 @@ pub fn spawn(id: u64, kind: OpKind, ctx: egui::Context) -> Job {
         OpKind::Admin { .. } => 1,
         OpKind::Sort { moves, .. } => moves.len(),
         OpKind::Sync { copies, remove } => copies.len() + remove.len(),
+        OpKind::Perms { paths, .. } => paths.len(),
     };
     let label = match &kind {
         OpKind::Extract { archive, members, .. } if members.is_empty() => format!("Extracting {}", name_of(archive)),
@@ -127,7 +132,7 @@ pub fn spawn(id: u64, kind: OpKind, ctx: egui::Context) -> Job {
         // One file by its name, several by their number: "Moving notes.txt to the trash".
         _ => {
             let first = match &kind {
-                OpKind::Copy { srcs, .. } | OpKind::Move { srcs, .. } => srcs.first(),
+                OpKind::Copy { srcs, .. } | OpKind::Move { srcs, .. } | OpKind::Perms { paths: srcs, .. } => srcs.first(),
                 OpKind::Trash { paths } | OpKind::Delete { paths } | OpKind::Extract { members: paths, .. } => paths.first(),
                 _ => None,
             };
@@ -299,6 +304,23 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 p.lock().unwrap().done_items += 1;
             }
         }
+        OpKind::Perms { paths, change, deep } => {
+            p.lock().unwrap().total_items = paths.len();
+            for s in paths {
+                if cancel.stop() {
+                    return;
+                }
+                p.lock().unwrap().current = name_of(s);
+                let errs = crate::perms::apply(s, change, *deep, cancel);
+                let mut g = p.lock().unwrap();
+                // Refused anywhere in it: offered again, as administrator, as a whole.
+                if errs.iter().any(|e| crate::admin::denied(&e.1)) {
+                    g.denied.push(s.clone());
+                }
+                g.errors.extend(errs.iter().take(20).map(|(at, e)| format!("{}: {e}", at.display())));
+                g.done_items += 1;
+            }
+        }
         OpKind::Trash { paths } => {
             p.lock().unwrap().total_items = paths.len();
             for s in paths {
@@ -450,6 +472,7 @@ impl Changed {
             OpKind::Convert { srcs, .. } => Changed::add(&mut c.arrived, srcs.first().and_then(|s| s.parent())),
             OpKind::Admin { task: Task::NewFolder(p) | Task::NewFile(p), .. } => Changed::add(&mut c.arrived, p.parent()),
             OpKind::Admin { task: Task::Rename { from, .. }, .. } => Changed::add(&mut c.arrived, from.parent()),
+            OpKind::Perms { paths, .. } | OpKind::Admin { task: Task::Perms { paths, .. }, .. } => parents(&mut c.arrived, paths),
         }
         c
     }

@@ -1684,6 +1684,7 @@ impl App {
                                 crate::ops::OpKind::Copy { dest, .. } if done && !denied.is_empty() => Some(crate::admin::Task::Copy { srcs: denied, dest: dest.clone() }),
                                 crate::ops::OpKind::Move { dest, .. } if done && !denied.is_empty() => Some(crate::admin::Task::Move { srcs: denied, dest: dest.clone() }),
                                 crate::ops::OpKind::Delete { .. } if done && !denied.is_empty() => Some(crate::admin::Task::Delete { paths: denied }),
+                                crate::ops::OpKind::Perms { change, deep, .. } if done && !denied.is_empty() => change.admin(denied, *deep),
                                 _ => None,
                             };
                             if let (Some(task), Some(tools)) = (task, crate::drives::Tools::current().filter(|t| t.has("pkexec"))) {
