@@ -8566,3 +8566,287 @@ fn conflicts_if_newer_and_renamed() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// An animated GIF over `pal`: frames of (left, top, width, height, palette indices,
+/// delay in hundredths, disposal), index 0 transparent.
+fn gif_bytes(w: u16, h: u16, pal: &[u8], repeat: gif::Repeat, frames: &[(u16, u16, u16, u16, Vec<u8>, u16, gif::DisposalMethod)]) -> Vec<u8> {
+    let mut out = vec![];
+    {
+        let mut e = gif::Encoder::new(&mut out, w, h, pal).unwrap();
+        e.set_repeat(repeat).unwrap();
+        for (x, y, fw, fh, px, delay, dispose) in frames {
+            let mut f = gif::Frame::from_indexed_pixels(*fw, *fh, px.clone(), Some(0));
+            (f.left, f.top, f.delay, f.dispose) = (*x, *y, *delay, *dispose);
+            e.write_frame(&f).unwrap();
+        }
+    }
+    out
+}
+
+/// `n` whole-picture frames, frame k all of colour k + 1 of a palette where colour i
+/// is (i, 255 - i, 0), each `delay` hundredths.
+pub(crate) fn gif_run(w: u16, h: u16, n: u8, delay: u16, repeat: gif::Repeat) -> Vec<u8> {
+    let pal: Vec<u8> = (0..=255u8).flat_map(|i| [i, 255 - i, 0]).collect();
+    let frames: Vec<_> = (0..n).map(|k| (0, 0, w, h, vec![k + 1; w as usize * h as usize], delay, gif::DisposalMethod::Keep)).collect();
+    gif_bytes(w, h, &pal, repeat, &frames)
+}
+
+/// The colour frame k of `gif_run` shows.
+fn run_colour(k: u8) -> egui::Color32 {
+    egui::Color32::from_rgb(k + 1, 254 - k, 0)
+}
+
+/// Animated GIF frames composited as browsers do: each drawn over the last where it
+/// says, its transparent pixels showing what lies under them, an area cleared or put
+/// back as the frame before asks; delays as written (the tiny ones shown for a tenth of
+/// a second) and the loop count as times played. One frame is one frame; a still PNG
+/// is no animation.
+#[test]
+fn animated_gif_frames() {
+    use crate::anim::{Frames, delay_ms};
+    use gif::DisposalMethod::{Background, Keep, Previous};
+    let d = tmpdir("anim-gif");
+    let path = d.join("a.gif");
+    let pal = [0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255];
+    let frames = [(0, 0, 8, 6, vec![1; 48], 5, Keep), (2, 2, 4, 3, vec![2; 12], 0, Background), (0, 0, 2, 2, vec![3, 3, 3, 0], 1, Previous), (7, 5, 1, 1, vec![2], 30, Keep)];
+    std::fs::write(&path, gif_bytes(8, 6, &pal, gif::Repeat::Finite(2), &frames)).unwrap();
+    let mut f = Frames::open(&path).unwrap();
+    let px = |f: &Frames, x: usize, y: usize| <[u8; 4]>::try_from(&f.canvas.px[(y * 8 + x) * 4..][..4]).unwrap();
+    let (red, green, blue, clear) = ([255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [0; 4]);
+    let mut delays = vec![f.next().unwrap()];
+    assert_eq!(px(&f, 0, 0), red);
+    delays.push(f.next().unwrap());
+    assert_eq!((px(&f, 3, 3), px(&f, 0, 0)), (green, red));
+    delays.push(f.next().unwrap());
+    assert_eq!(px(&f, 3, 3), clear, "the frame before cleared its area");
+    assert_eq!((px(&f, 0, 0), px(&f, 1, 1)), (blue, red), "a transparent pixel shows what is under it");
+    delays.push(f.next().unwrap());
+    assert_eq!((px(&f, 0, 0), px(&f, 7, 5)), (red, green), "the frame before put back what it covered");
+    assert!(f.next().is_none());
+    assert_eq!(delays, [50, 0, 10, 300]);
+    assert_eq!(delays.iter().map(|&d| delay_ms(d)).collect::<Vec<_>>(), [50, 100, 100, 300]);
+    assert_eq!(f.plays, Some(3), "twice more after the first time");
+    std::fs::write(&path, gif_run(4, 4, 1, 10, gif::Repeat::Infinite)).unwrap();
+    let mut f = Frames::open(&path).unwrap();
+    assert!(f.next().is_some() && f.next().is_none() && f.plays.is_none(), "one frame, looping forever");
+    std::fs::write(d.join("still.png"), png_bytes(4, 4, 1)).unwrap();
+    assert!(Frames::open(&d.join("still.png")).is_none());
+    assert!(Frames::open(&d.join("missing.gif")).is_none());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// APNG frames: a frame blended over what is there or replacing it, at its offset; an
+/// area cleared after its frame; delays from their fractions; plays as written. A default
+/// image outside the animation is not one of its frames.
+#[test]
+fn apng_frames() {
+    use crate::anim::Frames;
+    use png::{BlendOp, DisposeOp};
+    let apng = |separate: bool| {
+        let mut out = vec![];
+        let mut e = png::Encoder::new(&mut out, 4, 4);
+        e.set_color(png::ColorType::Rgba);
+        e.set_depth(png::BitDepth::Eight);
+        e.set_animated(3, 2).unwrap();
+        e.set_sep_def_img(separate).unwrap();
+        let mut w = e.write_header().unwrap();
+        if separate {
+            w.write_image_data(&[255; 64]).unwrap();
+        }
+        let red: Vec<u8> = [255, 0, 0, 255].repeat(16);
+        let half_blue: Vec<u8> = [0, 0, 255, 128].repeat(4);
+        let green: Vec<u8> = [0, 255, 0, 255].repeat(4);
+        for (x, y, fw, fh, px, (n, den), blend, dispose) in [(0, 0, 4, 4, red, (1, 10), BlendOp::Source, DisposeOp::None), (1, 1, 2, 2, half_blue, (3, 0), BlendOp::Over, DisposeOp::Background), (2, 2, 2, 2, green, (25, 1000), BlendOp::Source, DisposeOp::None)] {
+            w.reset_frame_position().unwrap();
+            w.set_frame_dimension(fw, fh).unwrap();
+            w.set_frame_position(x, y).unwrap();
+            w.set_frame_delay(n, den).unwrap();
+            w.set_blend_op(blend).unwrap();
+            w.set_dispose_op(dispose).unwrap();
+            w.write_image_data(&px).unwrap();
+        }
+        w.finish().unwrap();
+        out
+    };
+    let d = tmpdir("apng");
+    for separate in [false, true] {
+        let path = d.join("a.png");
+        std::fs::write(&path, apng(separate)).unwrap();
+        let mut f = Frames::open(&path).unwrap_or_else(|| panic!("animated (default image apart: {separate})"));
+        let px = |f: &Frames, x: usize, y: usize| <[u8; 4]>::try_from(&f.canvas.px[(y * 4 + x) * 4..][..4]).unwrap();
+        assert_eq!(f.next(), Some(100));
+        assert_eq!(px(&f, 1, 1), [255, 0, 0, 255], "the first frame, not the default image");
+        assert_eq!(f.next(), Some(30), "a zero denominator means hundredths");
+        let [r, g, b, a] = px(&f, 1, 1);
+        assert!(a == 255 && (126..=128).contains(&r) && g == 0 && (127..=129).contains(&b), "half blue over red: {:?}", [r, g, b, a]);
+        assert_eq!(px(&f, 0, 0), [255, 0, 0, 255], "outside the frame untouched");
+        assert_eq!(f.next(), Some(25));
+        assert_eq!(px(&f, 1, 1), [0; 4], "cleared after its frame");
+        assert_eq!(px(&f, 3, 3), [0, 255, 0, 255]);
+        assert!(f.next().is_none());
+        assert_eq!(f.plays, Some(2));
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The real ImageMagick (`magick`, else the older `convert`) on the PATH, as a stand-in
+/// folder holding only it, and its name.
+pub(crate) fn any_imagemagick_tools(dir: &Path) -> Option<(PathBuf, &'static str)> {
+    let path = std::env::var_os("PATH")?;
+    let (real, name) = ["magick", "convert"].into_iter().find_map(|n| std::env::split_paths(&path).map(|d| d.join(n)).find(|m| m.is_file()).map(|m| (m, n)))?;
+    std::fs::create_dir_all(dir).unwrap();
+    let _ = std::os::unix::fs::symlink(real, dir.join(name));
+    Some((dir.to_path_buf(), name))
+}
+
+/// An animated WebP made by ImageMagick, when it is here: three lossless frames, the
+/// decoder's composited canvas each time, their delays, looping forever.
+#[test]
+fn animated_webp_frames() {
+    let d = tmpdir("anim-webp");
+    let Some((tools, im)) = any_imagemagick_tools(&d.join("tools")) else {
+        eprintln!("animated WebP: skipped (no ImageMagick)");
+        return;
+    };
+    let path = d.join("a.webp");
+    let made = std::process::Command::new(tools.join(im)).args(["-size", "40x30", "xc:red", "xc:lime", "xc:blue", "-set", "delay", "5", "-loop", "0", "-define", "webp:lossless=true"]).arg(&path).status().is_ok_and(|s| s.success());
+    let Some(mut f) = made.then(|| crate::anim::Frames::open(&path)).flatten() else {
+        eprintln!("animated WebP: skipped (ImageMagick wrote no animated WebP)");
+        return;
+    };
+    let mut seen = vec![];
+    while let Some(ms) = f.next() {
+        seen.push((ms, <[u8; 4]>::try_from(&f.canvas.px[..4]).unwrap()));
+    }
+    // Lossless, but ImageMagick may round a level by one.
+    let near = |a: [u8; 4], b: [u8; 4]| a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= 1);
+    assert!(seen.len() == 3 && seen.iter().zip([[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]]).all(|(s, c)| s.0 == 50 && near(s.1, c)), "{seen:?}");
+    assert_eq!(f.plays, None);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Drive `p` through `secs` of simulated time a frame (1/60 s) at a time, its worker
+/// given a moment each frame; the colours shown go to `seen`, each once as it comes,
+/// and the most frames it held to `held`.
+fn play_for(p: &mut crate::anim::Player, ctx: &egui::Context, t: &mut f64, secs: f64, held: &mut usize, seen: &mut Vec<egui::Color32>) {
+    let end = *t + secs;
+    while *t < end {
+        *t += 1.0 / 60.0;
+        let _ = ctx.run(egui::RawInput { time: Some(*t), ..Default::default() }, |_| {
+            p.frame(true);
+        });
+        let (_, n, _, _, c) = p.state();
+        *held = (*held).max(n);
+        if let Some(c) = c.filter(|c| seen.last() != Some(c)) {
+            seen.push(c);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Playing: frames on time, kept and looped from memory when they fit, as many times as
+/// the GIF says, then still on the last; a pause holds the frame. One too long to keep
+/// is decoded again each time round, a couple of frames held at once. Big frames are
+/// scaled to the view; a still GIF never shows as moving.
+#[test]
+fn animations_play_within_their_memory() {
+    use crate::anim::Player;
+    let d = tmpdir("anim-play");
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let path = d.join("loop.gif");
+    std::fs::write(&path, gif_run(32, 32, 10, 5, gif::Repeat::Finite(1))).unwrap();
+    let mut p = Player::start(&path, None, 200.0, 256 << 20, &ctx);
+    let (mut held, mut seen) = (0, vec![]);
+    play_for(&mut p, &ctx, &mut t, 2.0, &mut held, &mut seen);
+    let want: Vec<_> = (0..10).chain(0..10).map(run_colour).collect();
+    assert_eq!(seen, want, "twice through, in order");
+    assert!(!p.playing && p.moving(), "then still on its last frame");
+    assert_eq!((held, p.state().3), (10, false), "kept whole");
+    p.toggle();
+    assert!(p.playing, "played again from the top");
+    play_for(&mut p, &ctx, &mut t, 0.12, &mut held, &mut seen);
+    p.toggle();
+    let at = p.state().0;
+    assert!(at > 0, "moved on");
+    play_for(&mut p, &ctx, &mut t, 0.5, &mut held, &mut seen);
+    assert_eq!(p.state().0, at, "paused");
+    // Too long to keep within 100 kB: forty 16 kB frames.
+    std::fs::write(&path, gif_run(64, 64, 40, 5, gif::Repeat::Infinite)).unwrap();
+    let mut p = Player::start(&path, None, 64.0, 400 << 10, &ctx);
+    let (mut warm, mut held, mut seen) = (0, 0, vec![]);
+    play_for(&mut p, &ctx, &mut t, 1.5, &mut warm, &mut seen);
+    play_for(&mut p, &ctx, &mut t, 3.0, &mut held, &mut seen);
+    assert!(p.state().3, "decoded again each time round");
+    assert!(held <= 3, "the frame shown and two ahead, not {held}");
+    let want: Vec<_> = (0..120u32).map(|k| run_colour((k % 40) as u8)).collect();
+    assert!(seen.len() >= 80 && seen == want[..seen.len()], "round and round, in order: {} frames", seen.len());
+    // Scaled to the view.
+    let img = crate::anim::shown(&crate::imgdec::Rgba { w: 3000, h: 1000, px: vec![9; 12_000_000] }, 512);
+    assert_eq!(img.size, [512, 171]);
+    assert!(!p.is_for(&d.join("other.gif"), None, 64.0) && p.is_for(&path, None, 64.0));
+    // A still GIF.
+    std::fs::write(&path, gif_run(8, 8, 1, 5, gif::Repeat::Infinite)).unwrap();
+    let mut p = Player::start(&path, None, 64.0, 256 << 20, &ctx);
+    play_for(&mut p, &ctx, &mut t, 0.3, &mut held, &mut seen);
+    assert!(!p.moving() && p.state().1 == 0, "nothing kept for a still");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// HEIC, AVIF, TIFF and the like through the real ImageMagick: a TIFF stored turned
+/// (orientation 6) comes upright, at its upright size, scaled to what was asked; an AVIF
+/// (made by ffmpeg, when it is here) the same. Nothing here writes HEIC, so it is
+/// skipped. PNM read with comments and alpha; what to install when nothing reads a
+/// format.
+#[test]
+fn photos_through_external_tools() {
+    use crate::extpic::{can, install_note, load, pnm};
+    let (img, rest) = pnm(b"P6\n# by hand\n2 1\n255\n\xff\x00\x00\x00\xff\x00 400 300\n").unwrap();
+    assert_eq!((img.w, img.h, &img.px[..]), (2, 1, &[255, 0, 0, 255, 0, 255, 0, 255][..]));
+    assert_eq!(rest, b" 400 300\n");
+    let (img, _) = pnm(b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 2\nMAXVAL 255\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n\x80\x40").unwrap();
+    assert_eq!(img.px, [128, 128, 128, 64]);
+    assert!(pnm(b"P6\n2 1\n65535\n\x00\x00").is_none(), "16 bits");
+    assert!(pnm(b"P6\n2 1\n255\n\x00").is_none(), "cut short");
+    assert_eq!(install_note("heic"), Some("Install ImageMagick to see HEIC photos"));
+    assert_eq!(install_note("png"), None);
+    let d = tmpdir("extpic");
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        }
+    }
+    let _reset = Reset;
+    std::fs::create_dir_all(d.join("none")).unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(d.join("none")));
+    assert!(!can(&crate::drives::Tools::current().unwrap(), "heic"), "no tools, no HEIC");
+    let Some((tools, im)) = any_imagemagick_tools(&d.join("tools")) else {
+        eprintln!("photos: skipped (no ImageMagick)");
+        return;
+    };
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(tools.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    assert!(["heic", "avif", "tiff", "tif", "nef", "dng"].iter().all(|e| can(&t, e)) && !can(&t, "png"));
+    // Red above blue, stored turned: upright, blue is on the left and red on the right.
+    let tiff = d.join("turned.tiff");
+    let made = std::process::Command::new(tools.join(im)).args(["-size", "300x100", "xc:red", "-size", "300x100", "xc:blue", "-append", "-orient", "RightTop"]).arg(&tiff).status().unwrap();
+    assert!(made.success());
+    let (img, dims) = load(&t, &tiff, 64).expect("a TIFF");
+    assert_eq!((dims, img.w, img.h), ([200, 300], 43, 64));
+    let at = |x: u32, y: u32| &img.px[((y * img.w + x) * 4) as usize..][..3];
+    assert!(at(2, 32)[2] > 200 && at(40, 32)[0] > 200, "upright: {:?} {:?}", at(2, 32), at(40, 32));
+    let avif = d.join("red.avif");
+    let ffmpeg = std::process::Command::new("ffmpeg").args(["-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=320x240", "-frames:v", "1"]).arg(&avif).status().is_ok_and(|s| s.success());
+    if ffmpeg {
+        let (img, dims) = load(&t, &avif, 64).expect("an AVIF");
+        assert_eq!((dims, img.w, img.h), ([320, 240], 64, 48));
+        assert!(img.px[0] > 200 && img.px[1] < 60, "red: {:?}", &img.px[..4]);
+    } else {
+        eprintln!("photos: AVIF skipped (ffmpeg can't write one)");
+    }
+    eprintln!("photos: HEIC skipped (nothing here writes one)");
+    assert!(load(&t, &d.join("missing.heic"), 64).is_none());
+    std::fs::write(d.join("junk.tiff"), "not a picture").unwrap();
+    assert!(load(&t, &d.join("junk.tiff"), 64).is_none());
+    let _ = std::fs::remove_dir_all(&d);
+}

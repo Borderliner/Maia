@@ -314,13 +314,7 @@ pub static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize
 /// Run a thumbnailer on `path` for `size` pixels (killed after `timeout`). Its PNG is
 /// decoded and returned.
 pub fn run_external(t: &Thumbnailer, path: &Path, size: u32, timeout: Duration) -> Option<Rgba> {
-    let dir = std::env::temp_dir().join(format!("maia-thumbs-{}", unsafe { libc::getuid() }));
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir);
-    }
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let out = dir.join(format!("{}-{}.png", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let out = scratch_png();
     let uri = uri_for(path);
     // Desktop-entry style field codes; each token is one argument (no shell).
     let argv: Vec<String> = t
@@ -346,4 +340,15 @@ pub fn run_external(t: &Thumbnailer, path: &Path, size: u32, timeout: Duration) 
     let img = if ok { std::fs::read(&out).ok().and_then(|b| crate::imgdec::decode_bytes(&b)) } else { None };
     let _ = std::fs::remove_file(&out);
     img
+}
+
+/// A new name for a PNG another program writes, in a private folder of its own.
+pub fn scratch_png() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("maia-thumbs-{}", unsafe { libc::getuid() }));
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir);
+    }
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    dir.join(format!("{}-{}.png", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))
 }
