@@ -8,7 +8,6 @@ license = "GPL-3.0-or-later"
 [dependencies]
 # egui draws its text with it already; fonts previewed in the inspector use the same.
 ab_glyph = "=0.2.32"
-arboard = { version = "3.6.1", default-features = false }
 dirs = "7.0.0"
 fdeflate = "=0.3.7"
 egui = { version = "=0.33.3", default-features = false }
@@ -26,6 +25,9 @@ sctk = { version = "=0.19.2", package = "smithay-client-toolkit", default-featur
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "wayland", "x11"] }
+# The X11 clipboard and drag out, on the same libxcb and libX11 bindings winit uses.
+x11-dl = "2.21.0"
+x11rb = { version = "0.13.2", default-features = false, features = ["allow-unsafe-code", "dl-libxcb"] }
 zune-jpeg = "=0.4.21"
 
 [features]

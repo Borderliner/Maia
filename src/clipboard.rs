@@ -1,6 +1,6 @@
 //! System clipboard: text for egui, plus file lists that interoperate with other
 //! file managers (text/uri-list, x-special/gnome-copied-files, KDE cut marker).
-//! Wayland uses our own wl_data_device client; X11 uses arboard (text only).
+//! Wayland uses our own wl_data_device client, X11 our own selection owner (xclip.rs).
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -51,7 +51,8 @@ pub fn parse_uri_list(s: &str) -> Vec<PathBuf> {
 
 pub use crate::wlclip::Dnd;
 
-/// Drags from other apps over the window (Wayland; X11 drops come through winit).
+/// Drags from other apps over the window (Wayland; X11 drops come through winit), and
+/// Maia's own carried out and back.
 pub fn take_dnd() -> Vec<Dnd> {
     crate::wlclip::take_events()
 }
@@ -66,19 +67,21 @@ pub fn can_drag_out() -> bool {
     #[cfg(test)]
     return true;
     #[cfg(not(test))]
-    with(|c| matches!(c, Clip::Wayland(_)).then_some(())).is_some()
+    with(|_| Some(())).is_some()
 }
 
 #[cfg(test)]
 pub static DRAGGED_OUT: Mutex<Vec<Vec<PathBuf>>> = Mutex::new(Vec::new());
 
-/// Hand an in-window file drag over to the system (the button is still held).
-pub fn start_drag(paths: Vec<PathBuf>, picture: Option<crate::wlclip::Picture>) {
+/// Hand an in-window file drag over to the system (the button is still held); `scale`
+/// is the window's pixels per logical pixel.
+pub fn start_drag(paths: Vec<PathBuf>, picture: Option<crate::wlclip::Picture>, scale: f32) {
     #[cfg(test)]
     DRAGGED_OUT.lock().unwrap_or_else(|e| e.into_inner()).push(paths.clone());
     with(|c| {
-        if let Clip::Wayland(w) = c {
-            w.start_drag(paths, picture);
+        match c {
+            Clip::Wayland(w) => w.start_drag(paths, picture),
+            Clip::X11(x) => x.start_drag(paths, scale),
         }
         Some(())
     });
@@ -86,7 +89,23 @@ pub fn start_drag(paths: Vec<PathBuf>, picture: Option<crate::wlclip::Picture>) 
 
 enum Clip {
     Wayland(crate::wlclip::WlClip),
-    X11(arboard::Clipboard),
+    X11(crate::xclip::XClip),
+}
+
+impl Clip {
+    fn store(&self, items: Vec<crate::wlclip::Item>) {
+        match self {
+            Clip::Wayland(w) => w.store(items),
+            Clip::X11(x) => x.store(items),
+        }
+    }
+
+    fn load(&self, prefer: &[&str]) -> std::io::Result<crate::wlclip::Item> {
+        match self {
+            Clip::Wayland(w) => w.load(prefer),
+            Clip::X11(x) => x.load(prefer),
+        }
+    }
 }
 
 static CLIP: OnceLock<Mutex<Option<Clip>>> = OnceLock::new();
@@ -98,7 +117,7 @@ pub fn init(window: &winit::window::Window) {
     use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
     let clip = match window.display_handle().map(|h| h.as_raw()) {
         Ok(RawDisplayHandle::Wayland(w)) => Some(Clip::Wayland(unsafe { crate::wlclip::WlClip::new(w.display.as_ptr()) })),
-        Ok(RawDisplayHandle::Xlib(_)) | Ok(RawDisplayHandle::Xcb(_)) => arboard::Clipboard::new().ok().map(Clip::X11),
+        Ok(RawDisplayHandle::Xlib(_)) | Ok(RawDisplayHandle::Xcb(_)) => crate::xclip::XClip::new(window).map(Clip::X11),
         _ => None,
     };
     let _ = CLIP.set(Mutex::new(clip));
@@ -111,55 +130,51 @@ fn with<R>(f: impl FnOnce(&mut Clip) -> Option<R>) -> Option<R> {
 
 pub fn set_text(s: &str) {
     with(|c| {
-        match c {
-            Clip::Wayland(w) => w.store(TEXT_MIMES.iter().map(|m| (m.to_string(), s.as_bytes().to_vec())).collect()),
-            Clip::X11(x) => {
-                let _ = x.set_text(s.to_string());
-            }
-        }
+        c.store(TEXT_MIMES.iter().map(|m| (m.to_string(), s.as_bytes().to_vec())).collect());
         Some(())
     });
 }
 
 /// Clipboard text; a copied file list is returned as one path per line.
 pub fn get_text() -> Option<String> {
-    with(|c| match c {
-        Clip::Wayland(w) => {
-            let (mime, bytes) = w.load(&["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "text/uri-list"]).ok()?;
-            let s = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
-            if mime == "text/uri-list" {
-                Some(s.lines().filter_map(uri_to_path).map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>().join("\n"))
-            } else {
-                Some(s)
-            }
+    with(|c| {
+        let (mime, bytes) = c.load(&["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "text/uri-list"]).ok()?;
+        let s = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
+        if mime == "text/uri-list" {
+            Some(s.lines().filter_map(uri_to_path).map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>().join("\n"))
+        } else {
+            Some(s)
         }
-        Clip::X11(x) => x.get_text().ok(),
     })
+}
+
+/// A copied or cut file list as other file managers read it, with the paths as text.
+pub fn file_items(paths: &[PathBuf], cut: bool) -> Vec<crate::wlclip::Item> {
+    let uris: Vec<String> = paths.iter().map(|p| path_to_uri(p)).collect();
+    let plain = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>().join("\n");
+    let mut items: Vec<(String, Vec<u8>)> = vec![
+        ("text/uri-list".into(), uri_list(paths).into_bytes()),
+        ("x-special/gnome-copied-files".into(), format!("{}\n{}", if cut { "cut" } else { "copy" }, uris.join("\n")).into_bytes()),
+    ];
+    items.extend(TEXT_MIMES.iter().map(|m| (m.to_string(), plain.clone().into_bytes())));
+    if cut {
+        items.push(("application/x-kde-cutselection".into(), b"1".to_vec()));
+    }
+    items
+}
+
+/// Files in an x-special/gnome-copied-files body, and whether they were cut.
+pub fn parse_gnome_files(s: &str) -> (Vec<PathBuf>, bool) {
+    let mut lines = s.lines();
+    let cut = lines.next().map(|l| l.trim() == "cut").unwrap_or(false);
+    (lines.filter_map(uri_to_path).collect(), cut)
 }
 
 /// Publish files to the system clipboard. Returns false if only the internal clipboard is used.
 pub fn set_files(paths: &[PathBuf], cut: bool) -> bool {
     with(|c| {
-        let uris: Vec<String> = paths.iter().map(|p| path_to_uri(p)).collect();
-        let plain = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>().join("\n");
-        match c {
-            Clip::Wayland(w) => {
-                let mut items: Vec<(String, Vec<u8>)> = vec![
-                    ("text/uri-list".into(), uri_list(paths).into_bytes()),
-                    ("x-special/gnome-copied-files".into(), format!("{}\n{}", if cut { "cut" } else { "copy" }, uris.join("\n")).into_bytes()),
-                ];
-                items.extend(TEXT_MIMES.iter().map(|m| (m.to_string(), plain.clone().into_bytes())));
-                if cut {
-                    items.push(("application/x-kde-cutselection".into(), b"1".to_vec()));
-                }
-                w.store(items);
-                Some(true)
-            }
-            Clip::X11(x) => {
-                let _ = x.set_text(plain);
-                Some(false)
-            }
-        }
+        c.store(file_items(paths, cut));
+        Some(true)
     })
     .unwrap_or(false)
 }
@@ -169,28 +184,18 @@ pub fn get_files() -> Option<(Vec<PathBuf>, bool)> {
     let from_text = |s: &str| -> Vec<PathBuf> {
         s.lines().map(|l| l.trim().trim_matches('"').trim_matches('\'')).filter(|l| l.starts_with('/')).map(PathBuf::from).filter(|p| p.exists()).collect()
     };
-    with(|c| match c {
-        Clip::Wayland(w) => {
-            let (mime, bytes) = w.load(&["x-special/gnome-copied-files", "text/uri-list", "text/plain;charset=utf-8", "text/plain"]).ok()?;
-            let s = String::from_utf8_lossy(&bytes).into_owned();
-            let (paths, cut) = match mime.as_str() {
-                "x-special/gnome-copied-files" => {
-                    let mut lines = s.lines();
-                    let cut = lines.next().map(|l| l.trim() == "cut").unwrap_or(false);
-                    (lines.filter_map(uri_to_path).collect(), cut)
-                }
-                "text/uri-list" => {
-                    let cut = w.load(&["application/x-kde-cutselection"]).map(|(_, b)| b.first() == Some(&b'1')).unwrap_or(false);
-                    (parse_uri_list(&s), cut)
-                }
-                _ => (from_text(&s), false),
-            };
-            (!paths.is_empty()).then_some((paths, cut))
-        }
-        Clip::X11(x) => {
-            let paths = from_text(&x.get_text().ok()?);
-            (!paths.is_empty()).then_some((paths, false))
-        }
+    with(|c| {
+        let (mime, bytes) = c.load(&["x-special/gnome-copied-files", "text/uri-list", "text/plain;charset=utf-8", "text/plain"]).ok()?;
+        let s = String::from_utf8_lossy(&bytes).into_owned();
+        let (paths, cut) = match mime.as_str() {
+            "x-special/gnome-copied-files" => parse_gnome_files(&s),
+            "text/uri-list" => {
+                let cut = c.load(&["application/x-kde-cutselection"]).map(|(_, b)| b.first() == Some(&b'1')).unwrap_or(false);
+                (parse_uri_list(&s), cut)
+            }
+            _ => (from_text(&s), false),
+        };
+        (!paths.is_empty()).then_some((paths, cut))
     })
 }
 

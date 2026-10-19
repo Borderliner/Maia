@@ -104,6 +104,7 @@ mod thumbs;
 mod ui;
 mod watch;
 mod wlclip;
+mod xclip;
 
 #[cfg(test)]
 mod tests;
