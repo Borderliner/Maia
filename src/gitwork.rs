@@ -1,6 +1,7 @@
-//! What Maia changes in a work tree when asked: staging and unstaging files and hunks,
-//! discarding, committing, switching and creating branches, and the stash. Everything
-//! runs on a worker, through `gitstatus::guard`, and nothing here ever pushes.
+//! What Maia changes in a work tree when asked: staging and unstaging files, hunks and
+//! lines, discarding, committing, branches and tags, checking out, cherry-picking,
+//! reverting and resetting to commits, and the stash. Everything runs on a worker,
+//! through `gitstatus::guard`, and nothing here ever pushes.
 //!
 //! Diffs come from the plumbing commands (`diff-files`, `diff-index`), which ignore the
 //! user's diff settings and run no textconv or external diff, so a hunk read here
@@ -25,7 +26,7 @@ pub struct Work {
     pub unstaged: Vec<Change>,
     /// The commit HEAD is on; None before the first one.
     pub head: Option<String>,
-    /// A merge or rebase stopped part way.
+    /// A merge, rebase, cherry-pick or revert stopped part way.
     pub doing: Option<crate::gitsync::Doing>,
 }
 
@@ -153,6 +154,61 @@ impl Hunk {
     /// on its own (a combined diff, a cut one, an untracked file).
     pub fn patch(&self) -> Option<&[u8]> {
         (!self.patch.is_empty()).then_some(&self.patch[..])
+    }
+
+    /// Whether some of its lines can go in or out alone: not for a file added or
+    /// deleted whole, which only goes as a whole.
+    pub fn splits(&self) -> bool {
+        let p = &self.patch[..self.patch.windows(3).position(|w| w == b"\n@@").unwrap_or(0)];
+        !p.is_empty() && !p.windows(10).any(|w| w == b"\nnew file " || w == b"\ndeleted f")
+    }
+
+    /// The patch for the `picked` lines alone (by their place in `lines`), to stage, or
+    /// with `staged` to unstage. What is left out stays as the index has it: an
+    /// unpicked line the index holds becomes context, one it doesn't is dropped. None
+    /// when no change is picked.
+    pub fn lines_patch(&self, picked: &[bool], staged: bool) -> Option<Vec<u8>> {
+        if !self.splits() {
+            return None;
+        }
+        let at = self.patch.windows(3).position(|w| w == b"\n@@")? + 1;
+        let (header, hunk) = self.patch.split_at(at);
+        let mut it = hunk.split_inclusive(|&b| b == b'\n');
+        let head = std::str::from_utf8(it.next()?).ok()?;
+        let (old, rest) = head.strip_prefix("@@ -")?.split_once(" +")?;
+        let (new, tail) = rest.split_once(" @@")?;
+        let start = |s: &str| s.split(',').next()?.parse::<u32>().ok();
+        let (os, ns) = (start(old)?, start(new)?);
+        // Unstaging takes the patch backwards: the index is its new side.
+        let held = if staged { b'+' } else { b'-' };
+        let (mut body, mut o, mut n, mut any, mut kept) = (vec![], 0, 0, false, true);
+        for (i, l) in it.enumerate() {
+            match l[0] {
+                // "No newline at end of file" goes with the line before it.
+                b'\\' if kept => body.extend_from_slice(l),
+                b'\\' => {}
+                c @ (b'+' | b'-') if picked.get(i).copied().unwrap_or(false) => {
+                    any = true;
+                    kept = true;
+                    body.extend_from_slice(l);
+                    if c == b'+' { n += 1 } else { o += 1 }
+                }
+                c @ (b'+' | b'-') => {
+                    kept = c == held;
+                    if kept {
+                        body.push(b' ');
+                        body.extend_from_slice(&l[1..]);
+                        (o, n) = (o + 1, n + 1);
+                    }
+                }
+                _ => {
+                    kept = true;
+                    body.extend_from_slice(l);
+                    (o, n) = (o + 1, n + 1);
+                }
+            }
+        }
+        any.then(|| [header, format!("@@ -{os},{o} +{ns},{n} @@{tail}").as_bytes(), &body].concat())
     }
 }
 
@@ -429,6 +485,8 @@ pub enum Op {
     UnstageAll,
     /// One hunk into the index, or (`staged`) out of it again.
     Hunk { patch: Vec<u8>, staged: bool },
+    /// `n` lines of a hunk, the same way (see `Hunk::lines_patch`).
+    Lines { patch: Vec<u8>, staged: bool, n: usize },
     /// A file's unstaged changes, kept in the stash (an untracked file goes to the
     /// trash).
     Discard(Change),
@@ -448,20 +506,52 @@ pub enum Op {
     Push(bool),
     /// One conflict in a file settled.
     Settle { path: String, at: usize, side: crate::gitsync::Side },
-    /// Finish the merge or rebase in progress, give up on it, or skip a rebase's commit.
+    /// Finish what is in progress, give up on it, or skip the commit it stopped at.
     Continue,
     Abort,
     Skip,
+    /// A commit checked out on its own: HEAD on no branch.
+    Checkout(String),
+    /// A branch at a commit, switched to when asked.
+    Branch { name: String, at: String, switch: bool },
+    /// A tag at a commit, annotated when it has a message.
+    Tag { name: String, at: String, message: String },
+    /// A commit's change made again on HEAD, or undone by a new commit; a merge's
+    /// change is the one against its first parent.
+    CherryPick { hash: String, merge: bool },
+    Revert { hash: String, merge: bool },
+    /// The branch HEAD is on moved to a commit; `hard` resets the files too, once what
+    /// isn't committed is in the stash.
+    Reset { to: String, hard: bool },
+    /// `force` deletes a branch whose commits are on no other.
+    DeleteBranch { name: String, force: bool },
+    RenameBranch { from: String, to: String },
+    DeleteTag(String),
 }
 
 impl Op {
     /// Whether the op reads or writes the files themselves (through content filters).
     fn filtered(&self) -> bool {
-        matches!(self, Op::Stage(_) | Op::StageAll | Op::Hunk { staged: false, .. } | Op::Discard(_) | Op::Switch(_) | Op::Track(_) | Op::StashApply(_) | Op::StashPop(_) | Op::Pull(_) | Op::Continue | Op::Abort | Op::Skip)
+        matches!(
+            self,
+            Op::Stage(_) | Op::StageAll | Op::Hunk { staged: false, .. } | Op::Lines { staged: false, .. } | Op::Discard(_) | Op::Switch(_) | Op::Track(_) | Op::StashApply(_) | Op::StashPop(_) | Op::Pull(_) | Op::Continue | Op::Abort | Op::Skip
+                | Op::Checkout(_) | Op::Branch { switch: true, .. } | Op::CherryPick { .. } | Op::Revert { .. } | Op::Reset { hard: true, .. }
+        )
+    }
+
+    /// Whether, done with result `r`, it moved HEAD, a branch or a tag: the history is
+    /// read again. A refused change moved nothing, unless it went on to more conflicts.
+    pub fn moved(&self, r: &Result<String, String>) -> bool {
+        let refs = !matches!(self, Op::Stage(_) | Op::Unstage(_) | Op::StageAll | Op::UnstageAll | Op::Hunk { .. } | Op::Lines { .. } | Op::Discard(_) | Op::StashApply(_) | Op::StashPop(_) | Op::StashDrop(_) | Op::Settle { .. });
+        refs && r.as_ref().map_or_else(|e| e == crate::gitsync::CONFLICTS, |_| true)
     }
 }
 
 pub const FILTERED: &str = "This repository's own settings filter its files, which Maia doesn't run. Use a terminal for this one.";
+
+/// A branch `git branch -d` kept: its commits are on no other branch. The app asks
+/// whether to delete it anyway.
+pub const UNMERGED: &str = "\u{1}unmerged";
 
 /// git for a change: guarded, never prompting, never opening an editor.
 pub(crate) fn exec(root: &Path, args: &[&str], input: Option<&[u8]>, timeout: Duration) -> Result<String, String> {
@@ -539,6 +629,42 @@ fn still(root: &Path, s: &Stash) -> Result<(), String> {
     if now.as_deref() == Some(s.hash.as_str()) { Ok(()) } else { Err("The stash list has changed. Open the menu again.".into()) }
 }
 
+/// A name git takes for a new branch or tag, trimmed, or why not.
+fn ref_name<'a>(root: &Path, name: &'a str, tag: bool) -> Result<&'a str, String> {
+    let (n, what) = (name.trim(), if tag { "tag" } else { "branch" });
+    if n.is_empty() {
+        return Err(format!("A {what} needs a name"));
+    }
+    let full = format!("refs/tags/{n}");
+    let check: &[&str] = if tag { &["check-ref-format", &full] } else { &["check-ref-format", "--branch", n] };
+    if n.starts_with('-') || exec(root, check, None, Duration::from_secs(30)).is_err() {
+        return Err(format!("{n:?} can't be a {what} name"));
+    }
+    Ok(n)
+}
+
+fn short_hash(h: &str) -> &str {
+    &h[..h.len().min(7)]
+}
+
+/// The commit git says a deleted branch or tag was at ("Deleted branch x (was 1a2b3c4).").
+fn was(out: &str) -> &str {
+    out.rsplit_once("(was ").and_then(|(_, r)| r.split(')').next()).unwrap_or("")
+}
+
+/// Why a cherry-pick or revert stopped: at conflicts the Changes page takes over; with
+/// nothing to change, it is given up on and `empty` said.
+fn stopped(root: &Path, e: String, d: crate::gitsync::Doing, empty: String) -> String {
+    match crate::gitsync::doing(root) {
+        Some(_) if crate::gitsync::unmerged(root) > 0 => crate::gitsync::CONFLICTS.into(),
+        Some(now) if now == d => {
+            let _ = crate::gitsync::abort(root);
+            empty
+        }
+        _ => e,
+    }
+}
+
 /// Make the change; Ok holds what to say about it, Err git's reason (plainly).
 pub fn run(root: &Path, op: &Op) -> Result<String, String> {
     if op.filtered() && !crate::gitstatus::local_filters(root).is_empty() {
@@ -563,13 +689,19 @@ pub fn run(root: &Path, op: &Op) -> Result<String, String> {
         Op::StageAll => exec(root, &["add", "-A"], None, quick).map(|_| "Staged every change".into()),
         Op::UnstageAll if head => exec(root, &["reset", "-q"], None, quick).map(|_| "Unstaged everything".into()),
         Op::UnstageAll => exec(root, &["rm", "-q", "-r", "-f", "--cached", "--", "."], None, quick).map(|_| "Unstaged everything".into()),
-        Op::Hunk { patch, staged } => {
+        Op::Hunk { patch, staged } | Op::Lines { patch, staged, .. } => {
             let mut a = vec!["apply", "--cached", "--whitespace=nowarn"];
             if *staged {
                 a.push("-R");
             }
             a.push("-");
-            exec(root, &a, Some(patch), quick).map(|_| if *staged { "Unstaged the hunk".into() } else { "Staged the hunk".into() })
+            exec(root, &a, Some(patch), quick)?;
+            let what = match op {
+                Op::Lines { n: 1, .. } => "1 line".into(),
+                Op::Lines { n, .. } => format!("{n} lines"),
+                _ => "the hunk".into(),
+            };
+            Ok(format!("{} {what}", if *staged { "Unstaged" } else { "Staged" }))
         }
         Op::Discard(f) if f.status == b'?' => {
             let p = root.join(f.path.trim_end_matches('/'));
@@ -604,13 +736,7 @@ pub fn run(root: &Path, op: &Op) -> Result<String, String> {
         }
         Op::Switch(b) => exec(root, &["switch", "-q", "--no-guess", b], None, quick).map(|_| format!("Switched to {b}")),
         Op::Create(b) => {
-            let b = b.trim();
-            if b.is_empty() {
-                return Err("A branch needs a name".into());
-            }
-            if b.starts_with('-') || exec(root, &["check-ref-format", "--branch", b], None, quick).is_err() {
-                return Err(format!("{b:?} can't be a branch name"));
-            }
+            let b = ref_name(root, b, false)?;
             exec(root, &["switch", "-q", "-c", b], None, quick).map(|_| format!("Created and switched to {b}"))
         }
         Op::Track(r) => exec(root, &["switch", "-q", "--track", r], None, quick).map(|_| format!("Switched to {}", r.split_once('/').map_or(r.as_str(), |x| x.1))),
@@ -633,6 +759,63 @@ pub fn run(root: &Path, op: &Op) -> Result<String, String> {
         Op::Continue => crate::gitsync::go_on(root),
         Op::Abort => crate::gitsync::abort(root),
         Op::Skip => crate::gitsync::skip(root),
+        // git refuses when a change in the files would be overwritten, and says which.
+        Op::Checkout(at) => exec(root, &["switch", "-q", "--detach", at], None, quick).map(|_| format!("Checked out {}, on no branch", short_hash(at))),
+        Op::Branch { name, at, switch } => {
+            let b = ref_name(root, name, false)?;
+            if *switch {
+                exec(root, &["switch", "-q", "-c", b, at], None, quick).map(|_| format!("Created {b} at {} and switched to it", short_hash(at)))
+            } else {
+                exec(root, &["branch", b, at], None, quick).map(|_| format!("Created {b} at {}", short_hash(at)))
+            }
+        }
+        Op::Tag { name, at, message } => {
+            let t = ref_name(root, name, true)?;
+            let m = message.trim();
+            if m.is_empty() { exec(root, &["tag", t, at], None, quick) } else { exec(root, &["tag", "-a", "-F", "-", t, at], Some(m.as_bytes()), quick) }.map(|_| format!("Tagged {} as {t}", short_hash(at)))
+        }
+        Op::CherryPick { hash, merge } => {
+            let onto = crate::gitsync::branch(root).unwrap_or_else(|| "HEAD".into());
+            let h = short_hash(hash);
+            if exec(root, &["merge-base", "--is-ancestor", hash, "HEAD"], None, quick).is_ok() {
+                return Err(format!("{h} is already on {onto}."));
+            }
+            let a: &[&str] = if *merge { &["cherry-pick", "-m", "1", hash] } else { &["cherry-pick", hash] };
+            match exec(root, a, None, quick) {
+                Ok(_) => Ok(format!("Cherry-picked {h} onto {onto}")),
+                Err(e) => Err(stopped(root, e, crate::gitsync::Doing::CherryPick, format!("{onto} already has what {h} changes."))),
+            }
+        }
+        Op::Revert { hash, merge } => {
+            let h = short_hash(hash);
+            let a: &[&str] = if *merge { &["revert", "--no-edit", "-m", "1", hash] } else { &["revert", "--no-edit", hash] };
+            match exec(root, a, None, quick) {
+                Ok(_) => Ok(format!("Reverted {h}")),
+                Err(e) => Err(stopped(root, e, crate::gitsync::Doing::Revert, format!("What {h} changes is already undone."))),
+            }
+        }
+        Op::Reset { to, hard } => {
+            let b = crate::gitsync::branch(root).unwrap_or_else(|| "HEAD".into());
+            let old = exec(root, &["rev-parse", "--short", "HEAD"], None, quick)?;
+            // What isn't committed is kept in the stash: a hard reset would lose it.
+            let stash = || read(root, &["rev-parse", "-q", "--verify", "refs/stash"], 4096);
+            let before = stash();
+            if *hard {
+                exec(root, &["stash", "push", "-q", "-m", &format!("Before resetting {b} in Maia")], None, quick)?;
+            }
+            exec(root, &["reset", "-q", if *hard { "--hard" } else { "--mixed" }, to], None, quick)?;
+            let kept = if stash() != before { ", your changes kept in the stash" } else { "" };
+            Ok(format!("Reset {b} to {} · it was at {old}{kept}", short_hash(to)))
+        }
+        Op::DeleteBranch { name, force } => match exec(root, &["branch", if *force { "-D" } else { "-d" }, name], None, quick) {
+            Err(e) if !force && e.contains("not fully merged") => Err(UNMERGED.into()),
+            r => r.map(|out| format!("Deleted {name} · it was at {}", was(&out))),
+        },
+        Op::RenameBranch { from, to } => {
+            let to = ref_name(root, to, false)?;
+            exec(root, &["branch", "-m", from, to], None, quick).map(|_| format!("Renamed {from} to {to}"))
+        }
+        Op::DeleteTag(t) => exec(root, &["tag", "-d", t], None, quick).map(|out| format!("Deleted the tag {t} · it was at {}", was(&out))),
     }
 }
 
@@ -642,7 +825,7 @@ struct Pending {
     title: String,
     /// Said in the status bar while it runs ("Pulling…"), for the slow ones.
     doing: Option<&'static str>,
-    slot: crate::gitlog::Slot<Result<String, String>>,
+    slot: crate::gitlog::Slot<(Op, Result<String, String>)>,
 }
 
 thread_local! {
@@ -658,7 +841,10 @@ pub fn start(ctx: &egui::Context, root: &Path, op: Op, title: String) {
         Op::Push(_) => Some("Pushing…"),
         _ => None,
     };
-    let slot = crate::gitlog::spawn(ctx, move || run(&r, &op));
+    let slot = crate::gitlog::spawn(ctx, move || {
+        let res = run(&r, &op);
+        (op, res)
+    });
     PENDING.with(|p| p.borrow_mut().push(Pending { root: root.to_path_buf(), title, doing, slot }));
 }
 
@@ -667,14 +853,15 @@ pub fn busy(root: &Path) -> Option<&'static str> {
     PENDING.with(|p| p.borrow().iter().find(|x| x.root == root).and_then(|x| x.doing))
 }
 
-/// Changes started with `start` that have finished: (work tree, title, result).
-pub fn finished() -> Vec<(PathBuf, String, Result<String, String>)> {
+/// Changes started with `start` that have finished: (work tree, title, the change,
+/// result).
+pub fn finished() -> Vec<(PathBuf, String, Op, Result<String, String>)> {
     PENDING.with(|p| {
         let mut p = p.borrow_mut();
         let mut done = vec![];
         p.retain(|x| match x.slot.lock().ok().and_then(|mut s| s.take()) {
-            Some(r) => {
-                done.push((x.root.clone(), x.title.clone(), r));
+            Some((op, r)) => {
+                done.push((x.root.clone(), x.title.clone(), op, r));
                 false
             }
             None => true,

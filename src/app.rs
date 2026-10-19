@@ -1166,11 +1166,16 @@ impl App {
                 want.insert(ip);
             }
         }
-        // Changes started from the branch menu: said once done, and read again.
-        for (root, title, r) in crate::gitwork::finished() {
+        // Changes started from the branch and commit menus: said once done, and read again.
+        for (root, title, op, r) in crate::gitwork::finished() {
             crate::gitstatus::rescan(&root);
+            if op.moved(&r) {
+                for h in self.panels.values_mut().filter_map(|p| p.inspector.as_mut()?.git.as_mut()).filter(|h| h.root == root) {
+                    h.reload();
+                }
+            }
             use crate::gitsync::{BEHIND, CONFLICTS, DIVERGED};
-            use crate::gitwork::Op;
+            use crate::gitwork::{Op, UNMERGED};
             let go = |root: &PathBuf, op: Op, title: &str| -> Option<Box<dyn FnOnce(&mut App)>> {
                 let (root, title) = (root.clone(), title.to_string());
                 Some(Box::new(move |app: &mut App| crate::gitwork::start(&app.ctx, &root, op, title)))
@@ -1183,6 +1188,12 @@ impl App {
                 Err(e) if e == BEHIND => {
                     let choices = vec![("Pull first".to_string(), false, go(&root, Op::Pull(None), "Couldn't pull")), ("Replace the remote's".to_string(), true, go(&root, Op::Push(true), "Couldn't push"))];
                     self.popup = Popup::Choose { msg: "The remote has commits this branch doesn't".into(), sub: "Pull them first, or replace the remote branch with yours. Replacing drops its commits for everyone.".into(), choices };
+                }
+                Err(e) if e == UNMERGED => {
+                    let Op::DeleteBranch { name, .. } = op else { continue };
+                    let title = format!("Couldn't delete {name}");
+                    let choices = vec![("Delete anyway".to_string(), true, go(&root, Op::DeleteBranch { name: name.clone(), force: true }, &title))];
+                    self.popup = Popup::Choose { msg: format!("{name} has commits no other branch has"), sub: "Deleting it anyway leaves them findable only by their hash, until git cleans up.".into(), choices };
                 }
                 Err(e) if e == CONFLICTS => {
                     self.toast("Stopped at conflicts: settle them on the Changes page");
@@ -2575,9 +2586,15 @@ impl App {
             }
             Cmd::ContextMenu => {
                 let id = self.active;
-                let pos = self.tab().cursor_screen_pos.unwrap_or_else(|| self.panels[&id].list_rect.center());
-                let bg = self.tab().targets().is_empty();
-                self.actions.push(Action::CtxMenu { panel: id, pos, background: bg });
+                // An open history has the keyboard: the selected commit's menu.
+                match self.panels.get(&id).and_then(|p| p.inspector.as_ref()?.git.as_ref()?.menu()) {
+                    Some(m) => self.popup = m,
+                    None => {
+                        let pos = self.tab().cursor_screen_pos.unwrap_or_else(|| self.panels[&id].list_rect.center());
+                        let bg = self.tab().targets().is_empty();
+                        self.actions.push(Action::CtxMenu { panel: id, pos, background: bg });
+                    }
+                }
             }
             Cmd::RestoreTrash => self.restore_from_trash(),
             Cmd::EmptyTrash => {

@@ -1,7 +1,8 @@
 //! Commit history of a work tree as a vertical graph in the inspector: newest at the top,
 //! one row per commit, each line of work in a lane of its own. A single `git log` runs
 //! per history and is held back by its own pipe between pages, so a repository of any
-//! size costs only the pages scrolled through. Nothing here writes to the repository.
+//! size costs only the pages scrolled through. Nothing here writes to the repository:
+//! a commit's menu (a right click, or Shift+F10) acts on it through `gitwork`.
 //!
 //! A commit opens to its files with their line counts, grouped by folder when there are
 //! many. A file's diff (or, for a picture, its old and new versions) opens under its row,
@@ -871,6 +872,9 @@ pub struct History {
     pub(crate) changes: crate::gitchanges::Changes,
     /// The keyboard is on the Changes row (above the first commit).
     on_changes: bool,
+    /// Where the selected commit's menu opens from the keyboard: under its row when it
+    /// was drawn last frame.
+    menu_at: Pos2,
 }
 
 /// What a simulated user can check: the state behind the view.
@@ -968,7 +972,7 @@ impl History {
 impl History {
     pub fn new(root: PathBuf, branch: String, opened: bool) -> History {
         let changes = crate::gitchanges::Changes::new(root.clone());
-        History { root, branch, opened, list: List::new(None), all: None, keyed: false, reveal: false, open: None, wrapped: None, tree: true, want: None, changes, on_changes: false }
+        History { root, branch, opened, list: List::new(None), all: None, keyed: false, reveal: false, open: None, wrapped: None, tree: true, want: None, changes, on_changes: false, menu_at: Pos2::ZERO }
     }
 
     /// Read the history again from the top: HEAD moved (a commit, a switch).
@@ -1146,6 +1150,31 @@ impl History {
             Some(o) if o.diff.is_some() => o.diff = None,
             _ => self.top(),
         }
+    }
+
+    /// Commit `i`'s menu, opening at `pos`; `keyed`, its first item is ready for Enter.
+    fn commit_menu(&self, i: usize, pos: Pos2, keyed: bool) -> Option<crate::popups::Popup> {
+        let c = self.list.commits.get(i)?;
+        let tags = c.refs.iter().filter(|r| r.0 == RefKind::Tag).map(|r| r.1.clone()).collect();
+        Some(crate::popups::Popup::GitCommit(crate::popups::CommitMenu {
+            root: self.root.clone(),
+            hash: c.hash.clone(),
+            subject: c.subject.clone(),
+            merge: c.parents.len() > 1,
+            head: c.refs.iter().any(|r| r.0 == RefKind::Head),
+            tags,
+            branch: self.branch.clone(),
+            pos,
+            sel: if keyed { 0 } else { usize::MAX },
+        }))
+    }
+
+    /// Shift+F10 on the graph: the selected commit's menu, under its row.
+    pub fn menu(&self) -> Option<crate::popups::Popup> {
+        if self.open.is_some() || self.changes.open || self.on_changes {
+            return None;
+        }
+        self.commit_menu(self.list.sel, self.menu_at, true)
     }
 
     /// A file of the open commit (the right-click menu's).
@@ -1546,7 +1575,8 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
     let fpx = face_px(fs, ppp);
     let ctx = ui.ctx().clone();
     let root = &h.root;
-    let mut open = None;
+    let (mut open, mut menu) = (None, None);
+    h.menu_at = body.center();
     let mut inner = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(4.0, 4.0))));
     ScrollArea::vertical().auto_shrink([false, false]).id_salt(("git_graph", l.path.is_some())).show_viewport(&mut inner, |ui, vp| {
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), n as f32 * row_h), Sense::hover());
@@ -1621,6 +1651,12 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
             }
             if resp.clicked() {
                 open = Some(i);
+            }
+            if resp.secondary_clicked() {
+                menu = Some((i, ui.ctx().pointer_interact_pos().unwrap_or(rr.center())));
+            }
+            if i == l.sel {
+                h.menu_at = pos2(tx, rr.bottom());
             }
             let (c, row) = (&l.commits[i], &l.rows[i]);
             let (top, cy, bot) = (rr.top(), rr.center().y, rr.bottom());
@@ -1702,6 +1738,11 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
     if let Some(i) = open {
         h.on_changes = false;
         h.open_commit(i);
+    }
+    // The row stays marked while its menu is open.
+    if let Some((i, pos)) = menu {
+        (h.list.sel, h.keyed, h.on_changes) = (i, true, false);
+        env.actions.extend(h.commit_menu(i, pos, false).map(Action::Open));
     }
     if open_changes {
         h.on_changes = true;

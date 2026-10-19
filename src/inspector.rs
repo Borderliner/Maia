@@ -1534,7 +1534,7 @@ fn text_body(ui: &mut Ui, body: Rect, ins: &mut Inspector, e: &Entry, env: &mut 
     let here = ins.current.as_ref().map(|c| &c.0);
     let skip = ins.first_line.max(1) - 1;
     let mark = ins.goto.as_mut().filter(|g| !filtered && Some(&g.0) == here && g.1 as usize > skip).map(|g| (g.1 as usize - 1 - skip, &mut g.2));
-    let opts = TextOpts { blame, first: if filtered { 0 } else { ins.first_line }, stick: ins.follow, to_end: std::mem::take(&mut ins.to_end), mark };
+    let opts = TextOpts { blame, first: if filtered { 0 } else { ins.first_line }, stick: ins.follow, to_end: std::mem::take(&mut ins.to_end), mark, pick: None };
     let spans = if filtered { None } else { spans.as_deref() };
     text_view_ex(ui, body, shown, *truncated && !filtered, spans, ins.line_numbers, wrapped, size, &pal, is_patch(&e.name), spacing, opts)
 }
@@ -2050,11 +2050,14 @@ pub(crate) struct TextOpts<'a> {
     pub stick: bool,
     pub to_end: bool,
     pub mark: Option<(usize, &'a mut bool)>,
+    /// A diff whose changed lines can be picked: those picked, and where the one
+    /// clicked this frame goes (with whether Shift was held).
+    pub pick: Option<(&'a [bool], &'a mut Option<(usize, bool)>)>,
 }
 
 impl Default for TextOpts<'_> {
     fn default() -> Self {
-        TextOpts { blame: None, first: 1, stick: false, to_end: false, mark: None }
+        TextOpts { blame: None, first: 1, stick: false, to_end: false, mark: None, pick: None }
     }
 }
 
@@ -2110,9 +2113,19 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
         marked = Some(line);
     }
     let now = crate::blame::now();
+    let mut pick = opts.pick;
+    let picked: &[bool] = pick.as_ref().map_or(&[], |p| p.0);
     area.auto_shrink([false, false]).stick_to_bottom(opts.stick).id_salt("insp_text").show_viewport(&mut inner, |ui, vp| {
         let w = if rows.is_some() { vp.width() } else { (2000.0 * size * 0.62).min(lines.iter().map(|l| l.len()).max().unwrap_or(0) as f32 * size * 0.62 + gutter + 20.0).max(vp.width()) };
-        let (r, _) = ui.allocate_exact_size(vec2(w, n as f32 * row_h + 8.0), Sense::hover());
+        let (r, resp) = ui.allocate_exact_size(vec2(w, n as f32 * row_h + 8.0), if pick.is_some() { Sense::click() } else { Sense::hover() });
+        // The changed line under the pointer, when lines can be picked: a click picks it.
+        let hover_line = resp.hover_pos().filter(|_| pick.is_some()).map(|hp| ((hp.y - r.top()).max(0.0) / row_h) as usize).filter(|&i| i < total).map(|i| rows.map_or(i, |rw| rw[i].0 as usize)).filter(|&li| matches!(lines[li].as_bytes().first(), Some(b'+' | b'-')));
+        if let (Some(li), Some((_, slot))) = (hover_line, pick.as_mut()) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            if resp.clicked() {
+                **slot = Some((li, ui.input(|i| i.modifiers.shift)));
+            }
+        }
         if opts.to_end && n > 0 {
             // At once: a followed log jumps to its newest line, as a terminal does.
             ui.scroll_to_rect_animation(Rect::from_min_size(pos2(r.left(), r.bottom() - row_h), vec2(1.0, row_h)), Some(egui::Align::BOTTOM), egui::style::ScrollAnimation::none());
@@ -2191,6 +2204,13 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
             };
             if tint != Color32::TRANSPARENT {
                 p.rect_filled(Rect::from_min_size(pos2(r.left(), top), vec2(r.width(), row_h)), CornerRadius::ZERO, tint.gamma_multiply(if pal.dark { 0.13 } else { 0.11 }));
+            }
+            // A picked line: the accent over its tint, and a bar at its edge.
+            if picked.get(li).copied().unwrap_or(false) {
+                p.rect_filled(Rect::from_min_size(pos2(r.left(), top), vec2(r.width(), row_h)), CornerRadius::ZERO, pal.accent.gamma_multiply(0.2));
+                p.rect_filled(Rect::from_min_size(pos2(r.left(), top), vec2(3.0, row_h)), CornerRadius::ZERO, pal.accent);
+            } else if hover_line == Some(li) {
+                p.rect_filled(Rect::from_min_size(pos2(r.left(), top), vec2(r.width(), row_h)), CornerRadius::ZERO, pal.hover);
             }
             if mark == Some(b'@') || mark == Some(b'\\') {
                 p.text(pos2(r.left() + gutter, y), Align2::LEFT_TOP, &line[a..b], font.clone(), pal.text_dim);

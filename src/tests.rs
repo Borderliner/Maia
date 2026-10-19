@@ -4314,6 +4314,194 @@ fn git_branches_switch_create_track_and_stash() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// What git prints for `args` in `d`, trimmed.
+fn git_said(d: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git").arg("-C").arg(d).args(args).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The commit menu's changes that need no other side: a commit checked out on its own
+/// (refused while a change would be lost), branches and tags made at a commit, renamed
+/// and deleted (an unmerged branch only when forced), and the branch reset to a commit,
+/// keeping the files or not, the old commit said and uncommitted work kept in the stash.
+#[test]
+fn git_commits_checked_out_branched_tagged_and_reset() {
+    use crate::gitwork::{Op, UNMERGED, run};
+    if !crate::media::have("git") {
+        return;
+    }
+    let d = tmpdir("gitcommits");
+    work_repo(&d);
+    let mut hashes = vec![];
+    for (n, text) in [("Start", "one\n"), ("Second", "two\n"), ("Third", "three\n")] {
+        touch(&d.join("a.txt"), text);
+        git(&d, &["add", "-A"]);
+        git(&d, &["commit", "-qm", n]);
+        hashes.push(git_said(&d, &["rev-parse", "HEAD"]));
+    }
+    let (first, second, third) = (hashes[0].clone(), hashes[1].clone(), hashes[2].clone());
+    let short = |h: &str| h[..7].to_string();
+    // Checking out a commit git would overwrite a change for: its words, nothing lost.
+    touch(&d.join("a.txt"), "mine\n");
+    let e = run(&d, &Op::Checkout(second.clone())).unwrap_err();
+    assert!(e.contains("would be overwritten") && e.contains("a.txt"), "{e}");
+    assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "mine\n");
+    git(&d, &["checkout", "-q", "--", "a.txt"]);
+    assert_eq!(run(&d, &Op::Checkout(second.clone())).unwrap(), format!("Checked out {}, on no branch", short(&second)));
+    assert_eq!((git_said(&d, &["rev-parse", "HEAD"]), git_said(&d, &["branch", "--show-current"])), (second.clone(), String::new()));
+    run(&d, &Op::Switch("main".into())).unwrap();
+    // A branch at a commit, and one switched to.
+    assert_eq!(run(&d, &Op::Branch { name: " old ".into(), at: first.clone(), switch: false }).unwrap(), format!("Created old at {}", short(&first)));
+    assert_eq!(git_said(&d, &["rev-parse", "old"]), first);
+    assert!(run(&d, &Op::Branch { name: "a..b".into(), at: first.clone(), switch: false }).unwrap_err().contains("can't be a branch name"));
+    assert_eq!(run(&d, &Op::Branch { name: "fix".into(), at: second.clone(), switch: true }).unwrap(), format!("Created fix at {} and switched to it", short(&second)));
+    assert_eq!(git_said(&d, &["branch", "--show-current"]), "fix");
+    touch(&d.join("b.txt"), "only on fix\n");
+    git(&d, &["add", "-A"]);
+    git(&d, &["commit", "-qm", "Only on fix"]);
+    run(&d, &Op::Switch("main".into())).unwrap();
+    // Tags: a light one, and one with a message.
+    assert_eq!(run(&d, &Op::Tag { name: "v1".into(), at: first.clone(), message: String::new() }).unwrap(), format!("Tagged {} as v1", short(&first)));
+    run(&d, &Op::Tag { name: "v2".into(), at: third.clone(), message: "The second release\n".into() }).unwrap();
+    assert_eq!((git_said(&d, &["cat-file", "-t", "v1"]), git_said(&d, &["cat-file", "-t", "v2"])), ("commit".to_string(), "tag".to_string()));
+    assert_eq!(git_said(&d, &["tag", "-l", "--format=%(contents)", "v2"]), "The second release");
+    assert!(run(&d, &Op::Tag { name: "v1".into(), at: third.clone(), message: String::new() }).unwrap_err().contains("already exists"));
+    assert_eq!(run(&d, &Op::DeleteTag("v1".into())).unwrap(), format!("Deleted the tag v1 · it was at {}", short(&first)));
+    assert_eq!(git_said(&d, &["tag"]), "v2");
+    // Deleting: a merged branch goes, one with its own commits only when forced.
+    assert_eq!(run(&d, &Op::DeleteBranch { name: "old".into(), force: false }).unwrap(), format!("Deleted old · it was at {}", short(&first)));
+    assert_eq!(run(&d, &Op::DeleteBranch { name: "fix".into(), force: false }).unwrap_err(), UNMERGED);
+    assert!(git_said(&d, &["branch"]).contains("fix"), "kept");
+    let tip = git_said(&d, &["rev-parse", "--short", "fix"]);
+    assert_eq!(run(&d, &Op::DeleteBranch { name: "fix".into(), force: true }).unwrap(), format!("Deleted fix · it was at {tip}"));
+    assert!(run(&d, &Op::DeleteBranch { name: "main".into(), force: true }).is_err(), "not the branch HEAD is on");
+    git(&d, &["branch", "topic"]);
+    assert_eq!(run(&d, &Op::RenameBranch { from: "topic".into(), to: "feature".into() }).unwrap(), "Renamed topic to feature");
+    assert_eq!(git_said(&d, &["branch", "--format=%(refname:short)"]), "feature\nmain");
+    // Reset keeping the files: the later commits' change is left unstaged.
+    assert_eq!(run(&d, &Op::Reset { to: first.clone(), hard: false }).unwrap(), format!("Reset main to {} · it was at {}", short(&first), short(&third)));
+    assert_eq!(git_said(&d, &["rev-parse", "HEAD"]), first);
+    assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "three\n");
+    assert_eq!(letters(&work_of(&d).unstaged), [("a.txt".into(), 'M')]);
+    // And back, discarding: the uncommitted change goes to the stash first.
+    let said = run(&d, &Op::Reset { to: third.clone(), hard: true }).unwrap();
+    assert_eq!(said, format!("Reset main to {} · it was at {}, your changes kept in the stash", short(&third), short(&first)));
+    assert!(work_of(&d).is_empty());
+    assert!(git_said(&d, &["stash", "list"]).contains("Before resetting main in Maia"));
+    // With nothing uncommitted, nothing is stashed.
+    assert_eq!(run(&d, &Op::Reset { to: second.clone(), hard: true }).unwrap(), format!("Reset main to {} · it was at {}", short(&second), short(&third)));
+    assert_eq!(git_said(&d, &["stash", "list"]).lines().count(), 1);
+    assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "two\n");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Cherry-picking and reverting: a clean pick, one already there (said, and nothing
+/// left in progress), one that stops at a conflict and is given up on, then settled
+/// and continued; a revert, and one that stops and is skipped.
+#[test]
+fn git_cherry_pick_and_revert_with_conflicts() {
+    use crate::gitsync::{CONFLICTS, Doing, Side, doing};
+    use crate::gitwork::{Op, run};
+    if !crate::media::have("git") {
+        return;
+    }
+    let d = tmpdir("gitpick");
+    work_repo(&d);
+    touch(&d.join("notes.txt"), "one\ntwo\nthree\n");
+    git(&d, &["add", "-A"]);
+    git(&d, &["commit", "-qm", "Start"]);
+    let start = git_said(&d, &["rev-parse", "HEAD"]);
+    git(&d, &["switch", "-q", "-c", "topic"]);
+    touch(&d.join("notes.txt"), "one\nTWO from topic\nthree\n");
+    git(&d, &["commit", "-qam", "Shout two"]);
+    let shout = git_said(&d, &["rev-parse", "HEAD"]);
+    touch(&d.join("c.txt"), "see\n");
+    git(&d, &["add", "-A"]);
+    git(&d, &["commit", "-qm", "Add c"]);
+    let add_c = git_said(&d, &["rev-parse", "HEAD"]);
+    git(&d, &["switch", "-q", "main"]);
+    touch(&d.join("notes.txt"), "one\ntwo on main\nthree\n");
+    git(&d, &["commit", "-qam", "Two on main"]);
+    let pick = |h: &str| run(&d, &Op::CherryPick { hash: h.into(), merge: false });
+    assert_eq!(pick(&add_c).unwrap(), format!("Cherry-picked {} onto main", &add_c[..7]));
+    assert_eq!(std::fs::read_to_string(d.join("c.txt")).unwrap(), "see\n");
+    assert_eq!(pick(&add_c).unwrap_err(), format!("main already has what {} changes.", &add_c[..7]));
+    assert_eq!(doing(&d), None, "nothing left in progress");
+    assert_eq!(pick(&start).unwrap_err(), format!("{} is already on main.", &start[..7]));
+    // A conflict: given up on, everything as before.
+    assert_eq!(pick(&shout).unwrap_err(), CONFLICTS);
+    assert_eq!((doing(&d), work_of(&d).doing), (Some(Doing::CherryPick), Some(Doing::CherryPick)));
+    assert_eq!(run(&d, &Op::Abort).unwrap(), "Stopped cherry-picking and went back");
+    assert_eq!((doing(&d), std::fs::read_to_string(d.join("notes.txt")).unwrap()), (None, "one\ntwo on main\nthree\n".to_string()));
+    // Again, settled with theirs and continued: the commit keeps its message.
+    assert_eq!(pick(&shout).unwrap_err(), CONFLICTS);
+    assert_eq!(run(&d, &Op::Continue).unwrap_err(), "Some files are still in conflict.");
+    run(&d, &Op::Settle { path: "notes.txt".into(), at: 0, side: Side::Theirs }).unwrap();
+    assert_eq!(run(&d, &Op::Continue).unwrap(), "Finished the cherry-pick");
+    assert_eq!((doing(&d), git_said(&d, &["log", "-1", "--format=%s"])), (None, "Shout two".to_string()));
+    assert_eq!(std::fs::read_to_string(d.join("notes.txt")).unwrap(), "one\nTWO from topic\nthree\n");
+    // A revert: a new commit that undoes one.
+    let picked_c = git_said(&d, &["rev-parse", "HEAD~1"]);
+    assert_eq!(run(&d, &Op::Revert { hash: picked_c.clone(), merge: false }).unwrap(), format!("Reverted {}", &picked_c[..7]));
+    assert!(!d.join("c.txt").exists());
+    assert_eq!(git_said(&d, &["log", "-1", "--format=%s"]), "Revert \"Add c\"");
+    // One that stops: the line it would take back changed since. Skipped.
+    let shouted = git_said(&d, &["rev-parse", "HEAD~1"]);
+    touch(&d.join("notes.txt"), "one\ntwo, quietly\nthree\n");
+    git(&d, &["commit", "-qam", "Quiet two"]);
+    assert_eq!(run(&d, &Op::Revert { hash: shouted, merge: false }).unwrap_err(), CONFLICTS);
+    assert_eq!(doing(&d), Some(Doing::Revert));
+    assert_eq!(run(&d, &Op::Skip).unwrap(), "Skipped that commit");
+    assert_eq!((doing(&d), git_said(&d, &["log", "-1", "--format=%s"])), (None, "Quiet two".to_string()));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Lines of a hunk staged on their own, and one of them unstaged again: the index
+/// gets exactly the picked lines, the file itself is left alone.
+#[test]
+fn git_lines_staged_and_unstaged() {
+    use crate::gitwork::{Op, file_diff, run};
+    if !crate::media::have("git") {
+        return;
+    }
+    let d = tmpdir("gitlines");
+    work_repo(&d);
+    touch(&d.join("f.txt"), &numbered(&[]));
+    git(&d, &["add", "-A"]);
+    git(&d, &["commit", "-qm", "Start"]);
+    let changed = numbered(&[(3, "line three"), (4, "line 4\nnew A\nnew B")]);
+    touch(&d.join("f.txt"), &changed);
+    let f = work_of(&d).unstaged[0].clone();
+    let diff = file_diff(&d, &f, false, "HEAD");
+    let h = &diff.hunks[0];
+    assert_eq!(h.lines[..7], [" line 1", " line 2", "-line 3", "+line three", " line 4", "+new A", "+new B"]);
+    assert!(h.splits());
+    let pick = |h: &crate::gitwork::Hunk, at: &[usize]| (0..h.lines.len()).map(|i| at.contains(&i)).collect::<Vec<bool>>();
+    assert!(h.lines_patch(&pick(h, &[0, 1]), false).is_none(), "no change picked");
+    // The removed line 3 and the first new line.
+    let patch = h.lines_patch(&pick(h, &[2, 5]), false).unwrap();
+    assert_eq!(run(&d, &Op::Lines { patch, staged: false, n: 2 }).unwrap(), "Staged 2 lines");
+    let cached = git_said(&d, &["diff", "--cached"]);
+    let hunk = |s: &str| s[s.find("@@").unwrap()..].to_string();
+    assert_eq!(hunk(&cached), "@@ -1,7 +1,7 @@\n line 1\n line 2\n-line 3\n line 4\n+new A\n line 5\n line 6\n line 7");
+    assert_eq!(std::fs::read_to_string(d.join("f.txt")).unwrap(), changed, "the file itself untouched");
+    // Back out: the new line only.
+    let w = work_of(&d);
+    let staged = file_diff(&d, &w.staged[0], true, "HEAD");
+    let h = &staged.hunks[0];
+    let at = h.lines.iter().position(|l| l == "+new A").unwrap();
+    let patch = h.lines_patch(&pick(h, &[at]), true).unwrap();
+    assert_eq!(run(&d, &Op::Lines { patch, staged: true, n: 1 }).unwrap(), "Unstaged 1 line");
+    assert_eq!(hunk(&git_said(&d, &["diff", "--cached"])), "@@ -1,6 +1,5 @@\n line 1\n line 2\n-line 3\n line 4\n line 5\n line 6");
+    assert_eq!(hunk(&git_said(&d, &["diff"])), "@@ -1,6 +1,9 @@\n line 1\n line 2\n+line three\n line 4\n+new A\n+new B\n line 5\n line 6\n line 7");
+    // A file added whole goes only whole.
+    touch(&d.join("new.txt"), "a\nb\n");
+    run(&d, &Op::Stage(vec!["new.txt".into()])).unwrap();
+    let n = work_of(&d).staged.into_iter().find(|c| c.path == "new.txt").unwrap();
+    assert!(!file_diff(&d, &n, true, "HEAD").hunks[0].splits());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 #[test]
 fn git_ignored_files_are_known_and_left_out_when_hidden() {
     use crate::gitstatus::{ignored, inside_ignored, query};
