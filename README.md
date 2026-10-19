@@ -62,6 +62,8 @@ with its hotkey, and every hotkey can be changed there. Some to start with:
 | New tab, close tab, reopen | Ctrl+T, Ctrl+W, Ctrl+Shift+T |
 | Split right, split below, switch panel | Ctrl+Shift+S, Ctrl+S, Tab |
 | Preview, pictures full window | Space, F3 |
+| Find in the preview, edit it there | Ctrl+F, Shift+F4 |
+| Terminal under the files | Ctrl+` |
 | Find anywhere in home, in this project | Ctrl+K, Ctrl+O |
 | Every file below this folder | Ctrl+E |
 | Only what git marks as changed | Ctrl+Shift+G |
