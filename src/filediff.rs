@@ -69,6 +69,7 @@ pub struct Compare {
     rx: Option<mpsc::Receiver<Result<Diff, String>>>,
     pub got: Option<Result<Diff, String>>,
     wrapped: Option<crate::inspector::Wrapped>,
+    side: crate::sidediff::View,
 }
 
 impl Compare {
@@ -80,7 +81,7 @@ impl Compare {
             c.request_repaint();
         });
         let got = started.is_err().then(|| Err("Couldn't start comparing".to_string()));
-        Compare { a, b, rx: Some(rx), got, wrapped: None }
+        Compare { a, b, rx: Some(rx), got, wrapped: None, side: Default::default() }
     }
 
     fn poll(&mut self) {
@@ -118,8 +119,12 @@ pub fn view(ui: &mut Ui, rect: Rect, c: &mut Compare, wrap: &mut bool, env: &mut
         return false;
     }
     hui.add_space(4.0);
+    let side = env.cfg.diff_side;
     crate::inspector::seg_frame(&mut hui, &pal, |ui| {
-        if crate::inspector::seg_button(ui, *wrap, "Wrap lines", &pal, |p, r, col| crate::theme::paint_glyph(p, r, Glyph::Wrap, col)) {
+        if diff_layout(ui, side, &pal) {
+            env.actions.push(crate::app::Action::Run(Box::new(|app| toggle_side(app))));
+        }
+        if !side && crate::inspector::seg_button(ui, *wrap, "Wrap lines", &pal, |p, r, col| crate::theme::paint_glyph(p, r, Glyph::Wrap, col)) {
             *wrap = !*wrap;
             c.wrapped = None;
         }
@@ -159,8 +164,25 @@ pub fn view(ui: &mut Ui, rect: Rect, c: &mut Compare, wrap: &mut bool, env: &mut
         return true;
     }
     if let Some(Ok(d)) = &c.got {
-        let wrapped = if *wrap { Some(&mut c.wrapped) } else { None };
-        crate::inspector::text_view(&mut bui, body, &d.lines, false, None, false, wrapped, env.cfg.inspector_font_size, &pal, true, env.cfg.preview_line_spacing);
+        if side {
+            crate::sidediff::view(&mut bui, body, &d.lines, &mut c.side, env.cfg.inspector_font_size, env.cfg.preview_line_spacing, &pal);
+        } else {
+            let wrapped = if *wrap { Some(&mut c.wrapped) } else { None };
+            crate::inspector::text_view(&mut bui, body, &d.lines, false, None, false, wrapped, env.cfg.inspector_font_size, &pal, true, env.cfg.preview_line_spacing);
+        }
     }
     true
+}
+
+/// The toolbar button that puts a diff's sides beside each other; true when clicked.
+pub fn diff_layout(ui: &mut Ui, side: bool, pal: &crate::theme::Palette) -> bool {
+    crate::inspector::seg_button(ui, side, "Side by side", pal, |p, r, col| {
+        crate::theme::paint_lucide(p, r, "columns-2", col);
+    })
+}
+
+/// Diffs side by side, or one side under the other again: remembered.
+pub fn toggle_side(app: &mut crate::app::App) {
+    app.cfg.diff_side = !app.cfg.diff_side;
+    app.cfg_dirty = true;
 }

@@ -76,6 +76,7 @@ mod sendto;
 mod share;
 mod shelf;
 mod sidebar;
+mod sidediff;
 mod smart;
 mod signals;
 mod sqlite;

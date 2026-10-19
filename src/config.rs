@@ -218,6 +218,8 @@ pub struct Config {
     pub inspector_layout: InspectorLayout,
     /// Previews shown as written rather than rendered (the inspector's Source toggle).
     pub source_views: SourceViews,
+    /// Diffs shown side by side, old beside new, rather than one under the other.
+    pub diff_side: bool,
     pub startup: Startup,
     pub new_tab: NewTabShows,
     /// Authors' GitHub pictures in the history. Off: GitHub is never contacted.
@@ -289,6 +291,7 @@ impl Default for Config {
             middle_click: MiddleClick::OpenInSplit,
             inspector_layout: InspectorLayout::Auto,
             source_views: SourceViews::default(),
+            diff_side: false,
             startup: Startup::LastSession,
             new_tab: NewTabShows::Current,
             github_pictures: false,

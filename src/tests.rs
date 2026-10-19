@@ -8093,3 +8093,18 @@ fn find_in_preview_matches() {
     f.update(&lines, 1);
     assert_eq!(f.count(), "No matches");
 }
+
+/// A unified diff side by side: context on both sides with each side's own numbers,
+/// removals beside the additions that replaced them, an addition alone beside a gap,
+/// and the changed part of a changed line.
+#[test]
+fn diffs_side_by_side() {
+    use crate::sidediff::{Kind, Row, changed_span, rows};
+    let lines: Vec<String> = ["@@ -10,4 +10,5 @@ fn f", " same", "-old a", "-old b", "+new a", " tail", "+added", "\\ No newline at end of file"].iter().map(|s| s.to_string()).collect();
+    let r = rows(&lines);
+    let row = |old, new, kind| Row { old, new, kind };
+    assert_eq!(r, vec![row(Some((0, 0)), None, Kind::Head), row(Some((10, 1)), Some((10, 1)), Kind::Same), row(Some((11, 2)), Some((11, 4)), Kind::Changed), row(Some((12, 3)), None, Kind::Changed), row(Some((13, 5)), Some((12, 5)), Kind::Same), row(None, Some((13, 6)), Kind::Changed),]);
+    assert_eq!(changed_span("let x = score(a);", "let x = rank(a);"), ((8, 13), (8, 12)));
+    assert_eq!(changed_span("same", "same"), ((4, 4), (4, 4)));
+    assert_eq!(changed_span("é1", "é2"), ((2, 3), (2, 3)), "cut at character boundaries");
+}
