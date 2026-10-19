@@ -285,12 +285,20 @@ fn cross_device_move_keeps_original_when_something_was_skipped() {
     wait_job(&j);
     assert!(src.join("box/a.txt").exists(), "original deleted although the FIFO was not copied");
     assert!(!j.progress.lock().unwrap().errors.is_empty());
-    // With nothing left to skip, the move completes.
+    // With nothing left to skip, the move completes: every original goes once its copy is
+    // on the disk, and each lands once, ready for Undo.
     std::fs::remove_file(src.join("box/pipe")).unwrap();
     std::fs::remove_dir_all(dst.join("box")).unwrap();
-    let j = ops::spawn(2, OpKind::Move { srcs: vec![src.join("box")], dest: dst.clone(), decide: HashMap::new() }, ctx);
+    touch(&src.join("c.txt"), "c");
+    let j = ops::spawn(2, OpKind::Move { srcs: vec![src.join("box"), src.join("c.txt")], dest: dst.clone(), decide: HashMap::new() }, ctx);
     wait_job(&j);
     assert!(!src.join("box").exists() && std::fs::read_to_string(dst.join("box/a.txt")).unwrap() == "a");
+    assert!(!src.join("c.txt").exists() && std::fs::read_to_string(dst.join("c.txt")).unwrap() == "c");
+    let g = j.progress.lock().unwrap();
+    assert!(g.errors.is_empty(), "{:?}", g.errors);
+    assert_eq!(g.produced, [(src.join("box"), dst.join("box")), (src.join("c.txt"), dst.join("c.txt"))]);
+    assert_eq!(g.gone, [src.join("box"), src.join("c.txt")]);
+    drop(g);
     let _ = std::fs::remove_dir_all(&src);
     let _ = std::fs::remove_dir_all(&dst);
 }
