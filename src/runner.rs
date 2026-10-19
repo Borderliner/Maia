@@ -297,6 +297,13 @@ impl ApplicationHandler<UserEvent> for Runner {
         let Some(gl) = self.gl.as_ref() else { return };
         match &event {
             WindowEvent::CloseRequested => {
+                // Edits not saved are asked about first; the window stays until then.
+                if self.app.as_mut().is_some_and(|a| a.ask_unsaved()) {
+                    if let Some(gl) = &self.gl {
+                        gl.window.request_redraw();
+                    }
+                    return;
+                }
                 self.exit(el);
                 return;
             }

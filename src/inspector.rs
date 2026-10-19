@@ -31,7 +31,9 @@ enum Content {
     Sqlite(Box<crate::sqlite::View>),
     /// Why there is nothing to show, under the file's icon and name.
     Note(String),
-    Binary(Vec<u8>),
+    /// Text too big to read whole, or anything that isn't text (as hex): read a window
+    /// at a time.
+    Big(Box<crate::bigfile::Pager>),
     Image,
     Folder(Vec<Entry>),
     Volume,
@@ -184,6 +186,12 @@ pub struct Inspector {
     pub versions: Option<Box<crate::versions::Page>>,
     /// A photo's EXIF for its details (read on a worker once the card is open).
     exif: Option<(PathBuf, Option<std::sync::mpsc::Receiver<Option<crate::exif::Exif>>>, Option<crate::exif::Exif>)>,
+    /// Find in the text shown, while its bar is open.
+    pub find: Option<crate::findbar::Finder>,
+    /// The preview was clicked last: Ctrl+F finds in it rather than filtering the list.
+    pub keys: bool,
+    /// A text file being changed in the preview (it stays on it while the cursor moves).
+    pub edit: Option<Box<crate::quickedit::Edit>>,
 }
 
 /// Test-only views of the preview state (simulations check behaviour, not pixels).
@@ -435,6 +443,9 @@ impl Default for Inspector {
             crop: None,
             versions: None,
             exif: None,
+            find: None,
+            keys: false,
+            edit: None,
         }
     }
 }
@@ -584,7 +595,7 @@ impl Inspector {
                 let c = match (db, tools) {
                     (true, Some(t)) => Content::Sqlite(Box::new(crate::sqlite::View::start(path, t, &ctx))),
                     (true, None) => Content::Note("Install sqlite3 to see the tables in this database".into()),
-                    _ => read_text(&path),
+                    _ => read_text(&path, &ctx),
                 };
                 let _ = tx.send(c);
                 ctx.request_repaint();
@@ -611,9 +622,9 @@ impl Inspector {
             let c = if is_dir {
                 sorted(fsx::list_dir(&path).unwrap_or_default())
             } else if archive {
-                crate::archive::entries(&path, Path::new("")).map(sorted).unwrap_or_else(|_| read_text(&path))
+                crate::archive::entries(&path, Path::new("")).map(sorted).unwrap_or_else(|_| read_text(&path, &ctx))
             } else {
-                read_text(&path)
+                read_text(&path, &ctx)
             };
             let _ = tx.send(c);
             ctx.request_repaint();
@@ -713,9 +724,10 @@ fn kind_for(name: &str) -> Kind {
     }
 }
 
-/// Text read for its preview: the first megabyte as lines (a log: its last), and up to
-/// 8 MB for a data file or table, which is parsed whole, on this worker.
-fn read_text(p: &Path) -> Content {
+/// Text read for its preview: up to a megabyte as lines (a log: its last), and up to
+/// 8 MB for a data file or table, which is parsed whole, on this worker. Anything bigger,
+/// and anything that isn't text, is paged.
+fn read_text(p: &Path, ctx: &egui::Context) -> Content {
     use std::io::{Read, Seek};
     // Only regular files (a symlink may point at a FIFO or device).
     let Ok(meta) = std::fs::metadata(p) else { return Content::Other };
@@ -747,10 +759,14 @@ fn read_text(p: &Path) -> Content {
     let cut = buf.len() > parse_limit;
     buf.truncate(parse_limit);
     let truncated = !from_end && buf.len() > limit;
+    let big = |hex| crate::bigfile::Pager::open(p, meta.len(), hex, ctx).map_or(Content::Other, |v| Content::Big(Box::new(v)));
     let Some(lines) = text_lines(&buf[..buf.len().min(limit)]) else {
-        buf.truncate(4096);
-        return Content::Binary(buf);
+        return big(true);
     };
+    // Too long to keep whole, and not a data file read whole for its tree or table.
+    if !from_end && (cut || truncated && !matches!(kind, Kind::Json | Kind::JsonLines | Kind::Toml | Kind::Yaml | Kind::Table)) {
+        return big(false);
+    }
     let lang = crate::syntax::lang_for(&name);
     let prose = lang.is_none_or(crate::syntax::is_markdown);
     let spans = lang.map(|lang| crate::syntax::highlight(lang, &lines, 20_000));
@@ -899,6 +915,10 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             return;
         }
         ins.compare = None;
+    }
+    if ins.edit.is_some() {
+        edit_view(ui, rect, panel, env);
+        return;
     }
     // Previous versions: the list across the top, the version picked previewed below.
     let (mut rect, mut target) = (rect, target);
@@ -1114,12 +1134,38 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             if env_file && seg_button(&mut hui, ins.env_all, if ins.env_all { "Hide values" } else { "Show values" }, &pal, |p, r, c| paint_glyph(p, r, if ins.env_all { Glyph::LockOpen } else { Glyph::Lock }, c)) {
                 ins.env_all = !ins.env_all;
             }
+            let editable = !book && target.as_ref().is_some_and(|e| !e.is_dir && e.size <= crate::quickedit::MAX && e.path.exists());
+            if editable && seg_button(&mut hui, false, "Edit (Shift+F4)", &pal, |p, r, c| {
+                theme::paint_lucide(p, r, "pencil", c);
+            }) {
+                env.actions.push(crate::app::Action::Cmd(crate::commands::Cmd::EditInPreview));
+            }
             if as_text && !env_file && blame_ok && seg_button(&mut hui, ins.blame_on, "Blame", &pal, |p, r, c| paint_glyph(p, r, Glyph::Blame, c)) {
                 ins.blame_on = !ins.blame_on;
             }
             if as_text && !env_file && (log || ins.grew || ins.follow) && seg_button(&mut hui, ins.follow, "Follow", &pal, |p, r, c| paint_glyph(p, r, Glyph::Follow, c)) {
                 ins.toggle_follow();
             }
+        }
+        Content::Big(ref v) => {
+            let hex = v.hex;
+            seg_frame(&mut hui, &pal, |ui| {
+                if !hex && seg_button(ui, ins.line_numbers, "Line numbers", &pal, |p, r, c| {
+                    theme::paint_lucide(p, r, "list-ordered", c);
+                }) {
+                    ins.line_numbers = !ins.line_numbers;
+                }
+                if seg_button(ui, false, "Smaller text", &pal, |p, r, c| {
+                    theme::paint_lucide(p, r, "a-arrow-down", c);
+                }) {
+                    ins.text_size = (ins.text_size - 1.0).max(-6.0);
+                }
+                if seg_button(ui, false, "Larger text", &pal, |p, r, c| {
+                    theme::paint_lucide(p, r, "a-arrow-up", c);
+                }) {
+                    ins.text_size = (ins.text_size + 1.0).min(16.0);
+                }
+            });
         }
         Content::Sqlite(_) => {
             seg_frame(&mut hui, &pal, |ui| {
@@ -1136,6 +1182,16 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             });
         }
         _ => {}
+    }
+    let findable = match &ins.content {
+        Content::Text { rich, .. } => !matches!(rich.as_deref(), Some(Rich::Env(_) | Rich::Book(_))),
+        Content::Big(_) => true,
+        _ => false,
+    };
+    if findable && seg_button(&mut hui, ins.find.is_some(), "Find (Ctrl+F)", &pal, |p, r, c| paint_glyph(p, r, Glyph::Search, c)) {
+        if ins.find.take().is_none() {
+            ins.find = Some(crate::findbar::Finder::new(String::new()));
+        }
     }
     // File name as a tinted pill; its chevron opens the metadata card.
     if let Some(e) = &target {
@@ -1166,6 +1222,12 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         return;
     }
     let body = Rect::from_min_max(pos2(rect.left(), hdr.bottom() + 1.0), rect.max);
+    // Clicked, the preview takes Ctrl+F; a click elsewhere gives it back to the list.
+    if ui.input(|i| i.pointer.any_pressed()) {
+        if let Some(pp) = ui.ctx().pointer_interact_pos() {
+            ins.keys = rect.contains(pp);
+        }
+    }
     let mut bui = ui.new_child(UiBuilder::new().max_rect(body).id_salt(("insp", env.panel_id)));
     bui.set_clip_rect(body.intersect(ui.clip_rect()));
     let Some(e) = target else {
@@ -1203,18 +1265,12 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             }
         }
     }
+    if matches!(ins.content, Content::Big(_)) {
+        big_body(&mut bui, body, ins, &e, env);
+    }
     match &ins.content {
-        Content::Pdf(_) | Content::Office(_) | Content::Media(_) | Content::Font(_) | Content::Text { .. } | Content::Sqlite(_) => {}
+        Content::Pdf(_) | Content::Office(_) | Content::Media(_) | Content::Font(_) | Content::Text { .. } | Content::Sqlite(_) | Content::Big(_) => {}
         Content::Image => image_view(&mut bui, body, &e, ins, env),
-        Content::Binary(bytes) => {
-            let mut lines = vec!["Binary file: first 4 KB shown as hex".to_string(), String::new()];
-            for (i, chunk) in bytes.chunks(16).enumerate() {
-                let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
-                let ascii: String = chunk.iter().map(|&b| if (32..127).contains(&b) { b as char } else { '.' }).collect();
-                lines.push(format!("{:08x}  {:<47}  {}", i * 16, hex.join(" "), ascii));
-            }
-            text_view(&mut bui, body, &lines, false, None, false, None, env.cfg.inspector_font_size + ins.text_size, &pal, false, env.cfg.preview_line_spacing);
-        }
         Content::Folder(entries) => folder_view(&mut bui, body, entries, env),
         Content::Volume => volume_view(&mut bui, body, &e, vol.as_ref(), &pal),
         Content::Loading => {}
@@ -1431,6 +1487,7 @@ fn has_ci(hay: &str, q: &str) -> bool {
 
 /// Text, code, and the rich previews; returns a blame line's commit that was clicked.
 fn text_body(ui: &mut Ui, body: Rect, ins: &mut Inspector, e: &Entry, env: &mut Env) -> Option<String> {
+    let mut body = body;
     let pal = *env.pal;
     let size = env.cfg.inspector_font_size + ins.text_size;
     let spacing = env.cfg.preview_line_spacing;
@@ -1442,8 +1499,24 @@ fn text_body(ui: &mut Ui, body: Rect, ins: &mut Inspector, e: &Entry, env: &mut 
     // A search result's line is in the source, so a rendered file shows its source for it.
     let marking = ins.goto.as_ref().is_some_and(|g| g.1 > 0 && ins.current.as_ref().is_some_and(|c| c.0 == g.0));
     let Content::Text { lines, truncated, spans, prose, rich, .. } = &mut ins.content else { return None };
+    if let Some(f) = ins.find.as_mut().filter(|_| !matches!(rich.as_deref(), Some(Rich::Env(_)))) {
+        let count = f.count();
+        let (out, rest) = crate::findbar::bar(ui, body, f, &count, !f.hits.is_empty(), id, env.cfg.animations, &pal);
+        body = rest;
+        match out {
+            crate::findbar::Out::Next => f.step(1),
+            crate::findbar::Out::Prev => f.step(-1),
+            crate::findbar::Out::Close => {
+                ins.find = None;
+                ins.keys = true;
+            }
+            _ => {}
+        }
+    }
     let kind = rich.as_ref().and_then(|r| r.kind());
-    let source = marking || kind.is_some_and(|k| env.cfg.source_views.get(k));
+    // While finding, a rendered file shows its source, where the matches are.
+    let finding = ins.find.as_ref().is_some_and(|f| !f.query.is_empty());
+    let source = marking || finding || kind.is_some_and(|k| env.cfg.source_views.get(k));
     if !source {
         match rich.as_deref_mut() {
             Some(Rich::Markdown(v) | Rich::Book(v)) => {
@@ -1476,7 +1549,6 @@ fn text_body(ui: &mut Ui, body: Rect, ins: &mut Inspector, e: &Entry, env: &mut 
         crate::envfile::view(ui, body, lines, v, ins.env_all, ins.line_numbers, size, &pal, spacing);
         return None;
     }
-    let mut body = body;
     // A data file that would not parse says why, above its text.
     if let (false, Some(Rich::Broken(msg))) = (source, rich.as_deref()) {
         let bar = Rect::from_min_max(body.min, pos2(body.right(), body.top() + 28.0));
@@ -1534,9 +1606,330 @@ fn text_body(ui: &mut Ui, body: Rect, ins: &mut Inspector, e: &Entry, env: &mut 
     let here = ins.current.as_ref().map(|c| &c.0);
     let skip = ins.first_line.max(1) - 1;
     let mark = ins.goto.as_mut().filter(|g| !filtered && Some(&g.0) == here && g.1 as usize > skip).map(|g| (g.1 as usize - 1 - skip, &mut g.2));
-    let opts = TextOpts { blame, first: if filtered { 0 } else { ins.first_line }, stick: ins.follow, to_end: std::mem::take(&mut ins.to_end), mark };
+    let mut reveal = None;
+    let hits = match ins.find.as_mut() {
+        Some(f) if !f.query.is_empty() => {
+            f.update(shown, ins.era);
+            if std::mem::take(&mut f.reveal) {
+                reveal = f.hits.get(f.cur).map(|h| (h.0 as usize, h.1 as usize));
+            }
+            Some((&f.hits[..], Some(f.cur)))
+        }
+        _ => None,
+    };
+    let opts = TextOpts { blame, first: if filtered { 0 } else { ins.first_line }, stick: ins.follow, to_end: std::mem::take(&mut ins.to_end), mark, hits, reveal, ..Default::default() };
     let spans = if filtered { None } else { spans.as_deref() };
     text_view_ex(ui, body, shown, *truncated && !filtered, spans, ins.line_numbers, wrapped, size, &pal, is_patch(&e.name), spacing, opts)
+}
+
+/// The preview while its file is edited: the editor under a toolbar of its own, with find
+/// and replace.
+fn edit_view(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
+    use crate::app::Action;
+    use crate::findbar::Out;
+    let pal = *env.pal;
+    let id = env.panel_id;
+    let Some(ins) = panel.inspector.as_mut() else { return };
+    let Some(ed) = ins.edit.as_mut() else { return };
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, pal.bg);
+    let hdr = Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + 30.0));
+    ui.painter().line_segment([hdr.left_bottom(), hdr.right_bottom()], Stroke::new(1.0, pal.border));
+    let mut hui = ui.new_child(UiBuilder::new().max_rect(hdr.shrink2(vec2(6.0, 3.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    hui.set_clip_rect(hdr.intersect(ui.clip_rect()));
+    hui.spacing_mut().item_spacing.x = 2.0;
+    if crate::ui::glyph_button(&mut hui, Glyph::Close, "Close inspector (Space)", true, &pal).clicked() {
+        env.actions.push(Action::Run(Box::new(move |app| app.leave_edit(id, true))));
+    }
+    hui.add_space(4.0);
+    let dirty = ed.dirty();
+    seg_frame(&mut hui, &pal, |ui| {
+        if seg_button(ui, true, "Stop editing (Esc)", &pal, |p, r, c| {
+            theme::paint_lucide(p, r, "pencil", c);
+        }) {
+            env.actions.push(Action::Run(Box::new(move |app| app.leave_edit(id, false))));
+        }
+        // Lit while there is something to save.
+        if seg_button(ui, dirty, "Save (Ctrl+S)", &pal, |p, r, c| {
+            theme::paint_lucide(p, r, "save", c);
+        }) {
+            env.actions.push(Action::Run(Box::new(move |app| {
+                app.save_edit(id, false);
+            })));
+        }
+    });
+    seg_frame(&mut hui, &pal, |ui| {
+        if seg_button(ui, ins.line_numbers, "Line numbers", &pal, |p, r, c| {
+            theme::paint_lucide(p, r, "list-ordered", c);
+        }) {
+            ins.line_numbers = !ins.line_numbers;
+        }
+        if seg_button(ui, ins.wrap_code, "Wrap lines", &pal, |p, r, c| paint_glyph(p, r, Glyph::Wrap, c)) {
+            ins.wrap_code = !ins.wrap_code;
+        }
+        if seg_button(ui, false, "Smaller text", &pal, |p, r, c| {
+            theme::paint_lucide(p, r, "a-arrow-down", c);
+        }) {
+            ins.text_size = (ins.text_size - 1.0).max(-6.0);
+        }
+        if seg_button(ui, false, "Larger text", &pal, |p, r, c| {
+            theme::paint_lucide(p, r, "a-arrow-up", c);
+        }) {
+            ins.text_size = (ins.text_size + 1.0).min(16.0);
+        }
+    });
+    if seg_button(&mut hui, ins.find.is_some(), "Find and replace (Ctrl+F)", &pal, |p, r, c| paint_glyph(p, r, Glyph::Search, c)) {
+        match ins.find.take() {
+            Some(_) => ui.memory_mut(|m| m.request_focus(egui::Id::new(("insp-edit", id)))),
+            None => ins.find = Some(crate::findbar::Finder::new(String::new())),
+        }
+    }
+    // The file's name, a dot before it while it has changes.
+    let name = ed.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let room = ui.available_width() - 6.0;
+        if room < 40.0 {
+            return;
+        }
+        let label = if dirty { format!("● {name}") } else { name };
+        let g = crate::listing::elided(ui, &label, FontId::proportional(12.0), (room - 20.0).min(260.0), pal.text);
+        let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 20.0, 22.0), Sense::hover());
+        ui.painter().rect_filled(r, CornerRadius::same(11), pal.accent.gamma_multiply(0.22));
+        ui.painter().galley(pos2(r.left() + 10.0, r.center().y - g.size().y / 2.0), g, pal.text);
+    });
+    let mut body = Rect::from_min_max(pos2(rect.left(), hdr.bottom() + 1.0), rect.max);
+    let mut bui = ui.new_child(UiBuilder::new().max_rect(body).id_salt(("insp-edit-body", id)));
+    bui.set_clip_rect(body.intersect(ui.clip_rect()));
+    if let Some(f) = ins.find.as_mut() {
+        f.replace.get_or_insert_with(String::new);
+        let count = f.count();
+        let (out, rest) = crate::findbar::bar(&mut bui, body, f, &count, !f.hits.is_empty(), id, env.cfg.animations, &pal);
+        body = rest;
+        match out {
+            Out::Next => f.step(1),
+            Out::Prev => f.step(-1),
+            Out::Replace => {
+                ed.replace(f, false);
+            }
+            Out::ReplaceAll => {
+                let n = ed.replace(f, true);
+                env.actions.push(Action::Toast(format!("Replaced {n}")));
+            }
+            Out::Close => {
+                ins.find = None;
+                ui.memory_mut(|m| m.request_focus(egui::Id::new(("insp-edit", id))));
+            }
+            Out::None => {}
+        }
+    }
+    let size = env.cfg.inspector_font_size + ins.text_size;
+    crate::quickedit::view(&mut bui, body, ed, ins.find.as_mut(), ins.line_numbers, ins.wrap_code, size, env.cfg.preview_line_spacing, &pal, id);
+}
+
+/// A big file: its text a window at a time, or its bytes as hex; found in on a worker.
+fn big_body(ui: &mut Ui, body: Rect, ins: &mut Inspector, e: &Entry, env: &mut Env) {
+    use crate::findbar::Out;
+    let pal = *env.pal;
+    let (size, spacing, id) = (env.cfg.inspector_font_size + ins.text_size, env.cfg.preview_line_spacing, env.panel_id);
+    let Content::Big(v) = &mut ins.content else { return };
+    let mut body = body;
+    // The match to scroll to: a line, or a byte offset in hex.
+    let mut target = None;
+    let mut close = false;
+    if let Some(f) = ins.find.as_mut() {
+        v.search(&f.query, ui.ctx());
+        let (n, done, part) = v.find.as_ref().map_or((0, true, 1.0), |b| (b.hits.lock().unwrap().len(), b.done(), b.seen.load(std::sync::atomic::Ordering::Relaxed) as f32 / v.size.max(1) as f32));
+        let cur = v.find.as_ref().map_or(0, |b| b.cur);
+        let count = match n {
+            _ if f.query.is_empty() => String::new(),
+            0 if done => "No matches".into(),
+            0 => format!("Searching… {:.0}%", part * 100.0),
+            n => format!("{} of {}{}", cur + 1, crate::table::fmt_count(n), if !done { "…" } else if n >= crate::bigfile::MAX_HITS { "+" } else { "" }),
+        };
+        let (out, rest) = crate::findbar::bar(ui, body, f, &count, n > 0, id, env.cfg.animations, &pal);
+        body = rest;
+        close = out == Out::Close;
+        if let Some(b) = v.find.as_mut().filter(|_| n > 0) {
+            let d = match out {
+                Out::Next => 1,
+                Out::Prev => -1,
+                _ => 0,
+            };
+            if d != 0 || !b.shown {
+                b.cur = (b.cur as isize + d).rem_euclid(n as isize) as usize;
+                b.shown = true;
+                target = b.hits.lock().unwrap().get(b.cur).copied();
+            }
+        }
+    }
+    if close {
+        ins.find = None;
+        v.find = None;
+        ins.keys = true;
+    }
+    let query = ins.find.as_ref().map(|f| f.query.as_str()).filter(|q| !q.is_empty());
+    let cur = v.find.as_ref().and_then(|b| b.hits.lock().unwrap().get(b.cur).copied());
+    if v.hex {
+        hex_view(ui, body, v, size, spacing, query, cur, target, &pal);
+    } else {
+        let (seen0, seen1) = v.seen;
+        v.want(seen0 as u64, seen1 as u64 + 1);
+        let (rows, _) = v.rows();
+        // Highlighted a window at a time (a block comment begun above it shows plain).
+        let held = v.window().map(|(f, l)| (f, l.len()));
+        if held.is_some() && v.spans.as_ref().map(|s| (s.0, s.1)) != held {
+            v.spans = v.window().and_then(|(f, l)| crate::syntax::lang_for(&e.name).map(|lang| (f, l.len(), crate::syntax::highlight(lang, l, l.len()))));
+        }
+        let mut pending = target.or(v.reveal);
+        let (first, lines): (u64, &[String]) = v.window().unwrap_or((0, &[]));
+        let mut hits = vec![];
+        if let Some(q) = query {
+            let case = q.chars().any(char::is_uppercase);
+            let mut at = vec![];
+            for (k, l) in lines.iter().enumerate() {
+                at.clear();
+                crate::findbar::find_in(l, q, case, &mut at);
+                hits.extend(at.iter().map(|&(a, b)| ((first + k as u64) as u32, a, b)));
+            }
+        }
+        let cur_hit = cur.and_then(|line| hits.iter().position(|h| h.0 as u64 == line));
+        // Down to its line at once; sideways to the match once the line is read.
+        let reveal = pending.map(|line| (line as usize, cur_hit.map_or(0, |i| hits[i].1 as usize)));
+        if cur_hit.is_some() {
+            pending = None;
+        }
+        let mut seen = v.seen;
+        let opts = TextOpts { window: Some((rows as usize, first as usize, v.estimate() as usize)), hits: query.map(|_| (&hits[..], cur_hit)), reveal, seen: Some(&mut seen), ..Default::default() };
+        let spans = v.spans.as_ref().map(|s| &s.2[..]);
+        text_view_ex(ui, body, lines, false, spans, ins.line_numbers, None, size, &pal, false, spacing, opts);
+        v.reveal = pending;
+        if seen != v.seen {
+            v.seen = seen;
+            v.want(seen.0 as u64, seen.1 as u64 + 1);
+        }
+    }
+    // Lines are counted on a worker: how far it has got, until it is done.
+    let left = 1.0 - v.indexed();
+    let shown = ui.ctx().animate_bool_with_time(egui::Id::new(("big-count", id)), left > 0.0, 0.25);
+    if shown > 0.0 {
+        let txt = if left > 0.0 { format!("Counting lines… {:.0}%", (1.0 - left) * 100.0) } else { format!("{} lines", crate::table::fmt_count(v.rows().0 as usize)) };
+        let g = ui.painter().layout_no_wrap(txt, FontId::proportional(11.0), pal.text_dim);
+        let r = Rect::from_min_size(pos2(body.right() - g.size().x - 30.0, body.bottom() - g.size().y - 18.0), g.size() + vec2(14.0, 8.0));
+        let p = ui.painter().with_clip_rect(body);
+        p.rect(r, CornerRadius::same(10), pal.raised.gamma_multiply(shown), Stroke::new(1.0, pal.border.gamma_multiply(shown)), StrokeKind::Inside);
+        p.galley(r.min + vec2(7.0, 4.0), g, pal.text_dim.gamma_multiply(shown));
+        if left > 0.0 {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+}
+
+/// Bytes as hex beside their text, a row at a time as they are read. The byte under the
+/// pointer is marked in both columns; matches of a search are tinted.
+#[allow(clippy::too_many_arguments)]
+fn hex_view(ui: &mut Ui, body: Rect, v: &mut crate::bigfile::Pager, size: f32, spacing: f32, query: Option<&str>, cur: Option<u64>, target: Option<u64>, pal: &theme::Palette) {
+    let font = FontId::monospace(size);
+    let cw = ui.fonts_mut(|f| f.glyph_width(&font, 'M'));
+    let row_h = row_height(ui, size, spacing);
+    let lift = ((row_h - ui.fonts_mut(|f| f.row_height(&font))) / 2.0).floor().max(0.0);
+    // Sixteen bytes a row where they fit with their text, else eight.
+    let cols = |n: f32| (10.0 + n * 3.0 + (n / 8.0).ceil() + 1.0 + n) * cw + 24.0;
+    v.bpr = if body.width() >= cols(16.0) { 16 } else { 8 };
+    let bpr = v.bpr as usize;
+    let (rows, _) = v.rows();
+    let (s0, s1) = v.seen;
+    v.want(s0 as u64, s1 as u64 + 1);
+    let needle = query.map(crate::bigfile::hex_query).unwrap_or_default();
+    let x_hex = 10.0 * cw;
+    let x_of = |i: usize| x_hex + (i * 3 + i / 8) as f32 * cw;
+    let x_txt = x_of(bpr) + cw;
+    let mut inner = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(8.0, 4.0))));
+    let sid = inner.make_persistent_id("insp_hex");
+    let mut area = egui::ScrollArea::both().id_salt("insp_hex").auto_shrink([false, false]);
+    if let Some(off) = target {
+        let at = egui::scroll_area::State::load(ui.ctx(), sid).map_or(0.0, |s| s.offset.y);
+        let y = (off / v.bpr) as f32 * row_h;
+        if y < at || y + row_h > at + inner.max_rect().height() {
+            area = area.vertical_scroll_offset((y - inner.max_rect().height() / 3.0).max(0.0));
+        }
+    }
+    let mut seen = v.seen;
+    area.show_viewport(&mut inner, |ui, vp| {
+        let (r, resp) = ui.allocate_exact_size(vec2((x_txt + bpr as f32 * cw + 8.0).max(vp.width()), rows as f32 * row_h + 8.0), Sense::hover());
+        let first = (vp.min.y / row_h).floor().max(0.0) as usize;
+        let last = ((vp.max.y / row_h).ceil() as usize + 1).min(rows as usize);
+        seen = (first, last);
+        let p = ui.painter();
+        // The byte under the pointer, by its offset.
+        let hover = resp.hover_pos().and_then(|hp| {
+            let row = ((hp.y - r.top()) / row_h) as u64;
+            let x = hp.x - r.left();
+            let col = if x >= x_txt { ((x - x_txt) / cw) as usize } else { (0..bpr).find(|&i| x >= x_of(i) - cw * 0.5 && x < x_of(i) + cw * 2.5)? };
+            (col < bpr).then_some(row * v.bpr + col as u64).filter(|&o| o < v.size)
+        });
+        let mark = |p: &egui::Painter, top: f32, i: usize, col: Color32| {
+            p.rect_filled(Rect::from_min_size(pos2(r.left() + x_of(i) - 1.0, top + 1.0), vec2(cw * 2.0 + 2.0, row_h - 2.0)), CornerRadius::same(2), col);
+            p.rect_filled(Rect::from_min_size(pos2(r.left() + x_txt + i as f32 * cw, top + 1.0), vec2(cw, row_h - 2.0)), CornerRadius::same(2), col);
+        };
+        // Matches on screen, by where they start (one may run in from the row above).
+        let n = needle.len() as u64;
+        let found: Vec<u64> = if n == 0 { vec![] } else { ((first as u64 * v.bpr).saturating_sub(n - 1)..last as u64 * v.bpr).filter(|&s| hit_at(v, s, &needle)).collect() };
+        for row in first..last {
+            let top = r.top() + row as f32 * row_h;
+            let y = top + lift;
+            let off = row as u64 * v.bpr;
+            p.text(pos2(r.left(), y), Align2::LEFT_TOP, format!("{off:08x}"), font.clone(), pal.text_dim.gamma_multiply(0.7));
+            let Some(bytes) = v.row_bytes(row as u64) else {
+                p.text(pos2(r.left() + x_hex, y), Align2::LEFT_TOP, "·", font.clone(), pal.text_dim.gamma_multiply(0.5));
+                continue;
+            };
+            for i in 0..bytes.len() {
+                let o = off + i as u64;
+                let k = found.partition_point(|&s| s + n <= o);
+                if let Some(&s) = found.get(k).filter(|&&s| s <= o) {
+                    mark(p, top, i, if Some(s) == cur { pal.accent.gamma_multiply(0.55) } else { pal.accent.gamma_multiply(0.25) });
+                }
+            }
+            if let Some(h) = hover.filter(|h| h / v.bpr == row as u64) {
+                mark(p, top, (h % v.bpr) as usize, pal.hover);
+            }
+            let mut job = egui::text::LayoutJob::default();
+            let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
+            for (i, &b) in bytes.iter().enumerate() {
+                let c = match b {
+                    0 => pal.text_dim.gamma_multiply(0.55),
+                    32..127 => pal.text,
+                    _ => pal.syntax.number,
+                };
+                let gap = if i + 1 == bpr { "" } else if i % 8 == 7 { "  " } else { " " };
+                job.append(&format!("{b:02x}{gap}"), 0.0, fmt(c));
+            }
+            p.galley(pos2(r.left() + x_hex, y), ui.fonts_mut(|f| f.layout_job(job)), pal.text);
+            let mut job = egui::text::LayoutJob::default();
+            for &b in bytes {
+                let (ch, c) = if (32..127).contains(&b) { (b as char, pal.text) } else { ('.', pal.text_dim.gamma_multiply(0.6)) };
+                job.append(ch.encode_utf8(&mut [0; 4]), 0.0, fmt(c));
+            }
+            p.galley(pos2(r.left() + x_txt, y), ui.fonts_mut(|f| f.layout_job(job)), pal.text);
+        }
+        if let Some(h) = hover {
+            let b = v.row_bytes(h / v.bpr).and_then(|bs| bs.get((h % v.bpr) as usize)).copied();
+            if let Some(b) = b {
+                resp.on_hover_text(format!("Offset {h} (0x{h:x})\nByte {b} (0x{b:02x}){}", if (32..127).contains(&b) { format!(" '{}'", b as char) } else { String::new() }));
+            }
+        }
+    });
+    if seen != v.seen {
+        v.seen = seen;
+        v.want(seen.0 as u64, seen.1 as u64 + 1);
+    }
+}
+
+/// Whether the bytes held from `at` are `needle`.
+fn hit_at(v: &crate::bigfile::Pager, at: u64, needle: &[u8]) -> bool {
+    needle.iter().enumerate().all(|(k, &n)| {
+        let o = at + k as u64;
+        v.row_bytes(o / v.bpr).and_then(|b| b.get((o % v.bpr) as usize)) == Some(&n)
+    })
 }
 
 /// A diff or patch file, shown tinted like the history's diffs.
@@ -2050,11 +2443,20 @@ pub(crate) struct TextOpts<'a> {
     pub stick: bool,
     pub to_end: bool,
     pub mark: Option<(usize, &'a mut bool)>,
+    /// A big file held a window at a time: (its lines so far, the line `lines[0]` is, the
+    /// lines it will have). Lines not read yet show as a dot.
+    pub window: Option<(usize, usize, usize)>,
+    /// Matches to mark, and which one is current.
+    pub hits: Option<(&'a [crate::findbar::Hit], Option<usize>)>,
+    /// A line and a byte in it to scroll into view, when out of view.
+    pub reveal: Option<(usize, usize)>,
+    /// Given the rows shown.
+    pub seen: Option<&'a mut (usize, usize)>,
 }
 
 impl Default for TextOpts<'_> {
     fn default() -> Self {
-        TextOpts { blame: None, first: 1, stick: false, to_end: false, mark: None }
+        TextOpts { blame: None, first: 1, stick: false, to_end: false, mark: None, window: None, hits: None, reveal: None, seen: None }
     }
 }
 
@@ -2068,7 +2470,8 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
     let lift = ((row_h - line_h) / 2.0).floor().max(0.0);
     let numbers = numbers && opts.first > 0;
     let base = opts.first.max(1);
-    let gutter = if numbers { ((lines.len() + base).max(1).to_string().len() as f32) * size * 0.62 + 16.0 } else { 6.0 };
+    let (all, off, widest) = opts.window.unwrap_or((lines.len(), 0, lines.len()));
+    let gutter = if numbers { ((widest.max(all) + base).max(1).to_string().len() as f32) * size * 0.62 + 16.0 } else { 6.0 };
     // The blame column: author and age where a commit's lines begin; only the age when
     // the preview is narrow.
     let narrow = body.width() < 360.0;
@@ -2096,7 +2499,7 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
         }
         None => None,
     };
-    let total = rows.map_or(lines.len(), |r| r.len());
+    let total = rows.map_or(all, |r| r.len());
     let n = total + if truncated { 1 } else { 0 };
     let mut area = if rows.is_some() { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
     let mut marked = None;
@@ -2109,6 +2512,23 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
         }
         marked = Some(line);
     }
+    if let Some((line, byte)) = opts.reveal {
+        // Only when out of view: stepping through matches on screen shouldn't jump.
+        let at = egui::scroll_area::State::load(ui.ctx(), inner.make_persistent_id("insp_text")).map_or(Vec2::ZERO, |s| s.offset);
+        let view = inner.max_rect().size();
+        // Wrapped: the last row starting at or before the byte.
+        let row = rows.map_or(line, |r| r.partition_point(|x| (x.0 as usize, x.1 as usize) <= (line, byte)).saturating_sub(1));
+        let y = row as f32 * row_h;
+        if y < at.y || y + row_h > at.y + view.y {
+            area = area.vertical_scroll_offset((y - view.y / 3.0).max(0.0));
+        }
+        if rows.is_none() {
+            let x = line.checked_sub(off).and_then(|k| lines.get(k)).map_or(0.0, |l| crate::findbar::hit_x(l, byte, cw));
+            if x < at.x || x + gutter + 40.0 > at.x + view.x {
+                area = area.horizontal_scroll_offset((x + gutter - view.x / 2.0).max(0.0));
+            }
+        }
+    }
     let now = crate::blame::now();
     area.auto_shrink([false, false]).stick_to_bottom(opts.stick).id_salt("insp_text").show_viewport(&mut inner, |ui, vp| {
         let w = if rows.is_some() { vp.width() } else { (2000.0 * size * 0.62).min(lines.iter().map(|l| l.len()).max().unwrap_or(0) as f32 * size * 0.62 + gutter + 20.0).max(vp.width()) };
@@ -2119,6 +2539,9 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
         }
         let first = (vp.min.y / row_h).floor().max(0.0) as usize;
         let last = ((vp.max.y / row_h).ceil() as usize + 1).min(n);
+        if let Some(seen) = opts.seen {
+            *seen = (first, last);
+        }
         let p = ui.painter().clone();
         let p = &p;
         // The blame column scrolls sideways with the line numbers and the text.
@@ -2144,12 +2567,15 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
             let (li, a, b) = match rows {
                 Some(rows) => {
                     let (li, a) = (rows[i].0 as usize, rows[i].1 as usize);
-                    let b = rows.get(i + 1).filter(|n| n.0 as usize == li).map_or(lines[li].len(), |n| n.1 as usize);
-                    (li, a, b)
+                    (li, a, rows.get(i + 1).filter(|n| n.0 as usize == li).map_or(usize::MAX, |n| n.1 as usize))
                 }
-                None => (i, 0, lines[i].len()),
+                None => (i, 0, usize::MAX),
             };
-            let line = &lines[li];
+            let Some(line) = li.checked_sub(off).and_then(|k| lines.get(k)) else {
+                p.text(pos2(r.left() + gutter, y), Align2::LEFT_TOP, "·", font.clone(), pal.text_dim.gamma_multiply(0.5));
+                continue;
+            };
+            let b = b.min(line.len());
             if marked == Some(li) {
                 p.rect_filled(Rect::from_min_size(pos2(r.left(), top), vec2(r.width(), row_h)), CornerRadius::ZERO, pal.accent.gamma_multiply(0.18));
             }
@@ -2182,7 +2608,8 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
             // A diff: added and removed lines tinted (every row of them when wrapped),
             // hunk headers dimmed, and the file names (a "---" line with its "+++"
             // after it) dimmed with them rather than read as a line taken out and one put in.
-            let names = diff && ((line.starts_with("--- ") && lines.get(li + 1).is_some_and(|n| n.starts_with("+++ "))) || (line.starts_with("+++ ") && li > 0 && lines[li - 1].starts_with("--- ")));
+            let k = li - off;
+            let names = diff && ((line.starts_with("--- ") && lines.get(k + 1).is_some_and(|n| n.starts_with("+++ "))) || (line.starts_with("+++ ") && k > 0 && lines[k - 1].starts_with("--- ")));
             let mark = if names { Some(b'@') } else if diff { line.as_bytes().first().copied() } else { None };
             let tint = match mark {
                 Some(b'+') => crate::gitstatus::GREEN,
@@ -2192,11 +2619,18 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
             if tint != Color32::TRANSPARENT {
                 p.rect_filled(Rect::from_min_size(pos2(r.left(), top), vec2(r.width(), row_h)), CornerRadius::ZERO, tint.gamma_multiply(if pal.dark { 0.13 } else { 0.11 }));
             }
+            if let Some((hits, cur)) = opts.hits {
+                // The current match's line, faintly, to find it by at a glance.
+                if a == 0 && cur.and_then(|c| hits.get(c)).is_some_and(|h| h.0 as usize == li) {
+                    p.rect_filled(Rect::from_min_size(pos2(r.left(), top), vec2(r.width(), row_h)), CornerRadius::ZERO, pal.accent.gamma_multiply(0.07));
+                }
+                crate::findbar::paint_hits(p, hits, cur, li as u32, a, b, line, r.left() + gutter, top, row_h, cw, pal);
+            }
             if mark == Some(b'@') || mark == Some(b'\\') {
                 p.text(pos2(r.left() + gutter, y), Align2::LEFT_TOP, &line[a..b], font.clone(), pal.text_dim);
                 continue;
             }
-            let line_spans: &[(usize, usize, crate::syntax::Kind)] = spans.and_then(|s| s.get(li)).map_or(&[][..], |s| &s[..]);
+            let line_spans: &[(usize, usize, crate::syntax::Kind)] = spans.and_then(|s| s.get(k)).map_or(&[][..], |s| &s[..]);
             match Some(line_spans).filter(|s| !s.is_empty() || tint != Color32::TRANSPARENT) {
                 Some(sp) => {
                     // Coloured sections between the spans; plain text in the gaps. A diff's

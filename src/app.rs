@@ -1416,6 +1416,10 @@ impl App {
         }
         let text_focus = ctx.wants_keyboard_input();
         let filter_focus = self.panels.get(&self.active).map(|p| p.filter_has_focus).unwrap_or(false);
+        // The preview's editor has the keyboard: its own keys, and only a few of Maia's.
+        // (Asked of the editor: egui lets go of the focus on Escape before this runs.)
+        let editing = self.panels.get(&self.active).and_then(|p| p.inspector.as_ref()?.edit.as_ref()).is_some_and(|e| e.focused);
+        let mut typed: Vec<Event> = vec![];
         let mut consumed: Vec<usize> = vec![];
         let mut plain_fired = false;
         for (n, ev) in events.iter().enumerate() {
@@ -1459,6 +1463,40 @@ impl App {
                 },
                 _ => continue,
             };
+            if editing {
+                let id = self.active;
+                let ctrl = chord.ctrl && !chord.alt;
+                let plain = !chord.ctrl && !chord.alt && !chord.shift;
+                let mine = match chord.input {
+                    commands::Input::Key(Key::S) if ctrl && !chord.shift => {
+                        self.save_edit(id, false);
+                        true
+                    }
+                    commands::Input::Key(Key::F | Key::H) if ctrl => {
+                        self.run(Cmd::FindInPreview);
+                        true
+                    }
+                    commands::Input::Key(Key::Escape) if plain => {
+                        self.leave_edit(id, false);
+                        true
+                    }
+                    // Tab indents as the file does.
+                    commands::Input::Key(Key::Tab) if plain => {
+                        let indent = self.panels.get(&id).and_then(|p| p.inspector.as_ref()?.edit.as_ref()).map_or("    ", |e| e.indent);
+                        typed.push(Event::Text(indent.into()));
+                        true
+                    }
+                    _ => false,
+                };
+                if mine {
+                    consumed.push(n);
+                    continue;
+                }
+                // Only the palette, Options and Quit get past the editor.
+                if !matches!(self.keymap.lookup(&[chord]).0, Some(Cmd::Palette | Cmd::Options | Cmd::Quit)) {
+                    continue;
+                }
+            }
             if text_focus {
                 // Filter box: arrows/enter drive the list; plain typing stays in the box.
                 if filter_focus {
@@ -1589,6 +1627,7 @@ impl App {
                     k += 1;
                     keep
                 });
+                i.events.extend(typed);
             });
         }
     }
@@ -1959,7 +1998,33 @@ impl App {
                     t.set_flatten(on);
                 }
             }
+            // Ctrl+F finds in a preview that was clicked last, else filters the list.
+            Cmd::FocusFilter if self.panels.get(&self.active).and_then(|p| p.inspector.as_ref()).is_some_and(|i| i.keys || i.find.is_some() && self.ctx.memory(|m| m.focused()) == Some(egui::Id::new(("insp-find", self.active)))) => self.run(Cmd::FindInPreview),
             Cmd::FocusFilter => self.panel().focus_filter = true,
+            Cmd::FindInPreview => {
+                let p = self.panel();
+                let i = p.inspector.get_or_insert_with(Inspector::default);
+                let f = i.find.get_or_insert_with(|| crate::findbar::Finder::new(String::new()));
+                f.focus = true;
+            }
+            Cmd::EditInPreview => {
+                let id = self.active;
+                let p = self.panel();
+                let t = p.tab();
+                let Some(e) = t.cursor.and_then(|i| t.entries.get(i as usize)).filter(|e| !e.is_dir).cloned() else { return };
+                let i = p.inspector.get_or_insert_with(Inspector::default);
+                if i.edit.as_ref().is_some_and(|ed| ed.path == e.path) {
+                    return;
+                }
+                match crate::quickedit::Edit::open(&e.path) {
+                    Ok(ed) => {
+                        i.edit = Some(Box::new(ed));
+                        i.find = None;
+                        self.ctx.memory_mut(|m| m.request_focus(egui::Id::new(("insp-edit", id))));
+                    }
+                    Err(why) => self.toast(format!("Can't edit {}: {why}", e.name)),
+                }
+            }
             Cmd::ContentSearch => crate::contentsearch::toggle(self.panel()),
             Cmd::CodeSearch | Cmd::FindTodos => match crate::devtools::target_dir(self) {
                 Some(d) => self.popup = crate::devtools::code_search(&ctx, d, cmd == Cmd::FindTodos),
@@ -2162,7 +2227,12 @@ impl App {
                 self.set_config_changed();
             }
             Cmd::ToggleInspector => {
+                let id = self.active;
                 let p = self.panel();
+                if p.inspector.as_ref().is_some_and(|i| i.edit.is_some()) {
+                    self.leave_edit(id, true);
+                    return;
+                }
                 p.inspector = if p.inspector.is_some() { None } else { Some(Inspector::default()) };
             }
             Cmd::GitHistory => {
@@ -2635,7 +2705,11 @@ impl App {
             Cmd::NewWindow => {
                 let _ = crate::mime::new_window(&fsx::home());
             }
-            Cmd::Quit => self.quit = true,
+            Cmd::Quit => {
+                if !self.ask_unsaved() {
+                    self.quit = true;
+                }
+            }
             Cmd::FontBigger => {
                 self.cfg.font_size = (self.cfg.font_size + 0.5).min(24.0);
                 self.cfg_dirty = true;
@@ -2763,6 +2837,86 @@ impl App {
             self.prev_active = self.active;
             self.active = id;
         }
+    }
+
+    /// Save what panel `id`'s preview is editing; a file changed on disk since asks first.
+    pub fn save_edit(&mut self, id: u64, force: bool) -> bool {
+        let Some(ed) = self.panels.get_mut(&id).and_then(|p| p.inspector.as_mut()).and_then(|i| i.edit.as_mut()) else { return false };
+        let name = ed.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match ed.save(force) {
+            Ok(trashed) => {
+                if trashed {
+                    self.undo.push(UndoEntry { label: format!("Edit {name}"), kind: UndoKind::Replaced(vec![ed.path.clone()]) });
+                }
+                self.toast(format!("Saved {name}"));
+                true
+            }
+            Err(crate::quickedit::SaveError::Changed) => {
+                let reload: Box<dyn FnOnce(&mut App)> = Box::new(move |app| {
+                    if let Some(i) = app.panels.get_mut(&id).and_then(|p| p.inspector.as_mut()) {
+                        i.edit = i.edit.take().and_then(|ed| crate::quickedit::Edit::open(&ed.path).ok().map(Box::new));
+                    }
+                });
+                let choices = vec![("Save over it".to_string(), true, Some(Box::new(move |app: &mut App| {
+                    app.save_edit(id, true);
+                }) as Box<dyn FnOnce(&mut App)>)), ("Load it again".to_string(), true, Some(reload))];
+                self.popup = Popup::Choose { msg: format!("“{name}” changed since you started editing it"), sub: "Save over the newer file, or load it again and lose your changes.".into(), choices };
+                false
+            }
+            Err(crate::quickedit::SaveError::Failed(e)) => {
+                self.toast(format!("Couldn't save {name}: {e}"));
+                false
+            }
+        }
+    }
+
+    /// Stop editing in panel `id`'s preview, and close the preview when `close`; changes
+    /// not saved are asked about first.
+    pub fn leave_edit(&mut self, id: u64, close: bool) {
+        let Some(i) = self.panels.get_mut(&id).and_then(|p| p.inspector.as_mut()) else { return };
+        let Some(ed) = i.edit.as_ref() else { return };
+        let done = move |app: &mut App| {
+            if let Some(p) = app.panels.get_mut(&id) {
+                if close {
+                    p.inspector = None;
+                } else if let Some(i) = p.inspector.as_mut() {
+                    i.edit = None;
+                    i.find = None;
+                    i.invalidate();
+                }
+            }
+        };
+        if !ed.dirty() {
+            return done(self);
+        }
+        let name = ed.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let choices: Vec<(String, bool, Option<Box<dyn FnOnce(&mut App)>>)> = vec![
+            ("Save".to_string(), false, Some(Box::new(move |app: &mut App| {
+                if app.save_edit(id, false) {
+                    done(app);
+                }
+            }))),
+            ("Don't save".to_string(), true, Some(Box::new(done))),
+        ];
+        self.popup = Popup::Choose { msg: format!("Save the changes to “{name}”?"), sub: "They are lost if you don't.".into(), choices };
+    }
+
+    /// Ask about edits not saved before the window closes; false when there are none.
+    pub fn ask_unsaved(&mut self) -> bool {
+        let dirty: Vec<(u64, String)> = self.panels.iter().filter_map(|(id, p)| p.inspector.as_ref()?.edit.as_ref().filter(|e| e.dirty()).map(|e| (*id, e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))).collect();
+        let Some((_, name)) = dirty.first().cloned() else { return false };
+        let ids: Vec<u64> = dirty.iter().map(|d| d.0).collect();
+        let choices: Vec<(String, bool, Option<Box<dyn FnOnce(&mut App)>>)> = vec![
+            ("Save and quit".to_string(), false, Some(Box::new(move |app: &mut App| {
+                if ids.iter().all(|&id| app.save_edit(id, false)) {
+                    app.quit = true;
+                }
+            }))),
+            ("Quit without saving".to_string(), true, Some(Box::new(|app: &mut App| app.quit = true))),
+        ];
+        let msg = if dirty.len() == 1 { format!("“{name}” has changes not saved") } else { format!("{} files have changes not saved", dirty.len()) };
+        self.popup = Popup::Choose { msg, sub: "They are lost if you quit without saving.".into(), choices };
+        true
     }
 
     pub fn close_tab(&mut self, panel: u64, idx: usize) {

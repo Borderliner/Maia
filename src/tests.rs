@@ -7856,3 +7856,105 @@ fn file_manager1_answers_show_in_folder() {
     let _ = daemon.wait();
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A big file is counted and read a window at a time: lines anywhere in it, the last one
+/// without a line break, long lines cut, and every match found, across chunk seams too.
+#[test]
+fn big_files_page_and_search() {
+    use crate::bigfile::Pager;
+    let d = tmpdir("bigfile");
+    let p = d.join("big.log");
+    let mut text = String::new();
+    for i in 0..300_000 {
+        text.push_str(&format!("line {i} {}\n", if i % 100_000 == 7 { "Needle" } else { "hay" }));
+    }
+    text.push_str(&"x".repeat(9000));
+    std::fs::write(&p, &text).unwrap();
+    let ctx = egui::Context::default();
+    let mut v = Pager::open(&p, text.len() as u64, false, &ctx).unwrap();
+    let start = Instant::now();
+    while !v.rows().1 {
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(v.rows().0, 300_001, "the unterminated last line counts");
+    for (a, b) in [(0u64, 5u64), (123_456, 123_460), (299_998, 300_001)] {
+        v.want(a, b);
+        let start = Instant::now();
+        while v.line(a).is_none() || v.line(b - 1).is_none() {
+            assert!(start.elapsed() < Duration::from_secs(5), "lines {a}..{b}");
+            std::thread::sleep(Duration::from_millis(2));
+            v.want(a, b);
+        }
+        if a == 123_456 {
+            assert_eq!(v.line(123_456), Some("line 123456 hay"));
+        }
+    }
+    assert!(v.line(300_000).unwrap().ends_with('…') && v.line(300_000).unwrap().len() < 4100);
+    v.search("needle", &ctx);
+    let f = v.find.as_ref().unwrap();
+    let start = Instant::now();
+    while !f.done() {
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(*f.hits.lock().unwrap(), vec![7, 100_007, 200_007], "lines, ignoring case");
+    // Hex: offsets of the bytes, given as text or as pairs.
+    let bin = d.join("blob.bin");
+    let mut bytes = vec![0u8; 3 << 20];
+    bytes[(1 << 20) - 2..(1 << 20) + 2].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+    std::fs::write(&bin, &bytes).unwrap();
+    assert_eq!(crate::bigfile::hex_query("de ad be ef"), vec![0xde, 0xad, 0xbe, 0xef]);
+    assert_eq!(crate::bigfile::hex_query("0xDEAD"), vec![0xde, 0xad]);
+    assert_eq!(crate::bigfile::hex_query("cafe"), b"cafe".to_vec());
+    let mut h = Pager::open(&bin, bytes.len() as u64, true, &ctx).unwrap();
+    assert_eq!(h.rows(), (3 << 16, true));
+    h.search("de ad be ef", &ctx);
+    let f = h.find.as_ref().unwrap();
+    while !f.done() {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(*f.hits.lock().unwrap(), vec![(1 << 20) - 2], "found across the seam of two chunks");
+    let row = ((1 << 20) - 2) / 16;
+    h.want(row, row + 1);
+    let start = Instant::now();
+    while h.row_bytes(row).is_none() {
+        assert!(start.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(2));
+        h.want(row, row + 1);
+    }
+    assert_eq!(&h.row_bytes(row).unwrap()[14..], &[0xde, 0xad]);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Find in a preview: case ignored unless the query has capitals, matches stepped through
+/// in a ring, and the place kept when more text arrives.
+#[test]
+fn find_in_preview_matches() {
+    use crate::findbar::{Finder, find_in};
+    let mut at = vec![];
+    find_in("aXa xa XA", "xa", false, &mut at);
+    assert_eq!(at, vec![(1, 3), (4, 6), (7, 9)]);
+    at.clear();
+    find_in("aaaa", "aa", true, &mut at);
+    assert_eq!(at, vec![(0, 2), (2, 4)], "matches don't overlap");
+    let mut lines: Vec<String> = ["fn main() {", "    let Main = 1;", "}"].iter().map(|s| s.to_string()).collect();
+    let mut f = Finder::new("main".into());
+    f.update(&lines, 1);
+    assert_eq!(f.hits, vec![(0, 3, 7), (1, 8, 12)]);
+    assert!(f.reveal && f.count() == "1 of 2");
+    f.step(1);
+    f.step(1);
+    assert_eq!(f.cur, 0, "past the last, the first");
+    f.step(-1);
+    assert_eq!(f.count(), "2 of 2");
+    f.query = "Main".into();
+    f.update(&lines, 1);
+    assert_eq!(f.hits, vec![(1, 8, 12)], "a capital matches case");
+    lines.push("main again, Main".into());
+    f.update(&lines, 1);
+    assert_eq!((f.hits.len(), f.cur), (2, 0), "new lines found in, the place kept");
+    f.query = "nothing".into();
+    f.update(&lines, 1);
+    assert_eq!(f.count(), "No matches");
+}

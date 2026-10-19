@@ -128,7 +128,7 @@ pub fn rotate(t: &Tools, prog: &str, path: &Path, right: bool, again: bool) -> R
 }
 
 /// The latest copy of `path` in the trash.
-fn newest_trashed(path: &Path) -> Option<crate::trashcan::Item> {
+pub(crate) fn newest_trashed(path: &Path) -> Option<crate::trashcan::Item> {
     crate::trashcan::list().into_iter().filter(|it| it.original == path).max_by(|a, b| a.deleted.cmp(&b.deleted).then_with(|| a.file.cmp(&b.file)))
 }
 
