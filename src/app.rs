@@ -101,6 +101,7 @@ impl UndoKind {
             UndoKind::Rename(v) | UndoKind::Move(v) | UndoKind::Sorted(v, _) | UndoKind::MovedOver(v, _) => v.len(),
             UndoKind::Copied(v, _) => v.len(),
             UndoKind::Created(v) | UndoKind::Trashed(v) | UndoKind::Replaced(v) => v.len(),
+            UndoKind::Synced(made, _, removed) => made.len() + removed.len(),
         }
     }
 }
@@ -119,6 +120,9 @@ pub enum UndoKind {
     Copied(Vec<PathBuf>, Vec<PathBuf>),
     /// A move over things that were there (in the trash now).
     MovedOver(Vec<(PathBuf, PathBuf)>, Vec<PathBuf>),
+    /// A sync: copies made, those among them over something (in the trash now), and what
+    /// mirroring sent to the trash.
+    Synced(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>),
 }
 
 pub struct App {
@@ -1307,6 +1311,12 @@ impl App {
                         let made: Vec<PathBuf> = p.produced.iter().map(|x| x.1.clone()).collect();
                         let kind = if p.replaced.is_empty() { UndoKind::Created(made) } else { UndoKind::Copied(made, p.replaced.clone()) };
                         self.undo.push(UndoEntry { label, kind });
+                    }
+                }
+                if let OpKind::Sync { .. } = j.kind {
+                    if !p.produced.is_empty() || !p.gone.is_empty() {
+                        let made = p.produced.iter().map(|x| x.1.clone()).collect();
+                        self.undo.push(UndoEntry { label: crate::ui::job_undo_label(&j.label), kind: UndoKind::Synced(made, p.replaced.clone(), p.gone.clone()) });
                     }
                 }
                 if let OpKind::Trash { paths } = &j.kind {
@@ -3111,6 +3121,17 @@ impl App {
                 // The copies over something: theirs back from the trash in their place.
                 errs += crate::picfix::undo_replaced(replaced);
                 errs += made.iter().filter(|p| !replaced.contains(p) && crate::trashcan::delete(p).is_err()).count();
+            }
+            UndoKind::Synced(made, replaced, removed) => {
+                errs += crate::picfix::undo_replaced(replaced);
+                errs += made.iter().filter(|p| !replaced.contains(p) && crate::trashcan::delete(p).is_err()).count();
+                // What mirroring removed, back where it was.
+                for r in removed {
+                    match crate::picfix::newest_trashed(r) {
+                        Some(it) if std::fs::symlink_metadata(r).is_err() => errs += crate::trashcan::restore(&it).is_err() as usize,
+                        _ => errs += 1,
+                    }
+                }
             }
             UndoKind::MovedOver(pairs, replaced) => {
                 let mut back = vec![];

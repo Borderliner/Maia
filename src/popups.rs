@@ -169,6 +169,8 @@ pub enum Popup {
     /// it does; Cancel besides.
     Choose { msg: String, sub: String, choices: Vec<(String, bool, Option<Box<dyn FnOnce(&mut App)>>)> },
     Conflict(ConflictState),
+    /// Sync To Other Panel: what it will do, worked out first.
+    Sync(Box<crate::compare::SyncState>),
     Properties(PropState),
     OpenWith { paths: Vec<PathBuf>, query: String, all: bool },
     RunExec { path: PathBuf },
@@ -337,6 +339,7 @@ impl Popup {
             Popup::Confirm { .. } => "Confirm",
             Popup::Choose { .. } => "Choose",
             Popup::Conflict(..) => "Conflict",
+            Popup::Sync(..) => "Sync",
             Popup::Properties(..) => "Properties",
             Popup::OpenWith { .. } => "OpenWith",
             Popup::RunExec { .. } => "RunExec",
@@ -900,6 +903,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::Confirm { msg, ok, on_ok } => confirm(app, ctx, msg, ok, on_ok),
         Popup::Choose { msg, sub, choices } => choose(app, ctx, msg, sub, choices),
         Popup::Conflict(st) => conflict(app, ctx, st),
+        Popup::Sync(st) => sync(app, ctx, st),
         Popup::Properties(st) => properties(app, ctx, st),
         Popup::OpenWith { paths, query, all } => open_with(app, ctx, paths, query, all),
         Popup::RunExec { path } => run_exec(app, ctx, path),
@@ -4466,6 +4470,113 @@ fn conflict(app: &mut App, ctx: &egui::Context, st: &mut ConflictState) -> bool 
         }
     }
     true
+}
+
+/// Sync To Other Panel: what comes over, what is replaced and, mirroring, what goes, all
+/// the way down, before anything is done.
+fn sync(app: &mut App, ctx: &egui::Context, st: &mut crate::compare::SyncState) -> bool {
+    let pal = app.pal;
+    st.poll();
+    let (go, cancel, flip) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::Enter), i.consume_key(Modifiers::NONE, Key::Escape), i.consume_key(Modifiers::NONE, Key::M)));
+    if cancel {
+        return false;
+    }
+    let extra = st.plan.as_ref().map_or(0, |p| p.extra.len());
+    if flip && extra > 0 {
+        st.mirror = !st.mirror;
+    }
+    let job = st.job();
+    let mut start = go && job.is_some();
+    let mut close = false;
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let (_, rect) = centered(ctx, "sync", 540.0, &pal, |ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        dialog_title(ui, &format!("Sync into “{}”", name(&st.to)), Some(&format!("From {}: what is missing or older there is brought up to date, in every folder", home_short(&st.from))), &pal);
+        ui.add_space(6.0);
+        let Some(plan) = &st.plan else {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                crate::ui::spinner(ui.painter(), r.center(), 5.0, pal.accent, ui.input(|i| i.time));
+                ui.label(egui::RichText::new("Comparing both folders…").color(pal.text_dim));
+            });
+            ctx.request_repaint();
+            dialog_buttons(ui, |ui| close = plain_button(ui, "Cancel", &pal).clicked());
+            return;
+        };
+        if plan.copy.is_empty() && plan.update.is_empty() && plan.extra.is_empty() {
+            ui.label(egui::RichText::new("Both sides are the same already").color(pal.text_dim));
+            dialog_buttons(ui, |ui| close = primary_button(ui, "Close", true, &pal).clicked());
+            return;
+        }
+        let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        card(ui, &pal, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            let dot = |ui: &mut Ui, col: Color32, text: String| {
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(vec2(10.0, 14.0), Sense::hover());
+                    ui.painter().circle_filled(r.center(), 3.5, col);
+                    ui.label(text);
+                });
+            };
+            dot(ui, pal.accent, format!("{} to copy over ({})", count(plan.copy.len(), "new item", "new items"), fsx::fmt_size(plan.bytes)));
+            dot(ui, crate::gitstatus::GREEN, format!("{} here, replacing the older ones there (to the trash)", count(plan.update.len(), "newer file", "newer files")));
+            if extra > 0 {
+                ui.horizontal(|ui| {
+                    let (r, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+                    checkbox_glyph(ui.painter(), r, st.mirror, &pal);
+                    crate::ui::note_control(ui, r, "mirror");
+                    let t = ui.add(egui::Label::new(egui::RichText::new(format!("Mirror: also move {} only there to the trash", count(extra, "item", "items"))).color(if st.mirror { pal.danger } else { pal.text })).sense(Sense::click()));
+                    if resp.clicked() || t.clicked() {
+                        st.mirror = !st.mirror;
+                    }
+                });
+            }
+        });
+        // Every change, as it will be made, the folder there each lands in.
+        let rel = |p: &Path| p.strip_prefix(&st.to).map_or_else(|_| p.display().to_string(), |r| r.display().to_string());
+        let rows: Vec<(&str, Color32, String)> = plan
+            .copy
+            .iter()
+            .map(|(_, d)| ("New", pal.accent, rel(d)))
+            .chain(plan.update.iter().map(|(_, d)| ("Newer", crate::gitstatus::GREEN, rel(d))))
+            .chain(plan.extra.iter().filter(|_| st.mirror).map(|d| ("Trash", pal.danger, rel(d))))
+            .collect();
+        group_label(ui, &format!("In “{}”", name(&st.to)), &pal);
+        let h = (rows.len() as f32 * 24.0).min(fit_list(ctx, 240.0, 260.0));
+        egui::ScrollArea::vertical().id_salt("sync-list").max_height(h).min_scrolled_height(h).auto_shrink([false, true]).show_rows(ui, 24.0, rows.len(), |ui, range| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (tag, col, path) in &rows[range] {
+                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+                let chip = Rect::from_min_size(pos2(r.left() + 4.0, r.center().y - 8.0), vec2(48.0, 16.0));
+                ui.painter().rect_filled(chip, CornerRadius::same(8), col.gamma_multiply(0.18));
+                ui.painter().text(chip.center(), Align2::CENTER_CENTER, *tag, FontId::proportional(10.5), *col);
+                let g = crate::listing::elided_tail(ui, path, FontId::proportional(12.5), r.width() - 64.0, pal.text);
+                ui.painter().galley(pos2(chip.right() + 8.0, r.center().y - g.size().y / 2.0), g, pal.text);
+            }
+        });
+        let mut keys = vec![("Enter", "sync")];
+        if extra > 0 {
+            keys.push(("M", "mirror"));
+        }
+        keys.push(("Esc", "cancel"));
+        ui.add_space(4.0);
+        hints(ui, &keys, &pal);
+        dialog_buttons(ui, |ui| {
+            if primary_button(ui, "Sync", job.is_some(), &pal).clicked() {
+                start = true;
+            }
+            if plain_button(ui, "Cancel", &pal).clicked() {
+                close = true;
+            }
+        });
+    });
+    if start {
+        if let Some(kind) = st.job() {
+            app.actions.push(Action::StartJob(kind));
+        }
+        return false;
+    }
+    !(close || clicked_outside(ctx, rect))
 }
 
 fn user_name(uid: u32, file: &str) -> String {

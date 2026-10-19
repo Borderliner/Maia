@@ -8108,3 +8108,48 @@ fn diffs_side_by_side() {
     assert_eq!(changed_span("same", "same"), ((4, 4), (4, 4)));
     assert_eq!(changed_span("é1", "é2"), ((2, 3), (2, 3)), "cut at character boundaries");
 }
+
+/// Sync all the way down: what the other side lacks copied, newer files over older ones
+/// (the older to the trash), mirroring sends what only it has to the trash, folders that
+/// differ inside are found, and Undo puts it all back as one step.
+#[test]
+fn sync_plans_copies_and_undoes() {
+    use crate::compare::{differs, plan};
+    let ctx = egui::Context::default();
+    let d = tmpdir("sync");
+    let (a, b) = (d.join("a"), d.join("b"));
+    touch(&a.join("same.txt"), "same");
+    touch(&b.join("same.txt"), "same");
+    let t = std::fs::metadata(a.join("same.txt")).unwrap().modified().unwrap();
+    std::fs::File::options().write(true).open(b.join("same.txt")).unwrap().set_modified(t).unwrap();
+    touch(&a.join("sub/new.txt"), "new");
+    touch(&a.join("sub/deep/edit.txt"), "newer");
+    touch(&b.join("sub/deep/edit.txt"), "old");
+    let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+    std::fs::File::options().write(true).open(b.join("sub/deep/edit.txt")).unwrap().set_modified(old).unwrap();
+    touch(&a.join("fresh/inner.txt"), "x");
+    touch(&b.join("sub/only-there.txt"), "extra");
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    assert!(differs(&a.join("sub"), &b.join("sub"), &stop));
+    assert!(!differs(&a.join("sub/deep"), &a.join("sub/deep"), &stop));
+    let p = plan(&a, &b, &stop);
+    assert_eq!(p.copy, vec![(a.join("fresh"), b.join("fresh")), (a.join("sub/new.txt"), b.join("sub/new.txt"))]);
+    assert_eq!(p.update, vec![(a.join("sub/deep/edit.txt"), b.join("sub/deep/edit.txt"))]);
+    assert_eq!(p.extra, vec![b.join("sub/only-there.txt")]);
+    let copies = p.copy.iter().chain(&p.update).cloned().collect();
+    let j = ops::spawn(1, OpKind::Sync { copies, remove: p.extra.clone() }, ctx);
+    wait_job(&j);
+    let g = j.progress.lock().unwrap();
+    assert!(g.errors.is_empty(), "{:?}", g.errors);
+    assert_eq!(std::fs::read_to_string(b.join("sub/deep/edit.txt")).unwrap(), "newer");
+    assert!(b.join("fresh/inner.txt").exists() && b.join("sub/new.txt").exists() && !b.join("sub/only-there.txt").exists());
+    assert!(!differs(&a, &b, &stop), "the same now");
+    let kind = crate::app::UndoKind::Synced(g.produced.iter().map(|x| x.1.clone()).collect(), g.replaced.clone(), g.gone.clone());
+    drop(g);
+    let mut app = crate::app::App::new(&egui::Context::default(), vec![d.clone()]);
+    app.undo.push(crate::app::UndoEntry { label: "Sync".into(), kind });
+    assert!(app.undo_last());
+    assert_eq!(std::fs::read_to_string(b.join("sub/deep/edit.txt")).unwrap(), "old");
+    assert!(!b.join("fresh").exists() && !b.join("sub/new.txt").exists() && b.join("sub/only-there.txt").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}

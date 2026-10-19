@@ -39,6 +39,9 @@ pub enum OpKind {
     Convert { srcs: Vec<PathBuf>, to: crate::convert::Target, out: Option<PathBuf>, tools: crate::drives::Tools },
     /// Each file moved into its own folder (made when missing): Tidy Folder.
     Sort { moves: Vec<(PathBuf, PathBuf)>, label: String },
+    /// A folder synced into another: each (from, to) copied, over what is at `to` (which
+    /// goes to the trash); `remove` to the trash after (mirroring).
+    Sync { copies: Vec<(PathBuf, PathBuf)>, remove: Vec<PathBuf> },
 }
 
 impl OpKind {
@@ -53,6 +56,7 @@ impl OpKind {
             OpKind::Admin { .. } => "Working as administrator",
             OpKind::Convert { .. } => "Converting",
             OpKind::Sort { .. } => "Moving",
+            OpKind::Sync { .. } => "Syncing",
         }
     }
 }
@@ -107,6 +111,7 @@ pub fn spawn(id: u64, kind: OpKind, ctx: egui::Context) -> Job {
         OpKind::Trash { paths } | OpKind::Delete { paths } | OpKind::Extract { members: paths, .. } => paths.len(),
         OpKind::Admin { .. } => 1,
         OpKind::Sort { moves, .. } => moves.len(),
+        OpKind::Sync { copies, remove } => copies.len() + remove.len(),
     };
     let label = match &kind {
         OpKind::Extract { archive, members, .. } if members.is_empty() => format!("Extracting {}", name_of(archive)),
@@ -114,6 +119,7 @@ pub fn spawn(id: u64, kind: OpKind, ctx: egui::Context) -> Job {
         OpKind::Admin { task, .. } => task.label(),
         OpKind::Convert { srcs, to, .. } => crate::convert::label(srcs, *to),
         OpKind::Sort { label, .. } => label.clone(),
+        OpKind::Sync { copies, .. } => format!("Syncing into {}", copies.first().and_then(|c| c.1.parent()).map(name_of).unwrap_or_default()),
         // One file by its name, several by their number: "Moving notes.txt to the trash".
         _ => {
             let first = match &kind {
@@ -248,6 +254,45 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                     p.lock().unwrap().made.extend(new.into_iter().rev());
                 }
                 move_one(s, dest, Conflict::KeepBoth, p, cancel, ctx);
+            }
+        }
+        OpKind::Sync { copies, remove } => {
+            {
+                let mut g = p.lock().unwrap();
+                g.total_bytes = copies.iter().map(|(s, _)| tree_size(s)).sum();
+                g.total_items = copies.len() + remove.len();
+            }
+            for (s, d) in copies {
+                if cancel.stop() {
+                    return;
+                }
+                // Over something: written beside it and swapped in once whole.
+                let over = fs::symlink_metadata(d).is_ok();
+                let to = if over { unique_dest(d.parent().unwrap_or(d), &format!(".{}.maia-part", name_of(d))) } else { d.clone() };
+                match copy_tree(s, &to, p, cancel, ctx, false).and_then(|_| if over { swap_in(&to, d) } else { Ok(()) }) {
+                    Ok(()) => {
+                        let mut g = p.lock().unwrap();
+                        g.produced.push((s.clone(), d.clone()));
+                        if over {
+                            g.replaced.push(d.clone());
+                        }
+                    }
+                    Err(e) => {
+                        let _ = remove_tree(&to);
+                        p.lock().unwrap().errors.push(format!("{}: {e}", s.display()));
+                    }
+                }
+                p.lock().unwrap().done_items += 1;
+            }
+            for r in remove {
+                if cancel.stop() {
+                    return;
+                }
+                match crate::trashcan::delete(r) {
+                    Ok(()) => p.lock().unwrap().gone.push(r.clone()),
+                    Err(e) => p.lock().unwrap().errors.push(format!("{}: {e}", r.display())),
+                }
+                p.lock().unwrap().done_items += 1;
             }
         }
         OpKind::Trash { paths } => {
@@ -394,6 +439,10 @@ impl Changed {
             }
             OpKind::Trash { paths } | OpKind::Delete { paths } | OpKind::Admin { task: Task::Delete { paths }, .. } => parents(&mut c.left, paths),
             OpKind::Compress { out, .. } => Changed::add(&mut c.arrived, out.parent()),
+            OpKind::Sync { copies, remove } => {
+                copies.iter().for_each(|(_, d)| Changed::add(&mut c.arrived, d.parent()));
+                parents(&mut c.left, remove);
+            }
             OpKind::Convert { srcs, .. } => Changed::add(&mut c.arrived, srcs.first().and_then(|s| s.parent())),
             OpKind::Admin { task: Task::NewFolder(p) | Task::NewFile(p), .. } => Changed::add(&mut c.arrived, p.parent()),
             OpKind::Admin { task: Task::Rename { from, .. }, .. } => Changed::add(&mut c.arrived, from.parent()),

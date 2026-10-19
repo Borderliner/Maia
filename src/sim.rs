@@ -6694,6 +6694,9 @@ mod journeys {
         let home = fixture("compare");
         let (a, b) = (home.join("A"), home.join("B"));
         crate::tests::compare_fixture(&a, &b);
+        // A difference two levels down, in a folder both sides have.
+        std::fs::create_dir_all(a.join("both/deep")).unwrap();
+        std::fs::write(a.join("both/deep/inner.txt"), "inner").unwrap();
         let mut s = Sim::new(&a, vec2(1280.0, 800.0));
         s.act("key ctrl+shift+s");
         s.settle();
@@ -6708,7 +6711,7 @@ mod journeys {
         assert_eq!(mark(&b.join("size.txt")), Some(Diff::Size));
         assert_eq!(mark(&b.join("only-b.txt")), Some(Diff::Only));
         assert_eq!(mark(&a.join("same.txt")), None);
-        assert_eq!(mark(&a.join("both")), None);
+        wait_until(&mut s, "folders looked through", 10, |_| mark(&a.join("both")) == Some(Diff::Inside) && mark(&b.join("both")) == Some(Diff::Inside));
         for v in [ViewTree, ViewList, ViewMedium, ViewLarge, ViewXL, ViewDetails] {
             s.cmd(v);
             look(&mut s, &format!("compare {v:?}"));
@@ -6719,24 +6722,31 @@ mod journeys {
         palette_run(&mut s, "Select Differences");
         let mut sel: Vec<String> = s.tab().selected_paths().iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
         sel.sort();
-        assert_eq!(sel, vec!["folder-a", "kind", "newer.txt", "only-a.txt", "size.txt"]);
-        // Sync copies what is missing or newer (not the file that only differs in size);
-        // two names exist there already, so the conflict dialog asks.
+        assert_eq!(sel, vec!["both", "folder-a", "kind", "newer.txt", "only-a.txt", "size.txt"]);
+        // Sync shows what it will do, all the way down, before doing it: what is missing
+        // or newer (not the file that only differs in size), and with Mirror what only
+        // the other side has.
         palette_run(&mut s, "Sync To Other Panel");
-        for _ in 0..2 {
-            wait_until(&mut s, "conflict dialog", 10, |s| matches!(s.app.popup, Popup::Conflict(_)));
-            s.click_text("Replace");
-            s.settle();
-        }
-        wait_until(&mut s, "sync copied", 10, |_| b.join("only-a.txt").exists() && b.join("folder-a").is_dir() && b.join("kind").is_file());
+        wait_until(&mut s, "the plan", 10, |s| matches!(&s.app.popup, Popup::Sync(st) if st.plan.is_some()));
+        let Popup::Sync(st) = &s.app.popup else { unreachable!() };
+        let plan = st.plan.as_ref().unwrap();
+        assert_eq!((plan.copy.len(), plan.update.len(), plan.extra.len()), (3, 2, 1), "{plan:?}");
+        assert!(some_text_at(&s, "both/deep") && some_text_at(&s, "only-a.txt"), "the changes listed");
+        s.act("key m");
+        let popup = crate::ui::POPUPS.with(|p| p.borrow().last().copied()).unwrap_or_else(|| s.fail("the dialog"));
+        assert!(s.texts.iter().any(|(r, t)| t == "only-b.txt" && popup.contains_rect(*r)), "mirroring lists what goes");
+        s.shot("sync-preview");
+        look(&mut s, "sync preview");
+        s.act("key Enter");
+        wait_until(&mut s, "synced", 10, |_| b.join("only-a.txt").exists() && b.join("folder-a").is_dir() && b.join("kind").is_file() && b.join("both/deep/inner.txt").exists() && !b.join("only-b.txt").exists());
         assert_eq!(std::fs::read_to_string(b.join("newer.txt")).unwrap(), "new");
         assert_eq!(std::fs::read_to_string(b.join("size.txt")).unwrap(), "short", "a size difference alone is not synced");
-        wait_until(&mut s, "marks follow the sync", 10, |_| mark(&a.join("newer.txt")).is_none() && mark(&a.join("only-a.txt")).is_none());
-        assert_eq!(mark(&b.join("only-b.txt")), Some(Diff::Only));
+        wait_until(&mut s, "marks follow the sync", 10, |_| mark(&a.join("newer.txt")).is_none() && mark(&a.join("only-a.txt")).is_none() && mark(&a.join("both")).is_none());
         look(&mut s, "after sync");
-        // Undo removes the copies again, and the marks come back.
+        // Undo takes the whole sync back: copies gone, replaced and mirrored back.
         s.act("key ctrl+z");
-        wait_until(&mut s, "sync undone", 10, |s| !b.join("only-a.txt").exists() && mark(&a.join("only-a.txt")) == Some(Diff::Only));
+        wait_until(&mut s, "sync undone", 10, |s| !b.join("only-a.txt").exists() && b.join("only-b.txt").exists() && mark(&a.join("only-a.txt")) == Some(Diff::Only));
+        assert_eq!(std::fs::read_to_string(b.join("newer.txt")).unwrap(), "old");
         // Either panel moving clears every mark.
         s.act("key Tab");
         s.act("key alt+ArrowUp");
