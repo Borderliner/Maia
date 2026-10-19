@@ -24,6 +24,38 @@ struct Inline {
     stale: bool,
     /// Each hunk's wrapped rows.
     wrapped: Vec<Option<crate::inspector::Wrapped>>,
+    /// Lines picked in one hunk, to stage or unstage on their own.
+    picked: Option<Picked>,
+}
+
+/// Changed lines picked in a hunk (by their place in its lines), and the one a Shift
+/// click picks from.
+struct Picked {
+    hunk: usize,
+    lines: Vec<bool>,
+    anchor: usize,
+}
+
+impl Picked {
+    /// A click on line `at` of `hunk`: it is picked or let go, or with Shift the
+    /// changes from the last one clicked to it are picked. None when nothing is left.
+    fn click(p: Option<Picked>, hunk: usize, lines: &[String], at: usize, shift: bool) -> Option<Picked> {
+        let mut p = p.filter(|p| p.hunk == hunk).unwrap_or(Picked { hunk, lines: vec![false; lines.len()], anchor: at });
+        if shift {
+            let (a, b) = (p.anchor.min(at), p.anchor.max(at));
+            for (k, l) in lines.iter().enumerate() {
+                p.lines[k] = (a..=b).contains(&k) && matches!(l.as_bytes().first(), Some(b'+' | b'-'));
+            }
+        } else {
+            p.lines[at] = !p.lines[at];
+            p.anchor = at;
+        }
+        p.lines.contains(&true).then_some(p)
+    }
+
+    fn count(&self) -> usize {
+        self.lines.iter().filter(|&&on| on).count()
+    }
 }
 
 /// A row of the page's list.
@@ -55,7 +87,7 @@ pub struct Changes {
     /// What was typed before Amend filled the fields with the last commit's message.
     typed: Option<(String, String)>,
     amend_job: Option<Slot<Option<(String, String)>>>,
-    op: Option<(Slot<Result<String, String>>, bool)>,
+    op: Option<Slot<(Op, Result<String, String>)>>,
     queued: Option<Op>,
     /// The last change's outcome, said under the commit button.
     pub said: Option<Result<String, String>>,
@@ -157,8 +189,8 @@ impl Changes {
         }
     }
 
-    /// Take in what the workers finished. True when a commit was made (the graph has a
-    /// new head).
+    /// Take in what the workers finished. True when HEAD may have moved (a commit, or a
+    /// merge, rebase, cherry-pick or revert carried on): the graph is read again.
     pub fn poll(&mut self, ctx: &egui::Context) -> bool {
         if self.work.is_none() && self.job.is_none() && self.seen == 0 {
             self.seen = 1;
@@ -187,11 +219,11 @@ impl Changes {
             }
             self.sel = self.sel.min(self.rows().len().saturating_sub(1));
         }
-        let mut committed = false;
-        if let Some((r, commit)) = self.op.as_ref().and_then(|(s, c)| s.lock().ok()?.take().map(|r| (r, *c))) {
+        let mut moved = false;
+        if let Some((op, r)) = take(&self.op) {
             self.op = None;
-            if commit && r.is_ok() {
-                committed = true;
+            moved = op.moved(&r);
+            if matches!(op, Op::Commit { .. }) && r.is_ok() {
                 self.done = true;
                 self.summary.clear();
                 self.body.clear();
@@ -204,10 +236,12 @@ impl Changes {
         }
         if let Some(op) = self.queued.take() {
             if self.op.is_none() {
-                let commit = matches!(op, Op::Commit { .. });
                 let root = self.root.clone();
                 self.said = None;
-                self.op = Some((spawn(ctx, move || crate::gitwork::run(&root, &op)), commit));
+                self.op = Some(spawn(ctx, move || {
+                    let r = crate::gitwork::run(&root, &op);
+                    (op, r)
+                }));
             }
         }
         if let Some(m) = take(&self.amend_job) {
@@ -231,11 +265,14 @@ impl Changes {
                     if x.wrapped.len() != d.hunks.len() || x.diff.as_ref().is_some_and(|o| o.lines() != d.lines()) {
                         x.wrapped = (0..d.hunks.len()).map(|_| None).collect();
                     }
+                    // Picked lines stay picked while their hunk reads the same.
+                    let same = |p: &Picked| x.diff.as_ref().and_then(|o| o.hunks.get(p.hunk)).map(|h| &h.lines) == d.hunks.get(p.hunk).map(|h| &h.lines);
+                    x.picked = x.picked.take().filter(same);
                     x.diff = Some(d);
                 }
             }
         }
-        committed
+        moved
     }
 
     fn set_amend(&mut self, on: bool, ctx: &egui::Context) {
@@ -274,7 +311,7 @@ impl Changes {
             Some(k) => {
                 self.inline.remove(k);
             }
-            None => self.inline.push(Inline { staged, path: path.to_string(), diff: None, job: None, stale: false, wrapped: vec![] }),
+            None => self.inline.push(Inline { staged, path: path.to_string(), diff: None, job: None, stale: false, wrapped: vec![], picked: None }),
         }
     }
 
@@ -420,7 +457,7 @@ enum Act {
     Op(Op),
     Discard(Change),
     Amend(bool),
-    /// Give up on the merge or rebase, once asked.
+    /// Give up on what is in progress, once asked.
     Abort(crate::gitsync::Doing),
 }
 
@@ -468,7 +505,8 @@ pub fn page(ui: &mut Ui, body: Rect, c: &mut Changes, wrap: bool, env: &mut Env)
     let work = c.work.take();
     ScrollArea::vertical().auto_shrink([false, false]).id_salt("git_changes").show(&mut inner, |ui| {
         ui.add_space(6.0);
-        // A merge or rebase stopped part way: what is left, and the ways out.
+        // A merge, rebase, cherry-pick or revert stopped part way: what is left, and the
+        // ways out.
         if let Some(d) = work.as_ref().and_then(|w| w.doing) {
             let left = work.as_ref().map_or(0, |w| w.unstaged.iter().filter(|f| f.status == b'U').count());
             egui::Frame::NONE.fill(pal.accent.gamma_multiply(0.12)).stroke(Stroke::new(1.0, pal.accent.gamma_multiply(0.45))).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
@@ -487,7 +525,7 @@ pub fn page(ui: &mut Ui, body: Rect, c: &mut Changes, wrap: bool, env: &mut Env)
                         if b.on_hover_text(tip).on_disabled_hover_text(tip).clicked() {
                             act = Some(Act::Op(Op::Continue));
                         }
-                        if d == crate::gitsync::Doing::Rebase {
+                        if d != crate::gitsync::Doing::Merge {
                             let s = crate::popups::plain_button(ui, "Skip", &pal);
                             crate::ui::note_control(ui, s.rect, "conflict skip");
                             if s.on_hover_text("Leave out the commit it stopped at").clicked() && !busy {
@@ -804,6 +842,17 @@ pub fn page(ui: &mut Ui, body: Rect, c: &mut Changes, wrap: bool, env: &mut Env)
                             }
                             hr = l - 6.0;
                         }
+                        // Lines picked in this hunk go in or out on their own.
+                        let can_pick = h.splits() && f.status != b'U';
+                        if let Some(p) = x.picked.as_ref().filter(|p| p.hunk == k && can_pick && !busy) {
+                            let n = p.count();
+                            let (label, what) = if staged { ("Unstage", "unstage lines") } else { ("Stage", "stage lines") };
+                            let (hit, l) = text_button(ui, id.with(("lines", k)), hr, head.center().y, &format!("{label} {n} line{}", if n == 1 { "" } else { "s" }), what, true, &small, &pal);
+                            if hit {
+                                act = h.lines_patch(&p.lines, staged).map(|patch| Act::Op(Op::Lines { patch, staged, n }));
+                            }
+                            hr = l - 6.0;
+                        }
                         let g = crate::listing::elided(ui, &h.head, mono.clone(), (hr - head.left() - 8.0).max(8.0), pal.text_dim);
                         ui.painter().galley(pos2(head.left() + 6.0, head.center().y - g.size().y / 2.0), g, pal.text_dim);
                         let bh = hunk_h(x, k, h.lines.len());
@@ -816,7 +865,12 @@ pub fn page(ui: &mut Ui, body: Rect, c: &mut Changes, wrap: bool, env: &mut Env)
                         let mut cui = ui.new_child(UiBuilder::new().max_rect(b).id_salt(("whunk", staged, &f.path, k)));
                         cui.set_clip_rect(b.intersect(clip));
                         let wrapped = if wrap { x.wrapped.get_mut(k) } else { None };
-                        crate::inspector::text_view(&mut cui, b, &h.lines, false, h.spans.as_deref(), false, wrapped, code, &pal, true, spacing);
+                        let mut clicked = None;
+                        let pick = can_pick.then(|| (x.picked.as_ref().filter(|p| p.hunk == k).map_or(&[][..], |p| &p.lines[..]), &mut clicked));
+                        crate::inspector::text_view_ex(&mut cui, b, &h.lines, false, h.spans.as_deref(), false, wrapped, code, &pal, true, spacing, crate::inspector::TextOpts { pick, ..Default::default() });
+                        if let Some((at, shift)) = clicked {
+                            x.picked = Picked::click(x.picked.take(), k, &h.lines, at, shift);
+                        }
                     }
                     if d.cut {
                         ui.painter().text(pos2(left + 6.0, hy + row_h / 2.0), Align2::LEFT_CENTER, "Cut at 1 MB: stage the whole file", small.clone(), pal.text_dim);

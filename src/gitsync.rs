@@ -1,5 +1,5 @@
 //! Sending and getting work: fetch, pull and push for the branch HEAD is on, and the
-//! conflicts a merge or a rebase stops at, one at a time. git does the work on a worker
+//! conflicts a merge, rebase, cherry-pick or revert stops at, one at a time. git does the work on a worker
 //! and never asks for anything at a terminal; what it says is put in plain words.
 
 use std::path::Path;
@@ -10,7 +10,8 @@ use std::time::Duration;
 pub const DIVERGED: &str = "\u{1}diverged";
 /// A push the remote refused: it has commits this branch doesn't.
 pub const BEHIND: &str = "\u{1}behind";
-/// A merge or rebase that stopped at conflicts: the app opens the Changes page.
+/// A merge, rebase, cherry-pick or revert that stopped at conflicts: the app opens the
+/// Changes page.
 pub const CONFLICTS: &str = "\u{1}conflicts";
 
 /// Network work: slow links and large fetches get their time, a hang doesn't last.
@@ -46,7 +47,7 @@ pub fn explain(e: &str) -> String {
 }
 
 /// The branch HEAD is on, or None when it is detached.
-fn branch(root: &Path) -> Option<String> {
+pub(crate) fn branch(root: &Path) -> Option<String> {
     out(root, &["symbolic-ref", "-q", "--short", "HEAD"])
 }
 
@@ -188,7 +189,7 @@ pub fn doing(root: &Path) -> Option<Doing> {
     }
 }
 
-fn unmerged(root: &Path) -> usize {
+pub(crate) fn unmerged(root: &Path) -> usize {
     out(root, &["diff", "--name-only", "--diff-filter=U"]).map_or(0, |s| s.lines().count())
 }
 
@@ -218,22 +219,30 @@ pub fn go_on(root: &Path) -> Result<String, String> {
     }
 }
 
-/// Give up on it: the work tree goes back to where it was before.
-pub fn abort(root: &Path) -> Result<String, String> {
-    let d = doing(root).ok_or("Nothing is in progress.")?;
-    let sub = match d {
+/// The git command that carries it on, or gives it up.
+fn command(d: Doing) -> &'static str {
+    match d {
         Doing::Rebase => "rebase",
         Doing::Merge => "merge",
         Doing::CherryPick => "cherry-pick",
         Doing::Revert => "revert",
-    };
-    exec(root, &[sub, "--abort"], QUICK).map_err(|e| explain(&e))?;
+    }
+}
+
+/// Give up on it: the work tree goes back to where it was before.
+pub fn abort(root: &Path) -> Result<String, String> {
+    let d = doing(root).ok_or("Nothing is in progress.")?;
+    exec(root, &[command(d), "--abort"], QUICK).map_err(|e| explain(&e))?;
     Ok(format!("Stopped {} and went back", d.label().to_lowercase()))
 }
 
-/// Leave out the commit a rebase stopped at.
+/// Leave out the commit a rebase, cherry-pick or revert stopped at.
 pub fn skip(root: &Path) -> Result<String, String> {
-    exec(root, &["rebase", "--skip"], QUICK).map_err(|e| explain(&e))?;
+    let d = doing(root).ok_or("Nothing is in progress.")?;
+    if d == Doing::Merge {
+        return Err("A merge has no commit to skip.".into());
+    }
+    exec(root, &[command(d), "--skip"], QUICK).map_err(|e| explain(&e))?;
     if doing(root).is_some() && unmerged(root) > 0 {
         return Err(CONFLICTS.into());
     }

@@ -2459,11 +2459,14 @@ pub(crate) struct TextOpts<'a> {
     pub reveal: Option<(usize, usize)>,
     /// Given the rows shown.
     pub seen: Option<&'a mut (usize, usize)>,
+    /// A diff whose changed lines can be picked: those picked, and where the one
+    /// clicked this frame goes (with whether Shift was held).
+    pub pick: Option<(&'a [bool], &'a mut Option<(usize, bool)>)>,
 }
 
 impl Default for TextOpts<'_> {
     fn default() -> Self {
-        TextOpts { blame: None, first: 1, stick: false, to_end: false, mark: None, window: None, hits: None, reveal: None, seen: None }
+        TextOpts { blame: None, first: 1, stick: false, to_end: false, mark: None, window: None, hits: None, reveal: None, seen: None, pick: None }
     }
 }
 
@@ -2537,9 +2540,19 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
         }
     }
     let now = crate::blame::now();
+    let mut pick = opts.pick;
+    let picked: &[bool] = pick.as_ref().map_or(&[], |p| p.0);
     area.auto_shrink([false, false]).stick_to_bottom(opts.stick).id_salt("insp_text").show_viewport(&mut inner, |ui, vp| {
         let w = if rows.is_some() { vp.width() } else { (2000.0 * size * 0.62).min(lines.iter().map(|l| l.len()).max().unwrap_or(0) as f32 * size * 0.62 + gutter + 20.0).max(vp.width()) };
-        let (r, _) = ui.allocate_exact_size(vec2(w, n as f32 * row_h + 8.0), Sense::hover());
+        let (r, resp) = ui.allocate_exact_size(vec2(w, n as f32 * row_h + 8.0), if pick.is_some() { Sense::click() } else { Sense::hover() });
+        // The changed line under the pointer, when lines can be picked: a click picks it.
+        let hover_line = resp.hover_pos().filter(|_| pick.is_some()).map(|hp| ((hp.y - r.top()).max(0.0) / row_h) as usize).filter(|&i| i < total).map(|i| rows.map_or(i, |rw| rw[i].0 as usize)).filter(|&li| matches!(lines[li].as_bytes().first(), Some(b'+' | b'-')));
+        if let (Some(li), Some((_, slot))) = (hover_line, pick.as_mut()) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            if resp.clicked() {
+                **slot = Some((li, ui.input(|i| i.modifiers.shift)));
+            }
+        }
         if opts.to_end && n > 0 {
             // At once: a followed log jumps to its newest line, as a terminal does.
             ui.scroll_to_rect_animation(Rect::from_min_size(pos2(r.left(), r.bottom() - row_h), vec2(1.0, row_h)), Some(egui::Align::BOTTOM), egui::style::ScrollAnimation::none());
@@ -2632,6 +2645,13 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
                     p.rect_filled(Rect::from_min_size(pos2(r.left(), top), vec2(r.width(), row_h)), CornerRadius::ZERO, pal.accent.gamma_multiply(0.07));
                 }
                 crate::findbar::paint_hits(p, hits, cur, li as u32, a, b, line, r.left() + gutter, top, row_h, cw, pal);
+            }
+            // A picked line: the accent over its tint, and a bar at its edge.
+            if picked.get(li).copied().unwrap_or(false) {
+                p.rect_filled(Rect::from_min_size(pos2(r.left(), top), vec2(r.width(), row_h)), CornerRadius::ZERO, pal.accent.gamma_multiply(0.2));
+                p.rect_filled(Rect::from_min_size(pos2(r.left(), top), vec2(3.0, row_h)), CornerRadius::ZERO, pal.accent);
+            } else if hover_line == Some(li) {
+                p.rect_filled(Rect::from_min_size(pos2(r.left(), top), vec2(r.width(), row_h)), CornerRadius::ZERO, pal.hover);
             }
             if mark == Some(b'@') || mark == Some(b'\\') {
                 p.text(pos2(r.left() + gutter, y), Align2::LEFT_TOP, &line[a..b], font.clone(), pal.text_dim);

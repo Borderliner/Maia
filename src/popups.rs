@@ -195,6 +195,12 @@ pub enum Popup {
     Branches(BranchState),
     /// One stash: apply, pop, drop.
     Stash { panel: u64, root: PathBuf, stash: crate::gitwork::Stash, anchor: Pos2, sel: usize },
+    /// One local branch of the branch menu: switch, rename, delete.
+    Branch { root: PathBuf, branch: crate::gitwork::Branch, anchor: Pos2, sel: usize },
+    /// A commit in the history.
+    GitCommit(CommitMenu),
+    /// A new branch or tag at a commit.
+    NewRef(NewRef),
     /// Something that went wrong, said in full (git's own words).
     Notice { title: String, text: String },
     DropMenu { paths: Vec<PathBuf>, dest: PathBuf, pos: Pos2 },
@@ -238,6 +244,35 @@ pub struct BranchState {
     pub sel: usize,
     keyed: bool,
     opened: Instant,
+}
+
+/// A commit's menu in the history, and what it acts on.
+pub struct CommitMenu {
+    pub root: PathBuf,
+    pub hash: String,
+    pub subject: String,
+    /// A merge: picked and reverted against its first parent.
+    pub merge: bool,
+    /// HEAD is on it.
+    pub head: bool,
+    pub tags: Vec<String>,
+    /// The branch HEAD is on ("HEAD" when on none).
+    pub branch: String,
+    pub pos: Pos2,
+    /// The keyboard's item: none (`usize::MAX`) until the keys are used.
+    pub sel: usize,
+}
+
+/// Create branch here or Create tag here: a name, and for a tag a message that makes it
+/// an annotated one.
+pub struct NewRef {
+    pub root: PathBuf,
+    pub at: String,
+    pub subject: String,
+    pub tag: bool,
+    pub name: String,
+    pub message: String,
+    focus: bool,
 }
 
 /// The Search by Meaning window: a question, and the passages closest to it in meaning.
@@ -384,6 +419,9 @@ impl Popup {
             Popup::GitFile { .. } => "GitFile",
             Popup::Branches(..) => "Branches",
             Popup::Stash { .. } => "Stash",
+            Popup::Branch { .. } => "Branch",
+            Popup::GitCommit(..) => "GitCommit",
+            Popup::NewRef(..) => "NewRef",
             Popup::Notice { .. } => "Notice",
             Popup::DropMenu { .. } => "DropMenu",
         }
@@ -951,6 +989,9 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::GitFile { panel, file, pos } => git_file_menu(app, ctx, *panel, *file, *pos),
         Popup::Branches(st) => branch_menu(app, ctx, st),
         Popup::Stash { panel, root, stash, anchor, sel } => stash_menu(app, ctx, *panel, root, stash, *anchor, sel),
+        Popup::Branch { root, branch, anchor, sel } => branch_actions(app, ctx, root, branch, *anchor, sel),
+        Popup::GitCommit(m) => commit_menu(app, ctx, m),
+        Popup::NewRef(st) => new_ref(app, ctx, st),
         Popup::Notice { title, text } => notice(app, ctx, title, text),
         Popup::DropMenu { paths, dest, pos } => drop_menu(app, ctx, paths, dest, *pos),
     };
@@ -5644,7 +5685,9 @@ fn paint_counts(p: &egui::Painter, right: f32, cy: f32, ahead: u32, behind: u32,
 
 /// The branch chip's menu: the history first, then the branches (the current one
 /// marked, each with what it has to push and pull), a new branch, the remote branches
-/// nothing tracks yet, the stashes and the other work trees. Up, Down and Enter work it.
+/// nothing tracks yet, the stashes and the other work trees. Up, Down and Enter work it;
+/// a branch has its own menu on a right click, and F2 and Delete rename and delete the
+/// selected one.
 fn branch_menu(app: &mut App, ctx: &egui::Context, st: &mut BranchState) -> bool {
     let pal = app.pal;
     let k = take_keys(ctx);
@@ -5677,6 +5720,20 @@ fn branch_menu(app: &mut App, ctx: &egui::Context, st: &mut BranchState) -> bool
     let history = app.panels.get(&st.panel).and_then(|p| p.inspector.as_ref()).is_some_and(|i| i.git.is_some());
     let k_enter = k.enter;
     let mut pick = if k.enter { items.get(st.sel).copied() } else { None };
+    // F2 renames the selected branch, Delete deletes it.
+    if let (Some(BranchItem::Branch(b)), Some(r)) = (items.get(st.sel).filter(|_| st.keyed), &st.refs) {
+        let (f2, del) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::F2), i.consume_key(Modifiers::NONE, Key::Delete)));
+        let b = &r.local[*b];
+        if f2 {
+            rename_branch(app, &st.root, b.name.clone());
+            return false;
+        }
+        if del && !b.current {
+            delete_branch(app, &st.root, b.name.clone());
+            return false;
+        }
+    }
+    let mut actions = None;
     // Opens upward from the chip, hanging from its lower edge.
     let w = 300.0;
     let pos = pos2(st.anchor.right() - w + 8.0, st.anchor.top() - 4.0);
@@ -5749,6 +5806,9 @@ fn branch_menu(app: &mut App, ctx: &egui::Context, st: &mut BranchState) -> bool
             if resp.clicked() {
                 pick = Some(*it);
             }
+            if let (true, BranchItem::Branch(b), Some(r)) = (resp.secondary_clicked(), *it, &refs) {
+                actions = Some((r.local[b].clone(), ctx.pointer_interact_pos().unwrap_or(resp.rect.center())));
+            }
         }
         if refs.is_none() {
             ui.horizontal(|ui| {
@@ -5758,6 +5818,10 @@ fn branch_menu(app: &mut App, ctx: &egui::Context, st: &mut BranchState) -> bool
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
         }
     });
+    if let Some((branch, anchor)) = actions {
+        app.popup = Popup::Branch { root: st.root.clone(), branch, anchor, sel: usize::MAX };
+        return false;
+    }
     let Some(it) = pick else { return !clicked_outside(ctx, rect) };
     let (panel, root) = (st.panel, st.root.clone());
     let start = |app: &mut App, op: crate::gitwork::Op, title: String| crate::gitwork::start(&app.ctx, &root, op, title);
@@ -5820,11 +5884,7 @@ fn stash_menu(app: &mut App, ctx: &egui::Context, panel: u64, root: &Path, stash
     }
     let mut pick = if k.enter && *sel < ITEMS.len() { Some(*sel) } else { None };
     let (_, rect) = anchored(ctx, "stashmenu", anchor, 260.0, &pal, |ui| {
-        menu_heading(ui, &stash.sel, &pal);
-        let g = crate::listing::elided(ui, &stash.subject, FontId::proportional(11.5), ui.available_width() - 20.0, pal.text_dim);
-        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), g.size().y + 4.0), Sense::hover());
-        ui.painter().galley(pos2(r.left() + 10.0, r.top()), g, pal.text_dim);
-        menu_sep(ui, &pal);
+        menu_title(ui, &stash.sel, &stash.subject, &pal);
         for (i, label) in ITEMS.iter().enumerate() {
             let on = i == *sel;
             let resp = row(ui, 26.0, on, &pal, |ui, r| {
@@ -5847,6 +5907,218 @@ fn stash_menu(app: &mut App, ctx: &egui::Context, panel: u64, root: &Path, stash
             app.popup = Popup::confirm(msg, "Drop", Box::new(move |app| crate::gitwork::start(&app.ctx, &root, crate::gitwork::Op::StashDrop(s.clone()), format!("Couldn't drop {}", s.sel))));
         }
     }
+    false
+}
+
+/// A menu's heading: a name, and under it a dimmer line (a stash's or a commit's subject).
+fn menu_title(ui: &mut Ui, name: &str, sub: &str, pal: &Palette) {
+    menu_heading(ui, name, pal);
+    let g = crate::listing::elided(ui, sub, FontId::proportional(11.5), ui.available_width() - 20.0, pal.text_dim);
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), g.size().y + 4.0), Sense::hover());
+    ui.painter().galley(pos2(r.left() + 10.0, r.top()), g, pal.text_dim);
+    menu_sep(ui, pal);
+}
+
+/// One item of a small menu worked by Up, Down and Enter: marked when the keys are on
+/// it, dimmed when it can't be used.
+fn key_item(ui: &mut Ui, label: &str, on: bool, enabled: bool, pal: &Palette) -> egui::Response {
+    let resp = row(ui, 26.0, on, pal, |ui, r| {
+        let col = if !enabled { pal.text_dim.gamma_multiply(0.6) } else if on { pal.on_sel() } else { pal.text };
+        let g = crate::listing::elided(ui, label, FontId::proportional(13.0), r.width() - 20.0, col);
+        ui.painter().galley(pos2(r.left() + 10.0, r.center().y - g.size().y / 2.0), g, col);
+    });
+    crate::ui::note_control(ui, resp.rect, "menu item");
+    resp
+}
+
+/// A local branch renamed, its new name asked for.
+fn rename_branch(app: &mut App, root: &Path, from: String) {
+    let root = root.to_path_buf();
+    app.popup = Popup::prompt(
+        &format!("Rename {from}"),
+        from.clone(),
+        Box::new(move |app, to| {
+            if to.trim() != from {
+                crate::gitwork::start(&app.ctx, &root, crate::gitwork::Op::RenameBranch { to: to.trim().to_string(), from: from.clone() }, format!("Couldn't rename {from}"));
+            }
+        }),
+    );
+}
+
+/// A local branch deleted when its commits are on another branch; when not, the app
+/// asks whether to delete it anyway.
+fn delete_branch(app: &mut App, root: &Path, name: String) {
+    crate::gitwork::start(&app.ctx, root, crate::gitwork::Op::DeleteBranch { name: name.clone(), force: false }, format!("Couldn't delete {name}"));
+}
+
+/// One local branch's menu (the branch menu's right click): switch to it, rename it,
+/// delete it. The branch HEAD is on can only be renamed.
+fn branch_actions(app: &mut App, ctx: &egui::Context, root: &Path, b: &crate::gitwork::Branch, anchor: Pos2, sel: &mut usize) -> bool {
+    let pal = app.pal;
+    let k = take_keys(ctx);
+    if k.esc {
+        return false;
+    }
+    let items: &[&str] = if b.current { &["Rename…"] } else { &["Switch to it", "Rename…", "Delete"] };
+    if *sel == usize::MAX && (k.up || k.down) {
+        *sel = 0;
+    } else if *sel != usize::MAX {
+        step(sel, items.len(), &k, |_| false);
+    }
+    let mut pick = if k.enter && *sel < items.len() { Some(items[*sel]) } else { None };
+    let (_, rect) = anchored(ctx, "branchactions", anchor, 240.0, &pal, |ui| {
+        let sub = if b.upstream.is_empty() { "Not published".to_string() } else { format!("Tracks {}", b.upstream) };
+        menu_title(ui, &b.name, &sub, &pal);
+        for (i, label) in items.iter().enumerate() {
+            if key_item(ui, label, i == *sel, true, &pal).clicked() {
+                pick = Some(label);
+            }
+        }
+    });
+    let Some(label) = pick else { return !clicked_outside(ctx, rect) };
+    let name = b.name.clone();
+    match label {
+        "Switch to it" => crate::gitwork::start(&app.ctx, root, crate::gitwork::Op::Switch(name.clone()), format!("Couldn't switch to {name}")),
+        "Rename…" => rename_branch(app, root, name),
+        _ => delete_branch(app, root, name),
+    }
+    false
+}
+
+/// A commit's menu in the history: check it out, branch or tag it, cherry-pick or
+/// revert it, reset the current branch to it (asking how), delete its tags, copy its
+/// hash. Up, Down and Enter work it.
+fn commit_menu(app: &mut App, ctx: &egui::Context, m: &mut CommitMenu) -> bool {
+    use crate::gitwork::Op;
+    let pal = app.pal;
+    let k = take_keys(ctx);
+    if k.esc {
+        return false;
+    }
+    #[derive(Clone, Copy, PartialEq)]
+    enum It {
+        Checkout,
+        Branch,
+        Tag,
+        Pick,
+        Revert,
+        Reset,
+        Untag(usize),
+        Copy,
+    }
+    let mut items = vec![It::Checkout, It::Branch, It::Tag, It::Pick, It::Revert, It::Reset];
+    items.extend((0..m.tags.len()).map(It::Untag));
+    items.push(It::Copy);
+    // HEAD's own commit has nothing to check out, pick or reset to.
+    let off = |it: It| m.head && matches!(it, It::Checkout | It::Pick | It::Reset);
+    if m.sel == usize::MAX {
+        if k.up || k.down {
+            m.sel = items.iter().position(|&it| !off(it)).unwrap_or(0);
+        }
+    } else {
+        step(&mut m.sel, items.len(), &k, |i| off(items[i]));
+    }
+    let mut pick = items.get(m.sel).copied().filter(|_| k.enter);
+    let short = &m.hash[..m.hash.len().min(7)];
+    let (_, rect) = anchored(ctx, "commitmenu", m.pos, 270.0, &pal, |ui| {
+        menu_title(ui, short, &m.subject, &pal);
+        for (i, &it) in items.iter().enumerate() {
+            if it == It::Pick || it == It::Untag(0) || it == It::Copy && m.tags.is_empty() {
+                menu_sep(ui, &pal);
+            }
+            let label = match it {
+                It::Checkout => "Check out this commit".into(),
+                It::Branch => "Create branch here…".into(),
+                It::Tag => "Create tag here…".into(),
+                It::Pick => format!("Cherry-pick onto {}", m.branch),
+                It::Revert => "Revert".into(),
+                It::Reset => format!("Reset {} to here…", m.branch),
+                It::Untag(t) => format!("Delete tag {}", m.tags[t]),
+                It::Copy => "Copy hash".into(),
+            };
+            let resp = key_item(ui, &label, i == m.sel, !off(it), &pal);
+            let resp = match it {
+                _ if off(it) => resp.on_hover_text("HEAD is on this commit"),
+                It::Revert => resp.on_hover_text("A new commit that undoes this one"),
+                _ => resp,
+            };
+            if resp.clicked() && !off(it) {
+                pick = Some(it);
+            }
+        }
+    });
+    let Some(it) = pick.filter(|&it| !off(it)) else { return !clicked_outside(ctx, rect) };
+    let (root, hash, h) = (m.root.clone(), m.hash.clone(), short.to_string());
+    let start = |app: &mut App, op: Op, title: String| crate::gitwork::start(&app.ctx, &root, op, title);
+    match it {
+        It::Checkout => start(app, Op::Checkout(hash), format!("Couldn't check out {h}")),
+        It::Branch | It::Tag => app.popup = Popup::NewRef(NewRef { root, at: hash, subject: m.subject.clone(), tag: it == It::Tag, name: String::new(), message: String::new(), focus: true }),
+        It::Pick => start(app, Op::CherryPick { hash, merge: m.merge }, format!("Couldn't cherry-pick {h}")),
+        It::Revert => start(app, Op::Revert { hash, merge: m.merge }, format!("Couldn't revert {h}")),
+        It::Reset => {
+            let b = m.branch.clone();
+            let go = |hard: bool| -> Option<Box<dyn FnOnce(&mut App)>> {
+                let (root, to, title) = (root.clone(), hash.clone(), format!("Couldn't reset {b}"));
+                Some(Box::new(move |app: &mut App| crate::gitwork::start(&app.ctx, &root, Op::Reset { to, hard }, title)))
+            };
+            let choices = vec![("Keep changes".to_string(), false, go(false)), ("Discard changes".to_string(), true, go(true))];
+            let sub = format!("Commits after {h} leave {b}. Keep changes leaves what they changed in your files; Discard changes resets the files too, keeping uncommitted work in the stash.");
+            app.popup = Popup::Choose { msg: format!("Reset {b} to {h}?"), sub, choices };
+        }
+        It::Untag(t) => start(app, Op::DeleteTag(m.tags[t].clone()), format!("Couldn't delete the tag {}", m.tags[t])),
+        It::Copy => {
+            ctx.copy_text(hash.clone());
+            app.toast(format!("Copied {hash}"));
+        }
+    }
+    false
+}
+
+/// Create branch here or Create tag here. Enter creates; a branch can be switched to
+/// at once (Ctrl+Enter), and a tag with a message is an annotated one.
+fn new_ref(app: &mut App, ctx: &egui::Context, st: &mut NewRef) -> bool {
+    let pal = app.pal;
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        return false;
+    }
+    let mut go = ctx.input_mut(|i| if i.consume_key(Modifiers::CTRL, Key::Enter) { Some(!st.tag) } else { i.consume_key(Modifiers::NONE, Key::Enter).then_some(false) });
+    let mut cancel = false;
+    let short = &st.at[..st.at.len().min(7)];
+    let title = format!("New {} at {short}", if st.tag { "tag" } else { "branch" });
+    let named = !st.name.trim().is_empty();
+    centered(ctx, "newref", 440.0, &pal, |ui| {
+        dialog_title(ui, &title, Some(&st.subject), &pal);
+        ui.add_space(8.0);
+        let r = ui.add(egui::TextEdit::singleline(&mut st.name).hint_text("Name").desired_width(f32::INFINITY));
+        crate::ui::note_control(ui, r.rect, "ref name");
+        if std::mem::take(&mut st.focus) {
+            r.request_focus();
+        }
+        if st.tag {
+            ui.add_space(6.0);
+            let m = ui.add(egui::TextEdit::singleline(&mut st.message).hint_text("Message (optional: makes it an annotated tag)").desired_width(f32::INFINITY));
+            crate::ui::note_control(ui, m.rect, "tag message");
+        }
+        dialog_buttons(ui, |ui| {
+            if primary_button(ui, "Create", named, &pal).clicked() {
+                go = Some(false);
+            }
+            if !st.tag && plain_button(ui, "Create and switch", &pal).on_hover_text("Ctrl+Enter").clicked() {
+                go = Some(true);
+            }
+            if plain_button(ui, "Cancel", &pal).clicked() {
+                cancel = true;
+            }
+        });
+    });
+    let Some(switch) = go.filter(|_| named) else { return !cancel };
+    let (name, at) = (st.name.trim().to_string(), st.at.clone());
+    let (op, title) = if st.tag {
+        (crate::gitwork::Op::Tag { name, at, message: st.message.clone() }, format!("Couldn't tag {short}"))
+    } else {
+        (crate::gitwork::Op::Branch { name: name.clone(), at, switch }, format!("Couldn't create {name}"))
+    };
+    crate::gitwork::start(&app.ctx, &st.root, op, title);
     false
 }
 
