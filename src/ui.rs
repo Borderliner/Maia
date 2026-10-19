@@ -347,7 +347,8 @@ impl App {
             let full = ui.max_rect();
             let mut leaves = vec![];
             let mut dividers = vec![];
-            self.tree.layout(full, 3.0, &mut leaves, &mut dividers, &mut vec![]);
+            let panels = Rect::from_min_max(full.min, pos2(full.right(), full.bottom() - crate::terminal::room(self, full)));
+            self.tree.layout(panels, 3.0, &mut leaves, &mut dividers, &mut vec![]);
             // Panels still too small to lay out while they grow in: background only.
             let mut growing = std::collections::HashSet::new();
             // Ease each panel's rectangle toward its layout slot. A new panel grows out of
@@ -427,6 +428,9 @@ impl App {
                     }
                 }
             }
+            // The terminal below, its top following the panels' eased edge.
+            let above = leaves.iter().map(|(_, r)| r.bottom()).fold(full.top(), f32::max);
+            crate::terminal::pane(self, ui, full, above);
             // Tab drag: dock compass over the hovered panel.
             self.drag_overlay(ui, &leaves);
         });

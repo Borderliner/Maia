@@ -82,6 +82,7 @@ mod svg;
 mod syntax;
 mod tags;
 mod tasks;
+mod terminal;
 mod stats;
 mod tab;
 mod table;
@@ -99,6 +100,7 @@ mod tour;
 mod thumbcache;
 mod thumbs;
 mod ui;
+mod vt;
 mod watch;
 mod wlclip;
 

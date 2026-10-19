@@ -7408,6 +7408,91 @@ mod journeys {
         report("tasks", &s);
     }
 
+    /// The terminal pane: its key opens it on a shell in the folder shown that takes what
+    /// is typed (Maia's own hotkeys stay quiet), goes along when the panel moves to
+    /// another folder (not into the Computer view), scrolls back, copies a selection,
+    /// gives the keyboard back to a click on the files and closes with the shell reaped,
+    /// or when the shell ends.
+    #[test]
+    fn terminal_pane_follows_the_folder() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("terminal");
+        let docs = home.join("Documents");
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        let idle = |s: &Sim| s.app.terminal.pty.as_ref().is_some_and(|p| p.idle());
+        s.act("key ctrl+Backtick");
+        assert!(s.app.terminal.pty.is_some() && s.app.terminal.focused, "open, with the keyboard");
+        wait_until(&mut s, "the prompt", 10, |s| idle(s) && !s.app.terminal.text().trim().is_empty());
+        let pid = s.app.terminal.pty.as_ref().and_then(|p| p.pid()).unwrap();
+        let cwd = || std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
+        assert_eq!(cwd(), Some(home.clone()), "started in the folder shown");
+        // Ctrl+A is the shell's (start of the line) here, not Select All.
+        s.act("text echo maia-ok");
+        s.act("key ctrl+a");
+        s.act("key enter");
+        wait_until(&mut s, "the echo", 10, |s| some_text(s, "maia-ok"));
+        assert!(s.tab().selected.is_empty(), "Maia's hotkey stayed quiet");
+        s.idle(30);
+        s.shot("terminal-dark");
+        // Dragged over, the text copies with Ctrl+Shift+C.
+        let r = s.text_rect("maia-ok");
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", r.left() + 1.0, r.center().y, r.right() - 1.0, r.center().y));
+        s.act("key ctrl+shift+c");
+        assert_eq!(s.copied.last().map(String::as_str), Some("maia-ok"));
+        // The panel moves on: the shell, waiting at its prompt, follows.
+        wait_until(&mut s, "the prompt again", 10, idle);
+        go(&mut s, &docs);
+        wait_until(&mut s, "the shell in Documents", 10, |_| cwd() == Some(docs.clone()));
+        wait_until(&mut s, "the prompt after cd", 10, idle);
+        s.act("text pwd");
+        s.act("key enter");
+        let shown = docs.display().to_string();
+        wait_until(&mut s, "pwd", 10, |s| some_text(s, &shown));
+        s.cmd(Computer);
+        s.idle(5);
+        assert_eq!(cwd(), Some(docs.clone()), "the Computer view is no folder to go to");
+        // Output past the screen scrolls back with the wheel; typing comes back down.
+        s.act("text seq 1 300");
+        s.act("key enter");
+        wait_until(&mut s, "the numbers", 10, |s| some_text(s, "300"));
+        let body = s.text_rect("300");
+        s.act(&format!("scroll {:.0} {:.0} 5", body.center().x, body.center().y));
+        let back = s.app.terminal.pty.as_ref().map(|p| p.shared.term().screen.scroll).unwrap();
+        assert!(back > 0, "scrolled back");
+        s.act("text x");
+        assert_eq!(s.app.terminal.pty.as_ref().map(|p| p.shared.term().screen.scroll), Some(0));
+        s.act("key backspace");
+        // A click on the files takes the keyboard; the key gives it back, then closes.
+        let list = s.app.panels[&s.app.active].list_rect;
+        s.act(&format!("click {:.0} {:.0}", list.center().x, list.center().y));
+        assert!(!s.app.terminal.focused);
+        s.act("key ctrl+Backtick");
+        assert!(s.app.terminal.focused && s.app.terminal.pty.is_some());
+        s.act("key ctrl+Backtick");
+        assert!(s.app.terminal.pty.is_none(), "closed");
+        wait_until(&mut s, "the shell reaped", 10, |_| !Path::new(&format!("/proc/{pid}")).exists());
+        s.idle(20);
+        // In a light theme too.
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        go(&mut s, &home.join("Code/maia"));
+        s.act("key ctrl+Backtick");
+        wait_until(&mut s, "the prompt (light)", 10, |s| idle(s) && !s.app.terminal.text().trim().is_empty());
+        s.act("text printf '\\033[1;31mred \\033[32mgreen \\033[34mblue \\033[0;7m inverse \\033[0m\\n'; ls");
+        s.act("key enter");
+        wait_until(&mut s, "ls", 10, |s| s.texts.iter().any(|(_, t)| t.contains("Cargo.toml") && t.contains("README")));
+        s.idle(30);
+        s.shot("terminal-light");
+        // The shell ending closes the pane.
+        s.act("text exit");
+        s.act("key enter");
+        wait_until(&mut s, "the pane closed", 10, |s| s.app.terminal.pty.is_none());
+        s.app.cfg.theme = crate::theme::ThemeName::default();
+        look(&mut s, "after the terminal");
+        report("terminal", &s);
+    }
+
     /// Clean Build Folders: the scan finds each kind under the folder, sizes them, sorts
     /// the biggest first; nothing goes without a check and a confirmation, the checked
     /// ones go to the trash, and Undo brings them back.

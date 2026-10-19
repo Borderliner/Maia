@@ -221,6 +221,8 @@ pub struct App {
     pub errands: crate::errands::Runner,
     /// Files gathered to move or copy together, for this session.
     pub shelf: crate::shelf::Shelf,
+    /// The terminal under the panels.
+    pub terminal: crate::terminal::Pane,
 }
 
 /// What a thread sharing files hands back: text for the clipboard, what to say, and a
@@ -329,6 +331,7 @@ impl App {
             dialog_result: None,
             errands: Default::default(),
             shelf: Default::default(),
+            terminal: crate::terminal::Pane::new(session.terminal_height),
             cfg,
             ud,
         };
@@ -952,7 +955,7 @@ impl App {
             self.save_userdata();
         }
         if self.save_session {
-            let s = Session { layout: Some(self.layout_snap(ctx)), sidebar: self.sidebar, sidebar_width: self.sidebar_width };
+            let s = Session { layout: Some(self.layout_snap(ctx)), sidebar: self.sidebar, sidebar_width: self.sidebar_width, terminal_height: self.terminal.height };
             let _ = config::save_json(&config::session_path(), &s);
         }
         self.last_save = Instant::now();
@@ -1414,6 +1417,11 @@ impl App {
             }
             return;
         }
+        // The terminal pane, while it has the keyboard, takes every key.
+        if self.terminal.focused {
+            crate::terminal::keys(self, ctx, &events);
+            return;
+        }
         let text_focus = ctx.wants_keyboard_input();
         let filter_focus = self.panels.get(&self.active).map(|p| p.filter_has_focus).unwrap_or(false);
         let mut consumed: Vec<usize> = vec![];
@@ -1794,6 +1802,7 @@ impl App {
                     }
                 }
             }
+            Cmd::TerminalPanel => crate::terminal::toggle(self),
             Cmd::OpenTerminal => {
                 let p = self.panel().path();
                 let dir = if tab::is_computer(&p) { PathBuf::from("/") } else { p };
