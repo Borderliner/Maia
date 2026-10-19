@@ -442,7 +442,7 @@ impl App {
             let out = ctx.input(|i| i.pointer.any_down() && i.pointer.latest_pos().is_some_and(|p| !i.content_rect().contains(p)));
             if out && self.ext_drag.is_none() && crate::clipboard::can_drag_out() {
                 let pic = drag_picture(&ctx, paths, &self.pal);
-                crate::clipboard::start_drag(paths.clone(), Some(pic));
+                crate::clipboard::start_drag(paths.clone(), Some(pic), ctx.native_pixels_per_point().unwrap_or(1.0));
                 self.drag = None;
                 // The release goes to the drop target, never to us: end the press here.
                 let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap_or_default();

@@ -73,7 +73,7 @@ pub fn take_events() -> Vec<Dnd> {
     std::mem::take(&mut *EVENTS.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
-fn emit(ev: Dnd) {
+pub fn emit(ev: Dnd) {
     EVENTS.lock().unwrap_or_else(|e| e.into_inner()).push(ev);
     if let Some(w) = WAKER.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         w();

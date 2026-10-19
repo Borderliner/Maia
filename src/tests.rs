@@ -1251,6 +1251,141 @@ fn uri_lists_round_trip_any_file_name() {
 }
 
 #[test]
+fn copied_files_read_as_other_file_managers_write_them() {
+    use crate::clipboard::{file_items, parse_gnome_files, uri_list};
+    let paths: Vec<PathBuf> = ["/home/me/a b.txt", "/tmp/résumé.pdf"].iter().map(PathBuf::from).collect();
+    let text = |items: &[(String, Vec<u8>)], m: &str| items.iter().find(|i| i.0 == m).map(|i| String::from_utf8_lossy(&i.1).into_owned());
+    let copied = file_items(&paths, false);
+    assert_eq!(text(&copied, "text/uri-list").unwrap(), uri_list(&paths));
+    assert_eq!(text(&copied, "x-special/gnome-copied-files").unwrap(), "copy\nfile:///home/me/a%20b.txt\nfile:///tmp/r%C3%A9sum%C3%A9.pdf");
+    assert_eq!(text(&copied, "UTF8_STRING").unwrap(), "/home/me/a b.txt\n/tmp/résumé.pdf");
+    assert!(text(&copied, "application/x-kde-cutselection").is_none());
+    let cut = file_items(&paths, true);
+    assert!(text(&cut, "x-special/gnome-copied-files").unwrap().starts_with("cut\n"));
+    assert_eq!(text(&cut, "application/x-kde-cutselection").unwrap(), "1");
+    for items in [&copied, &cut] {
+        let g = text(items, "x-special/gnome-copied-files").unwrap();
+        assert_eq!(parse_gnome_files(&g), (paths.clone(), items == &cut));
+    }
+    // As Nautilus and Caja write it: a trailing newline, localhost.
+    assert_eq!(parse_gnome_files("cut\nfile:///a%20b\nfile://localhost/c\n"), (vec![PathBuf::from("/a b"), PathBuf::from("/c")], true));
+    assert_eq!(parse_gnome_files(""), (vec![], false));
+}
+
+/// The X11 clipboard and drag out against a real server: two clipboards of ours trade
+/// file lists (a large one in pieces), and a minimal XDND target takes a drop. It takes
+/// the clipboard and moves the pointer, so it runs only when asked, on a throwaway
+/// server: MAIA_TEST_X11=1 DISPLAY=:N.
+#[test]
+fn x11_clipboard_and_drag_out() {
+    use crate::clipboard::{file_items, parse_gnome_files, uri_list};
+    use crate::xclip::XClip;
+    use x11rb::connection::Connection;
+    use x11rb::protocol::Event;
+    use x11rb::protocol::xproto::*;
+    use x11rb::wrapper::ConnectionExt as _;
+    if std::env::var_os("MAIA_TEST_X11").is_none() {
+        return;
+    }
+    let (a, b) = (XClip::spawn(None, 0).unwrap(), XClip::spawn(None, 0).unwrap());
+    // Asked again until the other clipboard has taken over.
+    let load = |c: &XClip, prefer: &[&str], want: &str| -> Vec<u8> {
+        let t0 = Instant::now();
+        loop {
+            match c.load(prefer) {
+                Ok((m, bytes)) if m == want => return bytes,
+                r if t0.elapsed() > Duration::from_secs(5) => panic!("{want}: {r:?}"),
+                _ => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    };
+    let paths: Vec<PathBuf> = ["/home/me/a b.txt", "/tmp/résumé.pdf"].iter().map(PathBuf::from).collect();
+    a.store(file_items(&paths, true));
+    let g = load(&b, &["x-special/gnome-copied-files", "text/uri-list"], "x-special/gnome-copied-files");
+    assert_eq!(parse_gnome_files(&String::from_utf8_lossy(&g)), (paths.clone(), true));
+    assert_eq!(load(&b, &["application/x-kde-cutselection"], "application/x-kde-cutselection"), b"1");
+    assert_eq!(load(&a, &["text/uri-list"], "text/uri-list"), uri_list(&paths).into_bytes(), "our own, without the server");
+    // Text under X11's own names: UTF8_STRING for plain text, STRING as Latin-1.
+    b.store(vec![("UTF8_STRING".into(), "héllo ✓".into())]);
+    assert_eq!(load(&a, &["text/plain;charset=utf-8", "text/plain"], "UTF8_STRING"), "héllo ✓".as_bytes());
+    assert_eq!(load(&a, &["STRING"], "STRING"), "héllo ?".as_bytes());
+    // Lists too large for one request go in pieces, served and read.
+    let many: Vec<PathBuf> = (0..5000).map(|i| PathBuf::from(format!("/home/me/Pictures/Trip to the coast/IMG_{i:05} copy.jpg"))).collect();
+    assert!(uri_list(&many).len() > crate::xclip::CHUNK);
+    a.store(file_items(&many, false));
+    assert_eq!(load(&b, &["text/uri-list"], "text/uri-list"), uri_list(&many).into_bytes());
+
+    // A drop target: a window that is XDND-aware, under the pointer.
+    let (conn, screen) = x11rb::xcb_ffi::XCBConnection::connect(None).unwrap();
+    let root = conn.setup().roots[screen].root;
+    let atom = |n: &str| conn.intern_atom(false, n.as_bytes()).unwrap().reply().unwrap().atom;
+    let win = conn.generate_id().unwrap();
+    conn.create_window(0, win, root, 100, 100, 200, 200, 0, WindowClass::INPUT_OUTPUT, 0, &CreateWindowAux::new().override_redirect(1)).unwrap();
+    conn.change_property32(PropMode::REPLACE, win, atom("XdndAware"), AtomEnum::ATOM, &[5]).unwrap();
+    conn.map_window(win).unwrap();
+    conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, 150, 150).unwrap();
+    conn.get_input_focus().unwrap().reply().unwrap();
+    // No button is held, so the drag drops at once: entered, positioned, dropped, read.
+    a.start_drag(paths.clone(), 1.0);
+    let (copy, uris) = (atom("XdndActionCopy"), atom("text/uri-list"));
+    let mut seen = vec![];
+    let t0 = Instant::now();
+    let got = loop {
+        assert!(t0.elapsed() < Duration::from_secs(5), "drop not finished: {seen:?}");
+        let Some(ev) = conn.poll_for_event().unwrap() else {
+            std::thread::sleep(Duration::from_millis(5));
+            continue;
+        };
+        match ev {
+            Event::ClientMessage(e) => {
+                let l = e.data.as_data32();
+                let name = String::from_utf8(conn.get_atom_name(e.type_).unwrap().reply().unwrap().name).unwrap();
+                let reply = |kind: &str, data: [u32; 5]| conn.send_event(false, l[0], EventMask::NO_EVENT, ClientMessageEvent::new(32, l[0], atom(kind), data)).unwrap();
+                match name.as_str() {
+                    "XdndEnter" => {
+                        assert_eq!((l[1] >> 24, l[1] & 1), (5, 1), "version 5, more than three types");
+                        let list = conn.get_property(false, l[0], atom("XdndTypeList"), AtomEnum::ATOM, 0, 16).unwrap().reply().unwrap();
+                        assert!(list.value32().unwrap().any(|t| t == uris));
+                    }
+                    "XdndPosition" => {
+                        assert_eq!((l[2] >> 16, l[2] & 0xffff, l[4]), (150, 150, copy), "at the pointer, copying");
+                        reply("XdndStatus", [win, 1, 0, 0, copy]);
+                    }
+                    "XdndDrop" => {
+                        conn.convert_selection(win, atom("XdndSelection"), uris, atom("MAIA_TEST"), l[2]).unwrap();
+                    }
+                    _ => {}
+                }
+                seen.push(name);
+            }
+            Event::SelectionNotify(e) => {
+                let r = conn.get_property(true, win, e.property, AtomEnum::ANY, 0, u32::MAX / 4).unwrap().reply().unwrap();
+                let source = conn.get_selection_owner(atom("XdndSelection")).unwrap().reply().unwrap().owner;
+                conn.send_event(false, source, EventMask::NO_EVENT, ClientMessageEvent::new(32, source, atom("XdndFinished"), [win, 1, copy, 0, 0])).unwrap();
+                break r.value;
+            }
+            _ => {}
+        }
+        conn.flush().unwrap();
+    };
+    conn.flush().unwrap();
+    assert_eq!(seen, ["XdndEnter", "XdndPosition", "XdndDrop"]);
+    assert_eq!(got, uri_list(&paths).into_bytes());
+    // Over Maia's own window the drag is Maia's again, in its logical pixels.
+    let c = XClip::spawn(None, win).unwrap();
+    crate::wlclip::take_events();
+    c.start_drag(paths.clone(), 2.0);
+    let t0 = Instant::now();
+    let mut events = vec![];
+    while !events.iter().any(|e| matches!(e, crate::wlclip::Dnd::Dropped { .. })) && t0.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(5));
+        events.extend(crate::wlclip::take_events());
+    }
+    assert_eq!(events.last(), Some(&crate::wlclip::Dnd::Dropped { x: 25.0, y: 25.0, paths, own: true }), "{events:?}");
+    assert!(conn.poll_for_event().unwrap().is_none(), "no XDND to Maia itself");
+}
+
+#[test]
 fn drag_picture_is_a_clean_premultiplied_card() {
     let ctx = egui::Context::default();
     let cfg = crate::config::Config::default();
