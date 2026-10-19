@@ -12068,5 +12068,99 @@ mod journeys {
         eprintln!("sim monkey: {launched} external launches intercepted, {out} drags handed out");
         let _ = all;
     }
+
+    /// Find in a preview, a big file paged and found in, any file shown as hex, and a text
+    /// file edited in place: found and replaced in, saved, its original back by Undo, and
+    /// changes asked about on leaving.
+    #[test]
+    fn find_page_and_edit_in_previews() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("previews-find");
+        let d = home.join("Documents");
+        let mut big = String::with_capacity(12 << 20);
+        for i in 0..400_000 {
+            big.push_str(&format!("row {i} payload\n"));
+        }
+        std::fs::write(d.join("big.txt"), &big).unwrap();
+        let mut blob = vec![0u8; 3 << 20];
+        blob[2_000_000..2_000_004].copy_from_slice(b"MAIA");
+        std::fs::write(d.join("blob.bin"), &blob).unwrap();
+        let mut s = Sim::new(&d, vec2(1300.0, 800.0));
+        // Find in a text preview: every match counted, Enter steps on, Escape closes.
+        select_name(&mut s, "notes.txt");
+        s.cmd(ToggleInspector);
+        wait_until(&mut s, "notes shown", 10, |s| inspector(s).text_lines().is_some_and(|l| l.0.len() == 400));
+        s.cmd(FindInPreview);
+        s.act("text notes");
+        s.idle(3);
+        wait_until(&mut s, "400 matches", 5, |s| inspector(s).find.as_ref().is_some_and(|f| f.hits.len() == 400));
+        assert!(some_text_at(&s, "1 of 400"), "the count shown");
+        s.act("key enter");
+        assert_eq!(inspector(&s).find.as_ref().unwrap().cur, 1, "Enter: the next match");
+        s.act("key shift+enter");
+        s.act("key shift+enter");
+        assert_eq!(inspector(&s).find.as_ref().unwrap().cur, 399, "before the first: the last");
+        s.shot("find-in-preview");
+        s.act("key escape");
+        assert!(inspector(&s).find.is_none(), "Escape closes the bar");
+        // A big file: paged, all of it counted, found in to its end.
+        select_name(&mut s, "big.txt");
+        wait_until(&mut s, "lines counted", 20, |s| inspector(s).big_state().is_some_and(|b| b.0 == (400_000, true, false)));
+        s.cmd(FindInPreview);
+        s.act("text row 345678 ");
+        wait_until(&mut s, "found far in", 20, |s| inspector(s).big_state().and_then(|b| b.1).is_some_and(|f| f.0 == 1 && f.1));
+        wait_until(&mut s, "the match on screen", 10, |s| some_text_at(s, "row 345678 payload"));
+        s.shot("find-in-big-file");
+        s.act("key escape");
+        // Anything that isn't text: hex, every byte of it, found in too.
+        select_name(&mut s, "blob.bin");
+        wait_until(&mut s, "hex rows", 10, |s| inspector(s).big_state().is_some_and(|b| b.0.2 && b.0.0 > 0) && some_text_at(s, "00000000"));
+        s.cmd(FindInPreview);
+        s.act("text MAIA");
+        wait_until(&mut s, "the bytes found", 20, |s| inspector(s).big_state().and_then(|b| b.1).is_some_and(|f| f.0 == 1 && f.1));
+        wait_until(&mut s, "scrolled to them", 10, |s| s.texts.iter().any(|(_, t)| t.starts_with(&format!("{:08x}", 2_000_000 / 16 * 16))));
+        wait_until(&mut s, "their bytes read", 10, |s| s.texts.iter().any(|(_, t)| t.contains("4d 41 49 41")));
+        s.shot("hex-view");
+        s.act("key escape");
+        // Edit in place: replace, save, Undo brings the original back.
+        let notes = d.join("notes.txt");
+        let before = std::fs::read_to_string(&notes).unwrap();
+        select_name(&mut s, "notes.txt");
+        s.cmd(EditInPreview);
+        wait_until(&mut s, "editing", 5, |s| inspector(s).edit.as_ref().is_some_and(|e| e.focused));
+        s.act("text Top: ");
+        s.act("key ctrl+f");
+        s.act("text notes");
+        s.idle(2);
+        let field = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "replace field").map(|(_, r, _)| *r)).unwrap_or_else(|| s.fail("replace field"));
+        s.act(&format!("click {:.0} {:.0}", field.center().x, field.center().y));
+        s.act("text memo");
+        click_control(&mut s, "All");
+        s.idle(2);
+        s.shot("edit-replace");
+        click_control(&mut s, "Save (Ctrl+S)");
+        s.idle(2);
+        let saved = std::fs::read_to_string(&notes).unwrap();
+        assert!(saved.starts_with("Top: line of memo\n") && !saved.contains("notes") && saved.lines().count() == 400, "saved: {:?}", &saved[..40]);
+        assert!(s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Replaced(_))), "Undo offered");
+        // Leaving with changes asks; Don't save keeps the file as saved.
+        let ed = s.app.panels[&s.app.active].inspector.as_ref().and_then(|i| i.edit.as_ref()).map(|e| e.focused);
+        if ed != Some(true) {
+            s.act("click 1000 400");
+        }
+        s.act("text more");
+        s.act("key escape");
+        assert!(s.popup_open(), "asked about the changes");
+        s.click_text("Don't save");
+        s.idle(2);
+        assert!(inspector(&s).edit.is_none(), "editing stopped");
+        assert_eq!(std::fs::read_to_string(&notes).unwrap(), saved, "nothing more written");
+        s.cmd(Undo);
+        s.idle(2);
+        assert_eq!(std::fs::read_to_string(&notes).unwrap(), before, "Undo: the file as it was");
+        report("find_page_and_edit_in_previews", &s);
+    }
 }
 

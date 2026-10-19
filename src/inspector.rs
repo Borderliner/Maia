@@ -329,6 +329,13 @@ impl Inspector {
     pub fn filtered_lines(&self) -> Option<usize> {
         self.filtered.as_ref().filter(|f| !f.0.is_empty()).map(|f| f.3.len())
     }
+    /// A paged file: (rows, all counted, as hex), and its search: (matches, done, current).
+    pub fn big_state(&self) -> Option<((u64, bool, bool), Option<(usize, bool, usize)>)> {
+        match &self.content {
+            Content::Big(v) => Some(((v.rows().0, v.rows().1, v.hex), v.find.as_ref().map(|f| (f.hits.lock().unwrap().len(), f.done(), f.cur)))),
+            _ => None,
+        }
+    }
     /// Highlighted spans in a text preview (None: plain text or not text).
     pub fn text_spans(&self) -> Option<usize> {
         match &self.content {

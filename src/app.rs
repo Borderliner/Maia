@@ -1420,6 +1420,7 @@ impl App {
         // (Asked of the editor: egui lets go of the focus on Escape before this runs.)
         let editing = self.panels.get(&self.active).and_then(|p| p.inspector.as_ref()?.edit.as_ref()).is_some_and(|e| e.focused);
         let mut typed: Vec<Event> = vec![];
+        let finding = self.panels.get(&self.active).and_then(|p| p.inspector.as_ref()?.find.as_ref()).is_some_and(|f| f.focused);
         let mut consumed: Vec<usize> = vec![];
         let mut plain_fired = false;
         for (n, ev) in events.iter().enumerate() {
@@ -1463,6 +1464,19 @@ impl App {
                 },
                 _ => continue,
             };
+            // Escape in the find field closes the bar, back to what it was finding in.
+            if finding && chord.input == commands::Input::Key(Key::Escape) && !chord.ctrl && !chord.alt && !chord.shift {
+                let id = self.active;
+                if let Some(i) = self.panels.get_mut(&id).and_then(|p| p.inspector.as_mut()) {
+                    i.find = None;
+                    i.keys = true;
+                    if i.edit.is_some() {
+                        ctx.memory_mut(|m| m.request_focus(egui::Id::new(("insp-edit", id))));
+                    }
+                }
+                consumed.push(n);
+                continue;
+            }
             if editing {
                 let id = self.active;
                 let ctrl = chord.ctrl && !chord.alt;

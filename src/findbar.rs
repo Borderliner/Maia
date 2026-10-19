@@ -23,6 +23,9 @@ pub struct Finder {
     pub cur: usize,
     /// Scroll the current match into view on the next frame.
     pub reveal: bool,
+    /// The field had the keyboard last frame (egui lets go of it on Escape before the
+    /// app sees the key, so it is remembered here).
+    pub focused: bool,
     opened: Option<f64>,
 }
 
@@ -38,7 +41,7 @@ pub enum Out {
 
 impl Finder {
     pub fn new(query: String) -> Finder {
-        Finder { query, replace: None, focus: true, hits: vec![], key: (String::new(), u64::MAX, 0), cur: 0, reveal: false, opened: None }
+        Finder { query, replace: None, focus: true, hits: vec![], key: (String::new(), u64::MAX, 0), cur: 0, reveal: false, focused: false, opened: None }
     }
 
     /// Upper case in the query makes it match case.
@@ -166,14 +169,12 @@ pub fn bar(ui: &mut Ui, body: Rect, f: &mut Finder, count: &str, any: bool, id: 
             st.store(ui.ctx(), fid);
         }
     }
-    if r.has_focus() || r.lost_focus() {
+    if f.focused {
         bui.input_mut(|i| {
             if i.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter) || i.consume_key(egui::Modifiers::SHIFT, egui::Key::F3) {
                 out = Out::Prev;
             } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) || i.consume_key(egui::Modifiers::NONE, egui::Key::F3) {
                 out = Out::Next;
-            } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
-                out = Out::Close;
             }
         });
         // Enter takes the focus away from a single-line field: kept for the next press.
@@ -181,6 +182,7 @@ pub fn bar(ui: &mut Ui, body: Rect, f: &mut Finder, count: &str, any: bool, id: 
             r.request_focus();
         }
     }
+    f.focused = ui.memory(|m| m.has_focus(fid));
     if let Some(rep) = f.replace.as_mut() {
         let row = Rect::from_min_size(pos2(bar.left(), top.bottom()), vec2(bar.width(), BAR_H));
         let mut rui = ui.new_child(UiBuilder::new().max_rect(row.shrink2(vec2(6.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
