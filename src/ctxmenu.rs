@@ -642,7 +642,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                     let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
                     paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(13.0)), Glyph::Search, pal.text_dim);
                     let before = st.query.clone();
-                    let te = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text("Select a command…").frame(false).desired_width(ui.available_width() - 26.0));
+                    let te = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text(egui::RichText::new("Select a command…").color(pal.text_dim)).frame(false).desired_width(ui.available_width() - 26.0));
                     let (cr, cresp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
                     if cresp.hovered() {
                         ui.painter().rect_filled(cr, CornerRadius::same(4), pal.hover);

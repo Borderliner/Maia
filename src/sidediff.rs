@@ -84,11 +84,14 @@ pub fn changed_span(a: &str, b: &str) -> ((usize, usize), (usize, usize)) {
     ((pre, a.len() - suf.min(ra.len())), (pre, b.len() - suf.min(rb.len())))
 }
 
-/// The rows worked out for a diff, kept while it is shown, and the sideways scroll.
+/// The rows worked out for a diff, kept while it is shown (with the widest line number
+/// and line, in characters), and the sideways scroll.
 #[derive(Default)]
 pub struct View {
     key: (usize, usize),
     rows: Vec<Row>,
+    digits: usize,
+    widest: usize,
     pub x: f32,
 }
 
@@ -96,14 +99,16 @@ pub struct View {
 pub fn view(ui: &mut Ui, body: Rect, lines: &[String], v: &mut View, size: f32, spacing: f32, pal: &Palette) {
     let key = (lines.as_ptr() as usize, lines.len());
     if v.key != key {
-        *v = View { key, rows: rows(lines), x: 0.0 };
+        let rows = rows(lines);
+        let digits = rows.iter().filter_map(|r| r.new.or(r.old)).map(|x| x.0).max().unwrap_or(1).to_string().len();
+        let widest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        *v = View { key, rows, digits, widest, x: 0.0 };
     }
     let font = FontId::monospace(size);
     let cw = ui.fonts_mut(|f| f.glyph_width(&font, 'M'));
     let row_h = crate::inspector::row_height(ui, size, spacing);
     let lift = ((row_h - ui.fonts_mut(|f| f.row_height(&font))) / 2.0).floor().max(0.0);
-    let digits = v.rows.iter().filter_map(|r| r.new.or(r.old)).map(|x| x.0).max().unwrap_or(1).to_string().len();
-    let gutter = digits as f32 * cw + 14.0;
+    let gutter = v.digits as f32 * cw + 14.0;
     let mut inner = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(4.0, 4.0))));
     let (green, red) = (crate::gitstatus::GREEN, pal.danger);
     let tint = if pal.dark { 0.13 } else { 0.11 };
@@ -112,7 +117,7 @@ pub fn view(ui: &mut Ui, body: Rect, lines: &[String], v: &mut View, size: f32, 
         // Sideways: a wheel's sideways turn (or Shift with it) moves both sides together.
         if resp.hovered() {
             let dx = ui.input(|i| i.smooth_scroll_delta.x);
-            let widest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32 * cw;
+            let widest = v.widest as f32 * cw;
             v.x = (v.x - dx).clamp(0.0, (widest - r.width() / 2.0 + gutter + 24.0).max(0.0));
         }
         let half = r.width() / 2.0;

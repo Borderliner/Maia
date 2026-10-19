@@ -648,6 +648,10 @@ impl Sim {
             s.app.cfg.font_size = f;
             s.app.cfg.spacing = sp;
         }
+        // MAIA_SIM_THEME=Paper runs it in another theme.
+        if let Some(t) = std::env::var("MAIA_SIM_THEME").ok().and_then(|t| serde_json::from_str(&format!("\"{t}\"")).ok()) {
+            s.app.cfg.theme = t;
+        }
         s.settle();
         s
     }
@@ -813,7 +817,7 @@ impl Sim {
     /// variable is not set). The look in use goes into the name.
     pub fn shot(&self, name: &str) {
         let Some((w, h, rgb)) = self.pixels() else { return };
-        let look = std::env::var("MAIA_SIM_LOOK").unwrap_or_default().replace(',', "-");
+        let look = [std::env::var("MAIA_SIM_LOOK").unwrap_or_default().replace(',', "-"), std::env::var("MAIA_SIM_THEME").unwrap_or_default()].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join("-");
         let name: String = format!("{name}{}{look}", if look.is_empty() { "" } else { "@" }).chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '@') { c } else { '_' }).collect();
         if let Some(dir) = self.shots.as_ref().map(|sh| sh.dir.clone()) {
             write_png(&dir.join(format!("{name}.png")), w, h, &rgb);
@@ -5767,6 +5771,15 @@ mod journeys {
         assert!(s.texts.iter().any(|(_, t)| t == "+    ui::run();"), "the diff in the panel");
         look(&mut s, "diff in the panel");
         s.shot("diff-large");
+        // Side by side, and back: remembered.
+        click_control(&mut s, "Side by side");
+        s.idle(2);
+        assert!(s.app.cfg.diff_side, "side by side");
+        assert!(s.texts.iter().any(|(_, t)| t.trim_start() == "ui::run();"), "the new line on its side, without its +: {:?}", s.texts.iter().map(|x| &x.1).collect::<Vec<_>>());
+        look(&mut s, "diff side by side");
+        s.shot("diff-side-by-side");
+        click_control(&mut s, "Side by side");
+        assert!(!s.app.cfg.diff_side);
         s.act("key CloseBracket");
         let after = probe(&s).full.unwrap_or_else(|| s.fail("still in the panel")).0;
         assert_ne!(after, main, "] goes to the next file");
@@ -12725,7 +12738,7 @@ mod journeys {
         select_path(&mut s, &item.file);
         s.cmd(RestoreTrash);
         assert!(matches!(s.app.popup, Popup::Choose { .. }), "asked");
-        s.idle(1);
+        s.idle(20);
         s.shot("restore-asks");
         s.click_text("Keep both");
         s.settle();
@@ -12829,7 +12842,7 @@ mod journeys {
         s.cmd(CustomActions);
         assert!(matches!(s.app.popup, Popup::Actions { .. }));
         s.idle(1);
-        s.click_text("New action");
+        s.click_text("+ Add action");
         click_control(&mut s, "action command");
         s.act("text cp %f %f.bak");
         s.idle(1);

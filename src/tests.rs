@@ -8990,3 +8990,24 @@ fn theme_follows_the_desktop_and_comes_back() {
     app.follow_system(false);
     assert_eq!(app.cfg.theme, ThemeName::Latte, "and to the light one");
 }
+
+#[test]
+fn a_dropped_watch_lets_go_of_its_descriptor() {
+    let fds = || std::fs::read_dir("/proc/self/fd").unwrap().filter_map(|e| std::fs::read_link(e.ok()?.path()).ok()).filter(|l| l.to_string_lossy().contains("inotify")).count();
+    let before = fds();
+    let d = std::env::temp_dir().join(format!("maia-watch-drop-{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    for watched in [false, true] {
+        let mut w = crate::watch::Watch::new(egui::Context::default());
+        if watched {
+            w.sync(&[d.clone()].into_iter().collect());
+        }
+        drop(w);
+    }
+    let t0 = std::time::Instant::now();
+    while fds() > before && t0.elapsed() < std::time::Duration::from_secs(5) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(fds(), before, "both closed, with or without a folder watched");
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -155,7 +155,7 @@ pub fn bar(ui: &mut Ui, body: Rect, f: &mut Finder, count: &str, any: bool, id: 
         }
         let (cr, _) = ui.allocate_exact_size(cg.size() + vec2(10.0, 0.0), Sense::hover());
         ui.painter().galley(pos2(cr.left() + 4.0, cr.center().y - cg.size().y / 2.0), cg, pal.text_dim);
-        let te = egui::TextEdit::singleline(&mut f.query).id(fid).hint_text("Find").frame(false).desired_width(ui.available_width()).font(FontId::proportional(12.5));
+        let te = egui::TextEdit::singleline(&mut f.query).id(fid).hint_text(egui::RichText::new("Find").color(pal.text_dim)).frame(false).desired_width(ui.available_width()).font(FontId::proportional(12.5));
         r = Some(ui.add(te));
     });
     let Some(r) = r else { return (out, body) };
@@ -192,7 +192,7 @@ pub fn bar(ui: &mut Ui, body: Rect, f: &mut Finder, count: &str, any: bool, id: 
         let (gr, _) = rui.allocate_exact_size(vec2(16.0, 20.0), Sense::hover());
         theme::paint_lucide(rui.painter(), Rect::from_center_size(gr.center(), Vec2::splat(13.0)), "replace", pal.text_dim);
         let w = (rui.available_width() - 150.0).max(40.0);
-        let r = rui.add(egui::TextEdit::singleline(rep).id_salt(("insp-replace", id)).hint_text("Replace").frame(false).desired_width(w).font(FontId::proportional(12.5)));
+        let r = rui.add(egui::TextEdit::singleline(rep).id_salt(("insp-replace", id)).hint_text(egui::RichText::new("Replace").color(pal.text_dim)).frame(false).desired_width(w).font(FontId::proportional(12.5)));
         crate::ui::note_control(&rui, r.rect, "replace field");
         if r.lost_focus() && rui.input(|i| i.key_pressed(egui::Key::Enter)) {
             out = Out::Replace;

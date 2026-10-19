@@ -1419,7 +1419,7 @@ impl App {
             job.wrap.max_width = wrap;
             ui.fonts_mut(|f| f.layout_job(job))
         };
-        let mut edit = egui::TextEdit::singleline(&mut t.filter).hint_text(hint).frame(false).margin(egui::Margin::symmetric(4, 0)).desired_width(edit_rect.width()).font(egui::TextStyle::Body);
+        let mut edit = egui::TextEdit::singleline(&mut t.filter).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(false).margin(egui::Margin::symmetric(4, 0)).desired_width(edit_rect.width()).font(egui::TextStyle::Body);
         if before.contains(['>', '<', '=', ':']) {
             edit = edit.layouter(&mut conds);
         }

@@ -806,7 +806,7 @@ pub(crate) fn search_field(ui: &mut Ui, text: &mut String, hint: &str, focus: &m
         .horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(20.0, 22.0), Sense::hover());
             paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(14.0)), glyph, pal.text_dim);
-            ui.add(egui::TextEdit::singleline(text).hint_text(hint).frame(false).desired_width(ui.available_width() - 8.0).font(FontId::proportional(15.0)))
+            ui.add(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(false).desired_width(ui.available_width() - 8.0).font(FontId::proportional(15.0)))
         })
         .inner;
     if *focus {
@@ -1288,7 +1288,7 @@ fn goto(app: &mut App, ctx: &egui::Context, st: &mut GoToState) -> bool {
             let g = if !is_pathlike(&st.input) { Glyph::Search } else if fsx::mounts().iter().any(|m| m.path == fsx::expand_path(st.input.trim_end_matches('/'))) || st.input == "/" { Glyph::Drive } else { Glyph::Folder };
             paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(14.0)), g, pal.text_dim);
             let w = ui.available_width() - 4.0 * 28.0;
-            let resp = ui.add(egui::TextEdit::singleline(&mut st.input).hint_text("Open or expand a folder…").frame(false).desired_width(w).font(FontId::proportional(15.0)));
+            let resp = ui.add(egui::TextEdit::singleline(&mut st.input).hint_text(egui::RichText::new("Open or expand a folder…").color(pal.text_dim)).frame(false).desired_width(w).font(FontId::proportional(15.0)));
             if st.focus {
                 resp.request_focus();
                 if let Some(mut s) = egui::TextEdit::load_state(ui.ctx(), resp.id) {
@@ -2598,7 +2598,7 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
     }
     let c = &mut app.cfg;
     match o {
-        Opt::Font => ui.add(egui::TextEdit::singleline(&mut c.font_family).hint_text("System font").desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).lost_focus(),
+        Opt::Font => ui.add(egui::TextEdit::singleline(&mut c.font_family).hint_text(egui::RichText::new("System font").color(pal.text_dim)).desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).lost_focus(),
         Opt::InspectorFontSize => stepper(ui, &mut c.inspector_font_size, 0.5, 8.0, 28.0, &pal),
         Opt::LineSpacing => ui.add(egui::Slider::new(&mut c.preview_line_spacing, 1.0..=2.0).step_by(0.05).fixed_decimals(2)).changed(),
         Opt::RectButtons => toggle(ui, &mut c.rect_buttons, &pal),
@@ -2658,12 +2658,12 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         Opt::Editor => {
             // Empty is Auto: the hint says what that comes to here.
             let hint = crate::editor::auto_label().map_or("Auto".to_string(), |l| format!("Auto: {l}"));
-            let r = ui.add(egui::TextEdit::singleline(&mut c.editor).hint_text(hint).desired_width(150.0).margin(egui::Margin::symmetric(5, 2)));
+            let r = ui.add(egui::TextEdit::singleline(&mut c.editor).hint_text(egui::RichText::new(hint).color(pal.text_dim)).desired_width(150.0).margin(egui::Margin::symmetric(5, 2)));
             crate::ui::note_control(ui, r.rect, "editor field");
             r.lost_focus()
         }
         Opt::IgnoredFiles => choice(ui, "ignored", &mut c.git_ignored, &[(IgnoredFiles::Dim, "Dim"), (IgnoredFiles::Hide, "Hide"), (IgnoredFiles::Show, "Show")]),
-        Opt::MeaningFolders => ui.add(egui::TextEdit::singleline(&mut c.semantic_folders).hint_text("~/Documents").desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).lost_focus(),
+        Opt::MeaningFolders => ui.add(egui::TextEdit::singleline(&mut c.semantic_folders).hint_text(egui::RichText::new("~/Documents").color(pal.text_dim)).desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).lost_focus(),
         Opt::DefaultFm => false,
         Opt::Updates => {
             update_control(ui, app, &pal);
@@ -2704,7 +2704,7 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
             false
         }
         Opt::InspectorFont => {
-            let r = ui.add(egui::TextEdit::singleline(&mut c.inspector_font).hint_text("monospace").desired_width(150.0).margin(egui::Margin::symmetric(5, 2)));
+            let r = ui.add(egui::TextEdit::singleline(&mut c.inspector_font).hint_text(egui::RichText::new("monospace").color(pal.text_dim)).desired_width(150.0).margin(egui::Margin::symmetric(5, 2)));
             r.changed()
         }
         Opt::Thumbnails => choice(ui, "thumbs", &mut c.thumbnails, &[(ThumbMode::LocalDisks, "Local disks"), (ThumbMode::AllDrives, "All drives"), (ThumbMode::Never, "Never")]),
@@ -3158,7 +3158,7 @@ fn types(app: &mut App, ctx: &egui::Context, panel: u64, query: &mut String) -> 
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(20.0, 22.0), Sense::hover());
             paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(12.0)), Glyph::Search, pal.text_dim);
-            let te = ui.add(egui::TextEdit::singleline(query).hint_text(format!("Filter {} types…", counts.len())).frame(false).desired_width(ui.available_width() - 84.0));
+            let te = ui.add(egui::TextEdit::singleline(query).hint_text(egui::RichText::new(format!("Filter {} types…", counts.len())).color(pal.text_dim)).frame(false).desired_width(ui.available_width() - 84.0));
             if !te.has_focus() && query.is_empty() {
                 te.request_focus();
             }
@@ -3238,6 +3238,18 @@ fn types(app: &mut App, ctx: &egui::Context, panel: u64, query: &mut String) -> 
 }
 
 /// A checkbox drawn to match the theme.
+/// A box drawn as the app's own, with its label; either toggles it. True when clicked.
+fn boxed_check(ui: &mut Ui, on: bool, label: egui::RichText, what: &'static str, pal: &Palette) -> bool {
+    ui.horizontal(|ui| {
+        let (r, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+        checkbox_glyph(ui.painter(), r, on, pal);
+        crate::ui::note_control(ui, r, what);
+        let t = ui.add(egui::Label::new(label).selectable(false).sense(Sense::click()));
+        resp.clicked() || t.clicked()
+    })
+    .inner
+}
+
 pub fn checkbox_glyph(p: &egui::Painter, r: Rect, on: bool, pal: &Palette) {
     if on {
         p.rect_filled(r, CornerRadius::same(3), pal.accent);
@@ -4763,15 +4775,10 @@ fn sync(app: &mut App, ctx: &egui::Context, st: &mut crate::compare::SyncState) 
             dot(ui, pal.accent, format!("{} to copy over ({})", count(plan.copy.len(), "new item", "new items"), fsx::fmt_size(plan.bytes)));
             dot(ui, crate::gitstatus::GREEN, format!("{} here, replacing the older ones there (to the trash)", count(plan.update.len(), "newer file", "newer files")));
             if extra > 0 {
-                ui.horizontal(|ui| {
-                    let (r, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
-                    checkbox_glyph(ui.painter(), r, st.mirror, &pal);
-                    crate::ui::note_control(ui, r, "mirror");
-                    let t = ui.add(egui::Label::new(egui::RichText::new(format!("Mirror: also move {} only there to the trash", count(extra, "item", "items"))).color(if st.mirror { pal.danger } else { pal.text })).sense(Sense::click()));
-                    if resp.clicked() || t.clicked() {
-                        st.mirror = !st.mirror;
-                    }
-                });
+                let text = egui::RichText::new(format!("Mirror: also move {} only there to the trash", count(extra, "item", "items"))).color(if st.mirror { pal.danger } else { pal.text });
+                if boxed_check(ui, st.mirror, text, "mirror", &pal) {
+                    st.mirror = !st.mirror;
+                }
             }
         });
         // Every change, as it will be made, the folder there each lands in.
@@ -4851,7 +4858,7 @@ fn actions(app: &mut App, ctx: &egui::Context, sel: &mut usize) -> bool {
                     }
                 }
                 ui.add_space(4.0);
-                if plain_button(ui, "New action", &pal).clicked() {
+                if plain_button(ui, "+ Add action", &pal).clicked() {
                     list.push(crate::config::CustomAction { name: "New action".into(), files: true, ..Default::default() });
                     *sel = list.len() - 1;
                     changed = true;
@@ -4873,13 +4880,13 @@ fn actions(app: &mut App, ctx: &egui::Context, sel: &mut usize) -> bool {
                         changed |= ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(w)).changed();
                     });
                     field_row(ui, key_w, "Command", &pal, |ui| {
-                        let r = ui.add(egui::TextEdit::singleline(&mut a.command).hint_text("gimp %F").font(egui::TextStyle::Monospace).desired_width(w));
+                        let r = ui.add(egui::TextEdit::singleline(&mut a.command).hint_text(egui::RichText::new("gimp %F").color(pal.text_dim)).font(egui::TextStyle::Monospace).desired_width(w));
                         crate::ui::note_control(ui, r.rect, "action command");
                         changed |= r.changed();
                         ui.label(egui::RichText::new("%f the first item · %F all of them · %d the folder · %n their names").small().color(pal.text_dim));
                     });
                     field_row(ui, key_w, "Only for", &pal, |ui| {
-                        changed |= ui.add(egui::TextEdit::singleline(&mut a.extensions).hint_text("jpg, png (empty: any file)").desired_width(w)).changed();
+                        changed |= ui.add(egui::TextEdit::singleline(&mut a.extensions).hint_text(egui::RichText::new("jpg, png (empty: any file)").color(pal.text_dim)).desired_width(w)).changed();
                     });
                 });
                 card(ui, &pal, |ui| {
@@ -5146,7 +5153,9 @@ fn perms_card(ui: &mut Ui, st: &mut PropState, items: &[(u32, u32, u32, bool)], 
         });
         if dirs {
             ui.add_space(2.0);
-            ui.checkbox(&mut st.deep, "Change everything inside too");
+            if boxed_check(ui, st.deep, egui::RichText::new("Change everything inside too"), "deep", pal) {
+                st.deep = !st.deep;
+            }
             if st.deep && st.change.set & 0o111 != 0 {
                 ui.label(egui::RichText::new("Files inside get Execute only where they had it").small().color(pal.text_dim));
             }
@@ -5283,7 +5292,7 @@ fn open_with(app: &mut App, ctx: &egui::Context, paths: &mut Vec<PathBuf>, query
         // Or any command, the files after it (or where %f / %F put them).
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let r = ui.add(egui::TextEdit::singleline(command).id(cmd_id).hint_text("Or a command, like gimp %F").font(egui::TextStyle::Monospace).desired_width(ui.available_width() - 64.0));
+            let r = ui.add(egui::TextEdit::singleline(command).id(cmd_id).hint_text(egui::RichText::new("Or a command, like gimp %F").color(pal.text_dim)).font(egui::TextStyle::Monospace).desired_width(ui.available_width() - 64.0));
             crate::ui::note_control(ui, r.rect, "open with command");
             let go = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
             if (ui.add_enabled(!command.trim().is_empty(), egui::Button::new("Run")).clicked() || go) && !command.trim().is_empty() {
@@ -5534,7 +5543,7 @@ fn path_dropdown(app: &mut App, ctx: &egui::Context, st: &mut PathDropState) -> 
             let (r, _) = ui.allocate_exact_size(vec2(20.0, 22.0), Sense::hover());
             paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(12.0)), Glyph::Search, pal.text_dim);
             let hint = format!("Filter {} {}…", n_items, if n_items == 1 { "item" } else { "items" });
-            let r = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text(hint).frame(false).desired_width(ui.available_width() - 24.0));
+            let r = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(false).desired_width(ui.available_width() - 24.0));
             if st.focus {
                 r.request_focus();
                 st.focus = false;
@@ -6365,14 +6374,14 @@ fn new_ref(app: &mut App, ctx: &egui::Context, st: &mut NewRef) -> bool {
     centered(ctx, "newref", 440.0, &pal, |ui| {
         dialog_title(ui, &title, Some(&st.subject), &pal);
         ui.add_space(8.0);
-        let r = ui.add(egui::TextEdit::singleline(&mut st.name).hint_text("Name").desired_width(f32::INFINITY));
+        let r = ui.add(egui::TextEdit::singleline(&mut st.name).hint_text(egui::RichText::new("Name").color(pal.text_dim)).desired_width(f32::INFINITY));
         crate::ui::note_control(ui, r.rect, "ref name");
         if std::mem::take(&mut st.focus) {
             r.request_focus();
         }
         if st.tag {
             ui.add_space(6.0);
-            let m = ui.add(egui::TextEdit::singleline(&mut st.message).hint_text("Message (optional: makes it an annotated tag)").desired_width(f32::INFINITY));
+            let m = ui.add(egui::TextEdit::singleline(&mut st.message).hint_text(egui::RichText::new("Message (optional: makes it an annotated tag)").color(pal.text_dim)).desired_width(f32::INFINITY));
             crate::ui::note_control(ui, m.rect, "tag message");
         }
         dialog_buttons(ui, |ui| {

@@ -31,10 +31,12 @@ impl Watch {
                 let mut buf = vec![0u8; 64 * 1024];
                 loop {
                     let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-                    if n <= 0 {
-                        if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                            continue;
-                        }
+                    if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    // Done when reading fails or the Watch is gone (its drop wakes this read).
+                    if n <= 0 || Arc::strong_count(&wds2) == 1 {
+                        unsafe { libc::close(fd) };
                         return;
                     }
                     let mut off = 0usize;
@@ -50,6 +52,7 @@ impl Watch {
                         let Some(dir) = wds2.lock().unwrap().get(&ev.wd).cloned() else { continue };
                         let file = if name.is_empty() { None } else { Some(dir.join(std::ffi::OsStr::from_bytes(name))) };
                         if tx.send((dir, file)).is_err() {
+                            unsafe { libc::close(fd) };
                             return;
                         }
                     }
@@ -103,5 +106,21 @@ impl Watch {
 
     pub fn has_pending(&self) -> bool {
         !self.dirty.is_empty()
+    }
+}
+
+impl Drop for Watch {
+    /// Let go of the thread's map, then remove a watch: the event that sends wakes the
+    /// thread, which closes the descriptor and ends.
+    fn drop(&mut self) {
+        if self.fd < 0 {
+            return;
+        }
+        self.wds = Arc::default();
+        let wd = match self.by_path.values().next() {
+            Some(&wd) => wd,
+            None => unsafe { libc::inotify_add_watch(self.fd, c"/".as_ptr(), libc::IN_ATTRIB) },
+        };
+        unsafe { libc::inotify_rm_watch(self.fd, wd) };
     }
 }

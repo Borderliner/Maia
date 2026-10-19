@@ -547,12 +547,12 @@ pub fn page(ui: &mut Ui, body: Rect, c: &mut Changes, wrap: bool, env: &mut Env)
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 6.0;
             let font = FontId::proportional(fs);
-            let s = ui.add(egui::TextEdit::singleline(&mut c.summary).hint_text("Summary").font(font.clone()).desired_width(f32::INFINITY).margin(egui::Margin::symmetric(6, 4)));
+            let s = ui.add(egui::TextEdit::singleline(&mut c.summary).hint_text(egui::RichText::new("Summary").color(pal.text_dim)).font(font.clone()).desired_width(f32::INFINITY).margin(egui::Margin::symmetric(6, 4)));
             crate::ui::note_control(ui, s.rect, "commit summary");
             if std::mem::take(&mut c.focus_summary) {
                 s.request_focus();
             }
-            let b = ui.add(egui::TextEdit::multiline(&mut c.body).hint_text("Description").font(FontId::proportional(fs - 0.5)).desired_rows(2).desired_width(f32::INFINITY).margin(egui::Margin::symmetric(6, 4)));
+            let b = ui.add(egui::TextEdit::multiline(&mut c.body).hint_text(egui::RichText::new("Description").color(pal.text_dim)).font(FontId::proportional(fs - 0.5)).desired_rows(2).desired_width(f32::INFINITY).margin(egui::Margin::symmetric(6, 4)));
             crate::ui::note_control(ui, b.rect, "commit body");
             let staged = work.as_ref().map_or(0, |w| w.staged.len());
             let can = !busy && !c.summary.trim().is_empty() && (staged > 0 || c.amend);
