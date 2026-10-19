@@ -2238,7 +2238,7 @@ impl Section {
 /// its title and a short line saying what it does. The order is the order on screen.
 pub(crate) const OPTS: &[(Opt, Section, &str, &str, &str)] = &[
     (Opt::Theme, Section::Appearance, "Theme", "Color scheme", "The window's colors."),
-    (Opt::FollowSystem, Section::Appearance, "Theme", "Follow system light/dark", "Use a light scheme when the desktop is light."),
+    (Opt::FollowSystem, Section::Appearance, "Theme", "Follow system light/dark", "Switch between light and dark as the desktop does."),
     (Opt::SyntaxTheme, Section::Appearance, "Theme", "Code colors follow the theme", "Code in previews and diffs takes the theme's colors."),
     (Opt::Font, Section::Appearance, "Text", "Font", "Empty uses the system font."),
     (Opt::FontSize, Section::Appearance, "Text", "Font size", "Size of all text."),
@@ -2813,12 +2813,8 @@ fn option_row(ui: &mut Ui, app: &mut App, oi: usize, r: Rect, look: &RowLook, q:
 /// follows the desktop, the keymap and listings rebuilt, tooltips on or off.
 pub(crate) fn option_changed(app: &mut App, ctx: &egui::Context) {
     if app.cfg.follow_system_theme {
-        if let Some(t) = ctx.system_theme() {
-            app.cfg.theme = match t {
-                egui::Theme::Light => if app.cfg.theme.is_light() { app.cfg.theme } else { ThemeName::Paper },
-                egui::Theme::Dark if app.cfg.theme.is_light() => ThemeName::Midnight,
-                _ => app.cfg.theme,
-            };
+        if let Some(dark) = app.system_dark(ctx) {
+            app.follow_system(dark);
         }
     }
     app.set_config_changed();

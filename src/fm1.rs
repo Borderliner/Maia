@@ -53,7 +53,7 @@ fn put_u32(v: &mut Vec<u8>, n: u32) {
     v.extend_from_slice(&n.to_le_bytes());
 }
 
-fn put_str(v: &mut Vec<u8>, s: &str) {
+pub(crate) fn put_str(v: &mut Vec<u8>, s: &str) {
     put_u32(v, s.len() as u32);
     v.extend_from_slice(s.as_bytes());
     v.push(0);
@@ -129,6 +129,22 @@ impl Cur<'_> {
         let s = String::from_utf8_lossy(self.b.get(self.at + 1..self.at + 1 + n)?).into_owned();
         self.at += n + 2;
         Some(s)
+    }
+}
+
+/// The number in a variant (unwrapping variants in variants) after `skip` strings at the
+/// start of a body: what a portal setting says.
+pub fn variant_u32(body: &[u8], skip: usize) -> Option<u32> {
+    let mut c = Cur { b: body, at: 0 };
+    for _ in 0..skip {
+        c.str()?;
+    }
+    loop {
+        match c.sig()?.as_str() {
+            "v" => continue,
+            "u" => return c.u32(),
+            _ => return None,
+        }
     }
 }
 
@@ -260,6 +276,11 @@ impl Bus {
 
     pub fn send(&mut self, m: &[u8]) -> Option<()> {
         self.s.write_all(m).ok()
+    }
+
+    /// The next message that comes (a signal asked for with AddMatch).
+    pub fn recv(&mut self) -> Option<Msg> {
+        read(&mut self.s)
     }
 
     /// Call a method and wait for its answer (messages before it are skipped: none come

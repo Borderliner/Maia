@@ -227,6 +227,11 @@ pub struct App {
     pub shelf: crate::shelf::Shelf,
     /// The terminal under the panels.
     pub terminal: crate::terminal::Pane,
+    /// The desktop's light or dark preference as the portal last said, and as last applied.
+    appearance: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    appearance_seen: u8,
+    /// The theme left behind when the desktop last switched, to come back to.
+    pub other_theme: Option<theme::ThemeName>,
 }
 
 /// What a thread sharing files hands back: text for the clipboard, what to say, and a
@@ -336,10 +341,17 @@ impl App {
             errands: Default::default(),
             shelf: Default::default(),
             terminal: crate::terminal::Pane::new(session.terminal_height),
+            appearance: Default::default(),
+            appearance_seen: crate::appearance::UNKNOWN,
+            other_theme: None,
             cfg,
             ud,
         };
         app.refresh_recents();
+        if !cfg!(test) {
+            let c = ctx.clone();
+            crate::appearance::watch(app.appearance.clone(), move || c.request_repaint());
+        }
         // Startup: explicit paths → those; else last session / home / layout.
         let mut restored = false;
         if paths.is_empty() {
@@ -988,6 +1000,27 @@ impl App {
         }
     }
 
+    /// Match the desktop's light or dark: back to the theme last left, when it fits, else
+    /// Midnight or Paper.
+    pub fn follow_system(&mut self, dark: bool) {
+        if self.cfg.theme.is_light() != dark {
+            return;
+        }
+        let back = self.other_theme.filter(|t| t.is_light() != dark);
+        self.other_theme = Some(self.cfg.theme);
+        self.cfg.theme = back.unwrap_or(if dark { theme::ThemeName::Midnight } else { theme::ThemeName::Paper });
+        self.set_config_changed();
+    }
+
+    /// The desktop's preference: the portal's, else what the window system says.
+    pub fn system_dark(&self, ctx: &egui::Context) -> Option<bool> {
+        match self.appearance.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::appearance::DARK => Some(true),
+            crate::appearance::LIGHT => Some(false),
+            _ => ctx.system_theme().map(|t| t == egui::Theme::Dark),
+        }
+    }
+
     pub fn set_config_changed(&mut self) {
         self.cfg_dirty = true;
         self.keymap = Keymap::build(&self.cfg.hotkeys);
@@ -1084,6 +1117,13 @@ impl App {
         self.age_trash();
         crate::errands::pump(self);
         self.shelf.pump(ctx);
+        let look = self.appearance.load(std::sync::atomic::Ordering::Relaxed);
+        if look != self.appearance_seen {
+            self.appearance_seen = look;
+            if self.cfg.follow_system_theme && look != crate::appearance::UNKNOWN {
+                self.follow_system(look == crate::appearance::DARK);
+            }
+        }
         let notes = std::mem::take(&mut *self.notes.lock().unwrap_or_else(|e| e.into_inner()));
         if let Some(n) = notes.into_iter().last() {
             self.toast(n);

@@ -8884,3 +8884,19 @@ fn permissions_set_cleared_and_deep() {
     assert!(matches!(t, crate::admin::Task::Perms { mode: Some(ref m), .. } if m == "u+X"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn theme_follows_the_desktop_and_comes_back() {
+    use crate::theme::ThemeName;
+    let mut app = crate::app::App::new(&egui::Context::default(), vec![]);
+    app.cfg.theme = ThemeName::Nord;
+    app.follow_system(true);
+    assert_eq!(app.cfg.theme, ThemeName::Nord, "already dark");
+    app.follow_system(false);
+    assert_eq!(app.cfg.theme, ThemeName::Paper);
+    app.cfg.theme = ThemeName::Latte;
+    app.follow_system(true);
+    assert_eq!(app.cfg.theme, ThemeName::Nord, "back to the dark theme left");
+    app.follow_system(false);
+    assert_eq!(app.cfg.theme, ThemeName::Latte, "and to the light one");
+}

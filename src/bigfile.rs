@@ -120,6 +120,7 @@ impl Pager {
         let _ = self.req.send(if self.hex { Req::Bytes(a * self.bpr, ((b - a) * self.bpr) as usize) } else { Req::Lines(a, b) });
     }
 
+    #[cfg(test)]
     /// Line `i`, when it has been read.
     pub fn line(&self, i: u64) -> Option<&str> {
         match &self.got {
