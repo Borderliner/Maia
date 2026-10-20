@@ -165,6 +165,9 @@ impl Runner {
         let shot = match self.tk.as_mut() {
             Some(tk) => {
                 input.events.extend(tk.take());
+                if crate::testkit::held().any() {
+                    input.modifiers = crate::testkit::held();
+                }
                 if let Some(m) = input.events.iter().rev().find_map(|e| match e {
                     egui::Event::PointerButton { modifiers, .. } | egui::Event::Key { modifiers, .. } => Some(*modifiers),
                     _ => None,

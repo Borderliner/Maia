@@ -639,6 +639,8 @@ pub const SLOW_MS: f32 = 50.0;
 impl Sim {
     pub fn new(path: &Path, size: Vec2) -> Sim {
         root();
+        // A session that failed while holding a modifier doesn't leave it held for the next.
+        crate::testkit::parse("hold none");
         let ctx = egui::Context::default();
         let app = App::new(&ctx, vec![path.to_path_buf()]);
         let shots = std::env::var_os("MAIA_SIM_SHOTS").map(|d| Box::new(Shots { dir: PathBuf::from(d), textures: Default::default(), prims: vec![] }));
@@ -677,7 +679,7 @@ impl Sim {
                 Event::Key { modifiers, .. } | Event::PointerButton { modifiers, .. } | Event::MouseWheel { modifiers, .. } => Some(*modifiers),
                 _ => None,
             })
-            .unwrap_or_default();
+            .unwrap_or_else(crate::testkit::held);
         for e in &events {
             if let Event::PointerMoved(p) = e {
                 self.pointer = *p;
