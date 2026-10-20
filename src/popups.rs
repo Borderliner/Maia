@@ -2176,6 +2176,7 @@ pub(crate) enum Opt {
     Editor,
     Tour,
     CustomActions,
+    CheckCopies,
 }
 
 /// The pages of Options, in the order of its left column.
@@ -2286,6 +2287,7 @@ pub(crate) const OPTS: &[(Opt, Section, &str, &str, &str)] = &[
     (Opt::TrackRecents, Section::Files, "Recents", "Remember recents", "Visited folders and opened files."),
     (Opt::HighlightRecents, Section::Files, "Recents", "Highlight recents", "Mark recently used items with a dot."),
     (Opt::RecentsOnTop, Section::Files, "Recents", "Recents on top", "Sort recently used items first."),
+    (Opt::CheckCopies, Section::Files, "Copies", "Check copies", "Read each copy back from the disk and compare it."),
     (Opt::TrashAge, Section::Files, "Trash", "Empty the trash", "What stays longer goes for good. Off unless you choose."),
     (Opt::CustomActions, Section::Files, "Right-click menu", "Custom actions", "Your own commands for the files you right-click."),
     (Opt::SingleClick, Section::Mouse, "Clicks", "Single click to open", "Open items with one click."),
@@ -2560,6 +2562,7 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
         Opt::InspectorFont => f!(inspector_font),
         Opt::Thumbnails => f!(thumbnails),
         Opt::ThumbFill => f!(thumb_fill),
+        Opt::CheckCopies => f!(check_copies),
         Opt::ScrollBeyond => f!(scroll_beyond),
         Opt::DateFormat => f!(date_format),
         Opt::ActOnPress => f!(act_on_press),
@@ -2709,6 +2712,7 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         }
         Opt::Thumbnails => choice(ui, "thumbs", &mut c.thumbnails, &[(ThumbMode::LocalDisks, "Local disks"), (ThumbMode::AllDrives, "All drives"), (ThumbMode::Never, "Never")]),
         Opt::ThumbFill => toggle(ui, &mut c.thumb_fill, &pal),
+        Opt::CheckCopies => toggle(ui, &mut c.check_copies, &pal),
         Opt::ScrollBeyond => toggle(ui, &mut c.scroll_beyond, &pal),
         Opt::DateFormat => ui.add(egui::TextEdit::singleline(&mut c.date_format).desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).changed(),
         Opt::ActOnPress => toggle(ui, &mut c.act_on_press, &pal),
@@ -6546,6 +6550,7 @@ fn opt_flip(c: &mut crate::config::Config, o: Opt) -> bool {
         Opt::SelectionBoxes => &mut c.selection_boxes,
         Opt::SystemIcons => &mut c.system_icons,
         Opt::ThumbFill => &mut c.thumb_fill,
+        Opt::CheckCopies => &mut c.check_copies,
         Opt::ScrollBeyond => &mut c.scroll_beyond,
         Opt::ActOnPress => &mut c.act_on_press,
         Opt::SingleClick => &mut c.single_click,

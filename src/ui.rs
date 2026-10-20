@@ -819,10 +819,11 @@ impl App {
     fn panel_ui(&mut self, ui: &mut Ui, id: u64, rect: Rect, tabs_in_title: bool) {
         let pal = self.pal;
         let is_active = id == self.active;
-        // Focus on any press inside.
+        // Focus on any press inside, but not one on a job card or anything else floating
+        // over it.
         if ui.input(|i| i.pointer.any_pressed()) {
             if let Some(pp) = ui.ctx().pointer_interact_pos() {
-                if rect.contains(pp) && !is_active && matches!(self.popup, Popup::None) {
+                if rect.contains(pp) && !is_active && matches!(self.popup, Popup::None) && ui.ctx().layer_id_at(pp).is_none_or(|l| l == ui.layer_id()) {
                     self.actions.push(Action::FocusPanel(id));
                 }
             }
@@ -1633,8 +1634,10 @@ impl App {
                 for (k, j) in self.jobs.iter_mut().enumerate() {
                     egui::Frame::popup(ui.style()).fill(pal.raised).corner_radius(CornerRadius::same(10)).inner_margin(10.0).show(ui, |ui| {
                         ui.set_width(320.0);
-                        let p = j.progress.lock().unwrap();
+                        let mut p = j.progress.lock().unwrap();
                         let done = p.finished;
+                        // Its disk is busy with another job: it starts when that one ends.
+                        let waiting = if done { None } else { p.waiting.clone() };
                         let failed = done && !p.errors.is_empty() && p.errors.len() >= p.total_items.max(1);
                         let cancelled = j.cancel.load(std::sync::atomic::Ordering::Relaxed);
                         // The title gets what the buttons leave and ends in "…" past it: a
@@ -1647,6 +1650,19 @@ impl App {
                             if done {
                                 if ui.small_button("×").clicked() {
                                     remove = Some(k);
+                                }
+                            } else if waiting.is_some() {
+                                let c = ui.small_button("Cancel");
+                                note_control(ui, c.rect, "job cancel");
+                                if c.clicked() {
+                                    j.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    self.queue.poke();
+                                }
+                                let b = ui.small_button("Start now");
+                                note_control(ui, b.rect, "job start now");
+                                if b.clicked() {
+                                    p.go = true;
+                                    self.queue.poke();
                                 }
                             } else {
                                 if ui.small_button("Cancel").clicked() {
@@ -1669,9 +1685,11 @@ impl App {
                             _ => 0.0,
                         };
                         ui.add(egui::ProgressBar::new(if done && !cancelled { 1.0 } else { frac }).desired_height(5.0).fill(if p.errors.is_empty() { pal.accent } else { pal.danger }));
-                        let el = j.started.elapsed().as_secs_f64().max(0.001);
+                        let el = p.since.unwrap_or(j.started).elapsed().as_secs_f64().max(0.001);
                         let mut line = format!("{} / {} item{}", p.done_items, p.total_items, if p.total_items == 1 { "" } else { "s" });
-                        if p.within.is_some() && !done {
+                        if let Some(w) = &waiting {
+                            line = format!("Waiting for “{w}”");
+                        } else if p.within.is_some() && !done {
                             line.push_str(&format!(" · {:.0}%", frac * 100.0));
                         } else if p.total_bytes > 0 {
                             let speed = p.done_bytes as f64 / el;
@@ -1681,7 +1699,12 @@ impl App {
                                 line.push_str(&format!(" · {} left", time_left(eta)));
                             }
                         }
-                        ui.label(egui::RichText::new(line).small().color(pal.text_dim));
+                        if waiting.is_some() {
+                            // The other job's title can be any length: one line, cut with "…".
+                            ui.add(egui::Label::new(egui::RichText::new(line).small().color(pal.text_dim)).truncate());
+                        } else {
+                            ui.label(egui::RichText::new(line).small().color(pal.text_dim));
+                        }
                         if !done && !p.current.is_empty() {
                             // One line, cut with "…": a long name wrapped and the card grew and
                             // shrank from file to file.

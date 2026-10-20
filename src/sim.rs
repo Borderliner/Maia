@@ -1100,7 +1100,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(161) {
+    match rng.below(162) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2362,6 +2362,26 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             s.idle(rng.below(20) + 1);
             s.act("key Escape");
         }
+        161 => {
+            // Copies taking turns on one disk: two of what is here into one folder at
+            // once, checked or not, the second's card told to start now, cancelled or
+            // left to wait.
+            s.app.cfg.check_copies = rng.below(2) == 0;
+            let files: Vec<PathBuf> = s.tab().entries.iter().filter(|e| !e.is_dir && !e.is_link).map(|e| e.path.clone()).take(3).collect();
+            if !files.is_empty() && s.tab().path.starts_with(root()) {
+                let dest = root().join("home/turns");
+                let _ = std::fs::create_dir_all(&dest);
+                s.note(format!("two copies of {} items", files.len()));
+                for _ in 0..2 {
+                    s.app.start_job(crate::ops::OpKind::Copy { srcs: files.clone(), dest: dest.clone(), decide: Default::default() });
+                }
+                s.idle(2);
+                if rng.below(3) > 0 {
+                    click_control_at(s, rng.pick(&["job start now", "job cancel"]));
+                }
+                s.idle(rng.below(10) + 1);
+            }
+        }
         _ => {
             s.note("idle".into());
             s.idle(rng.below(20) + 1);
@@ -3546,7 +3566,8 @@ mod journeys {
         }
         s.idle(3);
         let popup = crate::ui::POPUPS.with(|p| p.borrow().first().copied()).unwrap();
-        let r = s.text_rect("Recents on top");
+        let bottom = OPTS.iter().filter(|o| o.1 == Section::Files).last().map(|o| o.3).unwrap();
+        let r = s.text_rect(bottom);
         assert!(popup.contains_rect(r), "the last row scrolled into view: {r:?} in {popup:?}");
         look(&mut s, "small window");
         s.shot("options-small");
@@ -10760,6 +10781,138 @@ mod journeys {
         click_control(&mut s, "undo close");
         assert!(!s.popup_open());
         report("undo history", &s);
+    }
+
+    /// The card of the job at `k`'s progress, by its label.
+    fn job_with(s: &Sim, label: &str) -> Option<std::sync::Arc<std::sync::Mutex<crate::ops::Progress>>> {
+        s.app.jobs.iter().rev().find(|j| j.label == label).map(|j| j.progress.clone())
+    }
+
+    /// Copies onto one disk take turns: a second copy's card waits for the first, named;
+    /// Start Now runs it anyway, Cancel ends it with nothing copied; a copy on another disk
+    /// runs at once; the first resumed, the one waiting follows. Check Copies switched on in
+    /// Options: a copy that comes back different from the disk is an error on its card and
+    /// is removed, and a move across disks keeps its original.
+    #[test]
+    fn copies_take_turns_and_are_checked() {
+        if !sandboxed() {
+            return;
+        }
+        use crate::ops::OpKind;
+        let home = fixture("turns");
+        let docs = home.join("Documents");
+        let backups = home.join("Backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        std::fs::write(docs.join("big.bin"), vec![7u8; 96 << 20]).unwrap();
+        // Another disk: the sandbox's /tmp is a file system of its own.
+        let far = Path::new("/tmp").join("turns");
+        let _ = std::fs::remove_dir_all(&far);
+        std::fs::create_dir_all(far.join("in")).unwrap();
+        std::fs::create_dir_all(far.join("out")).unwrap();
+        std::fs::write(far.join("in/photo.png"), "png").unwrap();
+        let mut s = Sim::new(&docs, vec2(1280.0, 800.0));
+        s.cmd(SplitRight);
+        go(&mut s, &backups);
+        s.act("key Tab");
+        s.settle();
+        // A long copy, held paused (as if its Pause had been pressed), holds the disk.
+        s.app.start_job(OpKind::Copy { srcs: vec![docs.join("big.bin")], dest: backups.clone(), decide: Default::default() });
+        s.app.jobs.last().unwrap().pause.store(true, std::sync::atomic::Ordering::Relaxed);
+        wait_until(&mut s, "the first job running", 10, |s| s.app.queue.running().len() == 1);
+        let waiting = |s: &Sim, label: &str| job_with(s, label).is_some_and(|p| p.lock().unwrap().waiting.as_deref() == Some("Copying big.bin"));
+        select_path(&mut s, &docs.join("notes.txt"));
+        s.act("key F5");
+        wait_until(&mut s, "the second copy queued", 10, |s| waiting(s, "Copying notes.txt"));
+        s.idle(3);
+        assert!(some_text(&s, "Waiting for “Copying big.bin”") && some_text(&s, "Start now"), "the card says what it waits for");
+        assert!(!backups.join("notes.txt").exists());
+        look(&mut s, "a copy waiting its turn");
+        s.shot("job-queued");
+        click_control(&mut s, "job start now");
+        wait_until(&mut s, "started now", 10, |_| backups.join("notes.txt").exists());
+        // Cancelled while it waits: nothing copied.
+        select_path(&mut s, &docs.join("report.md"));
+        s.act("key F5");
+        wait_until(&mut s, "queued again", 10, |s| waiting(s, "Copying report.md"));
+        s.idle(2);
+        click_control(&mut s, "job cancel");
+        wait_until(&mut s, "cancelled", 10, |s| job_with(s, "Copying report.md").is_some_and(|p| p.lock().unwrap().finished));
+        s.idle(2);
+        assert!(some_text(&s, "Cancelled copying report.md") && !backups.join("report.md").exists());
+        // Another disk doesn't wait.
+        go(&mut s, &far.join("in"));
+        s.act("key Tab");
+        go(&mut s, &far.join("out"));
+        s.act("key Tab");
+        s.settle();
+        select_path(&mut s, &far.join("in/photo.png"));
+        s.act("key F5");
+        wait_until(&mut s, "a copy on another disk", 10, |_| far.join("out/photo.png").exists());
+        go(&mut s, &docs);
+        s.act("key Tab");
+        go(&mut s, &backups);
+        s.act("key Tab");
+        s.settle();
+        // Queued behind the first, then the first resumed: the one waiting follows.
+        select_path(&mut s, &docs.join("budget 2026.csv"));
+        s.act("key F5");
+        wait_until(&mut s, "queued behind the first", 10, |s| waiting(s, "Copying budget 2026.csv"));
+        s.idle(2);
+        s.click_text("Resume");
+        wait_until(&mut s, "both done", 20, |_| backups.join("budget 2026.csv").exists() && std::fs::metadata(backups.join("big.bin")).is_ok_and(|m| m.len() == 96 << 20));
+        wait_until(&mut s, "the cards gone", 20, |s| s.app.jobs.iter().all(|j| j.finished_at.is_some()));
+        std::fs::remove_file(docs.join("big.bin")).unwrap();
+        std::fs::remove_file(backups.join("big.bin")).unwrap();
+        // Check Copies, from its row in Options.
+        s.act("key ctrl+Comma");
+        s.settle();
+        s.act("key ctrl+PageDown");
+        let popup = crate::ui::POPUPS.with(|p| p.borrow().first().copied()).unwrap_or_else(|| s.fail("Options drawn"));
+        for _ in 0..10 {
+            if s.texts.iter().any(|(r, t)| t == "Check copies" && popup.contains_rect(*r)) {
+                break;
+            }
+            s.act(&format!("scroll {:.0} {:.0} -3", popup.center().x + 100.0, popup.center().y));
+            s.idle(6);
+        }
+        click_in_row(&mut s, "switch", "Check copies");
+        assert!(s.app.cfg.check_copies, "switched on");
+        look(&mut s, "Check copies in Options");
+        s.shot("options-check-copies");
+        s.act("key Escape");
+        s.act("key Escape");
+        s.settle();
+        // Checked: a good copy lands; one that comes back changed is an error, removed.
+        select_path(&mut s, &docs.join("résumé – final (v3).txt"));
+        s.act("key F5");
+        wait_until(&mut s, "a checked copy", 10, |_| backups.join("résumé – final (v3).txt").exists());
+        let bad = format!("{} trip.png", crate::ops::SPOILED);
+        std::fs::write(docs.join(&bad), vec![9u8; 300_000]).unwrap();
+        let id = s.app.active;
+        s.app.panels.get_mut(&id).unwrap().tab_mut().reload();
+        s.settle();
+        select_path(&mut s, &docs.join(&bad));
+        s.act("key F5");
+        let failed = |s: &Sim| s.app.jobs.iter().any(|j| j.progress.lock().unwrap().finished && !j.progress.lock().unwrap().errors.is_empty());
+        wait_until(&mut s, "the check's error", 10, failed);
+        assert!(!backups.join(&bad).exists(), "the bad copy removed");
+        s.idle(2);
+        s.click_text("1 error · show");
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t.contains("read back from the disk differently")), "why, on the card");
+        look(&mut s, "a copy that failed its check");
+        s.shot("job-check-failed");
+        // A move across disks that fails its check keeps the original.
+        s.act("key Tab");
+        go(&mut s, &far.join("out"));
+        s.act("key Tab");
+        s.settle();
+        select_path(&mut s, &docs.join(&bad));
+        s.act("key F6");
+        wait_until(&mut s, "the move's check", 10, |s| s.app.jobs.iter().filter(|j| j.progress.lock().unwrap().finished && !j.progress.lock().unwrap().errors.is_empty()).count() >= 2 || !docs.join(&bad).exists());
+        assert!(docs.join(&bad).exists() && !far.join("out").join(&bad).exists(), "the original stays");
+        let _ = std::fs::remove_dir_all(&far);
+        report("turns and checks", &s);
     }
 
     /// Workspaces: leaving a project through Recent Projects keeps its tabs and panels;

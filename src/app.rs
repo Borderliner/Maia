@@ -157,6 +157,8 @@ pub struct App {
     pub save_session: bool,
     pub jump_buf: (String, Instant),
     pub undo: UndoStack,
+    /// Jobs that move data take turns on each disk.
+    pub queue: std::sync::Arc<ops::Queue>,
     pub theme_applied: (theme::ThemeName, f32, f32, bool, bool),
     pub ctx: egui::Context,
     pub fresh: bool,
@@ -304,6 +306,7 @@ impl App {
             save_session: paths.is_empty(),
             jump_buf: (String::new(), Instant::now()),
             undo: UndoStack::default(),
+            queue: Default::default(),
             theme_applied: (cfg.theme, cfg.font_size, cfg.spacing, cfg.animations, cfg.syntax_theme),
             ctx: ctx.clone(),
             fresh: true,
@@ -3155,7 +3158,7 @@ impl App {
 
     pub fn start_job(&mut self, kind: OpKind) {
         let id = self.alloc_id();
-        self.jobs.push(ops::spawn(id, kind, self.ctx.clone()));
+        self.jobs.push(ops::spawn_in(id, kind, self.ctx.clone(), &self.queue, self.cfg.check_copies));
     }
 
     fn restore_from_trash(&mut self) {

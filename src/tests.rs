@@ -3687,9 +3687,10 @@ fn every_option_has_one_section() {
         Opt::PictureViewer => 61,
         Opt::Tour => 62,
         Opt::CustomActions => 63,
+        Opt::CheckCopies => 64,
     };
-    let numbered: Vec<usize> = (0..59).chain([61, 62, 63]).collect();
-    let mut seen = vec![0; 64];
+    let numbered: Vec<usize> = (0..59).chain([61, 62, 63, 64]).collect();
+    let mut seen = vec![0; 65];
     for o in OPTS {
         seen[index(o.0)] += 1;
     }
@@ -9283,3 +9284,216 @@ fn a_dropped_watch_lets_go_of_its_descriptor() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+
+// ---------------------------------------------------------------- queue, check, redo
+
+/// A second folder on another file system than the temp folder (/dev/shm, a tmpfs), for
+/// moves across disks; None where there is none.
+fn other_fs(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let shm = Path::new("/dev/shm");
+    let t = std::fs::metadata(std::env::temp_dir()).ok()?.dev();
+    if std::fs::metadata(shm).ok()?.dev() == t {
+        return None;
+    }
+    let d = shm.join(format!("maia-test-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).ok()?;
+    Some(d)
+}
+
+/// Partitions of one drive, a btrfs subvolume (a device of its own, 0:N, named only by
+/// its mount's source), LUKS on a partition and LVM on that are all the one disk; a stick
+/// is another; tmpfs and a FUSE mount are each their own. The sysfs is laid out as the
+/// kernel lays it out, the mount table as /proc/self/mountinfo reads on such a laptop.
+#[test]
+fn disks_are_named_by_the_drive_under_them() {
+    use std::os::unix::fs::symlink;
+    let d = tmpdir("disks");
+    let sys = d.join("sys");
+    let nvme = sys.join("devices/pci0000:00/0000:00:06.0/nvme/nvme0/nvme0n1");
+    let sda = sys.join("devices/pci0000:00/0000:00:14.0/usb2/2-1/host0/block/sda");
+    for (dir, part) in [(&nvme, "nvme0n1p1"), (&nvme, "nvme0n1p2"), (&nvme, "nvme0n1p3"), (&sda, "sda1")] {
+        touch(&dir.join(part).join("partition"), "1\n");
+    }
+    let dm0 = sys.join("devices/virtual/block/dm-0");
+    let dm1 = sys.join("devices/virtual/block/dm-1");
+    std::fs::create_dir_all(dm0.join("slaves")).unwrap();
+    std::fs::create_dir_all(dm1.join("slaves")).unwrap();
+    std::fs::create_dir_all(sys.join("class/block")).unwrap();
+    std::fs::create_dir_all(sys.join("dev/block")).unwrap();
+    let class = |n: &str, to: &Path| symlink(to, sys.join("class/block").join(n)).unwrap();
+    class("nvme0n1", &nvme);
+    class("nvme0n1p1", &nvme.join("nvme0n1p1"));
+    class("nvme0n1p2", &nvme.join("nvme0n1p2"));
+    class("nvme0n1p3", &nvme.join("nvme0n1p3"));
+    class("sda", &sda);
+    class("sda1", &sda.join("sda1"));
+    class("dm-0", &dm0);
+    class("dm-1", &dm1);
+    // LUKS on the third partition, LVM inside it.
+    symlink(nvme.join("nvme0n1p3"), dm0.join("slaves/nvme0n1p3")).unwrap();
+    symlink(&dm0, dm1.join("slaves/dm-0")).unwrap();
+    for (dev, to) in [("259:1", nvme.join("nvme0n1p1")), ("259:3", nvme.join("nvme0n1p3")), ("254:0", dm0.clone()), ("254:1", dm1.clone()), ("8:1", sda.join("sda1"))] {
+        symlink(to, sys.join("dev/block").join(dev)).unwrap();
+    }
+    let mountinfo = "\
+26 1 0:33 /@ / rw,relatime shared:1 - btrfs /dev/nvme0n1p2 rw,ssd,space_cache=v2,subvolid=256,subvol=/@
+45 26 0:34 /@home /home rw,relatime shared:28 - btrfs /dev/nvme0n1p2 rw,ssd,space_cache=v2,subvolid=257,subvol=/@home
+48 26 259:1 / /boot rw,relatime shared:31 - vfat /dev/nvme0n1p1 rw,fmask=0137,dmask=0027
+50 26 254:1 / /srv rw,relatime shared:33 - ext4 /dev/mapper/vg-srv rw
+27 26 0:25 / /tmp rw,nosuid,nodev shared:14 - tmpfs tmpfs rw,size=16195776k
+98 30 0:50 / /run/user/1000/gvfs rw,nosuid,nodev,relatime shared:244 - fuse.gvfsd-fuse gvfsd-fuse rw,user_id=1000,group_id=1000
+101 26 8:1 / /run/media/me/STICK rw,nosuid,nodev,relatime shared:250 - vfat /dev/sda1 rw,uid=1000
+";
+    let key = |dev| ops::disk_key(dev, &sys, mountinfo);
+    for dev in [(0, 33), (0, 34), (259, 1), (259, 3), (254, 0), (254, 1)] {
+        assert_eq!(key(dev), "nvme0n1", "{dev:?} is on the laptop's drive");
+    }
+    assert_eq!(key((8, 1)), "sda", "the stick");
+    assert_eq!(key((0, 25)), "0:25", "tmpfs is no disk");
+    assert_eq!(key((0, 50)), "0:50", "nor is a FUSE mount");
+    assert_eq!(key((0, 99)), "0:99", "a device in no mount");
+    // This machine, as it is: one file system is one disk, another file system can be.
+    let a = ops::disk_of(&d).unwrap();
+    assert_eq!(ops::disk_of(&d.join("not yet/made")).as_deref(), Some(a.as_str()), "a path still to be made is on its folder's disk");
+    assert_eq!(ops::disk_of(&std::env::temp_dir()).as_deref(), Some(a.as_str()));
+    if let Some(shm) = other_fs("disks") {
+        assert_ne!(ops::disk_of(&shm).unwrap(), a);
+        let _ = std::fs::remove_dir_all(&shm);
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Copies onto one disk wait for each other, first come first served, each card saying
+/// what it waits for; a job told to start now and one on another disk don't wait; a
+/// move within one file system (a rename) never queues; a waiting job cancelled ends
+/// without copying anything.
+#[test]
+fn jobs_on_one_disk_take_turns() {
+    let ctx = egui::Context::default();
+    let q = std::sync::Arc::new(ops::Queue::default());
+    let d = tmpdir("queue");
+    let big: Vec<u8> = (0..24_000_000u32).map(|i| (i * 13 % 251) as u8).collect();
+    std::fs::write(d.join("big.bin"), &big).unwrap();
+    touch(&d.join("small.txt"), "small");
+    touch(&d.join("moved.txt"), "moved");
+    for o in ["out1", "out2", "out4", "out5", "elsewhere"] {
+        std::fs::create_dir_all(d.join(o)).unwrap();
+    }
+    let copy = |id: u64, what: &str, to: &str| ops::spawn_in(id, OpKind::Copy { srcs: vec![d.join(what)], dest: d.join(to), decide: HashMap::new() }, ctx.clone(), &q, false);
+    let first = copy(1, "big.bin", "out1");
+    first.pause.store(true, std::sync::atomic::Ordering::Relaxed);
+    let t0 = Instant::now();
+    while q.running() != [1] {
+        assert!(t0.elapsed() < Duration::from_secs(5), "the first job holds the disk");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let second = copy(2, "small.txt", "out2");
+    let waits_for = |j: &ops::Job, label: &str| {
+        let t0 = Instant::now();
+        while j.progress.lock().unwrap().waiting.as_deref() != Some(label) {
+            assert!(t0.elapsed() < Duration::from_secs(5), "{} waiting for {label}: {:?}", j.label, j.progress.lock().unwrap().waiting);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    waits_for(&second, "Copying big.bin");
+    // A rename on the same disk goes ahead.
+    let mv = ops::spawn_in(3, OpKind::Move { srcs: vec![d.join("moved.txt")], dest: d.join("elsewhere"), decide: HashMap::new() }, ctx.clone(), &q, false);
+    wait_job(&mv);
+    assert!(d.join("elsewhere/moved.txt").exists());
+    // Told to start now, it does, while the first still holds the disk.
+    let third = copy(4, "small.txt", "out4");
+    waits_for(&third, "Copying big.bin");
+    third.progress.lock().unwrap().go = true;
+    q.poke();
+    wait_job(&third);
+    assert!(d.join("out4/small.txt").exists() && third.progress.lock().unwrap().since.is_some());
+    // Cancelled while it waits: done, nothing copied.
+    let fourth = copy(5, "small.txt", "out5");
+    waits_for(&fourth, "Copying big.bin");
+    fourth.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    q.poke();
+    wait_job(&fourth);
+    assert!(!d.join("out5/small.txt").exists(), "a cancelled job in the queue copies nothing");
+    // Another disk is another queue.
+    if let Some(shm) = other_fs("queue") {
+        touch(&shm.join("there.txt"), "there");
+        std::fs::create_dir_all(shm.join("out")).unwrap();
+        let other = ops::spawn_in(6, OpKind::Copy { srcs: vec![shm.join("there.txt")], dest: shm.join("out"), decide: HashMap::new() }, ctx.clone(), &q, false);
+        wait_job(&other);
+        assert!(shm.join("out/there.txt").exists(), "a copy on another disk runs beside the first");
+        let _ = std::fs::remove_dir_all(&shm);
+    }
+    assert!(!d.join("out2/small.txt").exists() && !second.progress.lock().unwrap().finished, "the second still waits");
+    first.pause.store(false, std::sync::atomic::Ordering::Relaxed);
+    wait_job(&first);
+    wait_job(&second);
+    assert_eq!(std::fs::read(d.join("out1/big.bin")).unwrap(), big);
+    assert!(d.join("out2/small.txt").exists(), "its turn came once the first was done");
+    assert!(q.running().is_empty());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// With Check Copies on, every copied file is read back from the disk and compared with
+/// what went in: a good copy is read twice over (its bytes count twice), and a file that
+/// comes back different (changed on its way, as a failing drive would) fails the copy
+/// and is removed. A move across disks then keeps its original. With the check off, the
+/// same bad copy goes unnoticed.
+#[test]
+fn checked_copies_are_read_back() {
+    let ctx = egui::Context::default();
+    let q = std::sync::Arc::new(ops::Queue::default());
+    let d = tmpdir("check");
+    let big: Vec<u8> = (0..3_000_000u32).map(|i| (i * 7 % 253) as u8).collect();
+    std::fs::write(d.join("big.bin"), &big).unwrap();
+    touch(&d.join("box/a.txt"), "a");
+    touch(&d.join("box/deep/b.txt"), "b");
+    let bad = format!("{} photo.jpg", ops::SPOILED);
+    touch(&d.join("bad/keep.txt"), "keep");
+    std::fs::write(d.join("bad").join(&bad), &big[..100_000]).unwrap();
+    std::fs::create_dir_all(d.join("out")).unwrap();
+    let job = |id, kind, check| {
+        let j = ops::spawn_in(id, kind, ctx.clone(), &q, check);
+        wait_job(&j);
+        j
+    };
+    let j = job(1, OpKind::Copy { srcs: vec![d.join("big.bin"), d.join("box")], dest: d.join("out"), decide: HashMap::new() }, true);
+    let g = j.progress.lock().unwrap();
+    assert!(g.errors.is_empty(), "{:?}", g.errors);
+    assert_eq!((g.total_bytes, g.done_bytes), (2 * (big.len() as u64 + 2), 2 * (big.len() as u64 + 2)), "copied, then read back");
+    drop(g);
+    assert_eq!(std::fs::read(d.join("out/big.bin")).unwrap(), big);
+    assert_eq!(std::fs::read_to_string(d.join("out/box/deep/b.txt")).unwrap(), "b");
+    // Shared extents (btrfs, XFS) write no bytes that could come back different.
+    if !reflinks(&d) {
+        let j = job(2, OpKind::Copy { srcs: vec![d.join("bad")], dest: d.join("out"), decide: HashMap::new() }, true);
+        let errs = j.progress.lock().unwrap().errors.clone();
+        assert!(errs.len() == 1 && errs[0].contains("read back from the disk differently"), "{errs:?}");
+        assert!(!d.join("out/bad").exists(), "no copy that is known to be wrong");
+        let j = job(3, OpKind::Copy { srcs: vec![d.join("bad")], dest: d.join("out"), decide: HashMap::new() }, false);
+        assert!(j.progress.lock().unwrap().errors.is_empty());
+        assert_ne!(std::fs::read(d.join("out/bad").join(&bad)).unwrap(), std::fs::read(d.join("bad").join(&bad)).unwrap(), "unchecked, the changed copy stays");
+    }
+    if let Some(shm) = other_fs("check") {
+        let j = job(4, OpKind::Move { srcs: vec![d.join("bad")], dest: shm.clone(), decide: HashMap::new() }, true);
+        assert_eq!(j.progress.lock().unwrap().errors.len(), 1);
+        assert!(d.join("bad").join(&bad).exists() && !shm.join("bad").exists(), "the original stays, the copy goes");
+        let j = job(5, OpKind::Move { srcs: vec![d.join("box")], dest: shm.clone(), decide: HashMap::new() }, true);
+        assert!(j.progress.lock().unwrap().errors.is_empty());
+        assert!(!d.join("box").exists() && std::fs::read_to_string(shm.join("box/a.txt")).unwrap() == "a", "a good copy moves");
+        let _ = std::fs::remove_dir_all(&shm);
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Can files in `dir` share extents (a reflink copy)?
+fn reflinks(dir: &Path) -> bool {
+    use std::os::fd::AsRawFd;
+    let (a, b) = (dir.join(".reflink-a"), dir.join(".reflink-b"));
+    std::fs::write(&a, b"x").unwrap();
+    let (r, w) = (std::fs::File::open(&a).unwrap(), std::fs::File::create(&b).unwrap());
+    let ok = unsafe { libc::ioctl(w.as_raw_fd(), 0x4004_9409, r.as_raw_fd()) } == 0;
+    let _ = (std::fs::remove_file(&a), std::fs::remove_file(&b));
+    ok
+}

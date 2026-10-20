@@ -193,6 +193,8 @@ pub struct Config {
     pub inspector_font: String,
     pub thumbnails: ThumbMode,
     pub thumb_fill: bool,
+    /// Every copy read back from the disk and compared with what was copied.
+    pub check_copies: bool,
     pub scroll_beyond: bool,
     pub date_format: String,
     // Mouse & keyboard
@@ -274,6 +276,7 @@ impl Default for Config {
             inspector_font: String::new(),
             thumbnails: ThumbMode::LocalDisks,
             thumb_fill: false,
+            check_copies: false,
             scroll_beyond: false,
             date_format: "%x %H:%M".into(),
             act_on_press: true,

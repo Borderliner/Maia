@@ -96,6 +96,12 @@ pub struct Progress {
     pub made: Vec<PathBuf>,
     /// Paths no longer where they were: moved away, trashed or deleted.
     pub gone: Vec<PathBuf>,
+    /// Waiting for the disk: the label of the job it waits for.
+    pub waiting: Option<String>,
+    /// Asked to start without waiting its turn.
+    pub go: bool,
+    /// When it started after waiting its turn (speed and time left count from here).
+    pub since: Option<std::time::Instant>,
 }
 
 pub struct Job {
@@ -111,6 +117,12 @@ pub struct Job {
 }
 
 pub fn spawn(id: u64, kind: OpKind, ctx: egui::Context) -> Job {
+    spawn_in(id, kind, ctx, &Arc::new(Queue::default()), false)
+}
+
+/// A job that takes its turn in `queue` when it moves data, and reads its copies back
+/// from the disk when `check` is on.
+pub fn spawn_in(id: u64, kind: OpKind, ctx: egui::Context, queue: &Arc<Queue>, check: bool) -> Job {
     let progress = Arc::new(Mutex::new(Progress::default()));
     let cancel = Arc::new(AtomicBool::new(false));
     let pause = Arc::new(AtomicBool::new(false));
@@ -146,10 +158,19 @@ pub fn spawn(id: u64, kind: OpKind, ctx: egui::Context) -> Job {
             }
         }
     };
-    let (p2, c2, k2, pa2) = (progress.clone(), cancel.clone(), kind.clone(), pause.clone());
+    // Counted before it starts, for the card of one waiting its turn.
+    progress.lock().unwrap().total_items = n;
+    let (p2, c2, k2, pa2, l2) = (progress.clone(), cancel.clone(), kind.clone(), pause.clone(), label.clone());
+    let queue = queue.clone();
     std::thread::spawn(move || {
-        let gate = Gate { cancel: &c2, pause: &pa2 };
-        run(&k2, &p2, &gate, &ctx);
+        let check = check.then(|| Check { keys: std::collections::hash_map::RandomState::new(), written: Default::default() });
+        let gate = Gate { cancel: &c2, pause: &pa2, check };
+        let disks = disks_of(&k2);
+        let turn = disks.is_empty() || queue.wait_turn(id, &l2, disks, &p2, &gate, &ctx);
+        if turn {
+            run(&k2, &p2, &gate, &ctx);
+        }
+        queue.done(id);
         p2.lock().unwrap().finished = true;
         ctx.request_repaint();
     });
@@ -160,6 +181,16 @@ pub fn spawn(id: u64, kind: OpKind, ctx: egui::Context) -> Job {
 pub struct Gate<'a> {
     cancel: &'a AtomicBool,
     pause: &'a AtomicBool,
+    /// Copies to read back once they are on the disk (Check Copies).
+    check: Option<Check>,
+}
+
+/// What each file copied hashed to as its bytes went through, to compare with what the
+/// disk gives back. The hash is keyed afresh for every job, so no corruption can be
+/// shaped to match it.
+pub(crate) struct Check {
+    keys: std::collections::hash_map::RandomState,
+    written: std::cell::RefCell<Vec<(PathBuf, u64)>>,
 }
 
 impl Gate<'_> {
@@ -179,6 +210,22 @@ impl Gate<'_> {
     pub(crate) fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
+
+    /// How many times each byte is handled: twice when copies are read back.
+    fn weight(&self) -> u64 {
+        if self.check.is_some() { 2 } else { 1 }
+    }
+
+    /// A part renamed into place: its files are checked under their new names.
+    fn renamed(&self, from: &Path, to: &Path) {
+        if let Some(c) = &self.check {
+            for (f, _) in c.written.borrow_mut().iter_mut() {
+                if let Ok(rest) = f.strip_prefix(from) {
+                    *f = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
+                }
+            }
+        }
+    }
 }
 
 fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
@@ -187,7 +234,7 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
             let total: u64 = srcs.iter().map(|s| tree_size(s)).sum();
             {
                 let mut g = p.lock().unwrap();
-                g.total_bytes = total;
+                g.total_bytes = total * cancel.weight();
                 g.total_items = srcs.len();
             }
             for s in srcs {
@@ -202,7 +249,7 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 }
                 let merge = policy == Conflict::Merge && d.replace.is_none();
                 let fresh = fs::symlink_metadata(&d.to).is_err();
-                let r = copy_tree(s, &d.to, p, cancel, ctx, merge).and_then(|_| match &d.replace {
+                let r = checked(cancel, p, &d.to, copy_tree(s, &d.to, p, cancel, ctx, merge)).and_then(|_| match &d.replace {
                     Some(t) => swap_in(&d.to, t),
                     None => Ok(()),
                 });
@@ -272,7 +319,7 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
         OpKind::Sync { copies, remove } => {
             {
                 let mut g = p.lock().unwrap();
-                g.total_bytes = copies.iter().map(|(s, _)| tree_size(s)).sum();
+                g.total_bytes = copies.iter().map(|(s, _)| tree_size(s)).sum::<u64>() * cancel.weight();
                 g.total_items = copies.len() + remove.len();
             }
             for (s, d) in copies {
@@ -282,7 +329,7 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 // Over something: written beside it and swapped in once whole.
                 let over = fs::symlink_metadata(d).is_ok();
                 let to = if over { unique_dest(d.parent().unwrap_or(d), &format!(".{}.maia-part", name_of(d))) } else { d.clone() };
-                match copy_tree(s, &to, p, cancel, ctx, false).and_then(|_| if over { swap_in(&to, d) } else { Ok(()) }) {
+                match checked(cancel, p, &to, copy_tree(s, &to, p, cancel, ctx, false)).and_then(|_| if over { swap_in(&to, d) } else { Ok(()) }) {
                     Ok(()) => {
                         let mut g = p.lock().unwrap();
                         g.produced.push((s.clone(), d.clone()));
@@ -507,9 +554,9 @@ fn move_one(s: &PathBuf, dest: &Path, policy: Conflict, p: &Mutex<Progress>, can
         },
         // Cross-device: copy and put in place; the original goes later.
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            p.lock().unwrap().total_bytes += tree_size(s);
+            p.lock().unwrap().total_bytes += tree_size(s) * cancel.weight();
             let skipped = p.lock().unwrap().errors.len();
-            let r = copy_tree(s, &d.to, p, cancel, ctx, merge).and_then(|_| match &d.replace {
+            let r = checked(cancel, p, &d.to, copy_tree(s, &d.to, p, cancel, ctx, merge)).and_then(|_| match &d.replace {
                 Some(t) => swap_in(&d.to, t),
                 None => Ok(()),
             });
@@ -804,6 +851,7 @@ fn copy_tree(
                         let _ = remove_tree(&part);
                         return Err(e);
                     }
+                    cancel.renamed(&part, &child);
                     continue;
                 }
             }
@@ -820,12 +868,21 @@ fn copy_tree(
         p.lock().unwrap().current = name_of(src);
         let r = fs::File::open(src)?;
         let w = fs::File::create(dst)?;
-        if let Err(e) = copy_data(&r, &w, m.len(), p, cancel, ctx) {
-            drop(w);
-            // A failed copy (disk full, device gone, cancelled) must not leave a
-            // truncated file behind that looks like a finished one.
-            let _ = fs::remove_file(dst);
-            return Err(e);
+        match copy_data(&r, &w, m.len(), p, cancel, ctx) {
+            Ok(h) => {
+                #[cfg(test)]
+                spoil(&w, src);
+                if let (Some(c), Some(h)) = (&cancel.check, h) {
+                    c.written.borrow_mut().push((dst.to_path_buf(), h));
+                }
+            }
+            Err(e) => {
+                drop(w);
+                // A failed copy (disk full, device gone, cancelled) must not leave a
+                // truncated file behind that looks like a finished one.
+                let _ = fs::remove_file(dst);
+                return Err(e);
+            }
         }
         // Before the permissions: a read-only file takes no attributes.
         copy_xattrs(src, dst);
@@ -838,15 +895,19 @@ fn copy_tree(
 }
 
 /// The bytes of `r` into `w`: shared extents where the drive can (btrfs, XFS: instant),
-/// else copied in the kernel, else through a buffer.
-fn copy_data(r: &fs::File, w: &fs::File, len: u64, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) -> std::io::Result<()> {
+/// else copied in the kernel, else through a buffer. When copies are checked, what they
+/// hashed to on the way (the kernel's copy never shows them, so the buffer it is); none
+/// for shared extents, where no byte was written that could come back different.
+fn copy_data(r: &fs::File, w: &fs::File, len: u64, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) -> std::io::Result<Option<u64>> {
+    use std::hash::{BuildHasher, Hasher};
     use std::os::fd::AsRawFd;
     const FICLONE: libc::c_ulong = 0x4004_9409;
     let (rf, wf) = (r.as_raw_fd(), w.as_raw_fd());
     if len > 0 && unsafe { libc::ioctl(wf, FICLONE, rf) } == 0 {
-        p.lock().unwrap().done_bytes += len;
-        return Ok(());
+        p.lock().unwrap().done_bytes += len * cancel.weight();
+        return Ok(None);
     }
+    let mut hash = cancel.check.as_ref().map(|c| c.keys.build_hasher());
     let mut since_repaint = 0u64;
     let mut step = |n: u64| {
         p.lock().unwrap().done_bytes += n;
@@ -856,8 +917,8 @@ fn copy_data(r: &fs::File, w: &fs::File, len: u64, p: &Mutex<Progress>, cancel: 
             since_repaint = 0;
         }
     };
-    let (mut kernel, mut done) = (true, 0u64);
-    let mut buf = vec![];
+    let (mut kernel, mut done) = (hash.is_none(), 0u64);
+    let mut buf = if kernel { vec![] } else { vec![0u8; len.clamp(64 << 10, 1 << 20) as usize] };
     loop {
         if cancel.stop() {
             return Err(std::io::Error::other("cancelled"));
@@ -879,10 +940,13 @@ fn copy_data(r: &fs::File, w: &fs::File, len: u64, p: &Mutex<Progress>, cancel: 
         } else {
             let n = (&*r).read(&mut buf)?;
             (&*w).write_all(&buf[..n])?;
+            if let Some(h) = &mut hash {
+                h.write(&buf[..n]);
+            }
             n
         };
         if n == 0 {
-            return Ok(());
+            return Ok(hash.map(|h| h.finish()));
         }
         done += n as u64;
         step(n as u64);
@@ -926,4 +990,218 @@ pub fn copy_xattrs(src: &Path, dst: &Path) {
 pub fn remove_tree(p: &Path) -> std::io::Result<()> {
     let m = fs::symlink_metadata(p)?;
     if m.is_dir() { fs::remove_dir_all(p) } else { fs::remove_file(p) }
+}
+
+/// A copy just made, read back from the disk when copies are checked. The files are put
+/// on the device first, then their cached pages dropped, so what is read is what the
+/// device holds and not what is still in memory. A file that comes back different is
+/// removed and the copy fails: for a move, its original stays.
+fn checked(gate: &Gate, p: &Mutex<Progress>, at: &Path, r: std::io::Result<()>) -> std::io::Result<()> {
+    use std::hash::{BuildHasher, Hasher};
+    use std::os::fd::AsRawFd;
+    let Some(c) = &gate.check else { return r };
+    let files = std::mem::take(&mut *c.written.borrow_mut());
+    r?;
+    let Some(first) = files.first() else { return Ok(()) };
+    // One flush for the whole item: a file's own fsync waits on the device once per file,
+    // and a folder of photos is thousands of them.
+    syncfs(&first.0).map_err(|e| std::io::Error::other(format!("{}: {e}", at.display())))?;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut bad = vec![];
+    for (f, want) in &files {
+        if gate.stop() {
+            return Err(std::io::Error::other("cancelled"));
+        }
+        p.lock().unwrap().current = format!("Checking {}", name_of(f));
+        let file = fs::File::open(f)?;
+        unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+        let mut h = c.keys.build_hasher();
+        loop {
+            let n = (&file).read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            h.write(&buf[..n]);
+            p.lock().unwrap().done_bytes += n as u64;
+        }
+        if h.finish() != *want {
+            bad.push(f);
+            let _ = fs::remove_file(f);
+        }
+    }
+    match bad.as_slice() {
+        [] => Ok(()),
+        // The item itself: its name already heads the error.
+        [f] if *f == at => Err(std::io::Error::other("the copy read back from the disk differently, so it was removed")),
+        [f] => Err(std::io::Error::other(format!("the copy of {} read back from the disk differently, so it was removed", name_of(f)))),
+        v => Err(std::io::Error::other(format!("{} copied files read back from the disk differently, so they were removed", v.len()))),
+    }
+}
+
+/// Test builds: a file named so has its first byte changed once copied, as a failing
+/// drive would, for the check to find.
+#[cfg(test)]
+pub const SPOILED: &str = "spoiled on the way";
+
+#[cfg(test)]
+fn spoil(w: &fs::File, src: &Path) {
+    use std::os::unix::fs::FileExt;
+    if name_of(src).starts_with(SPOILED) {
+        let mut b = [0u8; 1];
+        let _ = fs::File::open(src).and_then(|f| f.read_at(&mut b, 0));
+        let _ = w.write_at(&[b[0] ^ 0xff], 0);
+    }
+}
+
+/// Jobs that move data take turns on each disk: two copies onto one drive at once take
+/// longer than one after the other, as the drive seeks between them, and each shows a
+/// time left that is wrong. Jobs on other disks, and quick ones (renames, the trash,
+/// permissions), never wait.
+#[derive(Default)]
+pub struct Queue {
+    lanes: Mutex<Vec<Lane>>,
+    turn: std::sync::Condvar,
+}
+
+struct Lane {
+    id: u64,
+    label: String,
+    disks: Vec<String>,
+    running: bool,
+}
+
+impl Queue {
+    /// Waiting jobs look again: one was told to start now, or cancelled.
+    pub fn poke(&self) {
+        self.turn.notify_all();
+    }
+
+    /// Jobs that hold their disks now.
+    pub fn running(&self) -> Vec<u64> {
+        self.lanes.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|l| l.running).map(|l| l.id).collect()
+    }
+
+    /// Wait until no job started before this one, and none running, uses one of `disks`,
+    /// or until the job is told to start anyway. False when it was cancelled first.
+    fn wait_turn(&self, id: u64, label: &str, disks: Vec<String>, p: &Mutex<Progress>, gate: &Gate, ctx: &egui::Context) -> bool {
+        let mut lanes = self.lanes.lock().unwrap_or_else(|e| e.into_inner());
+        lanes.push(Lane { id, label: label.to_string(), disks, running: false });
+        let mut waited = false;
+        loop {
+            if gate.cancelled() {
+                return false;
+            }
+            let Some(me) = lanes.iter().position(|l| l.id == id) else { return false };
+            let ahead = |l: &&Lane| l.id != id && (l.running || l.id < id) && l.disks.iter().any(|d| lanes[me].disks.contains(d));
+            let blocker = lanes.iter().filter(ahead).find(|l| l.running).or_else(|| lanes.iter().find(ahead)).map(|l| l.label.clone());
+            let mut g = p.lock().unwrap_or_else(|e| e.into_inner());
+            if blocker.is_none() || g.go {
+                lanes[me].running = true;
+                if g.waiting.take().is_some() || waited {
+                    g.since = Some(std::time::Instant::now());
+                }
+                drop(g);
+                ctx.request_repaint();
+                return true;
+            }
+            if g.waiting != blocker {
+                g.waiting = blocker;
+                ctx.request_repaint();
+            }
+            drop(g);
+            waited = true;
+            // Woken when a job ends or is told to start; the timeout covers a cancel.
+            lanes = self.turn.wait_timeout(lanes, std::time::Duration::from_millis(250)).unwrap_or_else(|e| e.into_inner()).0;
+        }
+    }
+
+    fn done(&self, id: u64) {
+        let mut lanes = self.lanes.lock().unwrap_or_else(|e| e.into_inner());
+        lanes.retain(|l| l.id != id);
+        drop(lanes);
+        self.turn.notify_all();
+    }
+}
+
+/// The disks a job moves data on, or none for a job that doesn't wait its turn. A move
+/// within one file system is a rename, and only its moves to another count.
+fn disks_of(kind: &OpKind) -> Vec<String> {
+    let paths: Vec<&Path> = match kind {
+        OpKind::Copy { srcs, dest, .. } => srcs.iter().map(PathBuf::as_path).chain([dest.as_path()]).collect(),
+        OpKind::Move { srcs, dest, decide } => {
+            let to = dev_of(dest);
+            let far: Vec<&Path> = srcs.iter().filter(|s| dev_of(s) != to || decide.get(*s) == Some(&Conflict::Merge)).map(PathBuf::as_path).collect();
+            if far.is_empty() {
+                return vec![];
+            }
+            far.into_iter().chain([dest.as_path()]).collect()
+        }
+        OpKind::Sync { copies, .. } => copies.iter().flat_map(|(f, t)| [f.as_path(), t.as_path()]).collect(),
+        OpKind::Extract { archive, dest, .. } => vec![archive.as_path(), dest.as_path()],
+        OpKind::Compress { srcs, out, .. } => srcs.iter().map(PathBuf::as_path).chain([out.as_path()]).collect(),
+        _ => vec![],
+    };
+    let mut devs: Vec<u64> = paths.into_iter().filter_map(dev_of).collect();
+    devs.sort_unstable();
+    devs.dedup();
+    if devs.is_empty() {
+        return vec![];
+    }
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let mut disks: Vec<String> = devs.into_iter().map(|d| disk_key((libc::major(d), libc::minor(d)), Path::new("/sys"), &mountinfo)).collect();
+    disks.sort();
+    disks.dedup();
+    disks
+}
+
+/// The device of `p`, or of the nearest folder above it that exists.
+fn dev_of(p: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    p.ancestors().find_map(|a| fs::symlink_metadata(a).ok()).map(|m| m.dev())
+}
+
+/// The disk `p` is on, by the name the kernel gives it (nvme0n1, sda).
+pub fn disk_of(p: &Path) -> Option<String> {
+    let d = dev_of(p)?;
+    Some(disk_key((libc::major(d), libc::minor(d)), Path::new("/sys"), &fs::read_to_string("/proc/self/mountinfo").unwrap_or_default()))
+}
+
+/// The physical disk under device `dev` (major, minor), found in the sysfs at `sys`:
+/// a partition, or a mapped device on one (LUKS, LVM), is its disk, so two partitions of
+/// one drive share it. A file system with no device of its own (a btrfs subvolume) is
+/// found by its mount's source; one on no disk (tmpfs, FUSE, NFS) is a key of its own.
+pub fn disk_key(dev: (u32, u32), sys: &Path, mountinfo: &str) -> String {
+    let (maj, min) = dev;
+    let own = format!("{maj}:{min}");
+    let start = if maj != 0 {
+        Some(sys.join("dev/block").join(&own))
+    } else {
+        mountinfo.lines().find_map(|l| {
+            if l.split(' ').nth(2)? != own {
+                return None;
+            }
+            let src = l.split(" - ").nth(1)?.split(' ').nth(1)?;
+            let dev = Path::new(src.strip_prefix("/dev/").map(|_| src)?);
+            // /dev/mapper/root is a link to /dev/dm-0, the name sysfs knows.
+            let name = fs::canonicalize(dev).ok().and_then(|r| r.file_name().map(|n| n.to_os_string())).or_else(|| dev.file_name().map(|n| n.to_os_string()))?;
+            Some(sys.join("class/block").join(name))
+        })
+    };
+    start.and_then(|s| disk_name(sys, &s)).unwrap_or(own)
+}
+
+fn disk_name(sys: &Path, dev: &Path) -> Option<String> {
+    let mut d = fs::canonicalize(dev).ok()?;
+    // A few levels at most: LVM on LUKS on a partition.
+    for _ in 0..6 {
+        let under = fs::read_dir(d.join("slaves")).ok().and_then(|r| r.flatten().map(|e| e.file_name()).min());
+        match under {
+            Some(s) => d = fs::canonicalize(sys.join("class/block").join(s)).ok()?,
+            None => break,
+        }
+    }
+    if d.join("partition").exists() {
+        d = d.parent()?.to_path_buf();
+    }
+    Some(d.file_name()?.to_string_lossy().into_owned())
 }
