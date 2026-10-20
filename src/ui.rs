@@ -332,6 +332,15 @@ impl App {
         self.drop_right = matches!(self.drag, Some(Drag::Files { right: true, .. }));
         let ctx = ctx.clone();
         let pal = self.pal;
+        // ------------------------------------------------ the picker's bar (Open and Save)
+        // The window's whole width, under the sidebar too: a dialog's row of answers.
+        if self.picker.is_some() {
+            egui::TopBottomPanel::bottom("picker")
+                .exact_height(crate::picker::height(self))
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE.fill(pal.chrome))
+                .show(&ctx, |ui| crate::picker::bar(self, ui));
+        }
         // ------------------------------------------------ sidebar (full height)
         if self.sidebar {
             // A narrow window keeps room beside it for the title bar's window buttons and

@@ -179,6 +179,14 @@ pub fn uninstall() -> Result<String, String> {
     }
     #[cfg(not(test))]
     let _ = crate::fm1::set_service(false, &crate::fm1::exe());
+    // Open and Save dialogs go back to the desktop's, and the backend's files go.
+    #[cfg(not(test))]
+    {
+        let pl = crate::portal::Places::user();
+        if crate::portal::is_on(&pl) || pl.portal_file().exists() || pl.service_file().exists() {
+            let _ = crate::portal::set(false);
+        }
+    }
     for p in [desktop_path(), icon_in(&hicolor()), old_icon_in(&hicolor())] {
         let _ = std::fs::remove_file(p);
     }

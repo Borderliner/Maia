@@ -127,6 +127,8 @@ pub struct Tab {
     pub git_only: Option<std::sync::Arc<HashSet<PathBuf>>>,
     /// The status answer `git_only` was made from.
     pub git_only_from: Option<std::rc::Rc<crate::gitstatus::Repo>>,
+    /// In a picker window: the files the app's filter lets through (folders always pass).
+    pub pick: Option<std::sync::Arc<crate::picker::Accept>>,
     /// In a trash folder: original location and deletion time per item.
     pub trash_meta: HashMap<PathBuf, (PathBuf, Option<SystemTime>)>,
     /// Tree-view context rows: ancestors kept only to show where filter matches live (drawn dimmed).
@@ -225,6 +227,7 @@ impl Tab {
             only_changed: false,
             git_only: None,
             git_only_from: None,
+            pick: None,
             gone: false,
             archive: None,
             dimmed: HashSet::new(),
@@ -976,6 +979,7 @@ impl Tab {
         let db = crate::mime::mime_db();
         let (git_hide, here) = (self.git_hide.clone(), self.path.clone());
         let git_only = self.git_only.clone();
+        let pick = self.pick.clone();
         let hidden_ok = |e: &Entry| -> bool {
             if !c.show_hidden && (e.hidden || e.rel_hidden()) {
                 return false;
@@ -1000,6 +1004,9 @@ impl Tab {
             if fq.has_conds() && !fq.ok(e, c.stats) {
                 return false;
             }
+            if pick.as_ref().is_some_and(|a| !a.ok(e)) {
+                return false;
+            }
             only.is_empty() || only.contains(e.special_kind().map(String::from).unwrap_or_else(|| db.label(&e.name, &e.ext(), e.is_dir, e.is_executable())).as_str())
         };
         let mut hidden_count = 0;
@@ -1009,7 +1016,7 @@ impl Tab {
         // Fuzzy score of each entry in `top` (same order), when filtering.
         let mut scores: Vec<i32> = vec![];
         let tree_view = self.tree_active();
-        let tree = tree_view && q.is_empty() && only.is_empty() && content.is_none() && !fq.has_conds();
+        let tree = tree_view && q.is_empty() && only.is_empty() && content.is_none() && !fq.has_conds() && pick.is_none();
         self.dimmed.clear();
         if tree_view && !tree {
             self.rebuild_tree_filtered(c, &q, &hidden_ok, &row_ok);

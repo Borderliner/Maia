@@ -64,7 +64,9 @@ mod ops;
 mod panel;
 mod perms;
 mod picfix;
+mod picker;
 mod popups;
+mod portal;
 mod project;
 mod projects;
 mod fm1;
@@ -131,6 +133,8 @@ Usage: maia [OPTIONS] [PATH...]
 Options:
   --install        Install to ~/.local/bin and add a launcher entry
   --set-default    Make Maia the default file manager (inode/directory)
+  --set-picker     Open and save files for other apps (the desktop portal's dialog)
+  --unset-picker   Give the Open and Save dialog back to the desktop
   --uninstall      Remove the launcher entry and installed binary
   --update         Update to the latest release on GitHub, if there is a newer one
   --window PATH    Open PATH in a new window
@@ -177,6 +181,29 @@ fn main() {
                 }
                 return;
             }
+            "--set-picker" | "--unset-picker" => {
+                match portal::set(a == "--set-picker") {
+                    Ok(m) => println!("{m}"),
+                    Err(e) => {
+                        eprintln!("maia: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+            // The Open and Save dialog's backend, started by the session bus.
+            "--portal" => {
+                if !portal::run_backend() {
+                    eprintln!("maia: no session bus, or the portal backend is already running");
+                    std::process::exit(1);
+                }
+                return;
+            }
+            // One Open or Save dialog: the request on standard input, the answer on output.
+            "--pick" => {
+                pick();
+                return;
+            }
             "--which" => {
                 // Diagnostics: how each file would be opened.
                 for p in args.by_ref() {
@@ -209,10 +236,45 @@ fn main() {
         }
         single::claim_at(&sock).map(|l| (l, sock))
     };
-    std::thread::spawn(install::refresh_icon);
+    std::thread::spawn(|| {
+        install::refresh_icon();
+        portal::refresh();
+    });
     runner::run(
-        runner::Options { title: "Maia", app_id: if cfg!(feature = "testkit") { "io.github.yappologistic.Maia.test" } else { "io.github.yappologistic.Maia" }, size: [1240.0, 780.0], min_size: [520.0, 340.0], icon: install::window_icon() },
+        runner::Options { title: "Maia", app_id: if cfg!(feature = "testkit") { "io.github.yappologistic.Maia.test" } else { "io.github.yappologistic.Maia" }, size: [1240.0, 780.0], min_size: [520.0, 340.0], icon: install::window_icon(), picker: None },
         paths,
         listener,
     );
+}
+
+/// A picker window for the request on standard input; its answer goes to standard
+/// output once it closes.
+fn pick() {
+    use std::io::Read as _;
+    use std::os::fd::FromRawFd as _;
+    let mut req = vec![];
+    let _ = std::io::stdin().take(1 << 20).read_to_end(&mut req);
+    // The answer goes out on a copy of the pipe that programs started from the window
+    // (an app opened from it, a thumbnailer) do not inherit: the backend reads until
+    // every writer has gone, and one still running would hold the answer back.
+    let answer = unsafe { libc::fcntl(1, libc::F_DUPFD_CLOEXEC, 3) };
+    if answer < 0 {
+        return;
+    }
+    unsafe {
+        let null = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+        if null >= 0 {
+            libc::dup2(null, 1);
+            libc::close(null);
+        }
+    }
+    let p = picker::Picker::new(portal::Pick::decode(&req));
+    picker::begin();
+    picker::warm(&p.pick);
+    let start = p.start();
+    // A class of its own, for window rules: a compositor can float and size dialogs.
+    let title: &'static str = Box::leak(p.title().into_boxed_str());
+    let app_id = if cfg!(feature = "testkit") { "io.github.yappologistic.Maia.test" } else { "io.github.yappologistic.Maia.Picker" };
+    runner::run(runner::Options { title, app_id, size: [980.0, 640.0], min_size: [520.0, 340.0], icon: install::window_icon(), picker: Some(Box::new(p)) }, vec![start], None);
+    picker::write_answer(&mut unsafe { std::fs::File::from_raw_fd(answer) });
 }

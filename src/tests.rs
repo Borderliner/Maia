@@ -10077,3 +10077,506 @@ fn viewer_turns_and_tags_real_pictures() {
     assert_eq!(std::fs::read_to_string(&svg).unwrap(), "<svg xmlns='http://www.w3.org/2000/svg'/>");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ------------------------------------------------------------------ the Open and Save dialog
+
+fn unhex(parts: &[&str]) -> Vec<u8> {
+    let s: String = parts.concat();
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+}
+
+/// The OpenFile call xdg-desktop-portal 1.18.4 sent Maia's backend for this request,
+/// made with gdbus through the real portal and taken off a private bus with
+/// `dbus-monitor --binary`: parent `x11:3a00007`, title "Upload a photo", several files,
+/// an accept label with a mnemonic, two filters (globs with classes, a MIME type), the
+/// first as current, a choice with options and a yes-or-no one, and /tmp to start in.
+const PORTAL_OPEN_CALL: &[&str] = &[
+    "6c01000159020000220000009d00000001016f001f0000002f6f72672f667265656465736b746f702f706f7274616c2f",
+    "6465736b746f700002017300270000006f72672e667265656465736b746f702e696d706c2e706f7274616c2e46696c65",
+    "43686f6f7365720006017300040000003a312e320000000008016700096f737373617b73767d00000301730008000000",
+    "4f70656e46696c65000000000000000007017300040000003a312e3100000000310000002f6f72672f66726565646573",
+    "6b746f702f706f7274616c2f6465736b746f702f726571756573742f315f332f6d616961310000000000000000000000",
+    "0b0000007831313a33613030303037000e00000055706c6f616420612070686f746f0000f10100000c00000061636365",
+    "70745f6c6162656c00017300070000005f55706c6f616400080000006d756c7469706c65000162000100000000000000",
+    "0700000066696c74657273000961287361287573292900005a0000000000000006000000496d6167657300002b000000",
+    "000000000e0000002a2e5b70505d5b6e4e5d5b67475d0000010000000a000000696d6167652f6a706567000000000000",
+    "03000000416c6c000a0000000000000000000000010000002a000000000000000e00000063757272656e745f66696c74",
+    "6572000828736128757329290000000006000000496d6167657300002b000000000000000e0000002a2e5b70505d5b6e",
+    "4e5d5b67475d0000010000000a000000696d6167652f6a7065670000000000000700000063686f69636573000b612873",
+    "7361287373297329000000009200000008000000656e636f64696e670000000008000000456e636f64696e6700000000",
+    "300000000000000004000000757466380000000007000000556e69636f646500060000006c6174696e31000007000000",
+    "5765737465726e000400000075746638000000000000000002000000726f00000900000052656164206f6e6c79000000",
+    "00000000000000000500000066616c7365000000000000000e00000063757272656e745f666f6c646572000261790000",
+    "050000002f746d7000",
+];
+
+/// The Close the portal sent for it when the app (gdbus) went away.
+const PORTAL_CLOSE_CALL: &[&str] = &[
+    "6c0100010000000024000000a500000001016f00310000002f6f72672f667265656465736b746f702f706f7274616c2f",
+    "6465736b746f702f726571756573742f315f332f6d616961310000000000000002017300230000006f72672e66726565",
+    "6465736b746f702e696d706c2e706f7274616c2e52657175657374000000000006017300040000003a312e3200000000",
+    "08016700000000000301730005000000436c6f736500000007017300040000003a312e3100000000",
+];
+
+/// The portal's own messages read as Maia reads them: the request with every option, the
+/// Close on its handle, and the body written again byte for byte the same. Answers go
+/// back as `ua{sv}`; between the backend and a picker window, requests and answers pass
+/// whole; a message cut short or nested without end is refused, not followed.
+#[test]
+fn portal_requests_read_and_answers_written() {
+    use crate::portal::{Answer, Filter, Mode, Pick, Val, parse, put, reply_body};
+    let m = crate::fm1::read(&mut std::io::Cursor::new(unhex(PORTAL_OPEN_CALL))).expect("a whole message");
+    assert_eq!((m.kind, m.path.as_str(), m.interface.as_str(), m.member.as_str(), m.signature.as_str()), (1, "/org/freedesktop/portal/desktop", crate::portal::IFACE, "OpenFile", "osssa{sv}"));
+    let (handle, p) = Pick::from_call(&m.member, &m.signature, &m.body).expect("a request");
+    assert_eq!(handle, "/org/freedesktop/portal/desktop/request/1_3/maia1");
+    assert_eq!((p.mode, p.parent.as_str(), p.title.as_str(), p.accept_label.as_str(), p.multiple, p.directory), (Mode::Open, "x11:3a00007", "Upload a photo", "Upload", true, false));
+    let images = Filter { name: "Images".into(), rules: vec![(0, "*.[pP][nN][gG]".into()), (1, "image/jpeg".into())] };
+    assert_eq!(p.filters, vec![images.clone(), Filter { name: "All".into(), rules: vec![(0, "*".into())] }]);
+    assert_eq!(p.current_filter, Some(0), "the current filter is one of the list");
+    assert_eq!(p.choices.len(), 2);
+    assert_eq!((p.choices[0].id.as_str(), p.choices[0].label.as_str(), p.choices[0].chosen.as_str()), ("encoding", "Encoding", "utf8"));
+    assert_eq!(p.choices[0].options, vec![("utf8".to_string(), "Unicode".to_string()), ("latin1".into(), "Western".into())]);
+    assert!(p.choices[1].options.is_empty() && p.choices[1].chosen == "false", "a yes or no");
+    assert_eq!(p.current_folder.as_deref(), Some(Path::new("/tmp")), "the nul-terminated path");
+    // Read and written again, the body is the portal's to the byte (alignment of the
+    // empty `a(ss)` included).
+    let vals = parse(&m.signature, &m.body).unwrap();
+    let mut again = vec![];
+    for (sig, v) in ["o", "s", "s", "s", "a{sv}"].iter().zip(&vals) {
+        put(&mut again, sig, v);
+    }
+    assert_eq!(again, m.body);
+    let c = crate::fm1::read(&mut std::io::Cursor::new(unhex(PORTAL_CLOSE_CALL))).unwrap();
+    assert_eq!((c.path.as_str(), c.interface.as_str(), c.member.as_str()), (handle.as_str(), "org.freedesktop.impl.portal.Request", "Close"));
+    // The answer: picked files, the questions' answers and the filter in use, by name.
+    let a = Answer { response: 0, uris: vec!["file:///tmp/a%20b.png".into(), "file:///tmp/c.jpg".into()], choices: vec![("encoding".into(), "latin1".into()), ("ro".into(), "true".into())], filter: Some(0) };
+    let v = parse("ua{sv}", &reply_body(&p, &a)).unwrap();
+    assert_eq!(v[0], Val::U32(0));
+    let Val::List(results) = &v[1] else { panic!("{v:?}") };
+    let get = |k: &str| results.iter().find_map(|e| match e {
+        Val::Tuple(t) if t[0] == Val::Str(k.into()) => match &t[1] {
+            Val::Var(_, x) => Some(x.as_ref().clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert_eq!(get("uris"), Some(Val::List(a.uris.iter().map(|u| Val::Str(u.clone())).collect())));
+    assert_eq!(get("choices"), Some(Val::List(vec![Val::Tuple(vec![Val::Str("encoding".into()), Val::Str("latin1".into())]), Val::Tuple(vec![Val::Str("ro".into()), Val::Str("true".into())])])));
+    let Some(Val::Tuple(f)) = get("current_filter") else { panic!("no filter") };
+    assert_eq!(f[0], Val::Str("Images".into()));
+    // Cancelled: response 1 and nothing else.
+    let v = parse("ua{sv}", &reply_body(&p, &Answer::cancelled())).unwrap();
+    assert_eq!(v, vec![Val::U32(1), Val::List(vec![])]);
+    // Between the backend and the window: the request and the answer whole.
+    let mut p2 = p.clone();
+    p2.current_name = "naïve name.txt".into();
+    p2.files = vec!["one.txt".into(), "two\nlines.txt".into()];
+    p2.current_file = Some("/tmp/x y/z".into());
+    assert_eq!(Pick::decode(&p2.encode()), p2);
+    assert_eq!(Answer::decode(&a.encode()), a);
+    assert_eq!(Answer::decode(b""), Answer::ended(), "a picker that said nothing ended some other way");
+    assert_eq!(Answer::decode(b"uri\0file:///x\0"), Answer::ended(), "an answer without its response is no answer");
+    // A current filter that is not in the list (or no list) is applied by itself.
+    let mut b = vec![];
+    for s in [Val::Str("/r/1".into()), Val::Str("app".into()), Val::Str("".into()), Val::Str("Save".into())] {
+        put(&mut b, "s", &s);
+    }
+    let docs = Val::Tuple(vec![Val::Str("Docs".into()), Val::List(vec![Val::Tuple(vec![Val::U32(0), Val::Str("*.odt".into())])])]);
+    let opts = Val::List(vec![
+        Val::Tuple(vec![Val::Str("current_filter".into()), Val::Var("(sa(us))".into(), Box::new(docs))]),
+        Val::Tuple(vec![Val::Str("current_name".into()), Val::Var("s".into(), Box::new(Val::Str("Untitled.odt".into())))]),
+        Val::Tuple(vec![Val::Str("current_file".into()), Val::Var("ay".into(), Box::new(Val::Bytes(b"/tmp/old.odt\0".to_vec())))]),
+        Val::Tuple(vec![Val::Str("a number".into()), Val::Var("x".into(), Box::new(Val::Other))]),
+    ]);
+    put(&mut b, "a{sv}", &opts);
+    // An int64 nobody asked for is read past: its 8 bytes written as zeroes here.
+    let (_, s) = Pick::from_call("SaveFile", "osssa{sv}", &b).unwrap();
+    assert_eq!((s.mode, s.current_filter, s.filters.len(), s.current_name.as_str()), (Mode::Save, Some(0), 1, "Untitled.odt"));
+    assert_eq!(s.current_file.as_deref(), Some(Path::new("/tmp/old.odt")));
+    assert!(Pick::from_call("Explode", "osssa{sv}", &b).is_none() && Pick::from_call("OpenFile", "s", &b).is_none());
+    for cut in [3, 17, 40, b.len() - 3] {
+        assert!(Pick::from_call("SaveFile", "osssa{sv}", &b[..cut]).is_none(), "cut at {cut}");
+    }
+    let mut deep = vec![];
+    for _ in 0..200 {
+        deep.extend_from_slice(&[1, b'v', 0]);
+    }
+    assert!(parse("v", &deep).is_none(), "variants in variants without end");
+    // A backend whose program an update replaced opens pickers with the new one.
+    let d = tmpdir("portal-exe");
+    let exe = d.join("maia");
+    touch(&exe, "new build");
+    assert_eq!(crate::portal::picker_exe(&exe), Some(exe.clone()));
+    assert_eq!(crate::portal::picker_exe(Path::new(&format!("{} (deleted)", exe.display()))), Some(exe.clone()));
+    assert_eq!(crate::portal::picker_exe(&d.join("gone (deleted)")), None, "nothing at the path: no picker");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(crate::portal::plain_label("_Open"), "Open");
+    assert_eq!(crate::portal::plain_label("Save __as"), "Save _as");
+}
+
+/// Globs as the portal's filters write them (classes, ranges, negation) and MIME types
+/// with the shared database's subclasses: a C file is plain text, `image/*` takes a PNG.
+/// Folders always pass, so the list can still be walked; folder mode lists only folders.
+#[test]
+fn picker_filters_let_through_what_the_app_asked() {
+    use crate::picker::{Accept, glob, mime_is};
+    let g = |p: &str, n: &str| glob(&p.chars().collect::<Vec<_>>(), &n.chars().collect::<Vec<_>>());
+    assert!(g("*.[pP][nN][gG]", "Shot.PnG") && g("*.[pP][nN][gG]", "a.png") && !g("*.[pP][nN][gG]", "a.jpg"));
+    assert!(g("*", "anything") && g("?.txt", "a.txt") && !g("?.txt", "ab.txt"));
+    assert!(g("report-[0-9][0-9].pdf", "report-07.pdf") && !g("report-[0-9][0-9].pdf", "report-7a.pdf"));
+    assert!(g("[!.]*", "visible") && !g("[!.]*", ".hidden"));
+    assert!(g("*.tar.gz", "x.tar.gz") && !g("*.tar.gz", "x.tar.gz.part"));
+    assert!(g("[", "[") && !g("*.PNG", "a.png"), "a lone bracket is itself; patterns are case-sensitive");
+    assert!(mime_is("image/png", "image/*") && !mime_is("text/plain", "image/*") && mime_is("text/plain", "*"));
+    assert!(mime_is("text/x-csrc", "text/plain") && mime_is("text/markdown", "text/plain"), "every text is plain text");
+    if std::path::Path::new("/usr/share/mime/subclasses").is_file() {
+        assert!(mime_is("application/x-shellscript", "text/plain"), "a subclass of the shared database");
+        assert!(mime_is("image/svg+xml", "application/xml"));
+    }
+    let d = tmpdir("picker-filters");
+    for f in ["a.png", "b.JPG", "c.jpeg", "notes.txt", "sub/x"] {
+        touch(&d.join(f), "x");
+    }
+    let e = |n: &str| crate::fsx::Entry::from_path(&d.join(n)).unwrap();
+    let mut p = crate::portal::Pick::default();
+    p.filters = vec![crate::portal::Filter { name: "Images".into(), rules: vec![(0, "*.[pP][nN][gG]".into()), (1, "image/jpeg".into())] }, crate::portal::Filter { name: "Nothing known".into(), rules: vec![(7, "?".into())] }];
+    let a = Accept::new(&p, Some(0)).unwrap();
+    assert!(a.ok(&e("a.png")) && a.ok(&e("b.JPG")) && a.ok(&e("c.jpeg")) && !a.ok(&e("notes.txt")));
+    assert!(a.ok(&e("sub")), "folders pass, to walk into");
+    assert!(Accept::new(&p, Some(1)).is_none() && Accept::new(&p, None).is_none(), "nothing Maia can read filters nothing");
+    p.directory = true;
+    let a = Accept::new(&p, Some(0)).unwrap();
+    assert!(a.ok(&e("sub")) && !a.ok(&e("a.png")), "folder mode: folders only");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Turning it on puts one line in the portals.conf the portal reads, keeps every other
+/// line, and remembers what was there; off puts it back. With no file of the user's, a
+/// copy of the desktop's own is made (portals before 1.20.1 read only the first file
+/// found) and taken away again. All in temporary folders, never the real home.
+#[test]
+fn picker_routing_merges_and_restores_portals_conf() {
+    use crate::portal::{IFACE, Places, conf_set, is_on, turn_off, turn_on};
+    // The text alone.
+    let (t, prev) = conf_set("# mine\n[preferred]\ndefault=hyprland;gtk\norg.freedesktop.impl.portal.ScreenCast=hyprland\n\n[other]\nx=1\n", IFACE, Some("maia"));
+    assert_eq!(t, "# mine\n[preferred]\ndefault=hyprland;gtk\norg.freedesktop.impl.portal.ScreenCast=hyprland\norg.freedesktop.impl.portal.FileChooser=maia\n\n[other]\nx=1\n");
+    assert_eq!(prev, None);
+    let (t2, prev) = conf_set(&t, IFACE, Some("kde"));
+    assert_eq!((prev.as_deref(), t2.matches("FileChooser").count()), (Some("maia"), 1), "replaced in place");
+    let (t3, _) = conf_set(&t2, IFACE, None);
+    assert!(!t3.contains("FileChooser") && t3.contains("ScreenCast=hyprland") && t3.contains("[other]\nx=1"));
+    assert_eq!(conf_set("", IFACE, Some("maia")).0, "[preferred]\norg.freedesktop.impl.portal.FileChooser=maia\n");
+    assert_eq!(conf_set("[other]\na=b\n", IFACE, Some("maia")).0, "[other]\na=b\n\n[preferred]\norg.freedesktop.impl.portal.FileChooser=maia\n");
+    assert_eq!(conf_set("[preferred]\n org.freedesktop.impl.portal.FileChooser = gtk \n", IFACE, None).1.as_deref(), Some("gtk"), "spaces around =");
+    let d = tmpdir("picker-routing");
+    let sys = d.join("usr/share/xdg-desktop-portal");
+    touch(&sys.join("hyprland-portals.conf"), "[preferred]\ndefault=hyprland;gtk\n");
+    let pl = Places { data: d.join("data"), config: d.join("config"), state: d.join("state/previous-file-chooser.json"), desktops: vec!["hyprland".into()], system: vec![d.join("etc/xdg-desktop-portal"), sys.clone()], merges: false };
+    let exe = Path::new("/opt/maia/bin/maia");
+    // No file of the user's: one for this desktop, copied from the desktop's.
+    assert!(!is_on(&pl));
+    turn_on(&pl, exe).unwrap();
+    let mine = d.join("config/xdg-desktop-portal/hyprland-portals.conf");
+    assert_eq!(std::fs::read_to_string(&mine).unwrap(), "[preferred]\ndefault=hyprland;gtk\norg.freedesktop.impl.portal.FileChooser=maia\n");
+    assert_eq!(std::fs::read_to_string(pl.portal_file()).unwrap(), crate::portal::PORTAL_FILE);
+    assert_eq!(std::fs::read_to_string(pl.service_file()).unwrap(), "[D-BUS Service]\nName=org.freedesktop.impl.portal.desktop.maia\nExec=/opt/maia/bin/maia --portal\n");
+    assert!(is_on(&pl));
+    turn_on(&pl, exe).unwrap();
+    turn_off(&pl).unwrap();
+    assert!(!mine.exists() && !pl.portal_file().exists() && !pl.service_file().exists() && !pl.state.exists(), "everything Maia made is gone");
+    assert!(!is_on(&pl));
+    // A file of the user's, routed to KDE's dialog, with their own lines: kept, and KDE
+    // again after.
+    let generic = d.join("config/xdg-desktop-portal/portals.conf");
+    let theirs = "[preferred]\n# my choice\ndefault=gtk\norg.freedesktop.impl.portal.FileChooser=kde\n";
+    touch(&generic, theirs);
+    turn_on(&pl, exe).unwrap();
+    assert!(!mine.exists(), "the file read now is the one changed");
+    assert_eq!(std::fs::read_to_string(&generic).unwrap(), "[preferred]\n# my choice\ndefault=gtk\norg.freedesktop.impl.portal.FileChooser=maia\n");
+    // Turned on twice, the first previous value is the one kept.
+    turn_on(&pl, exe).unwrap();
+    // A line the user added meanwhile stays.
+    let edited = std::fs::read_to_string(&generic).unwrap() + "org.freedesktop.impl.portal.Print=gtk\n";
+    std::fs::write(&generic, &edited).unwrap();
+    turn_off(&pl).unwrap();
+    assert_eq!(std::fs::read_to_string(&generic).unwrap(), format!("{theirs}org.freedesktop.impl.portal.Print=gtk\n"));
+    // A copy Maia made and the user changed since is theirs now: kept, without the line.
+    std::fs::remove_file(&generic).unwrap();
+    turn_on(&pl, exe).unwrap();
+    std::fs::write(&mine, std::fs::read_to_string(&mine).unwrap() + "org.freedesktop.impl.portal.Screenshot=hyprland\n").unwrap();
+    turn_off(&pl).unwrap();
+    assert_eq!(std::fs::read_to_string(&mine).unwrap(), "[preferred]\ndefault=hyprland;gtk\norg.freedesktop.impl.portal.Screenshot=hyprland\n");
+    // A portal that falls back from file to file (1.21.1 on) gets the line alone, so the
+    // desktop's own file still decides the rest.
+    std::fs::remove_file(&mine).unwrap();
+    let pl = Places { merges: true, ..pl };
+    turn_on(&pl, exe).unwrap();
+    assert_eq!(std::fs::read_to_string(&mine).unwrap(), "[preferred]\norg.freedesktop.impl.portal.FileChooser=maia\n");
+    assert!(is_on(&pl));
+    turn_off(&pl).unwrap();
+    assert!(!mine.exists() && !is_on(&pl));
+    // What the Options row says is missing: no portal, or one before 1.20.1 without the
+    // packaged file.
+    use crate::portal::{missing, version_of};
+    assert_eq!(version_of("xdg-desktop-portal 1.18.4\n"), Some((1, 18, 4)));
+    assert_eq!(version_of("xdg-desktop-portal 1.21"), Some((1, 21, 0)));
+    assert!(missing(None, false).is_some() && missing(Some((1, 18, 4)), false).is_some());
+    assert!(missing(Some((1, 18, 4)), true).is_none() && missing(Some((1, 20, 1)), false).is_none() && missing(Some((1, 22, 0)), false).is_none());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The backend on a private bus (never the user's): the portal's calls, made by the real
+/// xdg-desktop-portal when it is installed, reach the picker and its answer comes back to
+/// the app as the Response signal; a Close ends the picker and no answer is sent. Without
+/// the portal the backend is called directly. Introspection and the portal's GetAll work.
+#[test]
+fn portal_backend_answers_through_the_real_portal() {
+    use crate::fm1::{Bus, put_str};
+    use crate::portal::{Answer, NAME, Pick, Stop, Val, parse, put};
+    if !crate::media::have("dbus-daemon") {
+        return;
+    }
+    let d = tmpdir("portal-bus");
+    let sock = d.join("bus");
+    let conf = d.join("bus.conf");
+    std::fs::write(&conf, format!("<busconfig><type>session</type><listen>unix:path={}</listen><auth>EXTERNAL</auth><policy context=\"default\"><allow send_destination=\"*\" eavesdrop=\"true\"/><allow eavesdrop=\"true\"/><allow own=\"*\"/></policy></busconfig>", sock.display())).unwrap();
+    let mut daemon = std::process::Command::new("dbus-daemon").arg(format!("--config-file={}", conf.display())).arg("--nofork").stdout(std::process::Stdio::null()).spawn().unwrap();
+    let start = Instant::now();
+    while !sock.exists() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let addr = format!("unix:path={}", sock.display());
+    let mut backend = Bus::connect(&addr).unwrap();
+    assert!(backend.own(NAME));
+    // A stand-in for the window: picks by the title, or waits to be closed.
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel::<String>();
+    let closed_tx = std::sync::Mutex::new(closed_tx);
+    let run = move |p: &Pick, stop: &Stop| -> Answer {
+        if p.title == "wait" {
+            let t0 = Instant::now();
+            while !stop.stopped() && t0.elapsed() < Duration::from_secs(20) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = closed_tx.lock().unwrap().send(p.title.clone());
+            return Answer::ended();
+        }
+        let name = if p.current_name.is_empty() { "picked.png" } else { &p.current_name };
+        Answer { response: 0, uris: vec![format!("file:///tmp/{}", name.replace(' ', "%20"))], choices: vec![], filter: p.current_filter }
+    };
+    std::thread::spawn(move || crate::portal::serve(backend, std::sync::Arc::new(run)));
+    let mut app = Bus::connect(&addr).unwrap();
+    let opts = |items: Vec<(&str, &str, Val)>| Val::List(items.into_iter().map(|(k, s, v)| Val::Tuple(vec![Val::Str(k.into()), Val::Var(s.into(), Box::new(v))])).collect());
+    // Directly, as the portal calls it.
+    let mut body = vec![];
+    for (sig, v) in [("o", Val::Str("/org/freedesktop/portal/desktop/request/1_9/direct".into())), ("s", Val::Str("test".into())), ("s", Val::Str(String::new())), ("s", Val::Str("Save as".into()))] {
+        put(&mut body, sig, &v);
+    }
+    put(&mut body, "a{sv}", &opts(vec![("current_name", "s", Val::Str("a b.txt".into()))]));
+    let r = app.call(NAME, "/org/freedesktop/portal/desktop", crate::portal::IFACE, "SaveFile", "osssa{sv}", &body).expect("an answer");
+    let v = parse(&r.signature, &r.body).unwrap();
+    assert_eq!(v[0], Val::U32(0));
+    assert!(format!("{v:?}").contains("file:///tmp/a%20b.txt"));
+    let intro = app.call(NAME, "/org/freedesktop/portal/desktop", "org.freedesktop.DBus.Introspectable", "Introspect", "", &[]).unwrap();
+    assert!(String::from_utf8_lossy(&intro.body).contains("SaveFiles"));
+    let mut b = vec![];
+    put_str(&mut b, crate::portal::IFACE);
+    let all = app.call(NAME, "/org/freedesktop/portal/desktop", "org.freedesktop.DBus.Properties", "GetAll", "s", &b).unwrap();
+    assert_eq!(parse(&all.signature, &all.body).unwrap(), vec![Val::List(vec![])]);
+    // Through the real portal, when it is here.
+    let frontend = ["/usr/libexec/xdg-desktop-portal", "/usr/lib/xdg-desktop-portal"].into_iter().find(|p| Path::new(p).is_file());
+    if let Some(exe) = frontend {
+        let dir = d.join("portals");
+        touch(&dir.join("maia.portal"), crate::portal::PORTAL_FILE);
+        touch(&dir.join("portals.conf"), "[preferred]\ndefault=none\norg.freedesktop.impl.portal.FileChooser=maia\n");
+        let mut xdp = std::process::Command::new(exe)
+            .env_clear()
+            .env("DBUS_SESSION_BUS_ADDRESS", &addr)
+            .env("XDG_DESKTOP_PORTAL_DIR", &dir)
+            .env("XDG_CURRENT_DESKTOP", "test")
+            .env("HOME", &d)
+            .env("XDG_RUNTIME_DIR", &d)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        // The portal is up once it owns its name.
+        let t0 = Instant::now();
+        loop {
+            let mut b = vec![];
+            put_str(&mut b, "org.freedesktop.portal.Desktop");
+            if app.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner", "s", &b).is_some() {
+                break;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(10), "the portal started");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let mut b = vec![];
+        put_str(&mut b, "type='signal',interface='org.freedesktop.portal.Request',member='Response'");
+        app.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "AddMatch", "s", &b).unwrap();
+        let ask = |app: &mut Bus, method: &str, title: &str, o: Val| -> String {
+            let mut body = vec![];
+            put(&mut body, "s", &Val::Str("x11:1c00003".into()));
+            put(&mut body, "s", &Val::Str(title.into()));
+            put(&mut body, "a{sv}", &o);
+            let r = app.call("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.FileChooser", method, "ssa{sv}", &body).expect("the portal took it");
+            match parse(&r.signature, &r.body).unwrap().remove(0) {
+                Val::Str(h) => h,
+                v => panic!("{v:?}"),
+            }
+        };
+        let response = |app: &mut Bus, handle: &str| -> Vec<Val> {
+            loop {
+                let m = app.recv().expect("a signal");
+                if m.member == "Response" && m.path == handle {
+                    return parse(&m.signature, &m.body).unwrap();
+                }
+            }
+        };
+        let images = Val::Tuple(vec![Val::Str("Images".into()), Val::List(vec![Val::Tuple(vec![Val::U32(1), Val::Str("image/*".into())])])]);
+        let h = ask(&mut app, "OpenFile", "Open a picture", opts(vec![("handle_token", "s", Val::Str("t1".into())), ("filters", "a(sa(us))", Val::List(vec![images.clone()])), ("current_filter", "(sa(us))", images)]));
+        assert!(h.ends_with("/t1"), "{h}");
+        let v = response(&mut app, &h);
+        assert_eq!(v[0], Val::U32(0));
+        let s = format!("{v:?}");
+        assert!(s.contains("file:///tmp/picked.png") && s.contains("Images"), "{s}");
+        let h = ask(&mut app, "SaveFile", "Save the page", opts(vec![("handle_token", "s", Val::Str("t2".into())), ("current_name", "s", Val::Str("page one.html".into()))]));
+        assert!(format!("{:?}", response(&mut app, &h)).contains("file:///tmp/page%20one.html"));
+        // Closed by the app: the picker goes, and nothing answers.
+        let h = ask(&mut app, "OpenFile", "wait", opts(vec![("handle_token", "s", Val::Str("t3".into()))]));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(app.call("org.freedesktop.portal.Desktop", &h, "org.freedesktop.portal.Request", "Close", "", &[]).is_some());
+        assert_eq!(closed_rx.recv_timeout(Duration::from_secs(10)).ok().as_deref(), Some("wait"), "the picker was told to go");
+        let _ = xdp.kill();
+        let _ = xdp.wait();
+    }
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A picker window's answer in each mode, from the real app over a real folder: one file,
+/// several (in the order listed), a folder (the one shown or the one selected), a new
+/// name, a name already taken (asked first), a folder's name (gone into), several names
+/// to save in a folder, Cancel and Escape. The app's filter decides what is listed.
+#[test]
+fn picker_answers_each_mode() {
+    use crate::picker::{Picker, accept, cancel};
+    use crate::portal::{Answer, Filter, Mode, Pick};
+    let d = tmpdir("picker-modes");
+    for f in ["a.png", "b.txt", "c d.png", "keep.txt", "sub/inner.txt"] {
+        touch(&d.join(f), "x");
+    }
+    let uri = |p: &Path| crate::clipboard::path_to_uri(p);
+    let ctx = egui::Context::default();
+    let frame = |app: &mut crate::app::App, events: Vec<egui::Event>| {
+        let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 640.0))), events, ..Default::default() };
+        let _ = ctx.run(raw, |c| app.frame(c));
+    };
+    let open = |pick: Pick| -> crate::app::App {
+        let mut app = crate::app::App::new(&ctx, vec![d.clone()]);
+        app.picker = Some(Box::new(Picker::new(pick)));
+        let t0 = Instant::now();
+        loop {
+            frame(&mut app, vec![]);
+            if !app.tab().is_loading() && !app.tab().dirty || t0.elapsed() > Duration::from_secs(5) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        frame(&mut app, vec![]);
+        app
+    };
+    let select = |app: &mut crate::app::App, names: &[&str]| {
+        let t = app.tab();
+        t.selected.clear();
+        for n in names {
+            let i = t.entries.iter().position(|e| e.name == *n).unwrap_or_else(|| panic!("{n} listed"));
+            t.selected.insert(i as u32);
+            t.cursor = Some(i as u32);
+        }
+    };
+    let done = |app: &crate::app::App| app.picker.as_ref().and_then(|p| p.done.clone());
+    let listed = |app: &mut crate::app::App| -> Vec<String> {
+        let t = app.tab();
+        let mut v: Vec<String> = t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect();
+        v.sort();
+        v
+    };
+    // One file, with the filter the app gave: only pictures (and folders) are listed.
+    let pngs = Filter { name: "Pictures".into(), rules: vec![(0, "*.[pP][nN][gG]".into())] };
+    let mut app = open(Pick { filters: vec![Filter { name: "Text".into(), rules: vec![(1, "text/plain".into())] }, pngs.clone()], current_filter: Some(1), ..Default::default() });
+    assert_eq!(listed(&mut app), ["a.png", "c d.png", "sub"]);
+    select(&mut app, &["a.png"]);
+    accept(&mut app);
+    assert_eq!(done(&app), Some(Answer { response: 0, uris: vec![uri(&d.join("a.png"))], choices: vec![], filter: Some(1) }));
+    assert!(app.quit, "the window closes with its answer");
+    // Several, in the order listed; without `multiple` only the first.
+    for multiple in [true, false] {
+        let mut app = open(Pick { multiple, ..Default::default() });
+        assert_eq!(listed(&mut app).len(), 5, "no filter: everything");
+        select(&mut app, &["c d.png", "a.png", "sub"]);
+        accept(&mut app);
+        let want: Vec<String> = if multiple { vec![uri(&d.join("a.png")), uri(&d.join("c d.png"))] } else { vec![uri(&d.join("a.png"))] };
+        assert_eq!(done(&app).map(|a| a.uris), Some(want), "multiple {multiple}");
+    }
+    // A folder alone is gone into, not answered.
+    let mut app = open(Pick::default());
+    select(&mut app, &["sub"]);
+    accept(&mut app);
+    assert!(done(&app).is_none() && app.tab().path == d.join("sub"));
+    // Folders: the one shown, or the one selected; files are not listed.
+    let mut app = open(Pick { directory: true, ..Default::default() });
+    assert_eq!(listed(&mut app), ["sub"]);
+    accept(&mut app);
+    assert_eq!(done(&app).map(|a| a.uris), Some(vec![uri(&d)]));
+    let mut app = open(Pick { directory: true, ..Default::default() });
+    select(&mut app, &["sub"]);
+    assert!(crate::picker::enter(&mut app), "Enter answers in folder mode");
+    assert_eq!(done(&app).map(|a| a.uris), Some(vec![uri(&d.join("sub"))]));
+    // Save: the name given, in the folder shown, with the app's question answered.
+    let q = crate::portal::Choice { id: "ro".into(), label: "Compress".into(), options: vec![], chosen: "true".into() };
+    let mut app = open(Pick { mode: Mode::Save, current_name: "new file.txt".into(), choices: vec![q], ..Default::default() });
+    assert_eq!(app.picker.as_ref().unwrap().name, "new file.txt");
+    accept(&mut app);
+    assert_eq!(done(&app), Some(Answer { response: 0, uris: vec![uri(&d.join("new file.txt"))], choices: vec![("ro".into(), "true".into())], filter: None }));
+    // A name already there asks first; the app does the replacing.
+    let mut app = open(Pick { mode: Mode::Save, current_name: "keep.txt".into(), ..Default::default() });
+    accept(&mut app);
+    assert!(done(&app).is_none());
+    let crate::popups::Popup::Choose { choices, msg, .. } = std::mem::replace(&mut app.popup, crate::popups::Popup::None) else { panic!("asked to replace") };
+    assert!(msg.contains("keep.txt"));
+    let (label, risky, f) = choices.into_iter().next().unwrap();
+    assert_eq!((label.as_str(), risky), ("Replace", true));
+    (f.unwrap())(&mut app);
+    assert_eq!(done(&app).map(|a| a.uris), Some(vec![uri(&d.join("keep.txt"))]));
+    assert_eq!(std::fs::read_to_string(d.join("keep.txt")).unwrap(), "x", "Maia itself writes nothing");
+    // A folder's name goes into it; a file clicked in the list names the file.
+    let mut app = open(Pick { mode: Mode::Save, current_name: "sub".into(), ..Default::default() });
+    accept(&mut app);
+    assert!(done(&app).is_none() && app.tab().path == d.join("sub") && app.picker.as_ref().unwrap().name.is_empty());
+    let mut app = open(Pick { mode: Mode::Save, current_name: "x".into(), ..Default::default() });
+    select(&mut app, &["b.txt"]);
+    frame(&mut app, vec![]);
+    assert_eq!(app.picker.as_ref().unwrap().name, "b.txt");
+    // Several names for one folder; one of them taken.
+    let mut app = open(Pick { mode: Mode::SaveFiles, files: vec!["x.txt".into(), "keep.txt".into()], ..Default::default() });
+    assert_eq!(listed(&mut app), ["sub"], "a folder is chosen");
+    accept(&mut app);
+    let crate::popups::Popup::Choose { choices, .. } = std::mem::replace(&mut app.popup, crate::popups::Popup::None) else { panic!("asked to replace") };
+    (choices.into_iter().next().unwrap().2.unwrap())(&mut app);
+    assert_eq!(done(&app).map(|a| a.uris), Some(vec![uri(&d.join("x.txt")), uri(&d.join("keep.txt"))]));
+    // Cancel, and Escape.
+    let mut app = open(Pick::default());
+    cancel(&mut app);
+    assert_eq!(done(&app), Some(Answer::cancelled()));
+    let mut app = open(Pick::default());
+    frame(&mut app, vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]);
+    assert_eq!(done(&app).map(|a| a.response), Some(1), "Escape cancels");
+    // Escape clears a filter first.
+    let mut app = open(Pick::default());
+    app.tab().filter = "zz".into();
+    frame(&mut app, vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]);
+    assert!(done(&app).is_none() && app.tab().filter.is_empty());
+    let _ = crate::picker::ANSWER.lock().unwrap().take();
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -777,7 +777,7 @@ fn anchored<R>(ctx: &egui::Context, id: &str, pos: Pos2, width: f32, pal: &Palet
 
 /// `anchored`, with `pos` the menu's corner given by `pivot`: a menu opening upward
 /// from the status bar hangs from its lower edge, whatever its height.
-fn anchored_from<R>(ctx: &egui::Context, id: &str, pos: Pos2, pivot: Align2, width: f32, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
+pub(crate) fn anchored_from<R>(ctx: &egui::Context, id: &str, pos: Pos2, pivot: Align2, width: f32, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
     let screen = ctx.content_rect();
     let x = pos.x.min(screen.right() - width - 8.0).max(screen.left() + 4.0);
     // Kept off the window's edges, and scrolled when taller than the window (a Quick menu
@@ -849,7 +849,7 @@ pub(crate) fn hints(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette) {
 }
 
 /// Full-width selectable row; returns its response. `paint` draws inside the rect.
-fn row(ui: &mut Ui, h: f32, selected: bool, pal: &Palette, paint: impl FnOnce(&Ui, Rect)) -> egui::Response {
+pub(crate) fn row(ui: &mut Ui, h: f32, selected: bool, pal: &Palette, paint: impl FnOnce(&Ui, Rect)) -> egui::Response {
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
     if selected {
         ui.painter().rect_filled(r, CornerRadius::same(6), pal.selected);

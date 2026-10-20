@@ -327,6 +327,8 @@ pub struct App {
     appearance_seen: u8,
     /// The theme left behind when the desktop last switched, to come back to.
     pub other_theme: Option<theme::ThemeName>,
+    /// This window answers an app's Open or Save request (picker.rs).
+    pub picker: Option<Box<crate::picker::Picker>>,
 }
 
 /// What a thread sharing files hands back: text for the clipboard, what to say, and a
@@ -443,6 +445,7 @@ impl App {
             appearance: Default::default(),
             appearance_seen: crate::appearance::UNKNOWN,
             other_theme: None,
+            picker: None,
             cfg,
             ud,
         };
@@ -477,7 +480,10 @@ impl App {
             app.active = id;
             app.prev_active = id;
         }
-        crate::tour::at_start(&mut app, first);
+        // A picker window is there for one answer: no tour, no news.
+        if !crate::picker::picking() {
+            crate::tour::at_start(&mut app, first);
+        }
         app
     }
 
@@ -730,6 +736,10 @@ impl App {
     /// choice waits until it has been left alone a while: the choice steps through 7
     /// days on its way to 30, and that must not take what 30 would keep.
     fn age_trash(&mut self) {
+        // The main window's job: a picker is open for a few seconds.
+        if self.picker.is_some() {
+            return;
+        }
         const EVERY: Duration = Duration::from_secs(6 * 3600);
         const SETTLE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 60 });
         let days = self.cfg.trash_days;
@@ -1214,6 +1224,7 @@ impl App {
         }
         self.pump(&ctx);
         crate::hints::input(self, &ctx);
+        crate::picker::keys(self, &ctx);
         self.handle_input(&ctx);
         self.draw(&ctx);
         self.process_actions(&ctx);
@@ -1229,6 +1240,7 @@ impl App {
 
     /// Poll background work: listings, walks, stats, thumbnails, jobs, watcher.
     fn pump(&mut self, ctx: &egui::Context) {
+        crate::picker::sync(self);
         self.pump_drives(ctx);
         self.pump_requests(ctx);
         self.pump_net();
@@ -1988,6 +2000,7 @@ impl App {
                     i.invalidate();
                 }
             }
+            Cmd::Activate if crate::picker::enter(self) => {}
             Cmd::Activate => {
                 let t = self.tab();
                 let targets: Vec<u32> = if t.selected.len() > 1 {
@@ -2337,6 +2350,7 @@ impl App {
                 self.popup = Popup::meaning();
             }
             Cmd::ComparePanels | Cmd::SelectDifferences | Cmd::SyncPanels => crate::compare::run(self, cmd),
+            Cmd::TypesFilter if crate::picker::open_filters(self) => {}
             Cmd::TypesFilter => self.popup = Popup::types(self.active),
             Cmd::ToggleHidden => {
                 self.cfg.show_hidden = !self.cfg.show_hidden;
@@ -3637,6 +3651,9 @@ impl App {
     }
 
     fn activate(&mut self, panel: u64, idx: u32, mods: Modifiers) {
+        if crate::picker::activate(self, panel, idx) {
+            return;
+        }
         let Some(p) = self.panels.get_mut(&panel) else { return };
         let t = p.tab_mut();
         let Some(e) = t.entries.get(idx as usize).cloned() else { return };
@@ -3835,7 +3852,10 @@ impl App {
         if cfg!(test) {
             return;
         }
-        self.keep_workspace();
+        // A picker's one folder is not how the project was left.
+        if self.picker.is_none() {
+            self.keep_workspace();
+        }
         let ctx = self.ctx.clone();
         self.save_all(&ctx);
         self.undo_keep.flush(&self.undo);

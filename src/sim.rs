@@ -1102,7 +1102,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(165) {
+    match rng.below(167) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2507,11 +2507,122 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 }
             }
         }
+        165 => picker_start_or_stop(s, rng),
+        166 => picker_step(s, rng),
         _ => {
             s.note("idle".into());
             s.idle(rng.below(20) + 1);
         }
     }
+    picker_check(s);
+}
+
+/// Picker sessions the random walks started, and how many of them answered (0) or were
+/// cancelled (1), for the closing summary.
+static PICKERS: [std::sync::atomic::AtomicUsize; 3] = [const { std::sync::atomic::AtomicUsize::new(0) }; 3];
+
+/// Turn the session into an app's Open or Save dialog (a random request: any mode,
+/// filters, questions), or, when it is one, cancel it.
+fn picker_start_or_stop(s: &mut Sim, rng: &mut Rng) {
+    use crate::portal::{Choice, Filter, Mode, Pick};
+    if s.app.picker.is_some() {
+        s.note("picker cancelled".into());
+        crate::picker::cancel(&mut s.app);
+        picker_check(s);
+        return;
+    }
+    let mode = *rng.pick(&[Mode::Open, Mode::Open, Mode::Save, Mode::SaveFiles]);
+    let filters = [
+        Filter { name: "Pictures".into(), rules: vec![(0, "*.[pP][nN][gG]".into()), (1, "image/*".into())] },
+        Filter { name: "Text and notes, a long name for a filter".into(), rules: vec![(1, "text/plain".into())] },
+        Filter { name: "Everything".into(), rules: vec![(0, "*".into())] },
+    ];
+    let n = rng.below(4);
+    let mut p = Pick { mode, multiple: rng.below(2) == 0, directory: mode == Mode::Open && rng.below(3) == 0, filters: filters[..n].to_vec(), ..Default::default() };
+    p.current_filter = (n > 0).then(|| rng.below(n));
+    if rng.below(3) == 0 {
+        p.choices.push(Choice { id: "enc".into(), label: "Encoding".into(), options: vec![("u".into(), "Unicode".into()), ("w".into(), "Western".into())], chosen: "u".into() });
+    }
+    if rng.below(3) == 0 {
+        p.choices.push(Choice { id: "ro".into(), label: "Read only".into(), options: vec![], chosen: String::new() });
+    }
+    p.current_name = rng.pick(&["Untitled.txt", "notes.txt", "report.md", "a b.tar.gz", ""]).to_string();
+    p.files = vec!["one.txt".into(), "notes.txt".into()];
+    p.accept_label = rng.pick(&["", "_Upload", "Attach"]).to_string();
+    s.note(format!("picker {:?} multiple {} directory {} filters {n} choices {}", p.mode, p.multiple, p.directory, p.choices.len()));
+    s.app.picker = Some(Box::new(crate::picker::Picker::new(p)));
+    PICKERS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    s.idle(2);
+}
+
+/// One thing a person does with the picker's bar.
+fn picker_step(s: &mut Sim, rng: &mut Rng) {
+    if s.app.picker.is_none() {
+        return picker_start_or_stop(s, rng);
+    }
+    match rng.below(9) {
+        0 => click_control_at(s, "picker accept"),
+        1 => click_control_at(s, rng.pick(&["picker filter", "picker choice"])),
+        2 => click_control_at(s, "picker menu row"),
+        3 => click_control_at(s, "picker check"),
+        4 => {
+            click_control_at(s, "picker name");
+            s.act(&format!("text {}", rng.pick(&["new name.txt", "notes.txt", "Taxes", "~/x.txt", "/nowhere/y.txt", "/"])));
+        }
+        5 => s.act(&format!("key {}", rng.pick(&["Enter", "Escape", "alt+t", "ArrowDown", "ArrowUp"]))),
+        6 => {
+            if s.popup_open() {
+                s.act(rng.pick(&["key Enter", "key Escape"]));
+            }
+        }
+        7 => s.act(rng.pick(&["key alt+t", "key ctrl+a"])),
+        _ => click_control_at(s, "picker cancel"),
+    }
+}
+
+/// A picker that has answered: what it answered is what the request allows, then the
+/// session goes on as the ordinary window.
+fn picker_check(s: &mut Sim) {
+    let Some((pick, a)) = s.app.picker.as_ref().and_then(|p| p.done.clone().map(|a| (p.pick.clone(), a))) else { return };
+    use crate::portal::Mode;
+    s.note(format!("picker answered {} with {} uris", a.response, a.uris.len()));
+    let paths: Vec<PathBuf> = a.uris.iter().map(|u| crate::clipboard::uri_to_path(u).unwrap_or_else(|| s.fail(&format!("not a file URI: {u}")))).collect();
+    match a.response {
+        0 => {
+            if paths.is_empty() {
+                s.fail("picked nothing");
+            }
+            match pick.mode {
+                Mode::Open if pick.directory => paths.iter().for_each(|p| if !p.is_dir() { s.fail(&format!("{} is not a folder", p.display())) }),
+                Mode::Open => paths.iter().for_each(|p| if !p.is_file() { s.fail(&format!("{} is not a file", p.display())) }),
+                Mode::Save => {
+                    if paths.len() != 1 || !paths[0].parent().is_some_and(|d| d.is_dir()) {
+                        s.fail(&format!("saved as {paths:?}"));
+                    }
+                }
+                Mode::SaveFiles => {
+                    if paths.len() != pick.files.len() {
+                        s.fail(&format!("{} names, {} places", pick.files.len(), paths.len()));
+                    }
+                }
+            }
+            if !pick.multiple && pick.mode == Mode::Open && paths.len() > 1 {
+                s.fail("several picked without `multiple`");
+            }
+        }
+        1 if paths.is_empty() => {}
+        r => s.fail(&format!("answered {r} with {paths:?}")),
+    }
+    PICKERS[1 + a.response.min(1) as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    s.app.picker = None;
+    s.app.quit = false;
+    let _ = crate::picker::ANSWER.lock().map(|mut a| a.take());
+    for t in s.app.panels.values_mut().flat_map(|p| p.tabs.iter_mut()) {
+        if t.pick.take().is_some() {
+            t.dirty = true;
+        }
+    }
+    s.idle(1);
 }
 
 /// The viewer's tag strip is waiting for a new tag's name.
@@ -13330,6 +13441,200 @@ mod journeys {
         crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
     }
 
+    /// Maia as an app's Open and Save dialog, driven as a person would: a picture opened
+    /// by a click and the accept button, several by Ctrl+click and Enter, a folder chosen
+    /// after walking into it, a name typed over the selected name part and saved with
+    /// Enter, a taken name replaced after asking, Cancel and Escape, the app's filters
+    /// switched by mouse and by keys, its questions answered. Narrow and wide windows.
+    #[test]
+    fn picker_opens_saves_and_cancels() {
+        if !sandboxed() {
+            return;
+        }
+        use crate::picker::Picker;
+        use crate::portal::{Choice, Filter, Mode, Pick};
+        let home = fixture("picker");
+        let docs = home.join("Documents");
+        let pics = home.join("Pictures");
+        let start = |pick: Pick, at: &Path, size: Vec2| -> Sim {
+            let mut s = Sim::new(at, size);
+            s.app.picker = Some(Box::new(Picker::new(pick)));
+            s.settle();
+            look(&mut s, "picker opened");
+            s
+        };
+        let done = |s: &Sim| s.app.picker.as_ref().and_then(|p| p.done.clone());
+        let uri = |p: &Path| crate::clipboard::path_to_uri(p);
+        let listed = |s: &Sim| -> Vec<String> {
+            let t = s.tab();
+            t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect()
+        };
+        let row = |s: &Sim, name: &str| -> Rect { s.text_rect(name) };
+        // One picture: clicked, then the accept button the app named.
+        let images = Filter { name: "Images".into(), rules: vec![(0, "*.[pP][nN][gG]".into()), (1, "image/webp".into())] };
+        let texts = Filter { name: "Text files".into(), rules: vec![(1, "text/plain".into())] };
+        let pick = Pick { title: "Upload".into(), accept_label: "Upload".into(), filters: vec![images.clone(), texts.clone()], ..Default::default() };
+        let mut s = start(pick, &pics, vec2(1000.0, 640.0));
+        assert!(listed(&s).contains(&"wide.png".to_string()) && listed(&s).contains(&"Trip".to_string()));
+        let r = row(&s, "wide.png");
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        s.shot("picker-open");
+        s.click_text("Upload");
+        assert_eq!(done(&s).map(|a| (a.response, a.uris, a.filter)), Some((0, vec![uri(&pics.join("wide.png"))], Some(0))));
+        // Several, by Ctrl+click, answered by Enter; the filter switched to text first.
+        let pick = Pick { multiple: true, filters: vec![images.clone(), texts.clone()], ..Default::default() };
+        report("picker", &s);
+        let mut s = start(pick, &docs, vec2(1000.0, 640.0));
+        assert_eq!(listed(&s), ["Taxes"], "Images first: only the folder to walk into");
+        click_control_at(&mut s, "picker filter");
+        assert!(some_text_at(&s, "Text files"), "the filter's list is open");
+        s.idle(10);
+        s.shot("picker-filters");
+        s.click_text("Text files");
+        s.settle();
+        let shown = listed(&s);
+        assert!(shown.contains(&"notes.txt".to_string()) && shown.contains(&"report.md".to_string()) && shown.contains(&"Taxes".to_string()), "{shown:?}");
+        assert!(!shown.iter().any(|n| n.ends_with(".mp3")), "{shown:?}");
+        let (a, b) = (row(&s, "notes.txt"), row(&s, "report.md"));
+        s.act(&format!("click {:.0} {:.0}", a.center().x, a.center().y));
+        s.act(&format!("click {:.0} {:.0} left ctrl", b.center().x, b.center().y));
+        s.act("key Enter");
+        let got = done(&s).unwrap_or_else(|| s.fail("Enter picked"));
+        assert_eq!(got.response, 0);
+        let mut want = vec![uri(&docs.join("notes.txt")), uri(&docs.join("report.md"))];
+        let mut have = got.uris.clone();
+        want.sort();
+        have.sort();
+        assert_eq!(have, want);
+        assert_eq!(got.filter, Some(1));
+        // The filters by keys: Alt+T opens them, the arrows and Enter choose.
+        let pick = Pick { filters: vec![images.clone(), texts.clone()], ..Default::default() };
+        report("picker", &s);
+        let mut s = start(pick, &docs, vec2(1000.0, 640.0));
+        s.act("key alt+t");
+        assert!(some_text_at(&s, "Text files"));
+        s.act("key ArrowDown");
+        s.act("key Enter");
+        s.settle();
+        assert_eq!(s.app.picker.as_ref().unwrap().filter, Some(1));
+        assert!(listed(&s).contains(&"notes.txt".to_string()));
+        assert!(!s.popup_open(), "no other popup in the way");
+        s.act("key alt+t");
+        s.act("key Escape");
+        assert!(done(&s).is_none(), "Escape closed the list, not the window");
+        s.act("key Escape");
+        assert_eq!(done(&s).map(|a| a.response), Some(1), "then Escape cancels");
+        // A folder: walked into with a double click, chosen with Enter.
+        let pick = Pick { directory: true, title: "Choose a folder".into(), ..Default::default() };
+        report("picker", &s);
+        let mut s = start(pick, &docs, vec2(1000.0, 640.0));
+        assert!(listed(&s).iter().all(|n| docs.join(n).is_dir()), "only folders: {:?}", listed(&s));
+        let r = row(&s, "Taxes");
+        s.act(&format!("dclick {:.0} {:.0}", r.center().x, r.center().y));
+        s.settle();
+        assert_eq!(s.tab().path, docs.join("Taxes"));
+        assert!(some_text_at(&s, "Taxes") && some_text_at(&s, "Select"), "the bar names the folder shown");
+        s.shot("picker-folder");
+        s.act("key Enter");
+        assert_eq!(done(&s).map(|a| a.uris), Some(vec![uri(&docs.join("Taxes"))]));
+        // Save: the name part selected, typed over, saved with Enter; the question answered.
+        let q = Choice { id: "fmt".into(), label: "Format".into(), options: vec![("md".into(), "Markdown".into()), ("html".into(), "Web page".into())], chosen: "md".into() };
+        let yes = Choice { id: "open".into(), label: "Open after".into(), options: vec![], chosen: "false".into() };
+        let pick = Pick { mode: Mode::Save, current_name: "Untitled.md".into(), choices: vec![q, yes], ..Default::default() };
+        report("picker", &s);
+        let mut s = start(pick, &docs, vec2(1000.0, 640.0));
+        s.shot("picker-save");
+        click_control_at(&mut s, "picker check");
+        s.click_text("Format: Markdown");
+        s.click_text("Web page");
+        assert!(some_text_at(&s, "Format: Web page"));
+        // The click took the focus from the field: back into it, the name typed whole.
+        click_control_at(&mut s, "picker name");
+        s.act("key ctrl+a");
+        s.act("text minutes.md");
+        s.act("key Enter");
+        let got = done(&s).unwrap_or_else(|| s.fail("saved"));
+        assert_eq!(got.uris, vec![uri(&docs.join("minutes.md"))]);
+        assert_eq!(got.choices, vec![("fmt".to_string(), "html".to_string()), ("open".into(), "true".into())]);
+        // Typing straight away replaces just the name part.
+        let pick = Pick { mode: Mode::Save, current_name: "Untitled.md".into(), ..Default::default() };
+        report("picker", &s);
+        let mut s = start(pick, &docs, vec2(1000.0, 640.0));
+        s.act("text agenda");
+        assert_eq!(s.app.picker.as_ref().unwrap().name, "agenda.md");
+        // A name already there: asked, then replaced.
+        s.act("key ctrl+a");
+        s.act("text report.md");
+        s.act("key Enter");
+        assert!(done(&s).is_none() && s.popup_open(), "asked first");
+        s.shot("picker-replace");
+        look(&mut s, "replace asked");
+        s.click_text("Replace");
+        assert_eq!(done(&s).map(|a| a.uris), Some(vec![uri(&docs.join("report.md"))]));
+        assert!(std::fs::read_to_string(docs.join("report.md")).unwrap().starts_with("# Report"), "the app writes it, not Maia");
+        // The question's close fade runs out here (its last frame is kept per thread).
+        s.idle(12);
+        // Several files saved in one folder: the folder walked into, the names the app's.
+        let pick = Pick { mode: Mode::SaveFiles, files: vec!["a.txt".into(), "b.txt".into()], ..Default::default() };
+        report("picker", &s);
+        let mut s = start(pick, &docs, vec2(1000.0, 640.0));
+        assert_eq!(listed(&s), ["Taxes"], "a folder is chosen, files are not shown");
+        assert!(some_text_at(&s, "a.txt, b.txt"), "the bar names what will be saved");
+        let r = row(&s, "Taxes");
+        s.act(&format!("dclick {:.0} {:.0}", r.center().x, r.center().y));
+        s.settle();
+        click_control_at(&mut s, "picker accept");
+        assert_eq!(done(&s).map(|a| a.uris), Some(vec![uri(&docs.join("Taxes/a.txt")), uri(&docs.join("Taxes/b.txt"))]));
+        // Cancel, by its button, in the narrowest window.
+        let pick = Pick { mode: Mode::Save, current_name: "x.txt".into(), filters: vec![texts.clone()], choices: vec![Choice { id: "a".into(), label: "A rather long question".into(), options: vec![], chosen: String::new() }], ..Default::default() };
+        report("picker", &s);
+        let mut s = start(pick, &docs, vec2(520.0, 340.0));
+        look(&mut s, "narrow save");
+        s.shot("picker-narrow");
+        s.click_text("Cancel");
+        assert_eq!(done(&s).map(|a| a.response), Some(1));
+        // Every view at narrow and wide sizes, the menu open.
+        let pick = Pick { multiple: true, filters: vec![images, texts], ..Default::default() };
+        report("picker", &s);
+        let mut s = start(pick, &home, vec2(1280.0, 800.0));
+        for v in [Cmd::ViewDetails, Cmd::ViewTree, Cmd::ViewList, Cmd::ViewMedium, Cmd::ViewXL] {
+            s.cmd(v);
+            for (w, h) in [(1280.0, 800.0), (640.0, 480.0), (520.0, 340.0)] {
+                s.resize(w, h);
+                look(&mut s, &format!("picker {v:?} {w}x{h}"));
+                click_control_at(&mut s, "picker filter");
+                s.idle(2);
+                s.act("key Escape");
+            }
+        }
+        assert!(done(&s).is_none());
+        // Split, with animations off: the bar answers for the panel in use, the other
+        // panel filtered as well.
+        s.resize(1280.0, 800.0);
+        s.app.cfg.animations = false;
+        s.cmd(Cmd::ViewDetails);
+        s.cmd(Cmd::SplitRight);
+        look(&mut s, "picker split, no animations");
+        click_control_at(&mut s, "picker filter");
+        // Open over the status bar (popups are checked for text running out of them).
+        s.idle(3);
+        assert!(some_text_at(&s, "Text files"), "the list opened at once");
+        s.act("key Escape");
+        assert!(s.app.panels.values().all(|p| p.tab().pick.is_some()), "every panel lists what the filter lets through");
+        s.cmd(Cmd::ClosePanel);
+        s.app.cfg.animations = true;
+        // Everything in a big folder selected: the bar counts what the filter lets through.
+        s.cmd(Cmd::ViewDetails);
+        go(&mut s, &home.join("Big"));
+        assert_eq!(listed(&s).len(), 100, "the Big folder's pictures");
+        s.act("key ctrl+a");
+        s.idle(3);
+        assert!(some_text_at(&s, "100 files"), "said in the bar");
+        click_control_at(&mut s, "picker accept");
+        assert_eq!(done(&s).map(|a| a.uris.len()), Some(100));
+        report("picker", &s);
+    }
+
     #[test]
     fn monkey_sessions() {
         if !sandboxed() {
@@ -13469,6 +13774,8 @@ mod journeys {
         let launched = crate::mime::LAUNCHED.lock().unwrap().len();
         let out = crate::clipboard::DRAGGED_OUT.lock().unwrap().len();
         eprintln!("sim monkey: {launched} external launches intercepted, {out} drags handed out");
+        let n = |i: usize| super::PICKERS[i].load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("sim monkey: {} picker windows, {} answered, {} cancelled", n(0), n(1), n(2));
         let _ = all;
     }
 
