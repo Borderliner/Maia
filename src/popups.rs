@@ -1451,6 +1451,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::OpenLinkTarget => t.target_entries().first().map(|e| e.is_link).unwrap_or(false),
         Cmd::RestoreTrash => t.path.starts_with(crate::sidebar::trash_dir()),
         Cmd::Undo => !app.undo.is_empty(),
+        Cmd::Redo => app.undo.can_redo(),
         Cmd::ReopenTab => !app.closed_tabs.is_empty(),
         Cmd::EditTags => t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()) && crate::musictags::applies(&t.target_entries().iter().map(|e| (e.ext(), e.is_dir)).collect::<Vec<_>>()),
         Cmd::CompressLocked => crate::archive::available() && t.archive.is_none() && !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),

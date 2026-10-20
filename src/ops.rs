@@ -49,6 +49,10 @@ pub enum OpKind {
     /// Permission bits set and cleared, and a new owner and group, on `paths` (and, when
     /// `deep`, everything inside them).
     Perms { paths: Vec<PathBuf>, change: crate::perms::Change, deep: bool },
+    /// Each `from` moved to exactly `to`: Undo and Redo of a move, which must land where
+    /// it was. A `to` that is taken is refused, unless it is in `over` (it goes to the
+    /// trash first); once all are moved, each of `back` returns from the trash.
+    Place { pairs: Vec<(PathBuf, PathBuf)>, over: Vec<PathBuf>, back: Vec<PathBuf>, label: String },
 }
 
 impl OpKind {
@@ -65,6 +69,7 @@ impl OpKind {
             OpKind::Sort { .. } => "Moving",
             OpKind::Sync { .. } => "Syncing",
             OpKind::Perms { .. } => "Changing permissions of",
+            OpKind::Place { .. } => "Moving",
         }
     }
 }
@@ -96,6 +101,8 @@ pub struct Progress {
     pub made: Vec<PathBuf>,
     /// Paths no longer where they were: moved away, trashed or deleted.
     pub gone: Vec<PathBuf>,
+    /// What came back from the trash (a move undone over what it had replaced).
+    pub restored: Vec<PathBuf>,
     /// Waiting for the disk: the label of the job it waits for.
     pub waiting: Option<String>,
     /// Asked to start without waiting its turn.
@@ -133,13 +140,14 @@ pub fn spawn_in(id: u64, kind: OpKind, ctx: egui::Context, queue: &Arc<Queue>, c
         OpKind::Sort { moves, .. } => moves.len(),
         OpKind::Sync { copies, remove } => copies.len() + remove.len(),
         OpKind::Perms { paths, .. } => paths.len(),
+        OpKind::Place { pairs, .. } => pairs.len(),
     };
     let label = match &kind {
         OpKind::Extract { archive, members, .. } if members.is_empty() => format!("Extracting {}", name_of(archive)),
         OpKind::Compress { out, .. } => format!("Compressing into {}", name_of(out)),
         OpKind::Admin { task, .. } => task.label(),
         OpKind::Convert { srcs, to, .. } => crate::convert::label(srcs, *to),
-        OpKind::Sort { label, .. } => label.clone(),
+        OpKind::Sort { label, .. } | OpKind::Place { label, .. } => label.clone(),
         OpKind::Sync { copies, .. } => format!("Syncing into {}", copies.first().and_then(|c| c.1.parent()).map(name_of).unwrap_or_default()),
         // One file by its name, several by their number: "Moving notes.txt to the trash".
         _ => {
@@ -355,6 +363,27 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 p.lock().unwrap().done_items += 1;
             }
         }
+        OpKind::Place { pairs, over, back, .. } => {
+            p.lock().unwrap().total_items = pairs.len();
+            let mut later = vec![];
+            for (from, to) in pairs {
+                if cancel.stop() {
+                    break;
+                }
+                place_one(from, to, over.contains(to), p, cancel, ctx, &mut later);
+            }
+            finish_moves(later, p);
+            // What the move had replaced, back in its place now that it is free.
+            for r in back {
+                match crate::picfix::newest_trashed(r) {
+                    Some(it) if fs::symlink_metadata(r).is_err() => match crate::trashcan::restore(&it) {
+                        Ok(()) => p.lock().unwrap().restored.push(r.clone()),
+                        Err(e) => p.lock().unwrap().errors.push(format!("{}: {e}", r.display())),
+                    },
+                    _ => p.lock().unwrap().errors.push(format!("{}: the one it replaced is not in the trash", r.display())),
+                }
+            }
+        }
         OpKind::Perms { paths, change, deep } => {
             p.lock().unwrap().total_items = paths.len();
             for s in paths {
@@ -497,6 +526,14 @@ impl Changed {
         c
     }
 
+    /// `arrived` came into their folders, `gone` left theirs.
+    pub fn at(arrived: &[PathBuf], gone: &[PathBuf]) -> Changed {
+        let mut c = Changed { gone: gone.to_vec(), ..Default::default() };
+        arrived.iter().for_each(|p| Changed::add(&mut c.arrived, p.parent()));
+        gone.iter().for_each(|p| Changed::add(&mut c.left, p.parent()));
+        c
+    }
+
     /// What a job of `kind` changed, by what it recorded as it went.
     pub fn of(kind: &OpKind, p: &Progress) -> Changed {
         use crate::admin::Task;
@@ -512,6 +549,12 @@ impl Changed {
                 for (s, d) in moves {
                     Changed::add(&mut c.left, s.parent());
                     Changed::add(&mut c.arrived, Some(d));
+                }
+            }
+            OpKind::Place { pairs, .. } => {
+                for (s, d) in pairs {
+                    Changed::add(&mut c.left, s.parent());
+                    Changed::add(&mut c.arrived, d.parent());
                 }
             }
             OpKind::Trash { paths } | OpKind::Delete { paths } | OpKind::Admin { task: Task::Delete { paths }, .. } => parents(&mut c.left, paths),
@@ -992,6 +1035,64 @@ pub fn remove_tree(p: &Path) -> std::io::Result<()> {
     if m.is_dir() { fs::remove_dir_all(p) } else { fs::remove_file(p) }
 }
 
+/// One move of Undo or Redo, to exactly `to`. Across file systems it is a copy whose
+/// original goes in `finish_moves`, as for any move; a `to` it was allowed to replace is
+/// back from the trash when the move fails.
+fn place_one(from: &Path, to: &Path, over: bool, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context, later: &mut Vec<Later>) {
+    p.lock().unwrap().current = name_of(from);
+    let fail = |e: String| {
+        let mut g = p.lock().unwrap();
+        g.errors.push(format!("{}: {e}", from.display()));
+        g.done_items += 1;
+    };
+    if fs::symlink_metadata(from).is_err() {
+        return fail("no longer there".into());
+    }
+    let mut trashed = false;
+    if fs::symlink_metadata(to).is_ok() {
+        if !over {
+            return fail(format!("{} is there already", to.display()));
+        }
+        if let Err(e) = crate::trashcan::delete(to) {
+            return fail(e.to_string());
+        }
+        trashed = true;
+    }
+    let r = match crate::fsx::rename_new(from, to) {
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            p.lock().unwrap().total_bytes += tree_size(from) * cancel.weight();
+            let skipped = p.lock().unwrap().errors.len();
+            let r = checked(cancel, p, to, copy_tree(from, to, p, cancel, ctx, false)).and_then(|_| {
+                if p.lock().unwrap().errors.len() > skipped {
+                    return Err(std::io::Error::other("not all of it could be copied, so the original was kept"));
+                }
+                Ok(())
+            });
+            match r {
+                Ok(()) => {
+                    later.push(Later { src: from.to_path_buf(), dest: to.parent().unwrap_or(to).to_path_buf(), landed: to.to_path_buf(), replaced: trashed.then(|| to.to_path_buf()) });
+                    p.lock().unwrap().done_items += 1;
+                    ctx.request_repaint();
+                    return;
+                }
+                Err(e) => {
+                    let _ = remove_tree(to);
+                    Err(e)
+                }
+            }
+        }
+        r => r,
+    };
+    if r.is_err() && trashed {
+        if let Some(it) = crate::picfix::newest_trashed(to) {
+            let _ = crate::trashcan::restore(&it);
+        }
+    }
+    record_move(p, from, r, to, trashed.then(|| to.to_path_buf()));
+    p.lock().unwrap().done_items += 1;
+    ctx.request_repaint();
+}
+
 /// A copy just made, read back from the disk when copies are checked. The files are put
 /// on the device first, then their cached pages dropped, so what is read is what the
 /// device holds and not what is still in memory. A file that comes back different is
@@ -1136,6 +1237,7 @@ fn disks_of(kind: &OpKind) -> Vec<String> {
             }
             far.into_iter().chain([dest.as_path()]).collect()
         }
+        OpKind::Place { pairs, .. } => pairs.iter().filter(|(f, t)| dev_of(f) != dev_of(t)).flat_map(|(f, t)| [f.as_path(), t.as_path()]).collect(),
         OpKind::Sync { copies, .. } => copies.iter().flat_map(|(f, t)| [f.as_path(), t.as_path()]).collect(),
         OpKind::Extract { archive, dest, .. } => vec![archive.as_path(), dest.as_path()],
         OpKind::Compress { srcs, out, .. } => srcs.iter().map(PathBuf::as_path).chain([out.as_path()]).collect(),
@@ -1155,7 +1257,7 @@ fn disks_of(kind: &OpKind) -> Vec<String> {
 }
 
 /// The device of `p`, or of the nearest folder above it that exists.
-fn dev_of(p: &Path) -> Option<u64> {
+pub(crate) fn dev_of(p: &Path) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
     p.ancestors().find_map(|a| fs::symlink_metadata(a).ok()).map(|m| m.dev())
 }

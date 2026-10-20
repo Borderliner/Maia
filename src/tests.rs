@@ -9302,6 +9302,27 @@ fn other_fs(name: &str) -> Option<PathBuf> {
     Some(d)
 }
 
+/// What was put in a trash from under `dir`, removed for good.
+fn purge_trashed_under(dir: &Path) {
+    for it in crate::trashcan::list().into_iter().filter(|it| it.original.starts_with(dir)) {
+        let _ = crate::trashcan::purge(&it);
+    }
+}
+
+fn app_frame(app: &mut crate::app::App, ctx: &egui::Context) {
+    let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))), ..Default::default() };
+    let _ = ctx.run(raw, |c| app.frame(c));
+}
+
+fn app_until(app: &mut crate::app::App, ctx: &egui::Context, what: &str, ok: impl Fn(&crate::app::App) -> bool) {
+    let t0 = Instant::now();
+    while !ok(app) {
+        assert!(t0.elapsed() < Duration::from_secs(20), "timed out waiting for {what}");
+        app_frame(app, ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Partitions of one drive, a btrfs subvolume (a device of its own, 0:N, named only by
 /// its mount's source), LUKS on a partition and LVM on that are all the one disk; a stick
 /// is another; tmpfs and a FUSE mount are each their own. The sysfs is laid out as the
@@ -9496,4 +9517,160 @@ fn reflinks(dir: &Path) -> bool {
     let ok = unsafe { libc::ioctl(w.as_raw_fd(), 0x4004_9409, r.as_raw_fd()) } == 0;
     let _ = (std::fs::remove_file(&a), std::fs::remove_file(&b));
     ok
+}
+
+/// Undo of a move to another disk moves it back through a job (a rename can't cross
+/// disks), and Redo moves it there again; a move over something brings that back from
+/// the trash on Undo, and Redo puts it in the trash again.
+#[test]
+fn a_move_to_another_disk_is_undone_and_redone() {
+    let Some(far) = other_fs("xundo") else { return };
+    let ctx = egui::Context::default();
+    let d = tmpdir("xundo");
+    touch(&d.join("a.txt"), "new a");
+    touch(&d.join("box/inner.txt"), "inner");
+    touch(&far.join("a.txt"), "old a");
+    let mut app = crate::app::App::new(&ctx, vec![d.clone()]);
+    let mut decide = HashMap::new();
+    decide.insert(d.join("a.txt"), Conflict::Overwrite);
+    app.start_job(OpKind::Move { srcs: vec![d.join("a.txt"), d.join("box")], dest: far.clone(), decide });
+    app_until(&mut app, &ctx, "the move", |a| a.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::MovedOver(..))));
+    assert_eq!(std::fs::read_to_string(far.join("a.txt")).unwrap(), "new a");
+    assert!(app.undo_last());
+    assert!(app.jobs.iter().any(|j| j.label == "Moving 2 items back"), "a job with its card");
+    app_until(&mut app, &ctx, "the move back", |a| a.job_steps.is_empty() && a.undo.can_redo());
+    assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "new a");
+    assert_eq!(std::fs::read_to_string(d.join("box/inner.txt")).unwrap(), "inner");
+    assert_eq!(std::fs::read_to_string(far.join("a.txt")).unwrap(), "old a", "what it replaced is back");
+    assert!(!far.join("box").exists() && app.undo.is_empty());
+    assert!(app.redo_last());
+    app_until(&mut app, &ctx, "the move again", |a| a.job_steps.is_empty() && !a.undo.is_empty());
+    assert_eq!(std::fs::read_to_string(far.join("a.txt")).unwrap(), "new a");
+    assert!(far.join("box/inner.txt").exists() && !d.join("a.txt").exists() && !d.join("box").exists());
+    assert!(!app.undo.can_redo());
+    // And back once more, by Undo again.
+    assert!(app.undo_last());
+    app_until(&mut app, &ctx, "back again", |a| a.job_steps.is_empty() && a.undo.can_redo());
+    assert_eq!(std::fs::read_to_string(far.join("a.txt")).unwrap(), "old a");
+    assert!(d.join("a.txt").exists() && d.join("box/inner.txt").exists());
+    purge_trashed_under(&far);
+    purge_trashed_under(&d);
+    let _ = std::fs::remove_dir_all(&far);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Each kind of change Undo takes back, Redo does again, after checking things are where
+/// Undo left them; a new change leaves nothing to redo.
+#[test]
+fn redo_does_each_change_again() {
+    use crate::app::{UndoEntry, UndoKind};
+    let ctx = egui::Context::default();
+    let d = tmpdir("redo");
+    let mut app = crate::app::App::new(&ctx, vec![d.clone()]);
+    let mut push = |app: &mut crate::app::App, label: &str, kind| app.undo.push(UndoEntry { label: label.into(), kind });
+    let read = |p: &str| std::fs::read_to_string(d.join(p)).ok();
+    // Renamed.
+    touch(&d.join("b.txt"), "a");
+    push(&mut app, "Rename", UndoKind::Rename(vec![(d.join("a.txt"), d.join("b.txt"))]));
+    assert!(app.undo_last() && read("a.txt").is_some() && read("b.txt").is_none());
+    assert!(app.undo.can_redo());
+    assert!(app.redo_last() && read("b.txt").is_some() && read("a.txt").is_none());
+    assert!(matches!(&app.undo.last().unwrap().kind, UndoKind::Rename(v) if v.len() == 1), "and Undo has it again");
+    // Moved within a disk.
+    touch(&d.join("to/m.txt"), "m");
+    push(&mut app, "Move", UndoKind::Move(vec![(d.join("m.txt"), d.join("to/m.txt"))]));
+    assert!(app.undo_last() && read("m.txt").is_some());
+    assert!(app.redo_last() && read("to/m.txt").is_some() && read("m.txt").is_none());
+    // Made (a copy, a new file): Undo trashes it, Redo brings it back from the trash.
+    touch(&d.join("made.txt"), "made");
+    push(&mut app, "Copy", UndoKind::Created(vec![d.join("made.txt")]));
+    assert!(app.undo_last() && read("made.txt").is_none());
+    assert!(app.redo_last() && read("made.txt").as_deref() == Some("made"));
+    // Trashed: Undo restores, Redo trashes again.
+    touch(&d.join("t.txt"), "t");
+    crate::trashcan::delete(&d.join("t.txt")).unwrap();
+    push(&mut app, "Trash", UndoKind::Trashed(vec![d.join("t.txt")]));
+    assert!(app.undo_last() && read("t.txt").is_some());
+    assert!(app.redo_last() && read("t.txt").is_none());
+    assert!(app.undo_last() && read("t.txt").is_some(), "and back once more");
+    assert!(app.redo_last());
+    // Changed in place: the original in the trash; Redo swaps the changed one back in.
+    touch(&d.join("pic.txt"), "original");
+    crate::trashcan::delete(&d.join("pic.txt")).unwrap();
+    touch(&d.join("pic.txt"), "turned");
+    push(&mut app, "Rotate", UndoKind::Replaced(vec![d.join("pic.txt")]));
+    assert!(app.undo_last() && read("pic.txt").as_deref() == Some("original"));
+    assert!(app.redo_last() && read("pic.txt").as_deref() == Some("turned"));
+    assert!(app.undo_last() && read("pic.txt").as_deref() == Some("original"));
+    // Sorted into folders it made: Redo makes them again.
+    touch(&d.join("Pictures/s.png"), "s");
+    push(&mut app, "Tidy", UndoKind::Sorted(vec![(d.join("s.png"), d.join("Pictures/s.png"))], vec![d.join("Pictures")]));
+    assert!(app.undo_last() && read("s.png").is_some() && !d.join("Pictures").exists());
+    assert!(app.redo_last() && read("Pictures/s.png").is_some());
+    // The world changed meanwhile: Redo refuses, and says so.
+    assert!(app.undo_last());
+    touch(&d.join("Pictures/s.png"), "someone else's");
+    assert!(!app.redo_last(), "a file in the way");
+    assert_eq!(read("s.png").as_deref(), Some("s"));
+    assert_eq!(read("Pictures/s.png").as_deref(), Some("someone else's"));
+    // A new change: nothing to redo.
+    assert!(app.undo_last() && app.undo.can_redo());
+    push(&mut app, "New", UndoKind::Created(vec![d.join("x")]));
+    assert!(!app.undo.can_redo());
+    purge_trashed_under(&d);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Undo and Redo outlast a restart: written to the state folder when they change, read
+/// back at start. What has nothing left to act on (its files gone) and what is past its
+/// age is left out; the lists keep at most their number of changes, the newest.
+#[test]
+fn undo_and_redo_survive_a_restart() {
+    use crate::app::{UndoEntry, UndoKind};
+    let ctx = egui::Context::default();
+    let d = tmpdir("undokeep");
+    let file = d.join("state/undo.json");
+    let start = |ctx: &egui::Context| {
+        let mut app = crate::app::App::new(ctx, vec![d.clone()]);
+        app.undo_keep = crate::undofile::Keeper::new(Some(file.clone()), ctx);
+        app_until(&mut app, ctx, "the lists read", |a| !a.undo_keep.loading());
+        app
+    };
+    let mut app = start(&ctx);
+    assert!(app.undo.is_empty() && !app.undo.can_redo());
+    touch(&d.join("b.txt"), "b");
+    touch(&d.join("made.txt"), "m");
+    touch(&d.join("moved/c.txt"), "c");
+    app.undo.push(UndoEntry { label: "Gone".into(), kind: UndoKind::Move(vec![(d.join("x"), d.join("nowhere/x"))]) });
+    app.undo.push(UndoEntry { label: "Rename a.txt to b.txt".into(), kind: UndoKind::Rename(vec![(d.join("a.txt"), d.join("b.txt"))]) });
+    app.undo.push(UndoEntry { label: "Copy made.txt".into(), kind: UndoKind::Created(vec![d.join("made.txt")]) });
+    app.undo.push(UndoEntry { label: "Move c.txt".into(), kind: UndoKind::Move(vec![(d.join("c.txt"), d.join("moved/c.txt"))]) });
+    assert!(app.undo_last() && d.join("c.txt").exists(), "one undone, for Redo");
+    app_until(&mut app, &ctx, "the write", |_| std::fs::read_to_string(&file).is_ok_and(|s| s.contains("Copy made.txt") && s.contains("Move c.txt")));
+    drop(app);
+    let mut app = start(&ctx);
+    let labels: Vec<String> = (0..app.undo.len()).map(|i| app.undo[i].label.clone()).collect();
+    assert_eq!(labels, ["Rename a.txt to b.txt", "Copy made.txt"], "the move whose files are gone is left out");
+    assert!(app.undo.can_redo(), "Redo kept too");
+    assert!(app.redo_last() && d.join("moved/c.txt").exists() && !d.join("c.txt").exists());
+    assert!(app.undo_last() && app.undo_last() && app.undo_last());
+    assert!(d.join("a.txt").exists() && !d.join("made.txt").exists(), "taken back after the restart");
+    // Past its age, and over the number kept.
+    for i in 0..(crate::undofile::MOST + 20) {
+        touch(&d.join(format!("n{i}")), "n");
+        app.undo.push(UndoEntry { label: format!("Make n{i}"), kind: UndoKind::Created(vec![d.join(format!("n{i}"))]) });
+    }
+    assert_eq!(app.undo.len(), crate::undofile::MOST);
+    let last = format!("Make n{}", crate::undofile::MOST + 19);
+    app_until(&mut app, &ctx, "the write", |_| std::fs::read_to_string(&file).is_ok_and(|s| s.contains(&last)));
+    drop(app);
+    let app = start(&ctx);
+    assert_eq!(app.undo.len(), crate::undofile::MOST);
+    assert_eq!(app.undo[0].label, "Make n20", "the oldest went");
+    drop(app);
+    std::fs::write(&file, format!(r#"{{"undo":[{{"at":1000,"label":"Old","kind":{{"Created":["{}"]}}}}],"redo":[]}}"#, d.join("n1").display())).unwrap();
+    let app = start(&ctx);
+    assert!(app.undo.is_empty(), "a change months old is left out");
+    purge_trashed_under(&d);
+    let _ = std::fs::remove_dir_all(&d);
 }

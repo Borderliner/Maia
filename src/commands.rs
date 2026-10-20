@@ -312,6 +312,7 @@ commands! {
     ContextMenu, "context_menu", Files, "Context Menu", "Open the action menu at the file cursor.", ["Shift+F10"];
     RestoreTrash, "restore_trash", Files, "Restore From Trash", "Put trashed items back where they came from.", [];
     Undo, "undo", Files, "Undo", "Reverse the last rename, move, copy, create or trash.", ["Ctrl+Z"];
+    Redo, "redo", Files, "Redo", "Do again what Undo took back.", ["Ctrl+Shift+Z", "Ctrl+Y"];
     UndoHistory, "undo_history", Files, "Undo History…", "The changes Undo can take back, newest first; take back several at once.", ["Ctrl+Alt+Z"];
     EmptyTrash, "empty_trash", Files, "Empty Trash", "Permanently remove everything in the trash (asks first).", [];
     ExtractHere, "extract_here", Files, "Extract Here", "Unpack the selected archives (or what is selected inside one) beside them.", [];

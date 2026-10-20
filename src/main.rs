@@ -69,6 +69,8 @@ mod project;
 mod projects;
 mod fm1;
 mod quickopen;
+mod redo;
+mod undofile;
 mod undohist;
 mod hints;
 mod marks;

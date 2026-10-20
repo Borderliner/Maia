@@ -1100,7 +1100,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(162) {
+    match rng.below(163) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2381,6 +2381,20 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 }
                 s.idle(rng.below(10) + 1);
             }
+        }
+        162 => {
+            // Undo and Redo in a run, by their keys or from the history.
+            for _ in 0..1 + rng.below(4) {
+                s.act(&format!("key {}", rng.pick(&["ctrl+z", "ctrl+shift+z", "ctrl+y"])));
+            }
+            if rng.below(3) == 0 {
+                s.act("key ctrl+alt+z");
+                for _ in 0..rng.below(3) {
+                    s.act(&format!("key {}", rng.pick(&["ArrowUp", "ArrowDown"])));
+                }
+                s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
+            }
+            s.settle();
         }
         _ => {
             s.note("idle".into());
@@ -10723,6 +10737,11 @@ mod journeys {
         let home = fixture("undohist");
         let d = home.join("Documents");
         let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.act("key ctrl+alt+z");
+        s.idle(2);
+        assert!(some_text(&s, "Nothing to undo yet"));
+        look(&mut s, "undo history, empty");
+        s.act("key Escape");
         let rename = |s: &mut Sim, find: &str, to: &str| {
             s.act(&format!("text {find}"));
             s.act("key F2");
@@ -10770,9 +10789,26 @@ mod journeys {
         click_control(&mut s, "undo back");
         s.settle();
         assert!(d.join("notes.txt").exists() && s.app.undo.is_empty());
+        // What was taken back waits above, to be done again: the nearest chosen first,
+        // the furthest taking those before it along.
         s.act("key ctrl+alt+z");
         s.idle(2);
-        assert!(some_text(&s, "Nothing to undo yet"));
+        assert!(some_text(&s, "Undone · Moved to the trash · 1 item") && some_text(&s, "Undone · Renamed · 1 item"));
+        assert!(some_text(&s, "Redo") && some_text(&s, "do again"), "the nearest change to do again is chosen");
+        look(&mut s, "undo history, all undone");
+        s.shot("undo-history-redo");
+        s.act("key ArrowUp");
+        s.act("key ArrowUp");
+        s.idle(2);
+        assert!(some_text(&s, "Redo 3 changes"));
+        s.act("key Enter");
+        s.settle();
+        assert!(!d.join("budget 2026.csv").exists() && d.join("b.md").exists() && d.join("a.txt").exists(), "all three done again");
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0 == "Redid 3 changes"));
+        assert_eq!(s.app.undo.len(), 3);
+        assert!(!s.app.undo.can_redo());
+        s.act("key ctrl+alt+z");
+        s.idle(2);
         for (w, h) in [(520.0, 340.0), (1280.0, 800.0)] {
             s.resize(w, h);
             s.idle(3);
@@ -10792,7 +10828,8 @@ mod journeys {
     /// Start Now runs it anyway, Cancel ends it with nothing copied; a copy on another disk
     /// runs at once; the first resumed, the one waiting follows. Check Copies switched on in
     /// Options: a copy that comes back different from the disk is an error on its card and
-    /// is removed, and a move across disks keeps its original.
+    /// is removed, and a move across disks keeps its original. A move across disks undone
+    /// goes back through a job, and Redo moves it there again.
     #[test]
     fn copies_take_turns_and_are_checked() {
         if !sandboxed() {
@@ -10911,8 +10948,108 @@ mod journeys {
         s.act("key F6");
         wait_until(&mut s, "the move's check", 10, |s| s.app.jobs.iter().filter(|j| j.progress.lock().unwrap().finished && !j.progress.lock().unwrap().errors.is_empty()).count() >= 2 || !docs.join(&bad).exists());
         assert!(docs.join(&bad).exists() && !far.join("out").join(&bad).exists(), "the original stays");
+        // A move across disks, undone through a job and done again.
+        s.app.cfg.check_copies = false;
+        select_path(&mut s, &docs.join("report.md"));
+        s.act("key F6");
+        wait_until(&mut s, "moved to the other disk", 10, |s| far.join("out/report.md").exists() && s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Move(_))));
+        assert!(!docs.join("report.md").exists());
+        s.act("key ctrl+z");
+        s.idle(1);
+        assert!(s.app.jobs.iter().any(|j| j.label == "Moving report.md back"), "undone by a job with its card");
+        wait_until(&mut s, "moved back", 10, |s| docs.join("report.md").exists() && s.app.job_steps.is_empty());
+        assert!(!far.join("out/report.md").exists() && s.app.undo.can_redo());
+        s.act("key ctrl+shift+z");
+        wait_until(&mut s, "moved again", 10, |s| far.join("out/report.md").exists() && s.app.job_steps.is_empty());
+        assert!(!docs.join("report.md").exists());
+        s.act("key ctrl+z");
+        wait_until(&mut s, "and back", 10, |s| docs.join("report.md").exists() && s.app.job_steps.is_empty());
         let _ = std::fs::remove_dir_all(&far);
         report("turns and checks", &s);
+    }
+
+    /// Redo: Undo's changes done again by its keys and from Undo History, where they wait
+    /// above what can still be taken back; both lists kept across a restart; a new change
+    /// leaves nothing to redo.
+    #[test]
+    fn redo_and_undo_outlast_a_restart() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("redo");
+        let d = home.join("Documents");
+        let start = |d: &Path| {
+            let mut s = Sim::new(d, vec2(1280.0, 800.0));
+            s.app.undo_keep = crate::undofile::Keeper::new(Some(crate::undofile::path()), &s.ctx);
+            wait_until(&mut s, "Undo read back", 10, |s| !s.app.undo_keep.loading());
+            s
+        };
+        let _ = std::fs::remove_file(crate::undofile::path());
+        let mut s = start(&d);
+        s.act("text notes");
+        s.act("key F2");
+        s.act("key ctrl+a");
+        s.act("text plan.txt");
+        s.act("key Enter");
+        s.settle();
+        s.act("key Escape");
+        s.settle();
+        s.click_text("budget 2026.csv");
+        s.act("key Delete");
+        if s.popup_open() {
+            s.act("key Enter");
+        }
+        wait_until(&mut s, "trashed", 20, |s| s.app.undo.len() == 2 && !d.join("budget 2026.csv").exists());
+        s.act("key ctrl+z");
+        s.act("key ctrl+z");
+        s.settle();
+        assert!(d.join("notes.txt").exists() && d.join("budget 2026.csv").exists(), "both undone");
+        s.act("key ctrl+shift+z");
+        s.settle();
+        assert!(d.join("plan.txt").exists() && !d.join("notes.txt").exists(), "the rename again");
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0 == "Redid “Rename notes.txt to plan.txt”"));
+        s.act("key ctrl+alt+z");
+        s.idle(3);
+        assert!(some_text(&s, "Undone · Moved to the trash · 1 item") && some_text(&s, "Renamed · 1 item"));
+        assert!(some_text(&s, "Undo"), "the newest change chosen, as before");
+        look(&mut s, "undo history with one to redo");
+        s.shot("undo-history-one-redo");
+        s.act("key ArrowUp");
+        s.idle(2);
+        assert!(some_text(&s, "Redo"));
+        s.act("key Enter");
+        s.settle();
+        assert!(!d.join("budget 2026.csv").exists(), "trashed again from the history");
+        s.act("key ctrl+z");
+        s.settle();
+        assert!(d.join("budget 2026.csv").exists());
+        wait_until(&mut s, "written", 10, |s| s.app.undo_keep.settled(&s.app.undo));
+        drop(s);
+        // A new run: Undo and Redo where they were.
+        let mut s = start(&d);
+        assert_eq!(s.app.undo.len(), 1);
+        assert!(s.app.undo.can_redo());
+        s.act("key ctrl+y");
+        s.settle();
+        assert!(!d.join("budget 2026.csv").exists(), "redone after the restart");
+        s.act("key ctrl+z");
+        s.act("key ctrl+z");
+        s.settle();
+        assert!(d.join("notes.txt").exists() && d.join("budget 2026.csv").exists(), "undone after the restart");
+        // A new change: nothing left to redo.
+        s.act("key ctrl+shift+n");
+        s.settle();
+        // Named where it was made.
+        wait_until(&mut s, "the new folder's name field", 10, |s| s.tab().rename.is_some());
+        s.act("key ctrl+a");
+        s.act("text Fresh");
+        s.act("key Enter");
+        s.settle();
+        assert!(d.join("Fresh").is_dir() && !s.app.undo.can_redo(), "made, and nothing left to redo");
+        s.act("key ctrl+y");
+        s.idle(1);
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0 == "Nothing to redo"));
+        report("redo", &s);
     }
 
     /// Workspaces: leaving a project through Recent Projects keeps its tabs and panels;

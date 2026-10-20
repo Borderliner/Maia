@@ -58,39 +58,127 @@ pub enum Drag {
     Bookmark { idx: usize },
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct UndoEntry {
     pub label: String,
     pub kind: UndoKind,
 }
 
-/// What Undo can take back, the newest last, each with when it was done.
+/// What Undo can take back, the newest last, each with when it was done; and what Redo
+/// can do again, the next one last, each with when it was undone. The entries are shared
+/// with the thread that writes them to disk, so writing never copies them on a frame.
 #[derive(Default)]
 pub struct UndoStack {
-    items: Vec<UndoEntry>,
+    items: Vec<std::sync::Arc<UndoEntry>>,
     at: Vec<std::time::SystemTime>,
+    redo: Vec<std::sync::Arc<UndoEntry>>,
+    redo_at: Vec<std::time::SystemTime>,
+    /// Counts every change, for the file that keeps them across restarts.
+    pub(crate) generation: u64,
 }
 
 impl UndoStack {
+    /// A new change: what was undone before it can't be redone any more.
     pub fn push(&mut self, e: UndoEntry) {
-        self.items.push(e);
+        self.forget_redo();
+        self.push_redone(e);
+    }
+
+    /// A change done again by Redo: the rest of what was undone stays to redo.
+    pub fn push_redone(&mut self, e: UndoEntry) {
+        self.items.push(std::sync::Arc::new(e));
         self.at.push(std::time::SystemTime::now());
+        crate::undofile::cap(&mut self.items, &mut self.at);
+        self.generation += 1;
     }
 
     pub fn pop(&mut self) -> Option<UndoEntry> {
         self.at.pop();
-        self.items.pop()
+        let e = self.items.pop()?;
+        self.generation += 1;
+        Some(std::sync::Arc::unwrap_or_clone(e))
+    }
+
+    /// A change taken back, for Redo.
+    pub fn push_undone(&mut self, e: UndoEntry) {
+        self.redo.push(std::sync::Arc::new(e));
+        self.redo_at.push(std::time::SystemTime::now());
+        crate::undofile::cap(&mut self.redo, &mut self.redo_at);
+        self.generation += 1;
+    }
+
+    pub fn pop_redo(&mut self) -> Option<UndoEntry> {
+        self.redo_at.pop();
+        let e = self.redo.pop()?;
+        self.generation += 1;
+        Some(std::sync::Arc::unwrap_or_clone(e))
+    }
+
+    pub fn forget_redo(&mut self) {
+        if !self.redo.is_empty() {
+            self.redo.clear();
+            self.redo_at.clear();
+            self.generation += 1;
+        }
     }
 
     /// When the change at `i` (counted from the oldest) was made.
     pub fn when(&self, i: usize) -> Option<std::time::SystemTime> {
         self.at.get(i).copied()
     }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn last(&self) -> Option<&UndoEntry> {
+        self.items.last().map(|e| &**e)
+    }
+
+    /// What Redo can do again, the next one last.
+    pub fn redos(&self) -> impl ExactSizeIterator<Item = &UndoEntry> + DoubleEndedIterator {
+        self.redo.iter().map(|e| &**e)
+    }
+
+    /// When the change Redo would do `i`-th from the bottom was undone.
+    pub fn undone_when(&self, i: usize) -> Option<std::time::SystemTime> {
+        self.redo_at.get(i).copied()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    /// Both lists as they stand, for the thread that writes them.
+    pub(crate) fn snapshot(&self) -> crate::undofile::Snapshot {
+        let pair = |v: &[std::sync::Arc<UndoEntry>], t: &[std::time::SystemTime]| v.iter().cloned().zip(t.iter().copied()).collect();
+        crate::undofile::Snapshot { undo: pair(&self.items, &self.at), redo: pair(&self.redo, &self.redo_at) }
+    }
+
+    /// What the last run left, under what was done since it started. A change made since
+    /// then leaves nothing to redo.
+    pub(crate) fn restore(&mut self, s: crate::undofile::Snapshot) {
+        let fresh = !self.items.is_empty();
+        let (mut items, mut at): (Vec<_>, Vec<_>) = s.undo.into_iter().unzip();
+        items.append(&mut self.items);
+        at.append(&mut self.at);
+        crate::undofile::cap(&mut items, &mut at);
+        (self.items, self.at) = (items, at);
+        if !fresh && self.redo.is_empty() {
+            (self.redo, self.redo_at) = s.redo.into_iter().unzip();
+        }
+        self.generation += 1;
+    }
 }
 
-impl std::ops::Deref for UndoStack {
-    type Target = [UndoEntry];
-    fn deref(&self) -> &[UndoEntry] {
-        &self.items
+impl std::ops::Index<usize> for UndoStack {
+    type Output = UndoEntry;
+    fn index(&self, i: usize) -> &UndoEntry {
+        &self.items[i]
     }
 }
 
@@ -106,6 +194,7 @@ impl UndoKind {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum UndoKind {
     Rename(Vec<(PathBuf, PathBuf)>),
     Move(Vec<(PathBuf, PathBuf)>),
@@ -157,8 +246,12 @@ pub struct App {
     pub save_session: bool,
     pub jump_buf: (String, Instant),
     pub undo: UndoStack,
+    /// Undo and Redo kept across restarts.
+    pub undo_keep: crate::undofile::Keeper,
     /// Jobs that move data take turns on each disk.
     pub queue: std::sync::Arc<ops::Queue>,
+    /// Moves that Undo or Redo handed to a job, by job: what to record when it ends.
+    pub job_steps: HashMap<u64, crate::redo::Step>,
     pub theme_applied: (theme::ThemeName, f32, f32, bool, bool),
     pub ctx: egui::Context,
     pub fresh: bool,
@@ -306,7 +399,10 @@ impl App {
             save_session: paths.is_empty(),
             jump_buf: (String::new(), Instant::now()),
             undo: UndoStack::default(),
+            // Tests share one home: only those that check keeping Undo ask for it.
+            undo_keep: crate::undofile::Keeper::new((!cfg!(test)).then(crate::undofile::path), &ctx),
             queue: Default::default(),
+            job_steps: HashMap::new(),
             theme_applied: (cfg.theme, cfg.font_size, cfg.spacing, cfg.animations, cfg.syntax_theme),
             ctx: ctx.clone(),
             fresh: true,
@@ -1399,6 +1495,9 @@ impl App {
                 if let OpKind::Trash { paths } = &j.kind {
                     self.undo.push(UndoEntry { label: crate::ui::job_undo_label(&j.label), kind: UndoKind::Trashed(paths.clone()) });
                 }
+                if let Some(step) = self.job_steps.remove(&j.id) {
+                    crate::redo::placed(&mut self.undo, step, &p);
+                }
             }
         }
         // An extraction refused for want of a password: ask, and run it again.
@@ -1441,6 +1540,7 @@ impl App {
         if !self.jobs.is_empty() || any_loading || self.watch.has_pending() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+        self.undo_keep.pump(&mut self.undo, &ctx);
         if self.seq.len() > 0 && self.seq_time.elapsed() > Duration::from_millis(1100) {
             self.seq.clear();
         }
@@ -2867,10 +2967,13 @@ impl App {
             Cmd::About => self.popup = Popup::About,
             Cmd::Welcome => self.popup = crate::tour::open(crate::tour::Kind::Welcome, false),
             Cmd::WhatsNew => self.popup = crate::tour::open(crate::tour::Kind::News, false),
+            Cmd::Redo => {
+                self.redo_last();
+            }
             Cmd::Undo => {
                 self.undo_last();
             }
-            Cmd::UndoHistory => self.popup = Popup::UndoHistory(crate::undohist::State { sel: 0 }),
+            Cmd::UndoHistory => self.popup = Popup::UndoHistory(crate::undohist::State::new(&self.undo)),
             Cmd::Hints => crate::hints::start(self, &ctx),
             Cmd::SetMark => match crate::marks::here(self) {
                 Some(_) => self.popup = Popup::Marks(crate::marks::State { set: true, sel: 0 }),
@@ -3144,7 +3247,7 @@ impl App {
 
     /// Every tab that shows what changed reads it again, front or not, and the folders'
     /// sizes are counted again.
-    fn show_changed(&mut self, c: &ops::Changed) {
+    pub(crate) fn show_changed(&mut self, c: &ops::Changed) {
         if c.is_empty() {
             return;
         }
@@ -3224,15 +3327,22 @@ impl App {
         self.tab().reload();
     }
 
-    /// Take back the latest change; false when some of it couldn't be.
+    /// Take back the latest change; false when some of it couldn't be. What was taken
+    /// back goes to Redo. A move across disks goes back through a job with its card.
     pub fn undo_last(&mut self) -> bool {
+        if !self.job_steps.is_empty() {
+            self.toast("Undo waits for the move under way");
+            return false;
+        }
         let Some(u) = self.undo.pop() else {
             self.toast("Nothing to undo");
             return true;
         };
+        let here = |p: &Path| std::fs::symlink_metadata(p).is_ok();
         let mut errs = 0;
         let mut moved_back = ops::Changed::default();
-        match &u.kind {
+        // What Redo would do again: the part of the change that was taken back.
+        let again = match &u.kind {
             UndoKind::Rename(pairs) => {
                 let plan: Vec<(PathBuf, String)> = pairs
                     .iter()
@@ -3241,61 +3351,70 @@ impl App {
                 errs = crate::rename::apply(&plan).len();
                 let back: Vec<(PathBuf, PathBuf)> = pairs.iter().map(|(from, to)| (to.clone(), from.clone())).collect();
                 moved_back = ops::Changed::moved(&back);
+                UndoKind::Rename(pairs.iter().filter(|(from, to)| here(from) && !here(to)).cloned().collect())
             }
             UndoKind::Copied(made, replaced) => {
                 // The copies over something: theirs back from the trash in their place.
-                errs += crate::picfix::undo_replaced(replaced);
-                errs += made.iter().filter(|p| !replaced.contains(p) && crate::trashcan::delete(p).is_err()).count();
+                let swapped = crate::redo::swap_each(replaced, &mut errs);
+                let gone = crate::redo::trash_each(made.iter().filter(|p| !replaced.contains(p)), &mut errs);
+                UndoKind::Copied(gone.into_iter().chain(swapped.iter().cloned()).collect(), swapped)
             }
             UndoKind::Synced(made, replaced, removed) => {
-                errs += crate::picfix::undo_replaced(replaced);
-                errs += made.iter().filter(|p| !replaced.contains(p) && crate::trashcan::delete(p).is_err()).count();
+                let swapped = crate::redo::swap_each(replaced, &mut errs);
+                let gone = crate::redo::trash_each(made.iter().filter(|p| !replaced.contains(p)), &mut errs);
                 // What mirroring removed, back where it was.
-                for r in removed {
-                    match crate::picfix::newest_trashed(r) {
-                        Some(it) if std::fs::symlink_metadata(r).is_err() => errs += crate::trashcan::restore(&it).is_err() as usize,
-                        _ => errs += 1,
-                    }
-                }
+                let back = crate::redo::untrash_each(removed, &mut errs);
+                UndoKind::Synced(gone.into_iter().chain(swapped.iter().cloned()).collect(), swapped, back)
+            }
+            UndoKind::Move(pairs) | UndoKind::MovedOver(pairs, _) if crate::redo::crosses(pairs.iter().map(|(s, d)| (d.as_path(), s.as_path()))) => {
+                let over = matches!(u.kind, UndoKind::MovedOver(..));
+                let back = match &u.kind {
+                    UndoKind::MovedOver(_, r) => r.clone(),
+                    _ => vec![],
+                };
+                let pairs: Vec<(PathBuf, PathBuf)> = pairs.iter().map(|(s, d)| (d.clone(), s.clone())).collect();
+                let label = crate::redo::place_label(&pairs, true);
+                let id = self.alloc_id();
+                self.job_steps.insert(id, crate::redo::Step::Undid { label: u.label.clone(), over });
+                self.jobs.push(ops::spawn_in(id, OpKind::Place { pairs, over: vec![], back, label }, self.ctx.clone(), &self.queue, self.cfg.check_copies));
+                return true;
             }
             UndoKind::MovedOver(pairs, replaced) => {
                 let mut back = vec![];
                 for (src, dst) in pairs {
-                    if std::fs::symlink_metadata(src).is_ok() || crate::fsx::rename_new(dst, src).is_err() {
+                    if here(src) || crate::fsx::rename_new(dst, src).is_err() {
                         errs += 1;
                     } else {
                         back.push((dst.clone(), src.clone()));
                     }
                 }
                 // What was there before comes back from the trash, now its place is free.
-                for r in replaced {
-                    match crate::trashcan::list().into_iter().filter(|i| i.original == *r).max_by(|a, b| a.deleted.cmp(&b.deleted)) {
-                        Some(it) if std::fs::symlink_metadata(r).is_err() => errs += crate::trashcan::restore(&it).is_err() as usize,
-                        _ => errs += 1,
-                    }
-                }
+                let restored = crate::redo::untrash_each(replaced, &mut errs);
                 moved_back = ops::Changed::moved(&back);
                 moved_back.arrived.extend(replaced.iter().filter_map(|r| r.parent().map(Path::to_path_buf)));
+                UndoKind::MovedOver(back.into_iter().map(|(d, s)| (s, d)).collect(), restored)
             }
             UndoKind::Move(pairs) => {
                 let mut back = vec![];
                 for (src, dst) in pairs {
-                    if std::fs::symlink_metadata(src).is_ok() || std::fs::rename(dst, src).is_err() {
+                    if here(src) || std::fs::rename(dst, src).is_err() {
                         errs += 1;
                     } else {
                         back.push((dst.clone(), src.clone()));
                     }
                 }
                 moved_back = ops::Changed::moved(&back);
+                UndoKind::Move(back.into_iter().map(|(d, s)| (s, d)).collect())
             }
             UndoKind::Created(paths) => {
-                errs += paths.iter().filter(|p| crate::trashcan::delete(p).is_err()).count();
+                let gone = crate::redo::trash_each(paths.iter(), &mut errs);
                 for p in paths {
                     moved_back.gone.push(p.clone());
                     if let Some(d) = p.parent().filter(|d| !moved_back.left.iter().any(|x| x == d)) {
                         moved_back.left.push(d.to_path_buf());
                     }
                 }
+                UndoKind::Created(gone)
             }
             UndoKind::Trashed(orig) => {
                 // Restore the most recent trash entry for each original path.
@@ -3308,12 +3427,13 @@ impl App {
                 let back: Vec<(PathBuf, PathBuf)> = best.values().filter(|it| crate::trashcan::restore(it).is_ok()).map(|it| (it.file.clone(), it.original.clone())).collect();
                 errs += best.len() - back.len();
                 moved_back = ops::Changed::moved(&back);
+                UndoKind::Trashed(orig.iter().filter(|p| back.iter().any(|b| b.1 == **p)).cloned().collect())
             }
-            UndoKind::Replaced(paths) => errs += crate::picfix::undo_replaced(paths),
+            UndoKind::Replaced(paths) => UndoKind::Replaced(crate::redo::swap_each(paths, &mut errs)),
             UndoKind::Sorted(pairs, made) => {
                 let mut back = vec![];
                 for (src, dst) in pairs {
-                    if std::fs::symlink_metadata(src).is_ok() || std::fs::rename(dst, src).is_err() {
+                    if here(src) || std::fs::rename(dst, src).is_err() {
                         errs += 1;
                     } else {
                         back.push((dst.clone(), src.clone()));
@@ -3321,12 +3441,19 @@ impl App {
                 }
                 moved_back = ops::Changed::moved(&back);
                 // Innermost first; one something else was put into stays.
+                let mut removed = vec![];
                 for d in made.iter().rev() {
                     if std::fs::remove_dir(d).is_ok() {
                         moved_back.gone.push(d.clone());
+                        removed.push(d.clone());
                     }
                 }
+                removed.reverse();
+                UndoKind::Sorted(back.into_iter().map(|(d, s)| (s, d)).collect(), removed)
             }
+        };
+        if again.count() > 0 {
+            self.undo.push_undone(UndoEntry { label: u.label.clone(), kind: again });
         }
         if moved_back.is_empty() {
             for p in self.panels.values_mut() {
@@ -3701,5 +3828,6 @@ impl App {
         self.keep_workspace();
         let ctx = self.ctx.clone();
         self.save_all(&ctx);
+        self.undo_keep.flush(&self.undo);
     }
 }
