@@ -2166,6 +2166,7 @@ pub(crate) enum Opt {
     IgnoredFiles,
     TrashAge,
     DefaultFm,
+    Picker,
     SingleInstance,
     Meaning,
     MeaningFolders,
@@ -2314,6 +2315,7 @@ pub(crate) const OPTS: &[(Opt, Section, &str, &str, &str)] = &[
     (Opt::Startup, Section::System, "Startup", "On startup", "What Maia shows when it starts."),
     (Opt::NewTab, Section::System, "Startup", "New tab shows", "The folder a new tab opens."),
     (Opt::DefaultFm, Section::System, "System", "Default file manager", "Open folders from other apps in Maia."),
+    (Opt::Picker, Section::System, "System", "Open and save dialog", "Pick files for other apps in Maia."),
     (Opt::SingleInstance, Section::System, "System", "Reuse the open window", "Other apps and new launches open tabs here."),
     (Opt::AssetCache, Section::System, "System", "Asset cache size", "Memory for thumbnails and previews."),
     (Opt::Editor, Section::System, "Developer", "Editor", "Empty finds one; a command can use {file} and {line}."),
@@ -2524,7 +2526,7 @@ fn opt_default(c: &mut crate::config::Config, o: Opt, reset: bool) -> bool {
     match o {
         Opt::Theme => f!(theme),
         // Lives in the desktop's settings, not Maia's: nothing to reset.
-        Opt::DefaultFm => true,
+        Opt::DefaultFm | Opt::Picker => true,
         // Buttons, not settings.
         Opt::ConfigFile | Opt::ResetAll | Opt::Install | Opt::Updates | Opt::Tour | Opt::CustomActions => true,
         Opt::SingleInstance => f!(single_instance),
@@ -2600,6 +2602,13 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         }
         return false;
     }
+    if o == Opt::Picker {
+        let mut on = app.picker_setting() == Some(true);
+        if toggle(ui, &mut on, &pal) {
+            app.set_picker_setting(on);
+        }
+        return false;
+    }
     let c = &mut app.cfg;
     match o {
         Opt::Font => ui.add(egui::TextEdit::singleline(&mut c.font_family).hint_text(egui::RichText::new("System font").color(pal.text_dim)).desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).lost_focus(),
@@ -2668,7 +2677,7 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         }
         Opt::IgnoredFiles => choice(ui, "ignored", &mut c.git_ignored, &[(IgnoredFiles::Dim, "Dim"), (IgnoredFiles::Hide, "Hide"), (IgnoredFiles::Show, "Show")]),
         Opt::MeaningFolders => ui.add(egui::TextEdit::singleline(&mut c.semantic_folders).hint_text(egui::RichText::new("~/Documents").color(pal.text_dim)).desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).lost_focus(),
-        Opt::DefaultFm => false,
+        Opt::DefaultFm | Opt::Picker => false,
         Opt::Updates => {
             update_control(ui, app, &pal);
             false
@@ -2757,6 +2766,8 @@ fn option_row(ui: &mut Ui, app: &mut App, oi: usize, r: Rect, look: &RowLook, q:
     let (o, sec, _, title, desc) = OPTS[oi];
     // Without curl there is no way to ask: said in place of what it would do.
     let desc: &str = if o == Opt::GitPictures && app.avatars.curl() == Some(false) { "Needs curl, which isn't installed; authors keep their initials." } else { desc };
+    // What keeps the portal from reaching Maia here, in place of what it would do.
+    let desc: &str = if o == Opt::Picker { app.picker_missing().unwrap_or(desc) } else { desc };
     // Sub-options sit indented under their switch and fade while it is off.
     let indent = if opt_parent(o).is_some() && !look.label { 20.0 } else { 0.0 };
     let inert = !parent_on(&app.cfg, o);
@@ -2964,6 +2975,10 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
                     Opt::DefaultFm => {
                         let on = app.default_fm() == Some(true);
                         app.set_default_fm(!on);
+                    }
+                    Opt::Picker => {
+                        let on = app.picker_setting() == Some(true);
+                        app.set_picker_setting(!on);
                     }
                     Opt::Theme => app.popup = Popup::Themes,
                     Opt::ConfigFile => cmd = Some(Cmd::OpenConfig),

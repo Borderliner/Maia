@@ -329,6 +329,10 @@ pub struct App {
     pub other_theme: Option<theme::ThemeName>,
     /// This window answers an app's Open or Save request (picker.rs).
     pub picker: Option<Box<crate::picker::Picker>>,
+    /// Whether apps open and save files with Maia: 0 not known yet, 1 no, 2 yes, 3 asking;
+    /// and what keeps it from working here.
+    picker_on: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    picker_missing: std::sync::Arc<std::sync::Mutex<Option<&'static str>>>,
 }
 
 /// What a thread sharing files hands back: text for the clipboard, what to say, and a
@@ -446,6 +450,8 @@ impl App {
             appearance_seen: crate::appearance::UNKNOWN,
             other_theme: None,
             picker: None,
+            picker_on: Default::default(),
+            picker_missing: Default::default(),
             cfg,
             ud,
         };
@@ -606,6 +612,47 @@ impl App {
             let r = if on { crate::install::set_default() } else { crate::install::unset_default() };
             let msg = r.unwrap_or_else(|e| format!("Couldn't change the default file manager: {e}"));
             state.store(if crate::install::is_default() { 2 } else { 1 }, Relaxed);
+            notes.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Whether apps open and save files with Maia (None while that is being read; the
+    /// first call starts reading it in the background).
+    pub fn picker_setting(&self) -> Option<bool> {
+        use std::sync::atomic::Ordering::Relaxed;
+        match self.picker_on.load(Relaxed) {
+            1 => Some(false),
+            2 => Some(true),
+            3 => None,
+            _ => {
+                self.picker_on.store(3, Relaxed);
+                let (state, missing, ctx) = (self.picker_on.clone(), self.picker_missing.clone(), self.ctx.clone());
+                std::thread::spawn(move || {
+                    let (on, m) = crate::portal::state();
+                    *missing.lock().unwrap_or_else(|e| e.into_inner()) = m;
+                    state.store(if on { 2 } else { 1 }, Relaxed);
+                    ctx.request_repaint();
+                });
+                None
+            }
+        }
+    }
+
+    /// What keeps the portal from reaching Maia here, once known.
+    pub fn picker_missing(&self) -> Option<&'static str> {
+        *self.picker_missing.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Route the desktop's Open and Save dialogs to Maia, or back, in the background.
+    pub fn set_picker_setting(&mut self, on: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.picker_on.store(if on { 2 } else { 1 }, Relaxed);
+        let (state, notes, ctx) = (self.picker_on.clone(), self.notes.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let r = crate::portal::set(on);
+            let msg = r.unwrap_or_else(|e| format!("Couldn't change the Open and Save dialog: {e}"));
+            state.store(if crate::portal::is_on(&crate::portal::Places::user()) { 2 } else { 1 }, Relaxed);
             notes.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
             ctx.request_repaint();
         });

@@ -13633,6 +13633,35 @@ mod journeys {
         click_control_at(&mut s, "picker accept");
         assert_eq!(done(&s).map(|a| a.uris.len()), Some(100));
         report("picker", &s);
+        // Turned on and off from Options in the ordinary window: the user's own
+        // portals.conf gets the line, keeps the rest, and gets its old dialog back.
+        let conf = crate::config::config_dir().parent().unwrap_or(&root()).join("xdg-desktop-portal/portals.conf");
+        let theirs = "[preferred]\n# mine\ndefault=gtk\norg.freedesktop.impl.portal.FileChooser=kde\n";
+        std::fs::create_dir_all(conf.parent().unwrap()).unwrap();
+        std::fs::write(&conf, theirs).unwrap();
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        let switch = |s: &mut Sim, want: bool| {
+            s.act("key ctrl+Comma");
+            s.settle();
+            s.act("text open and save dialog");
+            wait_until(s, "state read", 5, |s| s.app.picker_setting().is_some());
+            s.idle(3);
+            assert_eq!(s.app.picker_setting(), Some(!want), "the switch starts the other way");
+            let before = s.app.toast.as_ref().map(|t| t.0.clone());
+            click_control(s, "switch");
+            wait_until(s, "routing changed", 5, |s| s.app.toast.as_ref().is_some_and(|t| Some(&t.0) != before.as_ref()));
+            assert_eq!(s.app.picker_setting(), Some(want));
+            look(s, &format!("open and save dialog {want}"));
+            s.act("key Escape");
+            s.settle();
+        };
+        switch(&mut s, true);
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), "[preferred]\n# mine\ndefault=gtk\norg.freedesktop.impl.portal.FileChooser=maia\n");
+        assert!(crate::portal::Places::user().portal_file().is_file(), "the backend is there for the portal to find");
+        switch(&mut s, false);
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), theirs, "KDE's dialog again");
+        assert!(!crate::portal::Places::user().portal_file().exists());
+        report("picker options", &s);
     }
 
     #[test]

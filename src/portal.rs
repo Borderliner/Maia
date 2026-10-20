@@ -1021,6 +1021,11 @@ fn portal_version() -> Option<(u32, u32, u32)> {
 /// Where a package puts the portal file, read by every version.
 const SYSTEM_PORTAL: &str = "/usr/share/xdg-desktop-portal/portals/maia.portal";
 
+/// For the Options row: on or off, and what is missing when it can't work here.
+pub fn state() -> (bool, Option<&'static str>) {
+    (is_on(&Places::user()), missing(portal_version(), Path::new(SYSTEM_PORTAL).is_file()))
+}
+
 /// Turn it on or off for this user, then have the bus and the portal read their files
 /// again. Returns what to say: done, or what is still in the way.
 pub fn set(on: bool) -> Result<String, String> {

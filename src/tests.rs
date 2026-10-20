@@ -3688,9 +3688,10 @@ fn every_option_has_one_section() {
         Opt::Tour => 62,
         Opt::CustomActions => 63,
         Opt::CheckCopies => 64,
+        Opt::Picker => 65,
     };
-    let numbered: Vec<usize> = (0..59).chain([61, 62, 63, 64]).collect();
-    let mut seen = vec![0; 65];
+    let numbered: Vec<usize> = (0..59).chain([61, 62, 63, 64, 65]).collect();
+    let mut seen = vec![0; 66];
     for o in OPTS {
         seen[index(o.0)] += 1;
     }
@@ -3735,6 +3736,7 @@ fn option_search_spans_sections() {
     for (q, o) in [
         ("color scheme", Opt::Theme),
         ("default file manager", Opt::DefaultFm),
+        ("open and save dialog", Opt::Picker),
         ("search by meaning", Opt::Meaning),
         ("reuse the open window", Opt::SingleInstance),
         ("show github pictures", Opt::GitPictures),
