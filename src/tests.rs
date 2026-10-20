@@ -9674,3 +9674,110 @@ fn undo_and_redo_survive_a_restart() {
     purge_trashed_under(&d);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Selections in the previews, on real files: the part of each line a selection takes
+/// and its line breaks, words by double-click, the text copied out of lines; a big file's
+/// selected lines read back from disk through its line index (across the index's steps,
+/// tabs shown as spaces, to its end with Ctrl+A, cut at the most a copy takes) and its
+/// bytes as hex and as text; table cells as tab-separated lines; a data tree's rows and a
+/// picked value; a .env copied as shown.
+#[test]
+fn preview_selections_copy_what_is_shown() {
+    use crate::textsel::{END, Sel, lines_text, word};
+    use std::borrow::Cow;
+    let d = tmpdir("textsel");
+    // Lines and words.
+    let notes = d.join("notes.txt");
+    std::fs::write(&notes, "naïve café\tbar\r\nsecond_line here\n\nlast").unwrap();
+    let lines = crate::inspector::text_lines(&std::fs::read(&notes).unwrap()).unwrap();
+    assert_eq!(lines, ["naïve café    bar", "second_line here", "", "last"]);
+    let s = Sel::new((1, 7), (0, 7));
+    assert_eq!(s.span(), ((0, 7), (1, 7)), "in order whichever way it was dragged");
+    assert_eq!(s.on_line(0, lines[0].len()), Some((7, lines[0].len(), true)));
+    assert_eq!(s.on_line(1, lines[1].len()), Some((0, 7, false)));
+    assert_eq!(s.on_line(2, 0), None);
+    assert_eq!(Sel::new((2, 0), (3, 0)).on_line(2, 0), Some((0, 0, true)), "an empty line's break");
+    let get = |i: usize| lines.get(i).map(|l| Cow::Borrowed(l.as_str()));
+    assert_eq!(lines_text(&s, lines.len(), get), "café    bar\nsecond_");
+    assert_eq!(lines_text(&Sel::new((0, 0), END), lines.len(), get), "naïve café    bar\nsecond_line here\n\nlast", "all of it, no break after the last line");
+    assert_eq!(lines_text(&Sel::at((1, 3)), lines.len(), get), "");
+    assert_eq!(word(&lines[0], 2), (0, 6), "a word with a letter of two bytes");
+    assert_eq!(word(&lines[1], 3), (0, 11), "underscores are part of a word");
+    assert_eq!(word(&lines[0], 13), (12, 16), "spaces as a run");
+    assert_eq!(word(&lines[1], lines[1].len()), (12, 16), "at the end of a line, the word before it");
+    assert_eq!(word("a.b", 1), (1, 2), "anything else on its own");
+    assert_eq!(crate::textsel::byte_at_col("日本語", 2.4), 3, "wide characters take two columns");
+    // A big file: lines read back from the disk through the index.
+    let big = d.join("big.log");
+    let text: String = (0..3000).map(|i| if i % 500 == 7 { format!("{i}\twith a tab\n") } else { format!("line {i:05}\n") }).collect();
+    std::fs::write(&big, &text).unwrap();
+    let ctx = egui::Context::default();
+    let v = crate::bigfile::Pager::open(&big, text.len() as u64, false, &ctx).unwrap();
+    let t0 = Instant::now();
+    while !v.rows().1 {
+        assert!(t0.elapsed() < Duration::from_secs(20), "indexed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let shown: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
+    let read = |v: &crate::bigfile::Pager, s: Sel| v.copy_lines(s, &ctx).recv_timeout(Duration::from_secs(20)).unwrap();
+    let (got, cut) = read(&v, Sel::new((1022, 5), (1025, 3)));
+    assert_eq!(got, format!("{}\n{}\n{}\n{}", &shown[1022][5..], shown[1023], shown[1024], &shown[1025][..3]), "across a step of the index");
+    assert!(!cut);
+    let (got, _) = read(&v, Sel::new((2507, 0), (2507, 9)));
+    assert_eq!(got, "2507    w", "a tab copied as the spaces shown");
+    let (got, _) = read(&v, Sel::new((0, 0), END));
+    assert_eq!(got, shown.join("\n"), "all of it");
+    let (got, cut) = crate::bigfile::selected_lines(&std::fs::File::open(&big).unwrap(), 0, 0, &Sel::new((10, 0), END), 100);
+    assert!(cut && got.len() == 100 && got.starts_with("line 00010\n"), "cut at the most a copy takes: {got:?}");
+    // Its bytes.
+    let blob = d.join("blob.bin");
+    let bytes: Vec<u8> = (0..=255u8).cycle().take(700_000).collect();
+    std::fs::write(&blob, &bytes).unwrap();
+    let h = crate::bigfile::Pager::open(&blob, bytes.len() as u64, true, &ctx).unwrap();
+    let (got, _) = h.copy_bytes(Sel::new(300_000, 299_997), false, &ctx).recv_timeout(Duration::from_secs(20)).unwrap();
+    let want: Vec<String> = bytes[299_997..=300_000].iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(got, want.join(" "), "both ends taken");
+    let (got, _) = h.copy_bytes(Sel::new(65, 70), true, &ctx).recv_timeout(Duration::from_secs(20)).unwrap();
+    assert_eq!(got, "ABCDEF");
+    let (got, _) = h.copy_bytes(Sel::new(0, 3), true, &ctx).recv_timeout(Duration::from_secs(20)).unwrap();
+    assert_eq!(got, "....", "what isn't printable as dots");
+    let (got, _) = h.copy_bytes(Sel::new(262_140, 262_150), false, &ctx).recv_timeout(Duration::from_secs(20)).unwrap();
+    assert_eq!(got.split(' ').count(), 11, "read in pieces, one space between every byte");
+    // Tables, sheets and trees from the fixtures the previews show.
+    let dev = d.join("dev");
+    dev_fixture(&dev);
+    let csv = std::fs::read_to_string(dev.join("people.csv")).unwrap();
+    let mut tv = crate::table::TableView::new(crate::table::Table::from_text(&csv, "people.csv", false));
+    tv.sel = Some(Sel::new((2, 2), (1, 1)));
+    assert_eq!(tv.copy_text(), "\"Grace \"\"Amazing\"\" Hopper\"\tgrace@example.invalid\n\"Line\nbreak\"\tx@example.invalid", "quoted where a spreadsheet needs it");
+    assert!(tv.select_all());
+    assert!(tv.copy_text().starts_with("id\tname\temail\tjoined\tscore\n1\tAda Lovelace\t"), "all of it, with the titles");
+    assert_eq!(tv.copy_text().lines().count(), 6, "titles, four rows, one with a line break in quotes");
+    let json = std::fs::read_to_string(dev.join("package.json")).unwrap();
+    let mut t = crate::datatree::flatten(&crate::datatree::parse_json(&json).unwrap(), None);
+    let _ = t.rows();
+    let at = |t: &crate::datatree::Tree, key: &str| t.nodes.iter().position(|n| n.key == key).unwrap();
+    let (name, build, test) = (at(&t, "name"), at(&t, "build"), at(&t, "test"));
+    assert_eq!(t.row_text(build), ("build: \"vite build\"".to_string(), Some(7)));
+    t.tsel = Some(Sel::new((name, 6), (build, 5)));
+    let rows = t.copy_text();
+    assert!(rows.starts_with("\"maia-web\"\nversion: \"0.2.0\"\n") && rows.ends_with("scripts\n  build"), "rows as drawn, indented: {rows:?}");
+    t.tsel = None;
+    t.focus = true;
+    t.sel = test;
+    assert_eq!(t.copy_text(), "vitest", "the picked value, without quotes");
+    t.sel = at(&t, "scripts");
+    assert_eq!(t.copy_text(), "scripts\n  build: \"vite build\"\n  test: \"vitest\"", "a map as its rows");
+    t.toggle(t.sel);
+    let _ = t.rows();
+    assert_eq!(t.copy_text(), "scripts  {…} 2 keys", "folded, as it shows");
+    // A .env as shown: the mask until it is revealed.
+    let env = crate::inspector::text_lines(&std::fs::read(dev.join(".env")).unwrap()).unwrap();
+    let kinds = crate::envfile::classify(&env);
+    let (env, kinds) = (&env, &kinds);
+    let shown = |reveal: bool| move |i: usize| env.get(i).map(|l| Cow::Owned(crate::envfile::shown(l, kinds[i], reveal)));
+    let s = Sel::new((1, 0), (2, 100));
+    assert_eq!(lines_text(&s, env.len(), shown(false)), format!("export API_KEY={m}\nDATABASE_URL={m}", m = crate::envfile::MASK));
+    assert_eq!(lines_text(&s, env.len(), shown(true)), "export API_KEY=sk-live-0123456789\nDATABASE_URL=\"postgres://u:pw@localhost/db\"");
+    let _ = std::fs::remove_dir_all(&d);
+}

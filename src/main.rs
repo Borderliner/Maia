@@ -91,6 +91,7 @@ mod spaceuse;
 mod svg;
 mod syntax;
 mod tags;
+mod textsel;
 mod tasks;
 mod terminal;
 mod stats;

@@ -1100,7 +1100,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(163) {
+    match rng.below(164) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2395,6 +2395,44 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.act(&format!("key {}", rng.pick(&["Enter", "Escape"])));
             }
             s.settle();
+        }
+        163 => {
+            // Text taken out of a preview: drags, double and triple clicks and Shift
+            // clicks over it, Ctrl+A and Ctrl+C, the right-click Copy; then a key for the
+            // list, which must still be the list's.
+            if s.app.panels.get(&s.app.active).is_some_and(|p| p.inspector.is_none()) {
+                s.cmd(Cmd::ToggleInspector);
+            }
+            s.act(rng.pick(&["key ArrowDown", "key ArrowUp", "key End", "key Home"]));
+            s.idle(3);
+            let Some(ir) = s.app.panels.get(&s.app.active).and_then(|p| p.inspector_rect) else { return };
+            let q = |rng: &mut Rng| (rng.f(ir.left(), ir.right()), rng.f(ir.top() + 34.0, ir.bottom()));
+            for _ in 0..1 + rng.below(6) {
+                let (x, y) = q(rng);
+                match rng.below(7) {
+                    0 | 1 => {
+                        let (x2, y2) = q(rng);
+                        s.act(&format!("drag {x:.0} {y:.0} {x2:.0} {y2:.0}"));
+                    }
+                    2 => s.act(&format!("dclick {x:.0} {y:.0}")),
+                    3 => {
+                        s.act(&format!("dclick {x:.0} {y:.0}"));
+                        s.act(&format!("click {x:.0} {y:.0}"));
+                    }
+                    4 => s.act(&format!("click {x:.0} {y:.0} shift")),
+                    5 => s.act(rng.pick(&["key ctrl+a", "key ctrl+c"])),
+                    _ => {
+                        s.act(&format!("click {x:.0} {y:.0} right"));
+                        if matches!(s.app.popup, Popup::Ctx(_)) && rng.below(2) == 0 && some_text_at(s, "Copy") {
+                            s.click_text("Copy");
+                        }
+                    }
+                }
+            }
+            s.idle(rng.below(30));
+            if s.popup_open() {
+                s.act("key Escape");
+            }
         }
         _ => {
             s.note("idle".into());
@@ -13264,5 +13302,284 @@ mod journeys {
         wait_until(&mut s, "the pane closed", 10, |s| s.app.terminal.pty.is_none());
         look(&mut s, "after everything together");
         report("new_features_together", &s);
+    }
+
+    /// Just inside character `c` of `line` (drawn whole in the inspector, monospace): a
+    /// press there lands before it.
+    fn sel_at(s: &Sim, line: &str, c: usize) -> Pos2 {
+        let r = in_inspector(s, line);
+        let cw = r.width() / line.chars().count().max(1) as f32;
+        pos2(r.left() + (c as f32 + 0.2) * cw, r.center().y)
+    }
+
+    fn last_copy(s: &Sim) -> String {
+        s.copied.last().cloned().unwrap_or_default()
+    }
+
+    fn drag_between(s: &mut Sim, a: Pos2, b: Pos2) {
+        s.idle(40);
+        s.act(&format!("drag {:.1} {:.1} {:.1} {:.1}", a.x, a.y, b.x, b.y));
+    }
+
+    /// Selecting and copying in every preview that shows text, as someone taking a bit of
+    /// it would: a drag across lines, Shift+click to stretch it, double and triple clicks,
+    /// Ctrl+A, Ctrl+C with the preview focused and the files' own Ctrl+C after a click in
+    /// the list, the right-click Copy; then rendered Markdown, a data tree's value, table
+    /// cells, rows and columns, a database's rows, a .env copied masked until shown, a
+    /// filtered log, and a big file's text and hex copied on a worker.
+    #[test]
+    fn select_and_copy_in_previews() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("textsel");
+        let d = home.join("Dev");
+        crate::tests::dev_fixture(&d);
+        std::fs::write(d.join("notes.txt"), "first line here\nsecond line with words\nthird line\n").unwrap();
+        let big: String = (0..60_000).map(|i| format!("row {i:06} of the big file\n")).collect();
+        std::fs::write(d.join("big.txt"), &big).unwrap();
+        let blob: Vec<u8> = (0..1_500_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        std::fs::write(d.join("blob.bin"), &blob).unwrap();
+        let fake = root().join("textsel-tools");
+        crate::tests::fake_sqlite(&fake);
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.cmd(ToggleHidden);
+        s.cmd(ToggleInspector);
+        s.settle();
+        let sel = |s: &Sim| inspector(s).text_selection();
+        // Plain text: a drag from the second word of the first line into the second.
+        select_path(&mut s, &d.join("notes.txt"));
+        wait_until(&mut s, "notes read", 10, |s| inspector(s).text_lines().is_some());
+        s.idle(3);
+        let (a, b) = (sel_at(&s, "first line here", 6), sel_at(&s, "second line with words", 6));
+        drag_between(&mut s, a, b);
+        assert_eq!(sel(&s), Some(((0, 6), (1, 6))), "dragged across two lines");
+        s.idle(2);
+        s.shot("textsel-text");
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "line here\nsecond");
+        assert!(toast_is(&s, "Copied 2 lines"), "{:?}", s.app.toast);
+        assert!(s.app.clipboard.is_none(), "the files were not copied");
+        // Shift+click stretches it; a double-click takes a word, a triple-click the line.
+        let c = sel_at(&s, "third line", 5);
+        s.idle(40);
+        s.act(&format!("click {:.1} {:.1} shift", c.x, c.y));
+        assert_eq!(sel(&s), Some(((0, 6), (2, 5))));
+        let w = sel_at(&s, "second line with words", 13);
+        s.idle(40);
+        s.act(&format!("dclick {:.1} {:.1}", w.x, w.y));
+        assert_eq!(sel(&s), Some(((1, 12), (1, 16))), "the word");
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "with");
+        s.idle(40);
+        s.act(&format!("dclick {:.1} {:.1}", w.x, w.y));
+        s.act(&format!("click {:.1} {:.1}", w.x, w.y));
+        assert_eq!(sel(&s), Some(((1, 0), (2, 0))), "the line");
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "second line with words\n");
+        s.act("key ctrl+a");
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "first line here\nsecond line with words\nthird line", "all of it");
+        // A right-click on it: Copy, from the menu.
+        let m = sel_at(&s, "third line", 2);
+        s.idle(40);
+        s.act(&format!("click {:.1} {:.1} right", m.x, m.y));
+        s.idle(2);
+        assert!(matches!(s.app.popup, Popup::Ctx(_)), "the menu");
+        s.shot("textsel-menu");
+        let n = s.copied.len();
+        s.click_text("Copy");
+        assert_eq!(s.copied.len(), n + 1);
+        assert_eq!(last_copy(&s), "first line here\nsecond line with words\nthird line");
+        // A click in the list gives Ctrl+C back to the files.
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
+        let row = s.texts.iter().find(|(r, t)| t == "notes.txt" && r.left() > s.app.sidebar_width && !ir.contains(r.center())).map(|x| x.0).unwrap_or_else(|| s.fail("notes.txt listed"));
+        s.idle(40);
+        s.act(&format!("click {:.0} {:.0}", row.center().x, row.center().y));
+        let n = s.copied.len();
+        s.act("key ctrl+c");
+        assert_eq!(s.copied.len(), n, "no text copied");
+        assert!(s.app.clipboard.as_ref().is_some_and(|c| c.0 == vec![d.join("notes.txt")]), "the file copied");
+        s.app.clipboard = None;
+        // Rendered Markdown: from inside the title into the paragraph under it.
+        select_path(&mut s, &d.join("README.md"));
+        wait_until(&mut s, "markdown laid out", 10, |s| inspector(s).markdown().and_then(|m| m.counts()).is_some_and(|c| c.0 > 20));
+        s.idle(3);
+        let md = |s: &Sim, needle: &str, ch: usize| inspector(s).markdown().and_then(|m| m.char_pos(needle, ch)).unwrap_or_else(|| s.fail(&format!("{needle} drawn")));
+        let (a, b) = (md(&s, "Maia", 1), md(&s, "A file manager", 6));
+        drag_between(&mut s, a, b);
+        s.idle(2);
+        s.shot("textsel-markdown");
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "aia\nA file", "the heading's rest and the paragraph's start");
+        // Down to the code, by the wheel.
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
+        for _ in 0..40 {
+            if md(&s, "println", 2).y < ir.bottom() - 120.0 {
+                break;
+            }
+            s.act(&format!("scroll {:.0} {:.0} -2", ir.center().x, ir.center().y));
+            s.idle(12);
+        }
+        let code = md(&s, "println", 2);
+        s.idle(40);
+        s.act(&format!("dclick {:.1} {:.1}", code.x, code.y));
+        s.act(&format!("click {:.1} {:.1}", code.x, code.y));
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "    println!(\"hi\"); // greet", "a triple-click takes a line of a code block");
+        let cell = md(&s, "opens the inspector", 0);
+        s.idle(40);
+        s.act(&format!("dclick {:.1} {:.1}", cell.x, cell.y));
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "opens", "a word in a table");
+        // A link still opens with a click.
+        let at = inspector(&s).markdown().and_then(|m| m.link_pos("docs/guide.md")).unwrap();
+        let before = crate::mime::LAUNCHED.lock().unwrap().len();
+        s.idle(40);
+        s.act(&format!("click {:.0} {:.0}", at.x, at.y));
+        assert!(crate::mime::LAUNCHED.lock().unwrap().len() > before, "the link followed");
+        // A data tree: a double-click takes a value whole; Ctrl+C with only a row picked
+        // takes its value; a drag over rows takes them as drawn; folding still works.
+        select_path(&mut s, &d.join("package.json"));
+        wait_until(&mut s, "json tree", 10, |s| inspector(s).rich_name() == Some("tree"));
+        s.idle(3);
+        let v = sel_at(&s, "build: \"vite build\"", 12);
+        s.idle(40);
+        s.act(&format!("dclick {:.1} {:.1}", v.x, v.y));
+        s.idle(2);
+        s.shot("textsel-tree");
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "vite build", "the string, without its quotes");
+        click_in_inspector(&mut s, "version: \"0.2.0\"", "click");
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "0.2.0", "the picked row's value");
+        let (a, b) = (sel_at(&s, "name: \"maia-web\"", 0), sel_at(&s, "private: true", 13));
+        drag_between(&mut s, a, b);
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "name: \"maia-web\"\nversion: \"0.2.0\"\nprivate: true");
+        let rows = rich(&mut s).unwrap().1;
+        click_in_inspector(&mut s, "scripts", "click");
+        s.act("key ArrowLeft");
+        assert_eq!(rich(&mut s).unwrap().1, rows - 2, "the arrows still fold");
+        s.act("key Escape");
+        // A table: a cell, Shift+click to a rectangle, a column by its title, all of it.
+        select_path(&mut s, &d.join("people.csv"));
+        wait_until(&mut s, "csv table", 10, |s| inspector(s).table().is_some());
+        s.idle(3);
+        click_in_inspector(&mut s, "Ada Lovelace", "click");
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "Ada Lovelace");
+        let e = in_inspector(&s, "linus@example.invalid");
+        s.idle(40);
+        s.act(&format!("click {:.0} {:.0} shift", e.center().x, e.center().y));
+        s.idle(2);
+        s.shot("textsel-table");
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "Ada Lovelace\tada@example.invalid\n\"Grace \"\"Amazing\"\" Hopper\"\tgrace@example.invalid\n\"Line\nbreak\"\tx@example.invalid\nLinus\tlinus@example.invalid", "tab-separated, quoted where a cell needs it");
+        click_in_inspector(&mut s, "email", "click");
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "email\nada@example.invalid\ngrace@example.invalid\nx@example.invalid\nlinus@example.invalid", "a column with its title");
+        s.act("key ctrl+a");
+        s.act("key ctrl+c");
+        assert!(last_copy(&s).starts_with("id\tname\temail\tjoined\tscore\n1\tAda Lovelace\t"), "{:?}", last_copy(&s));
+        // A database's rows, through the same table.
+        select_path(&mut s, &d.join("data.db"));
+        wait_until(&mut s, "tables listed", 15, |s| inspector(s).sqlite_state().is_some_and(|st| st.0 == Some(3)));
+        click_in_inspector(&mut s, "people", "click");
+        wait_until(&mut s, "people's rows", 10, |s| inspector(s).sqlite_state().is_some_and(|st| st.2 == Some((1, 3))));
+        s.idle(3);
+        click_in_inspector(&mut s, "Grace, R.", "click");
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "Grace, R.");
+        // A .env: what is hidden copies hidden; shown, as it is.
+        select_path(&mut s, &d.join(".env"));
+        wait_until(&mut s, ".env shown", 10, |s| inspector(s).rich_name() == Some("env"));
+        s.idle(3);
+        let mask = crate::envfile::MASK;
+        let line = format!("export API_KEY={mask}");
+        let (a, b) = (sel_at(&s, "# Local secrets", 0), sel_at(&s, &line, line.chars().count() - 1));
+        drag_between(&mut s, a, b);
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), format!("# Local secrets\nexport API_KEY={}", &mask[..mask.len() - '•'.len_utf8()]), "masked");
+        assert!(!s.copied.iter().any(|c| c.contains("sk-live")), "no secret on the clipboard");
+        click_control(&mut s, "Show values");
+        s.act("key ctrl+a");
+        s.act("key ctrl+c");
+        assert!(last_copy(&s).contains("export API_KEY=sk-live-0123456789"), "{:?}", last_copy(&s));
+        click_control(&mut s, "Hide values");
+        // A log through its filter: the selection is of the lines it lets through.
+        select_path(&mut s, &d.join("app.log"));
+        wait_until(&mut s, "log read", 10, |s| inspector(s).text_lines().is_some());
+        s.idle(3);
+        click_control(&mut s, "line filter");
+        s.act("text request 3");
+        wait_until(&mut s, "filtered", 5, |s| inspector(s).filtered_lines() == Some(11));
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
+        s.act(&format!("scroll {:.0} {:.0} 20", ir.center().x, ir.center().y));
+        s.idle(30);
+        let first = s.texts.iter().filter(|(r, t)| t.contains("request 3") && s.app.panels[&s.app.active].inspector_rect.unwrap().contains(r.center())).min_by(|a, b| a.0.top().total_cmp(&b.0.top())).map(|x| x.1.clone()).unwrap();
+        let p0 = sel_at(&s, &first, 0);
+        s.idle(40);
+        s.act(&format!("dclick {:.1} {:.1}", p0.x, p0.y));
+        s.act(&format!("click {:.1} {:.1}", p0.x, p0.y));
+        assert_eq!(inspector(&s).text_selection(), Some(((0, 0), (1, 0))), "the first line let through");
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), format!("{first}\n"));
+        // Back in the filter's field, Ctrl+C and Ctrl+A are the field's.
+        click_control(&mut s, "line filter");
+        let n = s.copied.len();
+        s.act("key ctrl+a");
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "request 3", "the field's text, not the preview's: {:?}", &s.copied[n..]);
+        assert_eq!(inspector(&s).text_selection(), Some(((0, 0), (1, 0))), "the preview's selection as it was");
+        // A big file: two lines from far down, then all of it, read on a worker.
+        select_path(&mut s, &d.join("big.txt"));
+        wait_until(&mut s, "paged", 10, |s| inspector(s).big_state().is_some_and(|b| b.0.1));
+        s.idle(5);
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
+        s.act(&format!("scroll {:.0} {:.0} -400", ir.center().x, ir.center().y));
+        s.idle(30);
+        let lines: Vec<String> = s.texts.iter().filter(|(r, t)| t.starts_with("row ") && ir.contains(r.center())).map(|x| x.1.clone()).collect();
+        let (l0, l1) = (lines[2].clone(), lines[3].clone());
+        let (a, b) = (sel_at(&s, &l0, 4), sel_at(&s, &l1, 10));
+        drag_between(&mut s, a, b);
+        let n0: usize = l0[4..10].parse().unwrap();
+        assert_eq!(inspector(&s).big_selection(), Some(((n0, 4), (n0 + 1, 10))));
+        s.idle(2);
+        s.shot("textsel-big");
+        let n = s.copied.len();
+        s.act("key ctrl+c");
+        wait_until(&mut s, "the lines read", 10, |s| s.copied.len() > n);
+        assert_eq!(last_copy(&s), format!("{}\n{}", &l0[4..], &l1[..10]));
+        let n = s.copied.len();
+        s.act("key ctrl+a");
+        s.act("key ctrl+c");
+        wait_until(&mut s, "all of it read", 20, |s| s.copied.len() > n);
+        assert_eq!(last_copy(&s), big.trim_end_matches('\n'), "the whole file, as shown");
+        // Hex: bytes from one to another, as hex, then as their text.
+        select_path(&mut s, &d.join("blob.bin"));
+        wait_until(&mut s, "hex", 10, |s| inspector(s).big_state().is_some_and(|b| b.0.2));
+        s.idle(5);
+        let row1 = s.texts.iter().find(|(r, t)| t.starts_with("00000010") && ir.contains(r.center())).map(|x| x.0).unwrap_or_else(|| s.fail("the second hex row"));
+        // The hex column starts ten columns in; a byte is two of them and a space.
+        let cw = row1.width() / 8.0;
+        let (a, b) = (pos2(row1.left() + cw * 10.5, row1.center().y), pos2(row1.left() + cw * 19.5, row1.center().y));
+        drag_between(&mut s, a, b);
+        assert_eq!(inspector(&s).hex_selection(), Some(((16, 19), false)), "four bytes in the hex column");
+        s.idle(2);
+        s.shot("textsel-hex");
+        let n = s.copied.len();
+        s.act("key ctrl+c");
+        wait_until(&mut s, "bytes read", 10, |s| s.copied.len() > n);
+        assert_eq!(last_copy(&s), blob[16..20].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "));
+        report("select and copy", &s);
     }
 }

@@ -1703,6 +1703,11 @@ impl App {
                     continue;
                 }
             }
+            // Ctrl+C and Ctrl+A in a preview that has the keyboard take its selection.
+            if !text_focus && chord.ctrl && !chord.alt && !chord.shift && matches!(chord.input, commands::Input::Key(Key::C | Key::A)) && crate::textsel::key(self, ctx, chord.input == commands::Input::Key(Key::C)) {
+                consumed.push(n);
+                continue;
+            }
             if text_focus {
                 // Filter box: arrows/enter drive the list; plain typing stays in the box.
                 if filter_focus {

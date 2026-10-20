@@ -31,6 +31,8 @@ pub enum Act {
     NewTag,
     /// A smart folder's entry in the sidebar: (what, its id, panel to act in).
     Smart(SmartAct, u64, u64),
+    /// Copy what is selected in a panel's preview (true), or select all of it.
+    Preview(bool, u64),
     None,
 }
 
@@ -54,6 +56,13 @@ pub fn build_smart(panel: u64, id: u64, pos: Pos2) -> Popup {
     let it = |key: &str, label: &str, a: SmartAct| Item { id: format!("smart:{key}"), label: label.into(), act: Act::Smart(a, id, panel), children: vec![] };
     let items = vec![it("open", "Open", SmartAct::Open), it("new_tab", "Open In New Tab", SmartAct::NewTab), Item::sep(), it("edit", "Edit…", SmartAct::Edit), it("rename", "Rename…", SmartAct::Rename), Item::sep(), it("remove", "Remove", SmartAct::Remove)];
     Popup::Ctx(CtxState { sidebar: Some(smart_key(id)), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![], focus: true, reveal: None })
+}
+
+/// The menu of a selection in panel `panel`'s preview.
+pub fn build_preview(panel: u64, pos: Pos2) -> Popup {
+    let it = |key: &str, label: &str, copy: bool| Item { id: format!("preview:{key}"), label: label.into(), act: Act::Preview(copy, panel), children: vec![] };
+    let items = vec![it("copy", "Copy", true), it("select_all", "Select All", false)];
+    Popup::Ctx(CtxState { sidebar: None, pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![], focus: true, reveal: None })
 }
 
 #[derive(Clone, Copy)]
@@ -900,6 +909,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                     SmartAct::Remove => app.remove_smart(id),
                 }
             }
+            Act::Preview(copy, panel) => crate::textsel::menu_act(app, panel, copy),
             Act::None => {}
         }
         return false;
