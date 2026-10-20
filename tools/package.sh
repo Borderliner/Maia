@@ -26,7 +26,7 @@ trap 'rm -rf "$W"' EXIT
 tree() {
   install -Dm755 "$BIN" "$1/bin/maia"
   install -Dm644 "$C/packaging/$ID.desktop" "$1/share/applications/$ID.desktop"
-  install -Dm644 "$C/assets/maia.svg" "$1/share/icons/hicolor/scalable/apps/$ID.svg"
+  install -Dm644 "$C/assets/maia.png" "$1/share/icons/hicolor/256x256/apps/$ID.png"
   install -Dm644 "$C/packaging/$ID.metainfo.xml" "$1/share/metainfo/$ID.metainfo.xml"
   install -Dm644 "$C/LICENSE" "$1/share/licenses/maia/LICENSE"
   install -Dm644 "$C/assets/THIRD-PARTY-NOTICES.txt" "$1/share/licenses/maia/THIRD-PARTY-NOTICES.txt"
@@ -42,11 +42,14 @@ cat > "$T/install.sh" <<'SH'
 set -e
 D=$(dirname "$(readlink -f "$0")")
 if [ "$(id -u)" = 0 ]; then P=${PREFIX:-/usr/local}; else P=${PREFIX:-$HOME/.local}; fi
-for f in bin/maia share/applications/io.github.yappologistic.Maia.desktop share/icons/hicolor/scalable/apps/io.github.yappologistic.Maia.svg share/metainfo/io.github.yappologistic.Maia.metainfo.xml; do
+for f in bin/maia share/applications/io.github.yappologistic.Maia.desktop share/icons/hicolor/256x256/apps/io.github.yappologistic.Maia.png share/metainfo/io.github.yappologistic.Maia.metainfo.xml; do
   mkdir -p "$P/$(dirname "$f")"
   cp "$D/$f" "$P/$f.new" && mv -f "$P/$f.new" "$P/$f"
 done
 chmod 755 "$P/bin/maia"
+# Earlier versions' SVG icon would win over the PNG at every size.
+rm -f "$P/share/icons/hicolor/scalable/apps/io.github.yappologistic.Maia.svg"
+touch "$P/share/icons/hicolor"
 command -v update-desktop-database >/dev/null && update-desktop-database "$P/share/applications" 2>/dev/null || true
 echo "Installed to $P/bin/maia"
 SH
@@ -121,7 +124,7 @@ cp -a %{_sourcedir}/usr %{buildroot}/
 %files
 /usr/bin/maia
 /usr/share/applications/$ID.desktop
-/usr/share/icons/hicolor/scalable/apps/$ID.svg
+/usr/share/icons/hicolor/256x256/apps/$ID.png
 /usr/share/metainfo/$ID.metainfo.xml
 %license /usr/share/licenses/maia/LICENSE
 %license /usr/share/licenses/maia/THIRD-PARTY-NOTICES.txt
@@ -139,8 +142,8 @@ if [ -n "$AIT" ]; then
   R=$W/Maia.AppDir
   tree "$R/usr"
   cp "$C/packaging/$ID.desktop" "$R/$ID.desktop"
-  cp "$C/assets/maia.svg" "$R/$ID.svg"
-  ln -s "$ID.svg" "$R/.DirIcon"
+  cp "$C/assets/maia.png" "$R/$ID.png"
+  ln -s "$ID.png" "$R/.DirIcon"
   ln -s usr/bin/maia "$R/AppRun"
   # Without FUSE (a CI runner) appimagetool, itself an AppImage, unpacks and runs.
   ARCH=$A APPIMAGE_EXTRACT_AND_RUN=1 "$AIT" --no-appstream "$R" "$OUT/Maia-$V-$A.AppImage" >/dev/null

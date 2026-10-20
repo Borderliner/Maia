@@ -1738,19 +1738,42 @@ fn window_icon_is_the_launcher_icon() {
     let (px, w, h) = crate::install::window_icon();
     assert_eq!((w, h), (64, 64));
     let at = |x: u32, y: u32| &px[((y * w + x) * 4) as usize..((y * w + x) * 4 + 4) as usize];
-    assert_eq!(at(0, 0)[3], 0, "rounded corner");
-    assert!(at(32, 60)[3] == 255 && at(32, 60)[0] < 40, "dark tile");
-    // The star's centre (82, 46 of 128) is white, and its glow is blue.
-    let c = at(41, 23);
-    assert!(c[0] > 240 && c[1] > 240 && c[2] > 240, "star {c:?}");
-    let g = at(41, 31);
-    assert!(g[2] > g[0], "blue glow under the star {g:?}");
+    assert_eq!(at(0, 0)[3], 0, "clear around the folder");
+    assert_eq!(at(32, 2)[3], 0, "clear above the papers");
+    // The front paper, nearly white, stands out of the folder.
+    let paper = at(16, 15);
+    assert!(paper[3] > 250 && paper[0] > 200 && paper[0].abs_diff(paper[2]) < 12, "paper {paper:?}");
+    // The foot of the glass front is near black.
+    let glass = at(32, 51);
+    assert!(glass[3] > 240 && glass[0] < 60, "glass {glass:?}");
     if let Some(d) = std::env::var_os("MAIA_ICON_DUMP") {
         let f = std::fs::File::create(std::path::Path::new(&d).join("window-icon.png")).unwrap();
         let mut e = png::Encoder::new(f, w, h);
         e.set_color(png::ColorType::Rgba);
         e.write_header().unwrap().write_image_data(&px).unwrap();
     }
+}
+
+#[test]
+fn installing_the_icon_replaces_the_old_svg() {
+    use crate::install::{ICON_PNG, icon_in, old_icon_in, place_icon};
+    let d = tmpdir("hicolor");
+    // What an install of 0.4 left behind.
+    touch(&old_icon_in(&d), "<svg xmlns=\"http://www.w3.org/2000/svg\"/>");
+    assert!(place_icon(&d).unwrap());
+    assert!(!old_icon_in(&d).exists(), "a scalable icon would still be picked first");
+    assert_eq!(std::fs::read(icon_in(&d)).unwrap(), ICON_PNG);
+    let png = crate::imgdec::decode_bytes(&std::fs::read(icon_in(&d)).unwrap()).unwrap();
+    assert_eq!((png.w, png.h), (256, 256), "the size its folder names");
+    // An up-to-date icon is left alone, so starting Maia doesn't make launchers reload it.
+    let t = std::fs::metadata(icon_in(&d)).unwrap().modified().unwrap();
+    assert!(!place_icon(&d).unwrap());
+    assert_eq!(std::fs::metadata(icon_in(&d)).unwrap().modified().unwrap(), t);
+    // An older PNG is rewritten.
+    std::fs::write(icon_in(&d), b"old").unwrap();
+    assert!(place_icon(&d).unwrap());
+    assert_eq!(std::fs::read(icon_in(&d)).unwrap(), ICON_PNG);
+    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
