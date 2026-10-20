@@ -8581,6 +8581,38 @@ fn big_files_page_and_search() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// The find bar stays inside the body it is given. A terminal pane squeezed by a small
+/// window has a body shorter than the bar, which once reached up over the panel's
+/// status bar.
+#[test]
+fn find_bar_stays_inside_its_body() {
+    use crate::findbar::{Finder, bar};
+    let pal = crate::theme::palette(crate::theme::ThemeName::default());
+    let ctx = egui::Context::default();
+    crate::theme::install_fonts(&ctx, "", "");
+    // Shapes painted beyond the panel's own background, and the room left below the bar.
+    let mut run = |body: Option<egui::Rect>| {
+        let mut f = Finder::new("main".into());
+        let mut rest = egui::Rect::NOTHING;
+        let out = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                if let Some(body) = body {
+                    rest = bar(ui, body, &mut f, "1 of 2", true, 7, false, &pal).1;
+                }
+            });
+        });
+        (rest, out.shapes.len())
+    };
+    let (_, empty) = run(None);
+    let tall = egui::Rect::from_min_size(egui::pos2(0.0, 100.0), egui::vec2(400.0, 200.0));
+    let (rest, n) = run(Some(tall));
+    assert!(rest.bottom() < tall.bottom() - 20.0 && n > empty, "a tall body gives the bar its room: {rest:?}");
+    let short = egui::Rect::from_min_size(egui::pos2(0.0, 100.0), egui::vec2(400.0, 18.0));
+    let (rest, n) = run(Some(short));
+    assert_eq!(rest, short, "a short body keeps all of itself");
+    assert_eq!(n, empty, "and nothing of the bar is drawn");
+}
+
 /// Find in a preview: case ignored unless the query has capitals, matches stepped through
 /// in a ring, and the place kept when more text arrives.
 #[test]
