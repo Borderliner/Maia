@@ -8903,6 +8903,210 @@ fn terminal_pty_round_trip() {
     wait(&p, &|s| s.row_text(0) == "7 33");
 }
 
+/// Hyperlinks as `ls --hyperlink=always` writes them: each name links to its file, the
+/// spaces between don't; a link written with an id and a BEL, cut by what is written
+/// over it, and kept on its text when the line is rewrapped.
+#[test]
+fn terminal_hyperlinks() {
+    let d = tmpdir("vt-links");
+    touch(&d.join("a b.txt"), "x");
+    touch(&d.join("notes.md"), "y");
+    let out = std::process::Command::new("ls").args(["--hyperlink=always", "--color=never", "-1"]).current_dir(&d).output().unwrap();
+    assert!(out.status.success() && out.stdout.starts_with(b"\x1b]8;;file://"), "{:?}", String::from_utf8_lossy(&out.stdout));
+    // The terminal's line discipline turns its line feeds into CR LF.
+    let bytes: Vec<u8> = out.stdout.iter().flat_map(|&b| if b == b'\n' { vec![b'\r', b'\n'] } else { vec![b] }).collect();
+    let t = vt(40, 4, &bytes);
+    assert_eq!(vt_rows(&t)[..2], ["a b.txt", "notes.md"]);
+    let row = |y| t.screen.line(t.screen.view_line(y)).unwrap();
+    let path = |y, x| row(y).link(x).and_then(|u| crate::termlink::file_uri(u));
+    assert_eq!(path(0, 0), Some(d.join("a b.txt").display().to_string()));
+    assert_eq!(path(0, 6), path(0, 0), "the whole name");
+    assert_eq!(path(1, 3), Some(d.join("notes.md").display().to_string()));
+    assert!(row(0).link(7).is_none() && row(1).link(8).is_none(), "nothing after the name");
+    let mut t = vt(10, 3, b"go \x1b]8;id=x1;https://example.com/a;b\x07here and\x1b]8;;\x07 on");
+    let link = |t: &crate::vt::Term, n: u64, x: usize| t.screen.line(n).and_then(|r| r.link(x)).map(|u| u.to_string());
+    assert_eq!(link(&t, 0, 3).as_deref(), Some("https://example.com/a;b"));
+    // "go here an" + "d on": it runs on to the next row, and stops.
+    assert_eq!((link(&t, 0, 2), link(&t, 1, 0).as_deref(), link(&t, 1, 1)), (None, Some("https://example.com/a;b"), None));
+    // Wider, the line is one row and the link still on "here and".
+    t.screen.resize(20, 3);
+    assert_eq!(vt_rows(&t)[0], "go here and on");
+    let n = t.screen.view_line(0);
+    assert_eq!((3..11).filter(|&x| link(&t, n, x).is_some()).count(), 8);
+    assert!(link(&t, n, 2).is_none() && link(&t, n, 11).is_none());
+    // Plain text written over part of it unlinks that part only.
+    t.feed(b"\x1b[1;4HHE");
+    assert_eq!((link(&t, n, 3), link(&t, n, 4), link(&t, n, 5).is_some()), (None, None, true));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Mouse reports in each of xterm's modes and encodings, modifiers included.
+#[test]
+fn terminal_mouse_reports() {
+    use crate::vt::Mouse::*;
+    let none = (false, false, false);
+    let mut t = vt(300, 5, b"");
+    assert_eq!(t.screen.report(Press(0), 2, 3, none), None, "not asked for");
+    // less --mouse and vim with mouse=a ask for these.
+    t.feed(b"\x1b[?1006;1000h");
+    let s = |t: &crate::vt::Term, e, x, y, m| t.screen.report(e, x, y, m).map(|b| String::from_utf8_lossy(&b).into_owned());
+    assert_eq!(s(&t, Press(0), 2, 3, none).as_deref(), Some("\x1b[<0;3;4M"));
+    assert_eq!(s(&t, Release(2), 2, 3, none).as_deref(), Some("\x1b[<2;3;4m"));
+    assert_eq!(s(&t, Wheel(true), 0, 0, (false, false, true)).as_deref(), Some("\x1b[<80;1;1M"));
+    assert_eq!(s(&t, Wheel(false), 0, 0, (true, true, false)).as_deref(), Some("\x1b[<77;1;1M"));
+    assert_eq!(s(&t, Motion(Some(0)), 4, 0, none), None, "1000 is clicks only");
+    t.feed(b"\x1b[?1002h");
+    assert_eq!(s(&t, Motion(Some(0)), 4, 0, none).as_deref(), Some("\x1b[<32;5;1M"));
+    assert_eq!(s(&t, Motion(None), 4, 0, none), None, "1002 is drags only");
+    t.feed(b"\x1b[?1003h");
+    assert_eq!(s(&t, Motion(None), 4, 0, none).as_deref(), Some("\x1b[<35;5;1M"));
+    // xterm's own bytes, which can't say a column past 223.
+    t.feed(b"\x1b[?1006l");
+    assert_eq!(t.screen.report(Press(2), 2, 3, (true, false, false)), Some(vec![0x1b, b'[', b'M', 32 + 2 + 4, 32 + 3, 32 + 4]));
+    assert_eq!(t.screen.report(Release(2), 2, 3, none), Some(vec![0x1b, b'[', b'M', 32 + 3, 32 + 3, 32 + 4]));
+    assert_eq!(t.screen.report(Press(0), 250, 0, none), None);
+    t.feed(b"\x1b[?1015h");
+    assert_eq!(s(&t, Press(1), 2, 3, none).as_deref(), Some("\x1b[33;3;4M"));
+    t.feed(b"\x1b[?1015l\x1b[?1005h");
+    assert_eq!(s(&t, Press(0), 250, 0, none), Some(format!("\x1b[M {}!", char::from_u32(32 + 251).unwrap())));
+    // X10's own mode: presses only, no modifiers.
+    t.feed(b"\x1b[?1005l\x1b[?9h");
+    assert_eq!(t.screen.report(Press(0), 0, 0, (false, false, true)), Some(b"\x1b[M !!".to_vec()));
+    assert_eq!(t.screen.report(Release(0), 0, 0, none), None);
+    t.feed(b"\x1b[?9l");
+    assert_eq!(t.screen.report(Press(0), 0, 0, none), None);
+}
+
+/// Real programs asking for the mouse get it: less scrolls with the wheel, and a click
+/// puts vim's cursor where it was.
+#[test]
+fn terminal_mouse_with_real_programs() {
+    use crate::terminal::Pty;
+    use crate::vt::Mouse::*;
+    use std::process::Command;
+    let wait = |p: &Pty, what: &str, ok: &dyn Fn(&crate::vt::Screen) -> bool| {
+        let t0 = Instant::now();
+        while !ok(&p.shared.term().screen) {
+            assert!(t0.elapsed() < Duration::from_secs(10), "{what}: {:?}", vt_rows(&p.shared.term()));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let d = tmpdir("vt-mouse");
+    let file = d.join("lines.txt");
+    touch(&file, &(1..=200).map(|i| format!("line {i}\n")).collect::<String>());
+    let ctx = egui::Context::default();
+    let none = (false, false, false);
+    if crate::media::have("less") {
+        let mut c = Command::new("less");
+        c.arg("--mouse").arg(&file).env("LESSHISTFILE", "-");
+        let mut p = Pty::spawn(c, 40, 10, ctx.clone()).unwrap();
+        wait(&p, "less", &|s| s.mouse == crate::vt::Track::Click && s.mouse_enc == crate::vt::Enc::Sgr && s.row_text(0) == "line 1");
+        let down = p.shared.term().screen.report(Wheel(false), 5, 5, none).unwrap();
+        p.write(&down.repeat(3));
+        wait(&p, "less scrolled down", &|s| s.row_text(0) != "line 1");
+        let up = p.shared.term().screen.report(Wheel(true), 5, 5, none).unwrap();
+        p.write(&up.repeat(10));
+        wait(&p, "less scrolled back", &|s| s.row_text(0) == "line 1");
+        p.write(b"q");
+        wait(&p, "less let the mouse go", &|s| s.mouse == crate::vt::Track::Off && !s.alt());
+    }
+    if crate::media::have("vim") {
+        let mut c = Command::new("vim");
+        c.args(["-u", "NONE", "-i", "NONE", "-n", "-N", "-c", "set mouse=a"]).arg(&file);
+        let mut p = Pty::spawn(c, 40, 10, ctx).unwrap();
+        wait(&p, "vim", &|s| s.mouse == crate::vt::Track::Drag && s.row_text(0) == "line 1");
+        let (press, release) = {
+            let t = p.shared.term();
+            (t.screen.report(Press(0), 2, 5, none).unwrap(), t.screen.report(Release(0), 2, 5, none).unwrap())
+        };
+        p.write(&press);
+        p.write(&release);
+        std::thread::sleep(Duration::from_millis(100));
+        p.write(b"iX\x1b");
+        wait(&p, "the X where vim was clicked", &|s| s.row_text(5) == "liXne 6");
+        p.write(b":q!\r");
+        wait(&p, "vim let the mouse go", &|s| s.mouse == crate::vt::Track::Off);
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Find goes through the scrollback and the screen, a line that ran on as one; a
+/// double click takes a word (a path with its line number whole), a triple the line.
+#[test]
+fn terminal_finds_and_selects() {
+    let mut t = vt(10, 3, b"alpha one\r\n123456 Beta\r\nsee ~/src/main.rs:12, ok\r\n");
+    for i in 0..20 {
+        t.feed(format!("{i} beta\r\n").as_bytes());
+    }
+    let s = &t.screen;
+    assert!(s.history() > 5);
+    let mut hits = vec![];
+    s.find("beta", false, 100, &mut hits);
+    assert_eq!(hits.len(), 21);
+    let first = s.dropped;
+    // "123456 Bet" + "a": the match runs over the edge.
+    assert_eq!(hits[0], ((first + 1, 7), (first + 2, 0)));
+    assert_eq!(s.text(hits[0].0, hits[0].1), "Beta");
+    s.find("Beta", true, 100, &mut hits);
+    assert_eq!(hits.len(), 1, "upper case matches case");
+    s.find("beta", false, 5, &mut hits);
+    assert_eq!(hits.len(), 5);
+    s.find("zzz", false, 100, &mut hits);
+    assert!(hits.is_empty());
+    let word = |p: (u64, usize)| s.word(p).map(|(a, b)| s.text(a, b));
+    assert_eq!(word((first + 2, 0)).as_deref(), Some("Beta"), "a word over the edge");
+    // "see ~/src/" "main.rs:12" ", ok"
+    assert_eq!(word((first + 4, 2)).as_deref(), Some("~/src/main.rs:12"));
+    assert_eq!(s.word((first + 1, 6)), Some(((first + 1, 6), (first + 1, 6))), "a blank, alone");
+    assert_eq!(word((first + 5, 0)).as_deref(), Some(","));
+    // A word ending a sentence leaves its full stop, unless the full stop was clicked.
+    let t2 = vt(30, 2, b"read ~/notes.md. then a.b, c?");
+    let s2 = &t2.screen;
+    let n2 = s2.view_line(0);
+    let word2 = |x| s2.word((n2, x)).map(|(a, b)| s2.text(a, b));
+    assert_eq!((word2(6).as_deref(), word2(15).as_deref()), (Some("~/notes.md"), Some("~/notes.md.")));
+    assert_eq!((word2(22).as_deref(), word2(27).as_deref()), (Some("a.b"), Some("c")));
+    let (a, b) = s.line_span(first + 4);
+    assert_eq!(s.text(a, b), "see ~/src/main.rs:12, ok");
+}
+
+/// Addresses and paths in a line, as compilers, grep and people write them.
+#[test]
+fn terminal_links_in_text() {
+    use crate::termlink::{Target, at, resolve};
+    let find = |l: &str, w: &str| {
+        let i = l[..l.find(w).unwrap()].chars().count();
+        at(l, i).map(|(a, b, t)| (l.chars().skip(a).take(b - a).collect::<String>(), t))
+    };
+    let url = |s: &str| Target::Url(s.into());
+    let path = |s: &str, line, col| Target::Path { text: s.into(), line, col };
+    assert_eq!(find("see https://example.com/a_(b). done", "example"), Some(("https://example.com/a_(b)".into(), url("https://example.com/a_(b)"))));
+    assert_eq!(find("(at https://x.org/y),", "x.org"), Some(("https://x.org/y".into(), url("https://x.org/y"))));
+    assert_eq!(find("<http://localhost:8080/>", "local"), Some(("http://localhost:8080/".into(), url("http://localhost:8080/"))));
+    assert_eq!(find("error: src/main.rs:12:5: oops", "src"), Some(("src/main.rs:12:5".into(), path("src/main.rs", Some(12), Some(5)))));
+    assert_eq!(find("  --> src/vt.rs:42", "vt"), Some(("src/vt.rs:42".into(), path("src/vt.rs", Some(42), None))));
+    // grep -n and grep -n --column: the match after the numbers is not part of it.
+    assert_eq!(find("notes.txt:7:some match", "notes"), Some(("notes.txt:7".into(), path("notes.txt", Some(7), None))));
+    assert_eq!(find("notes.txt:7:3:some match", "notes"), Some(("notes.txt:7:3".into(), path("notes.txt", Some(7), Some(3)))));
+    assert_eq!(find("notes.txt:7:some match", "some"), None);
+    assert_eq!(find("see host:8080x", "host"), Some(("host:8080x".into(), path("host:8080x", None, None))));
+    assert_eq!(find("cc --out=build/app.o", "build"), Some(("build/app.o".into(), path("build/app.o", None, None))));
+    assert_eq!(find("open ~/notes.md.", "~"), Some(("~/notes.md".into(), path("~/notes.md", None, None))));
+    assert_eq!(find("'/tmp/a b'", "/tmp"), Some(("/tmp/a".into(), path("/tmp/a", None, None))));
+    assert_eq!(find("file:///tmp/a%20b", "file"), Some(("file:///tmp/a%20b".into(), path("/tmp/a b", None, None))));
+    assert_eq!(at("a  b", 1), None);
+    assert_eq!(at("...", 1), None);
+    let d = tmpdir("vt-paths");
+    touch(&d.join("sub/file.rs"), "fn main() {}\n");
+    assert_eq!(resolve("sub/file.rs", Some(&d)), Some((d.join("sub/file.rs"), false)));
+    assert_eq!(resolve("./sub/../sub", Some(&d)), Some((d.join("sub"), true)));
+    assert_eq!(resolve(&d.join("sub").display().to_string(), None), Some((d.join("sub"), true)));
+    assert_eq!(resolve("missing.rs", Some(&d)), None);
+    assert_eq!(resolve("sub/file.rs", None), None, "relative without a folder to be in");
+    assert_eq!(resolve("~", None), Some((crate::fsx::home(), true)));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// Conflicts settled as "if newer" (replaced only by a newer file, else skipped) and by
 /// a name typed for the one coming.
 #[test]

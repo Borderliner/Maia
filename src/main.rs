@@ -94,6 +94,7 @@ mod tags;
 mod textsel;
 mod tasks;
 mod terminal;
+mod termlink;
 mod stats;
 mod tab;
 mod table;
