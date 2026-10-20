@@ -209,8 +209,9 @@ pub enum Popup {
     Branches(BranchState),
     /// One stash: apply, pop, drop.
     Stash { panel: u64, root: PathBuf, stash: crate::gitwork::Stash, anchor: Pos2, sel: usize },
-    /// One local branch of the branch menu: switch, rename, delete.
-    Branch { root: PathBuf, branch: crate::gitwork::Branch, anchor: Pos2, sel: usize },
+    /// One branch of the branch menu: switch to it (or, a remote one, check it out),
+    /// compare it with the branch HEAD is on (`into`), rename, delete.
+    Branch { root: PathBuf, branch: crate::gitwork::Branch, anchor: Pos2, sel: usize, panel: u64, into: String, remote: bool },
     /// A commit in the history.
     GitCommit(CommitMenu),
     /// A new branch or tag at a commit.
@@ -277,6 +278,9 @@ pub struct CommitMenu {
     pub pos: Pos2,
     /// The keyboard's item: none (`usize::MAX`) until the keys are used.
     pub sel: usize,
+    /// The commit marked to compare with, and the panel whose history it is in.
+    pub marked: Option<String>,
+    pub panel: u64,
 }
 
 /// Create branch here or Create tag here: a name, and for a tag a message that makes it
@@ -1025,7 +1029,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::GitFile { panel, file, pos } => git_file_menu(app, ctx, *panel, *file, *pos),
         Popup::Branches(st) => branch_menu(app, ctx, st),
         Popup::Stash { panel, root, stash, anchor, sel } => stash_menu(app, ctx, *panel, root, stash, *anchor, sel),
-        Popup::Branch { root, branch, anchor, sel } => branch_actions(app, ctx, root, branch, *anchor, sel),
+        Popup::Branch { root, branch, anchor, sel, panel, into, remote } => branch_actions(app, ctx, root, branch, *anchor, sel, (*panel, into, *remote)),
         Popup::GitCommit(m) => commit_menu(app, ctx, m),
         Popup::NewRef(st) => new_ref(app, ctx, st),
         Popup::Notice { title, text } => notice(app, ctx, title, text),
@@ -5998,8 +6002,8 @@ fn paint_counts(p: &egui::Painter, right: f32, cy: f32, ahead: u32, behind: u32,
 /// The branch chip's menu: the history first, then the branches (the current one
 /// marked, each with what it has to push and pull), a new branch, the remote branches
 /// nothing tracks yet, the stashes and the other work trees. Up, Down and Enter work it;
-/// a branch has its own menu on a right click, and F2 and Delete rename and delete the
-/// selected one.
+/// a branch, local or remote, has its own menu on a right click or Shift+F10, and F2 and
+/// Delete rename and delete the selected one.
 fn branch_menu(app: &mut App, ctx: &egui::Context, st: &mut BranchState) -> bool {
     let pal = app.pal;
     let k = take_keys(ctx);
@@ -6045,7 +6049,9 @@ fn branch_menu(app: &mut App, ctx: &egui::Context, st: &mut BranchState) -> bool
             return false;
         }
     }
+    // A branch's own menu: on a right click, or Shift+F10 on the one the keys are on.
     let mut actions = None;
+    let menu_key = st.keyed && ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::F10));
     // Opens upward from the chip, hanging from its lower edge.
     let w = 300.0;
     let pos = pos2(st.anchor.right() - w + 8.0, st.anchor.top() - 4.0);
@@ -6118,8 +6124,13 @@ fn branch_menu(app: &mut App, ctx: &egui::Context, st: &mut BranchState) -> bool
             if resp.clicked() {
                 pick = Some(*it);
             }
-            if let (true, BranchItem::Branch(b), Some(r)) = (resp.secondary_clicked(), *it, &refs) {
-                actions = Some((r.local[b].clone(), ctx.pointer_interact_pos().unwrap_or(resp.rect.center())));
+            let at = || if menu_key { pos2(resp.rect.left() + 40.0, resp.rect.bottom()) } else { ctx.pointer_interact_pos().unwrap_or(resp.rect.center()) };
+            if resp.secondary_clicked() || menu_key && sel {
+                match (*it, &refs) {
+                    (BranchItem::Branch(b), Some(r)) => actions = Some((r.local[b].clone(), at(), false)),
+                    (BranchItem::Remote(k), Some(r)) => actions = Some((crate::gitwork::Branch { name: r.remote[k].clone(), ..Default::default() }, at(), true)),
+                    _ => {}
+                }
             }
         }
         if refs.is_none() {
@@ -6130,8 +6141,9 @@ fn branch_menu(app: &mut App, ctx: &egui::Context, st: &mut BranchState) -> bool
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
         }
     });
-    if let Some((branch, anchor)) = actions {
-        app.popup = Popup::Branch { root: st.root.clone(), branch, anchor, sel: usize::MAX };
+    if let Some((branch, anchor, remote)) = actions {
+        let into = st.refs.as_ref().and_then(|r| r.local.iter().find(|b| b.current)).map_or_else(|| "HEAD".to_string(), |b| b.name.clone());
+        app.popup = Popup::Branch { root: st.root.clone(), branch, anchor, sel: if menu_key { 0 } else { usize::MAX }, panel: st.panel, into, remote };
         return false;
     }
     let Some(it) = pick else { return !clicked_outside(ctx, rect) };
@@ -6263,43 +6275,94 @@ fn delete_branch(app: &mut App, root: &Path, name: String) {
     crate::gitwork::start(&app.ctx, root, crate::gitwork::Op::DeleteBranch { name: name.clone(), force: false }, format!("Couldn't delete {name}"));
 }
 
-/// One local branch's menu (the branch menu's right click): switch to it, rename it,
-/// delete it. The branch HEAD is on can only be renamed.
-fn branch_actions(app: &mut App, ctx: &egui::Context, root: &Path, b: &crate::gitwork::Branch, anchor: Pos2, sel: &mut usize) -> bool {
+/// The history of panel `panel`, opened in its inspector if it isn't yet.
+fn history_in(app: &mut App, panel: u64) -> Option<&mut crate::gitlog::History> {
+    let p = app.panels.get_mut(&panel)?;
+    if p.inspector.as_ref().and_then(|i| i.git.as_ref()).is_none() {
+        let r = crate::gitstatus::repo_for(&p.path())?;
+        let opened = p.inspector.is_none();
+        p.inspector.get_or_insert_with(crate::inspector::Inspector::default).show_history(crate::gitlog::History::new(r.root.clone(), r.branch.clone(), opened));
+    }
+    p.inspector.as_mut()?.git.as_deref_mut()
+}
+
+/// One branch's menu (the branch menu's right click, or Shift+F10): switch to it or, a
+/// remote one, check it out; compare it with the branch HEAD is on; rename it, delete it. The branch HEAD is on can only be renamed.
+fn branch_actions(app: &mut App, ctx: &egui::Context, root: &Path, b: &crate::gitwork::Branch, anchor: Pos2, sel: &mut usize, (panel, into, remote): (u64, &str, bool)) -> bool {
     let pal = app.pal;
     let k = take_keys(ctx);
     if k.esc {
         return false;
     }
-    let items: &[&str] = if b.current { &["Rename…"] } else { &["Switch to it", "Rename…", "Delete"] };
+    #[derive(Clone, Copy, PartialEq)]
+    enum It {
+        Switch,
+        Track,
+        Compare,
+        Rename,
+        Delete,
+    }
+    let items: &[It] = match (remote, b.current) {
+        (true, _) => &[It::Track, It::Compare],
+        (false, true) => &[It::Rename],
+        (false, false) => &[It::Switch, It::Compare, It::Rename, It::Delete],
+    };
     if *sel == usize::MAX && (k.up || k.down) {
         *sel = 0;
     } else if *sel != usize::MAX {
         step(sel, items.len(), &k, |_| false);
     }
     let mut pick = if k.enter && *sel < items.len() { Some(items[*sel]) } else { None };
-    let (_, rect) = anchored(ctx, "branchactions", anchor, 240.0, &pal, |ui| {
-        let sub = if b.upstream.is_empty() { "Not published".to_string() } else { format!("Tracks {}", b.upstream) };
+    let (_, rect) = anchored(ctx, "branchactions", anchor, 260.0, &pal, |ui| {
+        let sub = match (remote, b.upstream.is_empty()) {
+            (true, _) => "Remote branch".to_string(),
+            (false, true) => "Not published".to_string(),
+            (false, false) => format!("Tracks {}", b.upstream),
+        };
         menu_title(ui, &b.name, &sub, &pal);
-        for (i, label) in items.iter().enumerate() {
-            if key_item(ui, label, i == *sel, true, &pal).clicked() {
-                pick = Some(label);
+        for (i, &it) in items.iter().enumerate() {
+            if i > 0 && matches!(it, It::Compare | It::Rename) {
+                menu_sep(ui, &pal);
+            }
+            let label = match it {
+                It::Switch => "Switch to it".into(),
+                It::Track => "Check out".into(),
+                It::Compare => format!("Compare with {into}"),
+                It::Rename => "Rename…".into(),
+                It::Delete => "Delete".into(),
+            };
+            let resp = key_item(ui, &label, i == *sel, true, &pal);
+            let resp = match it {
+                It::Track => resp.on_hover_text("A local branch of it, tracking it"),
+                It::Compare => resp.on_hover_text(format!("The commits each has that the other doesn't, and what {} changes since they split", b.name)),
+                _ => resp,
+            };
+            if resp.clicked() {
+                pick = Some(it);
             }
         }
     });
-    let Some(label) = pick else { return !clicked_outside(ctx, rect) };
+    let Some(it) = pick else { return !clicked_outside(ctx, rect) };
     let name = b.name.clone();
-    match label {
-        "Switch to it" => crate::gitwork::start(&app.ctx, root, crate::gitwork::Op::Switch(name.clone()), format!("Couldn't switch to {name}")),
-        "Rename…" => rename_branch(app, root, name),
-        _ => delete_branch(app, root, name),
+    match it {
+        It::Switch => crate::gitwork::start(&app.ctx, root, crate::gitwork::Op::Switch(name.clone()), format!("Couldn't switch to {name}")),
+        It::Track => crate::gitwork::start(&app.ctx, root, crate::gitwork::Op::Track(name.clone()), format!("Couldn't check out {name}")),
+        It::Compare => {
+            app.actions.push(Action::FocusPanel(panel));
+            if let Some(h) = history_in(app, panel) {
+                h.compare([into.to_string(), name.clone()], ["HEAD".into(), name], false);
+            }
+        }
+        It::Rename => rename_branch(app, root, name),
+        It::Delete => delete_branch(app, root, name),
     }
     false
 }
 
 /// A commit's menu in the history: check it out, branch or tag it, cherry-pick or
-/// revert it, reset the current branch to it (asking how), delete its tags, copy its
-/// hash. Up, Down and Enter work it.
+/// revert it, reset the current branch to it (asking how), mark it to compare with or
+/// compare it with the one marked, delete its tags, copy its hash. Up, Down and Enter
+/// work it.
 fn commit_menu(app: &mut App, ctx: &egui::Context, m: &mut CommitMenu) -> bool {
     use crate::gitwork::Op;
     let pal = app.pal;
@@ -6315,10 +6378,16 @@ fn commit_menu(app: &mut App, ctx: &egui::Context, m: &mut CommitMenu) -> bool {
         Pick,
         Revert,
         Reset,
+        Compare,
+        Mark,
         Untag(usize),
         Copy,
     }
     let mut items = vec![It::Checkout, It::Branch, It::Tag, It::Pick, It::Revert, It::Reset];
+    // Comparing: one commit marked, then another's menu compares with it.
+    let other = m.marked.clone().filter(|x| *x != m.hash);
+    items.extend(other.is_some().then_some(It::Compare));
+    items.push(It::Mark);
     items.extend((0..m.tags.len()).map(It::Untag));
     items.push(It::Copy);
     // HEAD's own commit has nothing to check out, pick or reset to.
@@ -6335,7 +6404,7 @@ fn commit_menu(app: &mut App, ctx: &egui::Context, m: &mut CommitMenu) -> bool {
     let (_, rect) = anchored(ctx, "commitmenu", m.pos, 270.0, &pal, |ui| {
         menu_title(ui, short, &m.subject, &pal);
         for (i, &it) in items.iter().enumerate() {
-            if it == It::Pick || it == It::Untag(0) || it == It::Copy && m.tags.is_empty() {
+            if it == It::Pick || it == It::Untag(0) || it == It::Copy && m.tags.is_empty() || it == It::Compare || it == It::Mark && other.is_none() {
                 menu_sep(ui, &pal);
             }
             let label = match it {
@@ -6345,6 +6414,9 @@ fn commit_menu(app: &mut App, ctx: &egui::Context, m: &mut CommitMenu) -> bool {
                 It::Pick => format!("Cherry-pick onto {}", m.branch),
                 It::Revert => "Revert".into(),
                 It::Reset => format!("Reset {} to here…", m.branch),
+                It::Compare => format!("Compare with {}", other.as_deref().map_or("", |x| &x[..x.len().min(7)])),
+                It::Mark if m.marked.as_deref() == Some(m.hash.as_str()) => "Unmark".into(),
+                It::Mark => "Mark for comparison".into(),
                 It::Untag(t) => format!("Delete tag {}", m.tags[t]),
                 It::Copy => "Copy hash".into(),
             };
@@ -6352,6 +6424,8 @@ fn commit_menu(app: &mut App, ctx: &egui::Context, m: &mut CommitMenu) -> bool {
             let resp = match it {
                 _ if off(it) => resp.on_hover_text("HEAD is on this commit"),
                 It::Revert => resp.on_hover_text("A new commit that undoes this one"),
+                It::Compare => resp.on_hover_text("The commits each has that the other doesn't, and the files that differ"),
+                It::Mark => resp.on_hover_text("Then another commit's menu compares with this one"),
                 _ => resp,
             };
             if resp.clicked() && !off(it) {
@@ -6376,6 +6450,18 @@ fn commit_menu(app: &mut App, ctx: &egui::Context, m: &mut CommitMenu) -> bool {
             let choices = vec![("Keep changes".to_string(), false, go(false)), ("Discard changes".to_string(), true, go(true))];
             let sub = format!("Commits after {h} leave {b}. Keep changes leaves what they changed in your files; Discard changes resets the files too, keeping uncommitted work in the stash.");
             app.popup = Popup::Choose { msg: format!("Reset {b} to {h}?"), sub, choices };
+        }
+        It::Compare => {
+            if let (Some(x), Some(hist)) = (other, history_in(app, m.panel)) {
+                hist.compare([x[..x.len().min(7)].to_string(), h], [x, hash], true);
+            }
+        }
+        It::Mark => {
+            let unmark = m.marked.as_deref() == Some(hash.as_str());
+            if let Some(hist) = history_in(app, m.panel) {
+                hist.mark = (!unmark).then_some(hash);
+            }
+            app.toast(if unmark { format!("Unmarked {h}") } else { format!("Marked {h}: another commit's menu compares with it") });
         }
         It::Untag(t) => start(app, Op::DeleteTag(m.tags[t].clone()), format!("Couldn't delete the tag {}", m.tags[t])),
         It::Copy => {

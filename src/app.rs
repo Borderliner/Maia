@@ -2977,7 +2977,7 @@ impl App {
             Cmd::ContextMenu => {
                 let id = self.active;
                 // An open history has the keyboard: the selected commit's menu.
-                match self.panels.get(&id).and_then(|p| p.inspector.as_ref()?.git.as_ref()?.menu()) {
+                match self.panels.get(&id).and_then(|p| p.inspector.as_ref()?.git.as_ref()?.menu(id)) {
                     Some(m) => self.popup = m,
                     None => {
                         let pos = self.tab().cursor_screen_pos.unwrap_or_else(|| self.panels[&id].list_rect.center());

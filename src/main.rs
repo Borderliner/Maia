@@ -42,6 +42,7 @@ mod formatdrive;
 mod fsx;
 mod fuzzy;
 mod gitchanges;
+mod gitcompare;
 mod gitfind;
 mod gitlog;
 mod gitstatus;

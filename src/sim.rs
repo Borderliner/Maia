@@ -1102,7 +1102,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(169) {
+    match rng.below(170) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2581,6 +2581,41 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.idle(2);
             }
         }
+        169 => {
+            into_repo(s, rng);
+            // A comparison: from a branch's own menu, or a commit marked in the history and
+            // another one's menu comparing with it; then its rows, folded, opened, Back.
+            if crate::gitstatus::repo_for(&s.tab().path).is_none() {
+                return;
+            }
+            if rng.below(2) == 0 {
+                if branch_own_menu(s, rng) {
+                    pick_starting(s, "Compare with ");
+                }
+            } else {
+                // Opened, or back on its graph when it is open.
+                s.cmd(Cmd::GitHistory);
+                s.idle(4);
+                for (k, item) in ["Mark for comparison", "Compare with "].into_iter().enumerate() {
+                    for _ in 0..k + rng.below(3) {
+                        s.act("key ArrowDown");
+                    }
+                    s.act("key shift+F10");
+                    s.idle(3);
+                    if !matches!(s.app.popup, Popup::GitCommit(_)) {
+                        break;
+                    }
+                    pick_starting(s, item);
+                }
+            }
+            for _ in 0..rng.below(6) {
+                match rng.below(4) {
+                    0 => click_control_at(s, rng.pick(&["what it adds", "every difference", "compared commit", "split link"])),
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowDown", "Enter", "Home", "End", "Escape", "CloseBracket"]))),
+                }
+                s.idle(3);
+            }
+        }
         _ => {
             s.note("idle".into());
             s.idle(rng.below(20) + 1);
@@ -2700,6 +2735,45 @@ fn picker_check(s: &mut Sim) {
 /// The viewer's tag strip is waiting for a new tag's name.
 fn viewer_strip_typing(s: &Sim) -> bool {
     matches!(&s.app.popup, Popup::Viewer(v) if v.strip.as_ref().is_some_and(|t| t.typing.is_some()))
+}
+
+/// The branch menu, then one branch's own menu (not the current one's), by a right click
+/// on its name or by the keys and Shift+F10. False when there is no such branch.
+fn branch_own_menu(s: &mut Sim, rng: &mut Rng) -> bool {
+    s.cmd(Cmd::GitBranches);
+    let t0 = Instant::now();
+    while matches!(&s.app.popup, Popup::Branches(st) if st.refs.is_none()) && t0.elapsed().as_secs() < 3 {
+        s.idle(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    s.idle(6);
+    let Popup::Branches(st) = &s.app.popup else { return false };
+    let Some(r) = &st.refs else { return false };
+    let names: Vec<String> = r.local.iter().filter(|b| !b.current).map(|b| b.name.clone()).chain(r.remote.iter().cloned()).collect();
+    if names.is_empty() {
+        return false;
+    }
+    if rng.below(2) == 0 {
+        let name = rng.pick(&names).clone();
+        let Some(c) = s.texts.iter().rev().find(|(_, t)| *t == name).map(|(r, _)| r.center()) else { return false };
+        s.act(&format!("click {:.0} {:.0} right", c.x, c.y));
+    } else {
+        for _ in 0..1 + rng.below(8) {
+            s.act("key ArrowDown");
+        }
+        s.act("key shift+F10");
+    }
+    s.idle(3);
+    matches!(s.app.popup, Popup::Branch { .. })
+}
+
+/// Click the item of the open menu whose label starts with `prefix`, or leave the menu.
+fn pick_starting(s: &mut Sim, prefix: &str) {
+    match s.texts.iter().rev().find(|(_, t)| t.starts_with(prefix)).map(|(r, _)| r.center()) {
+        Some(c) => s.act(&format!("click {:.0} {:.0}", c.x, c.y)),
+        None => s.act("key Escape"),
+    }
+    s.idle(3);
 }
 
 /// An open history in the active panel's inspector.
@@ -14944,5 +15018,131 @@ mod journeys {
         s.act("key Escape");
         assert!(probe(&s).search.is_none());
         report("gitsearch", &s);
+    }
+
+    /// Comparing, as someone deciding whether a branch is ready: Compare with main from a
+    /// branch's own menu, the commits only each side has, where they split, the files topic
+    /// changes since then with a diff under one and the picture before and after, every
+    /// difference instead and back, a commit of the comparison opened and Back to it, a side
+    /// folded from the keyboard; then two commits compared from the commit menu by marking
+    /// one, the older put first; small windows and a light theme.
+    #[test]
+    fn git_compare_branches() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let home = fixture("gitcompare");
+        let repo = home.join("Code/topics");
+        crate::tests::branches_fixture(&repo);
+        let mut s = Sim::new(&repo, vec2(1280.0, 800.0));
+        wait_until(&mut s, "branch read", 10, |s| branch_now(s) == "main");
+        s.idle(2);
+        open_history(&mut s);
+        wait_until(&mut s, "history", 20, |s| history(s).is_some_and(|h| h.1 && h.0 == 5));
+        open_branches(&mut s);
+        let r = s.text_rect("topic");
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        assert!(matches!(s.app.popup, Popup::Branch { .. }), "the branch's menu");
+        s.idle(12);
+        for t in ["Switch to it", "Compare with main", "Rename…", "Delete"] {
+            assert!(some_text(&s, t), "{t:?} in the menu");
+        }
+        s.shot("branch-actions-compare");
+        s.click_text("Compare with main");
+        wait_until(&mut s, "the comparison", 20, |s| probe(s).cmp_counts == Some([1, 3]) && git_hist(s).files().len() == 3);
+        s.idle(3);
+        assert_eq!(probe(&s).cmp, Some(["main".to_string(), "topic".to_string()]));
+        for t in ["3 commits only on topic", "1 commit only on main", "Topic adds a file", "Main gets a readme", "Split at", "What topic adds", "Every difference", "3 files changed", "main → topic"] {
+            assert!(some_text(&s, t), "{t:?} shown");
+        }
+        look(&mut s, "comparison");
+        s.shot("compare");
+        click_in_inspector(&mut s, "notes.txt", "click");
+        wait_until(&mut s, "its diff", 10, |s| some_text(s, "+TWO on topic"));
+        wait_until(&mut s, "the picture's two sides", 10, |s| probe(s).pictures == 2);
+        s.idle(3);
+        look(&mut s, "comparison diff");
+        s.shot("compare-diff");
+        // Every difference: main's readme, gone on topic's side, counts too.
+        click_control(&mut s, "every difference");
+        wait_until(&mut s, "every file", 10, |s| git_hist(s).files().len() == 4 && !probe(s).split);
+        assert!(git_hist(&s).files().iter().any(|f| f.path == "readme.md" && f.status == b'D'));
+        look(&mut s, "every difference");
+        click_control(&mut s, "what it adds");
+        wait_until(&mut s, "since the split", 10, |s| git_hist(s).files().len() == 3 && probe(s).split);
+        // A commit of the comparison opens; Back comes to the comparison again.
+        click_in_inspector(&mut s, "Topic adds a file", "click");
+        wait_until(&mut s, "the commit", 10, |s| probe(s).subject.as_deref() == Some("Topic adds a file") && probe(s).cmp.is_none());
+        s.act("key Escape");
+        assert_eq!(probe(&s).cmp_counts, Some([1, 3]), "back in the comparison");
+        // The keys: Home to topic's heading, Enter folds it.
+        s.act("key Home");
+        s.act("key Enter");
+        s.idle(3);
+        assert!(!some_text(&s, "Topic adds a file") && some_text(&s, "3 commits only on topic"), "folded");
+        s.act("key Enter");
+        s.idle(3);
+        assert!(some_text(&s, "Topic adds a file"));
+        s.act("key Escape");
+        assert!(probe(&s).at.is_none() && probe(&s).cmp.is_none(), "the graph");
+        // Two commits: one marked, the other's menu compares with it.
+        let edits = git_out(&repo, &["rev-parse", "topic~2"]);
+        let start = git_out(&repo, &["rev-parse", "main~1"]);
+        right_click_in_inspector(&mut s, "Topic edits the notes");
+        s.idle(3);
+        s.click_text("Mark for comparison");
+        assert!(toast_starts(&s, &format!("Marked {}", &edits[..7])));
+        assert_eq!(probe(&s).mark.as_deref(), Some(edits.as_str()));
+        s.idle(3);
+        look(&mut s, "a commit marked");
+        s.shot("compare-marked");
+        right_click_in_inspector(&mut s, "Topic redraws the picture");
+        s.idle(3);
+        assert!(some_text(&s, &format!("Compare with {}", &edits[..7])) && some_text(&s, "Mark for comparison"));
+        s.shot("commit-menu-compare");
+        s.click_text(&format!("Compare with {}", &edits[..7]));
+        wait_until(&mut s, "two commits compared", 20, |s| probe(s).cmp_counts == Some([0, 2]) && git_hist(s).files().len() == 2);
+        assert!(!some_text(&s, "What topic adds"), "on one line, one way to compare");
+        look(&mut s, "two commits compared");
+        s.act("key Escape");
+        // Marked first, the newer: the older still goes first.
+        right_click_in_inspector(&mut s, "Start");
+        s.idle(3);
+        s.click_text(&format!("Compare with {}", &edits[..7]));
+        wait_until(&mut s, "older first", 20, |s| probe(s).cmp_counts == Some([0, 1]));
+        assert_eq!(probe(&s).cmp, Some([start[..7].to_string(), edits[..7].to_string()]));
+        s.act("key Escape");
+        right_click_in_inspector(&mut s, "Topic edits the notes");
+        s.idle(3);
+        s.click_text("Unmark");
+        assert_eq!(probe(&s).mark, None);
+        // From the keyboard: down to topic, Shift+F10, Compare is the item after Switch.
+        let topic_menu = |s: &Sim| matches!(&s.app.popup, Popup::Branch { branch, .. } if branch.name == "topic");
+        for n in 1..12 {
+            open_branches(&mut s);
+            for _ in 0..n {
+                s.act("key ArrowDown");
+            }
+            s.act("key shift+F10");
+            if topic_menu(&s) {
+                break;
+            }
+            s.act("key Escape");
+            s.idle(3);
+        }
+        assert!(matches!(&s.app.popup, Popup::Branch { branch, .. } if branch.name == "topic"), "topic menu from the keys, not {:?}", match &s.app.popup { Popup::Branch { branch, .. } => branch.name.clone(), p => p.kind_name().into() });
+        s.idle(3);
+        s.act("key ArrowDown");
+        s.act("key Enter");
+        wait_until(&mut s, "the comparison", 20, |s| probe(s).cmp_counts == Some([1, 3]) && git_hist(s).files().len() == 3);
+        for (w, h) in [(720.0, 480.0), (520.0, 400.0)] {
+            s.resize(w, h);
+            look(&mut s, "comparison narrow");
+        }
+        s.resize(1280.0, 800.0);
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        look(&mut s, "comparison light");
+        s.shot("compare-light");
+        report("gitcompare", &s);
     }
 }

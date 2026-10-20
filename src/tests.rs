@@ -10890,6 +10890,27 @@ fn media_probes_stop_when_their_folder_is_left() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// git in `d` as one fixed person at one fixed time of day `day` of September 2026, so
+/// the commits (and their hashes) come out the same every run.
+fn git_on(d: &Path, day: u32, args: &[&str]) {
+    let date = format!("2026-09-{day:02}T10:00:00+00:00");
+    let ok = std::process::Command::new("git")
+        .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", "-c", "core.hooksPath=/dev/null"])
+        .args(args)
+        .current_dir(d)
+        .env("GIT_AUTHOR_NAME", "Ada Lovelace")
+        .env("GIT_AUTHOR_EMAIL", "ada@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Ada Lovelace")
+        .env("GIT_COMMITTER_EMAIL", "ada@example.invalid")
+        .env("GIT_AUTHOR_DATE", &date)
+        .env("GIT_COMMITTER_DATE", &date)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    assert!(ok, "git {args:?}");
+}
+
 /// What the history's find bar makes of its text: plain words, "quoted words", the
 /// `author:`, `path:`, `since:` and `until:` terms (half typed ones ignored, a date form
 /// that isn't one kept as a word), case only when a word has capitals, git's flags, what
@@ -10974,5 +10995,74 @@ fn git_history_search_finds_commits() {
     // A page of one: the reader stops there, the log not ended.
     assert_eq!(read(None, "the", 1), (vec!["Tune the panel".to_string()], false));
     assert_eq!(read(None, "the", 10), (all.map(String::from).to_vec(), true));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A repository for comparing: main and topic split after "Start"; topic changes the
+/// notes, adds a file and changes the picture, main adds a readme.
+pub(crate) fn branches_fixture(d: &Path) {
+    std::fs::create_dir_all(d).unwrap();
+    git_on(d, 1, &["init", "-q"]);
+    touch(&d.join("notes.txt"), "one\ntwo\nthree\n");
+    std::fs::write(d.join("pic.png"), png_bytes(20, 10, 1)).unwrap();
+    git_on(d, 1, &["add", "-A"]);
+    git_on(d, 1, &["commit", "-qm", "Start"]);
+    git_on(d, 2, &["switch", "-qc", "topic"]);
+    touch(&d.join("notes.txt"), "one\nTWO on topic\nthree\n");
+    git_on(d, 2, &["commit", "-qam", "Topic edits the notes"]);
+    touch(&d.join("extra.txt"), "more\n");
+    git_on(d, 3, &["add", "-A"]);
+    git_on(d, 3, &["commit", "-qm", "Topic adds a file"]);
+    std::fs::write(d.join("pic.png"), png_bytes(30, 12, 2)).unwrap();
+    git_on(d, 4, &["commit", "-qam", "Topic redraws the picture"]);
+    git_on(d, 5, &["switch", "-q", "main"]);
+    touch(&d.join("readme.md"), "# Read me\n");
+    git_on(d, 5, &["add", "-A"]);
+    git_on(d, 5, &["commit", "-qm", "Main gets a readme"]);
+}
+
+/// Two branches compared: the commits only each has, where they split, the files topic
+/// changes since then (and every difference, main's readme included), a file's diff and
+/// the picture's two sides as the commit view reads them; two commits on one line put
+/// older first; a name git doesn't know, and two histories with nothing in common.
+#[test]
+fn git_compare_branches_and_commits() {
+    use crate::gitcompare::{heading, sides};
+    if !crate::media::have("git") {
+        return;
+    }
+    let d = tmpdir("gitcompare");
+    branches_fixture(&d);
+    let rev = |r: &str| git_said(&d, &["rev-parse", r]);
+    let subjects = |v: &[crate::gitlog::Commit]| v.iter().map(|c| c.subject.clone()).collect::<Vec<_>>();
+    let s = sides(&d, "main", "topic", false).unwrap();
+    assert_eq!((s.hashes.clone(), s.base.clone(), s.counts, s.swapped), ([rev("main"), rev("topic")], Some(rev("main~1")), [1, 3], false));
+    assert_eq!(subjects(&s.only[0]), ["Main gets a readme"]);
+    assert_eq!(subjects(&s.only[1]), ["Topic redraws the picture", "Topic adds a file", "Topic edits the notes"]);
+    let names = |v: &[crate::gitlog::Change]| v.iter().map(|c| (c.status as char, c.path.clone(), c.lines)).collect::<Vec<_>>();
+    let base = s.base.clone().unwrap();
+    let since = crate::gitlog::files(&d, &base, &s.hashes[1]);
+    assert_eq!(names(&since), [('A', "extra.txt".into(), Some((1, 0))), ('M', "notes.txt".into(), Some((1, 1))), ('M', "pic.png".into(), None)]);
+    let every = crate::gitlog::files(&d, &s.hashes[0], &s.hashes[1]);
+    assert_eq!(names(&every).iter().map(|x| (x.0, x.1.as_str())).collect::<Vec<_>>(), [('A', "extra.txt"), ('M', "notes.txt"), ('M', "pic.png"), ('D', "readme.md")]);
+    let parents = [base.clone()];
+    let notes = since.iter().find(|c| c.path == "notes.txt").unwrap();
+    assert_eq!(crate::gitlog::diff(&d, &s.hashes[1], &parents, notes).0, ["@@ -1,3 +1,3 @@", " one", "-two", "+TWO on topic", " three"]);
+    let pic = since.iter().find(|c| c.path == "pic.png").unwrap();
+    let side = |old| crate::gitlog::picture_side(&d, &s.hashes[1], &parents, pic, old, 64).map(|p| p.1);
+    assert_eq!((side(true), side(false)), (Some([20, 10]), Some([30, 12])), "before and after");
+    // Commits on one line: the older is the old side, whichever was marked first.
+    let s = sides(&d, &rev("topic"), &rev("main~1"), true).unwrap();
+    assert_eq!((s.hashes.clone(), s.counts, s.swapped, s.base.clone()), ([rev("main~1"), rev("topic")], [0, 3], true, Some(rev("main~1"))));
+    let s = sides(&d, &rev("topic"), &rev("main~1"), false).unwrap();
+    assert_eq!((s.counts, s.swapped), ([3, 0], false), "a branch compared as asked");
+    assert_eq!(sides(&d, "main", "nope", false).err().as_deref(), Some("git doesn't know nope"));
+    git_on(&d, 6, &["switch", "-q", "--orphan", "lone"]);
+    touch(&d.join("lone.txt"), "alone\n");
+    git_on(&d, 6, &["add", "lone.txt"]);
+    git_on(&d, 6, &["commit", "-qm", "Alone"]);
+    let s = sides(&d, "main", "lone", false).unwrap();
+    assert_eq!((s.base.clone(), s.counts), (None, [2, 1]), "no history in common");
+    assert_eq!((heading(0, "x"), heading(1, "main"), heading(1200, "topic")), ("Nothing only on x".to_string(), "1 commit only on main".to_string(), "1,200 commits only on topic".to_string()));
     let _ = std::fs::remove_dir_all(&d);
 }
