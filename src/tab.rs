@@ -982,7 +982,10 @@ impl Tab {
         // Parsed once per rebuild, so ages count from now; the rows only run the result.
         let fq = crate::query::parse(&self.filter, std::time::SystemTime::now());
         let fcx = crate::query::Cx::view(c.stats, if content.is_some() { crate::query::Text::Off } else { crate::query::Text::Full });
-        let ranked = fq.ranked(&fcx);
+        // A smart folder's words rank its files as the filter ranked them when it was
+        // saved, until the filter has words of its own.
+        let rank = self.smart.as_ref().filter(|s| s.tag.is_empty() && !fq.ranked(&fcx)).map(|s| crate::query::parse(&s.query_text(), std::time::SystemTime::now())).filter(|r| r.ranked(&fcx));
+        let ranked = fq.ranked(&fcx) || rank.is_some();
         if fq.pending {
             // An owner's name waits for the list of users: look again shortly.
             self.stream_dirty = true;
@@ -1041,7 +1044,7 @@ impl Tab {
         if !tree && self.entries.len() >= 40_000 {
             let threads = std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1).clamp(1, 8);
             let chunk = self.entries.len().div_ceil(threads);
-            let (hidden_ok, row_ok, fq, fcx) = (&hidden_ok, &row_ok, &fq, &fcx);
+            let (hidden_ok, row_ok, fq, fcx, rank) = (&hidden_ok, &row_ok, &fq, &fcx, &rank);
             let parts: Vec<(Vec<u32>, Vec<i32>, usize, usize, usize)> = std::thread::scope(|sc| {
                 let hs: Vec<_> = self
                     .entries
@@ -1064,7 +1067,7 @@ impl Tab {
                                     continue;
                                 }
                                 match fq.score(e, fcx) {
-                                    Some(sc) if ranked => scores.push(sc),
+                                    Some(sc) if ranked => scores.push(rank.as_ref().map_or(Some(sc), |r| r.score(e, fcx)).unwrap_or(0)),
                                     Some(_) => {}
                                     None => continue,
                                 }
@@ -1103,7 +1106,7 @@ impl Tab {
                 continue;
             }
             match fq.score(e, &fcx) {
-                Some(sc) if ranked => scores.push(sc),
+                Some(sc) if ranked => scores.push(rank.as_ref().map_or(Some(sc), |r| r.score(e, &fcx)).unwrap_or(0)),
                 Some(_) => {}
                 None => continue,
             }

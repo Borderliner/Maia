@@ -2023,10 +2023,10 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
         }
         138 => {
             // A smart folder made: from a search in the filter or the palette, its
-            // fields typed into, kinds picked, saved or let go.
+            // fields and query typed into, saved or let go.
             if rng.below(2) == 0 {
                 s.act("key ctrl+f");
-                s.act(&format!("text {}", rng.pick(&["doc", "img", ".png", "notes size>1k", "a modified<30d", "résumé"])));
+                s.act(&format!("text {}", rng.pick(&["doc", "img", ".png", "notes size>1k", "a modified<30d", "résumé", "type:pictures | ext:md", "-doc a", "/^re/"])));
                 s.cmd(Cmd::SaveSmart);
             } else {
                 s.cmd(Cmd::NewSmart);
@@ -2036,9 +2036,12 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                     break;
                 }
                 match rng.below(3) {
-                    0 => click_control_at(s, "smart kind"),
+                    0 => {
+                        click_control_at(s, "smart query");
+                        s.act(&format!("text {}", rng.pick(&[" type:pictures", " | ext:md", " -doc", " /(/", " size>10M", " owner:root", " (a | b)", " tag:red", " modified<7d"])));
+                    }
                     1 => {
-                        click_control_at(s, rng.pick(&["smart name", "smart root", "smart words", "smart days", "smart size"]));
+                        click_control_at(s, rng.pick(&["smart name", "smart root", "smart query"]));
                         s.act(&format!("text {}", rng.pick(&["7", "10 MB", "~/", "IMG_*", "zz", "-1", "Code"])));
                     }
                     _ => s.act(&format!("key {}", rng.pick(&["Backspace", "Tab", "ctrl+a"]))),
@@ -12531,6 +12534,7 @@ mod journeys {
         file("Invoices/2026/invoice-030.pdf", 1000, false);
         file("Invoices/2025/invoice-001.pdf", 3_000_000, true);
         file("Invoices/invoice notes.txt", 10, false);
+        file("Invoices/scans/page.txt", 10, false);
         file("Photos/IMG_0001.jpg", 500_000, false);
         file("Photos/IMG_0002.png", 400_000, true);
         file("Photos/thumb.png", 1000, false);
@@ -12560,9 +12564,11 @@ mod journeys {
         s.idle(1);
         assert!(some_text(&s, "Save As Smart Folder…"), "in the folder's menu while searching");
         s.act("key Enter");
-        assert_eq!((ed(&s).name.as_str(), ed(&s).name_has.as_str(), ed(&s).root.as_str(), ed(&s).id), ("invoice", "invoice", "~/smart", None));
-        s.click_text("PDFs");
-        assert_eq!(ed(&s).kinds, ["pdfs"]);
+        assert_eq!((ed(&s).name.as_str(), ed(&s).query.as_str(), ed(&s).root.as_str(), ed(&s).id), ("invoice", "invoice", "~/smart", None));
+        click_control(&mut s, "smart query");
+        s.act("key End");
+        s.act("text  type:pdfs");
+        assert_eq!(ed(&s).query, "invoice type:pdfs");
         look(&mut s, "smart folder dialog");
         s.idle(12);
         s.shot("smart-folder-edit");
@@ -12594,8 +12600,9 @@ mod journeys {
         s.idle(2);
         s.click_text("Edit…");
         assert!(ed(&s).id.is_some());
-        click_control(&mut s, "smart days");
-        s.act("text 30");
+        click_control(&mut s, "smart query");
+        s.act("key End");
+        s.act("text  modified<30d");
         s.act("key Enter");
         assert!(!s.popup_open());
         wait_until(&mut s, "searched again", 10, |s| !s.tab().is_loading() && rels(s).len() == 3);
@@ -12617,17 +12624,14 @@ mod journeys {
         click_control(&mut s, "smart name");
         s.act("key ctrl+a");
         s.act("text Big pictures");
-        let chip = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|x| x.2 == "smart kind").map(|x| x.1).next()).unwrap_or_else(|| s.fail("the kinds"));
-        s.act(&format!("click {:.0} {:.0}", chip.center().x, chip.center().y));
-        assert_eq!(ed(&s).kinds, ["pictures"]);
-        click_control(&mut s, "smart size");
-        s.act("text huge");
+        click_control(&mut s, "smart query");
+        s.act("text type:pictures /(/");
         s.act("key Enter");
-        assert_eq!(ed(&s).error.as_deref(), Some("Size: a number and a unit, like 10 MB"));
-        assert!(some_text(&s, "Size: a number and a unit, like 10 MB"));
+        assert_eq!(ed(&s).error.as_deref(), Some("Find: /(/ is not a regular expression"));
+        assert!(some_text(&s, "Find: /(/ is not a regular expression"));
         look(&mut s, "smart folder refused");
         s.act("key ctrl+a");
-        s.act("text 100 KB");
+        s.act("text type:pictures size>100K");
         s.act("key Enter");
         assert!(!s.popup_open());
         wait_until(&mut s, "the pictures", 10, |s| s.tab().smart.as_ref().is_some_and(|x| x.name == "Big pictures") && !s.tab().is_loading());
@@ -12644,8 +12648,35 @@ mod journeys {
             s.cmd(v);
             look(&mut s, &format!("smart folder {v:?}"));
         }
+        // One kept as fields by an older version opens as before, and edits as a query.
+        s.app.ud.smart.push(crate::smart::SmartFolder { id: 99, name: "Old scans".into(), root: d.clone(), kinds: vec!["pdfs".into()], days: Some(30), ..Default::default() });
+        s.idle(2);
+        let r = sidebar_text(&s, "Old scans").unwrap_or_else(|| s.fail("the older smart folder"));
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        wait_until(&mut s, "the older one's search", 10, |s| s.tab().smart.as_ref().is_some_and(|x| x.id == 99) && !s.tab().is_loading());
+        s.settle();
+        assert_eq!(rels(&s), ["Invoices/2026/invoice-030.pdf", "Invoices/2026/invoice-031.pdf", "Invoices/invoice-032.pdf"]);
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(2);
+        s.click_text("Edit…");
+        assert_eq!(ed(&s).query, "type:pdfs modified<30d");
+        look(&mut s, "older smart folder as a query");
+        s.shot("smart-folder-older");
+        // A query of the whole language, ranked by its words as the filter ranks them.
+        click_control(&mut s, "smart query");
+        s.act("key ctrl+a");
+        s.act("text invoice (type:pdfs | ext:txt) -2025");
+        s.act("key Enter");
+        assert!(!s.popup_open());
+        wait_until(&mut s, "the query's search", 10, |s| !s.tab().is_loading() && rels(s).len() == 5);
+        s.settle();
+        assert_eq!(rels(&s), ["Invoices/2026/invoice-030.pdf", "Invoices/2026/invoice-031.pdf", "Invoices/invoice notes.txt", "Invoices/invoice-032.pdf", "Invoices/scans/page.txt"]);
+        let last = s.tab().view.last().map(|&i| s.tab().entries[i as usize].name.clone());
+        assert_eq!(last.as_deref(), Some("page.txt"), "found only by its folder's name, so last");
+        look(&mut s, "smart folder from a query");
+        s.shot("smart-folder-query");
         // Removed from their menus: the tabs show their folders; the section goes.
-        for name in ["Bills", "Big pictures"] {
+        for name in ["Bills", "Big pictures", "Old scans"] {
             let r = sidebar_text(&s, name).unwrap_or_else(|| s.fail(&format!("{name} in the sidebar")));
             s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
             s.idle(2);

@@ -7019,7 +7019,7 @@ fn ports_and_their_owners() {
 /// later version doesn't stop it loading.
 #[test]
 fn smart_folders_find_what_they_say() {
-    use crate::smart::{SmartFolder, glob, parse_bytes, search};
+    use crate::smart::{SmartFolder, glob, search};
     let d = tmpdir("smart");
     let old = std::time::SystemTime::now() - Duration::from_secs(86_400 * 90);
     let file = |p: &str, len: usize, aged: bool| {
@@ -7052,7 +7052,7 @@ fn smart_folders_find_what_they_say() {
         v.sort();
         v
     };
-    let sf = |has: &str, kinds: &[&str], days: Option<u32>, bigger: Option<u64>| SmartFolder { id: 1, name: "x".into(), root: d.clone(), name_has: has.into(), kinds: kinds.iter().map(|k| k.to_string()).collect(), days, bigger, tag: String::new() };
+    let sf = |has: &str, kinds: &[&str], days: Option<u32>, bigger: Option<u64>| SmartFolder { id: 1, name: "x".into(), root: d.clone(), name_has: has.into(), kinds: kinds.iter().map(|k| k.to_string()).collect(), days, bigger, ..Default::default() };
     assert_eq!(found(&sf("invoice", &[], None, None)), ["Invoices/2025/invoice-001.pdf", "Invoices/2026/Invoice-030.PDF", "Invoices/2026/invoice-031.pdf"], "any case; no folders, hidden, installed or linked copies");
     assert_eq!(found(&sf("invoice-0??.pdf", &[], None, None)), ["Invoices/2025/invoice-001.pdf", "Invoices/2026/Invoice-030.PDF", "Invoices/2026/invoice-031.pdf"]);
     assert_eq!(found(&sf("IMG_*", &[], None, None)), ["Photos/IMG_0001.jpg", "Photos/IMG_0002.png"]);
@@ -7064,25 +7064,41 @@ fn smart_folders_find_what_they_say() {
     assert!(glob(&"a*b?c".chars().collect::<Vec<_>>(), &"axxbyc".chars().collect::<Vec<_>>()));
     assert!(!glob(&"a*b?c".chars().collect::<Vec<_>>(), &"axxbc".chars().collect::<Vec<_>>()));
     assert!(glob(&"*".chars().collect::<Vec<_>>(), &[]));
-    // From a search in the filter.
-    let from = crate::smart::from_filter(&d, "invoice size>1M modified<30d");
-    assert_eq!((from.name.as_str(), from.name_has.as_str(), from.bigger, from.days), ("invoice", "invoice", Some(1 << 20), Some(30)));
+    // From a search in the filter: all of it.
+    let from = crate::smart::from_filter(&d, " invoice size>1M modified<30d ");
+    assert_eq!((from.name.as_str(), from.query.as_str()), ("invoice", "invoice size>1M modified<30d"));
     assert_eq!(found(&from), ["Invoices/2026/invoice-031.pdf"]);
     assert_eq!(crate::smart::from_filter(&d.join("Photos"), "size>=2k").name, "Photos");
-    assert_eq!(parse_bytes("10 MB"), Some(10 << 20));
-    assert_eq!(parse_bytes("1.5G"), Some(1_610_612_736));
-    assert_eq!(parse_bytes("500k"), Some(512_000));
-    assert_eq!(parse_bytes("lots"), None);
-    // The dialog's fields.
-    let crate::popups::Popup::SmartEdit(mut e) = crate::smart::edit(&sf("invoice", &["pdfs"], Some(30), Some(10 << 20)), true) else { panic!() };
-    assert_eq!((e.days.as_str(), e.bigger.as_str()), ("30", "10.0 MB"));
-    assert_eq!(e.build().unwrap(), SmartFolder { name: "x".into(), ..sf("invoice", &["pdfs"], Some(30), Some(10 << 20)) });
-    e.days = "soon".into();
-    assert!(e.build().unwrap_err().starts_with("Days"));
-    e.days.clear();
-    e.bigger = "big".into();
-    assert!(e.build().unwrap_err().starts_with("Size"));
-    e.bigger.clear();
+    // The whole language, tested by the filter's own code.
+    let q = |text: &str| SmartFolder { id: 2, name: "q".into(), root: d.clone(), query: text.into(), ..Default::default() };
+    assert_eq!(found(&q("ext:pdf -invoice-001")), ["Invoices/2026/Invoice-030.PDF", "Invoices/2026/invoice-031.pdf"]);
+    assert_eq!(found(&q("type:pictures | size>5M")), ["Photos/IMG_0001.jpg", "Photos/IMG_0002.png", "Photos/holiday.mp4"]);
+    assert_eq!(found(&q(r"/^img_\d+\.jpg$/ | (ext:txt notes)")), ["Invoices/notes.txt", "Photos/IMG_0001.jpg"]);
+    assert_eq!(found(&q("2026 ext:pdf")), ["Invoices/2026/Invoice-030.PDF", "Invoices/2026/invoice-031.pdf"], "words see the path below the folder");
+    let me = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(d.join("Invoices/notes.txt")).unwrap());
+    assert_eq!(found(&q(&format!("owner:{me} ext:txt"))), ["Invoices/notes.txt"]);
+    if crate::tags::write(&d.join("Photos/IMG_0002.png"), &["keep".into()]).is_ok() {
+        assert_eq!(found(&q("tag:keep | ext:mp4")), ["Photos/IMG_0002.png", "Photos/holiday.mp4"], "tags read from the files");
+    }
+    // An older smart folder's fields, translated into the query they amount to: the
+    // same files as above, and what the dialog shows.
+    let old = sf("invoice", &["pdfs", "holograms"], Some(30), Some(1 << 20));
+    assert_eq!(old.query_text(), "name:invoice type:pdfs modified<30d size>1M");
+    assert_eq!(found(&old), ["Invoices/2026/invoice-031.pdf"]);
+    assert_eq!(sf("IMG_*", &[], None, Some(1500)).query_text(), "name:IMG_* size>1500");
+    assert_eq!(SmartFolder { query: "a | b".into(), ..sf("my scan", &[], Some(2), None) }.query_text(), r#"name:"my scan" modified<2d (a | b)"#);
+    assert_eq!(sf("", &[], None, Some(1_000_000)).query_text(), "size>1000000");
+    assert!(old.summary().ends_with("“name:invoice type:pdfs modified<30d size>1M”"), "{}", old.summary());
+    // The dialog's fields: what it saves is the query alone.
+    let crate::popups::Popup::SmartEdit(mut e) = crate::smart::edit(&old, true) else { panic!() };
+    assert_eq!(e.query, "name:invoice type:pdfs modified<30d size>1M");
+    let saved = e.build().unwrap();
+    assert_eq!(saved, SmartFolder { id: 1, name: "x".into(), root: d.clone(), query: e.query.clone(), ..Default::default() });
+    assert_eq!(found(&saved), found(&old));
+    e.query = "invoice /(/".into();
+    assert_eq!(e.build().unwrap_err(), "Find: /(/ is not a regular expression");
+    e.query = "  ".into();
+    assert_eq!(e.build().unwrap().query, "", "every file is a smart folder too");
     e.root = d.join("nowhere").display().to_string();
     assert!(e.build().unwrap_err().starts_with("There is no folder"));
     e.root = d.display().to_string();
@@ -7092,6 +7108,7 @@ fn smart_folders_find_what_they_say() {
     let path = d.join("userdata.json");
     let mut ud = crate::config::UserData::with_defaults();
     ud.smart.push(sf("invoice", &["pdfs"], Some(30), None));
+    ud.smart.push(q("ext:pdf | tag:keep"));
     crate::config::save_json(&path, &ud).unwrap();
     let back: crate::config::UserData = crate::config::load_json(&path);
     assert_eq!(back.smart, ud.smart);

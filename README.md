@@ -65,9 +65,10 @@ maia [PATH...]
 Start typing to filter the folder you are in. The filter also takes conditions:
 `size>100M`, `modified<7d` (and `created`, `accessed`), `tag:red`, `type:pictures`,
 `ext:jpg,png`, `owner:root`, `*.rs`, `/^IMG_\d+/`, a `"quoted phrase"`. `a | b` (or
-`OR`) is either, `-draft` (or `NOT`) leaves out, and parentheses group. Every command
-is in the palette, Ctrl+Shift+P, with its hotkey, and every hotkey can be changed
-there. Some to start with:
+`OR`) is either, `-draft` (or `NOT`) leaves out, and parentheses group. Save As Smart
+Folder keeps the whole filter in the sidebar. Every command is in the palette,
+Ctrl+Shift+P, with its hotkey, and every hotkey can be changed there. Some to start
+with:
 
 | Action | Keys |
 |---|---|

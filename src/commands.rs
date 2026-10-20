@@ -206,7 +206,7 @@ commands! {
     MeaningSearch, "search_meaning", View, "Search Everywhere", "Find files and folders in your home folder by name, and by what they are about with search by meaning on.", ["Ctrl+K"];
     ContentSearch, "search_contents", View, "Search File Contents", "Switch the filter between file names and the text inside files.", ["Ctrl+Shift+F"];
     SaveSmart, "save_smart_folder", View, "Save As Smart Folder…", "Keep this folder's search in the sidebar, searched again each time it opens.", [];
-    NewSmart, "new_smart_folder", View, "New Smart Folder…", "A saved search in the sidebar: a folder and what to find in it, by name, kind, date or size.", [];
+    NewSmart, "new_smart_folder", View, "New Smart Folder…", "A saved search in the sidebar: a folder and what to find in it, written as in the filter.", [];
     CodeSearch, "search_code", View, "Search Code", "Find text in this project's files, by word, case or regular expression.", ["Ctrl+Alt+F"];
     FindTodos, "find_todos", View, "Find TODOs", "List every TODO, FIXME, HACK and XXX comment in this project.", [];
     ViewPictures, "view_pictures", View, "View Pictures", "Show this folder's pictures full window, from the one under the cursor; Space plays them as a slideshow.", ["F3"];

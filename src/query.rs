@@ -121,25 +121,6 @@ impl Filter {
         self.conds
     }
 
-    /// What a smart folder can keep of the conditions: the size files must be over and
-    /// how many days back they were last changed.
-    pub fn floor_and_days(&self, now: SystemTime) -> (Option<u64>, Option<u32>) {
-        let top: &[Node] = match &self.root {
-            Some(Node::All(v)) => v,
-            Some(n) => std::slice::from_ref(n),
-            None => &[],
-        };
-        let (mut floor, mut days) = (None, None);
-        for n in top {
-            match n {
-                Node::Cond(c) if c.field == Field::Size && c.hi == i64::MAX && c.lo > 0 => floor = Some((c.lo - 1).max(0) as u64),
-                Node::Cond(c) if c.field == Field::Modified && c.hi == i64::MAX && c.lo > i64::MIN => days = Some(((secs(now) - c.lo).max(0) as u64).div_ceil(86_400).max(1) as u32),
-                _ => {}
-            }
-        }
-        (floor, days)
-    }
-
     /// Whether matches are ranked by how well the words fit.
     pub fn ranked(&self, cx: &Cx) -> bool {
         self.words && cx.text == Text::Full

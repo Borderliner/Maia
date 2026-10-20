@@ -1,13 +1,13 @@
 //! Smart folders: saved searches, kept in the user data file and pinned in the sidebar.
-//! Each is a folder to look in and conditions on what is found: part of the name or a
-//! pattern, kinds of file, how recently changed, how big. Opening one runs the search
-//! again, so it is never out of date: a flattened listing of the folder whose walk keeps
-//! only the files that match, streaming in like any other.
+//! Each is a folder to look in and a query in the filter's language (`src/query.rs`),
+//! tested by the same code as the filter. Opening one runs the search again, so it is
+//! never out of date: a flattened listing of the folder whose walk keeps only the files
+//! that match, streaming in like any other.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use egui::{FontId, Id, Sense, pos2, vec2};
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use crate::app::App;
 use crate::fsx::{Entry, Walk};
 use crate::popups::{self as pp, Popup};
-use crate::theme::FileCat;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -23,10 +22,14 @@ pub struct SmartFolder {
     pub id: u64,
     pub name: String,
     pub root: PathBuf,
+    /// What to find, as typed in the filter: `invoice type:pdfs modified<30d`.
+    pub query: String,
+    // The conditions smart folders kept before they kept a query, still read from older
+    // files and searched as the query they amount to (`query_text`). Saving one from the
+    // dialog writes them as its query.
     /// Part of the name, or a pattern with * and ? matched against the whole name.
     pub name_has: String,
-    /// Any of these kinds (`KINDS`); none means every kind. Names, so a kind a later
-    /// version adds can't stop an older one from reading the file.
+    /// Any of these kinds (`KINDS`); none means every kind.
     pub kinds: Vec<String>,
     /// Changed within this many days.
     pub days: Option<u32>,
@@ -86,21 +89,8 @@ pub fn timeline_view(mut v: crate::config::ViewSettings) -> crate::config::ViewS
     v
 }
 
-/// The kinds a smart folder can ask for: (stored name, shown name).
-pub const KINDS: [(&str, &str); 7] = [("pictures", "Pictures"), ("documents", "Documents"), ("pdfs", "PDFs"), ("videos", "Videos"), ("music", "Music"), ("archives", "Archives"), ("code", "Code")];
-
-fn cats(kind: &str) -> &'static [FileCat] {
-    match kind {
-        "pictures" => &[FileCat::Image],
-        "documents" => &[FileCat::Doc, FileCat::Text, FileCat::Sheet, FileCat::Slides, FileCat::Pdf, FileCat::Book],
-        "pdfs" => &[FileCat::Pdf],
-        "videos" => &[FileCat::Video],
-        "music" => &[FileCat::Audio],
-        "archives" => &[FileCat::Archive],
-        "code" => &[FileCat::Code],
-        _ => &[],
-    }
-}
+/// The kinds older smart folders could ask for, by their stored names.
+const KINDS: [&str; 7] = ["pictures", "documents", "pdfs", "videos", "music", "archives", "code"];
 
 /// `*` for any run of characters, `?` for one; both sides already lowercase.
 pub fn glob(pat: &[char], name: &[char]) -> bool {
@@ -125,75 +115,40 @@ pub fn glob(pat: &[char], name: &[char]) -> bool {
     pat[p..].iter().all(|&c| c == '*')
 }
 
-/// A smart folder's conditions, ready to test names and files against.
-pub struct Test {
-    has: Option<String>,
-    pattern: Option<Vec<char>>,
-    cats: Vec<FileCat>,
-    since: Option<SystemTime>,
-    bigger: Option<u64>,
-}
-
 impl SmartFolder {
-    pub fn test(&self, now: SystemTime) -> Test {
-        let n = self.name_has.trim().to_lowercase();
-        let wild = n.contains(['*', '?']);
-        Test {
-            has: (!n.is_empty() && !wild).then(|| n.clone()),
-            pattern: wild.then(|| n.chars().collect()),
-            cats: self.kinds.iter().flat_map(|k| cats(k).iter().copied()).collect(),
-            since: self.days.map(|d| now - Duration::from_secs(d as u64 * 86_400)),
-            bigger: self.bigger,
+    /// The query searched for: its own, after what an older smart folder kept, each as
+    /// the filter would say it.
+    pub fn query_text(&self) -> String {
+        let mut v: Vec<String> = vec![];
+        let has = self.name_has.trim().replace('"', "");
+        if !has.is_empty() {
+            v.push(if has.contains(|c: char| c.is_whitespace() || "|()".contains(c)) { format!("name:\"{has}\"") } else { format!("name:{has}") });
         }
-    }
-
-    /// The conditions in a few words, for the sidebar's tooltip.
-    pub fn summary(&self) -> String {
-        let mut v = vec![pp::home_short(&self.root)];
-        if !self.name_has.trim().is_empty() {
-            v.push(format!("“{}”", self.name_has.trim()));
-        }
-        let kinds: Vec<&str> = KINDS.iter().filter(|k| self.kinds.iter().any(|x| x == k.0)).map(|k| k.1).collect();
+        // A kind a later version added is left out, as this version always ignored it.
+        let kinds: Vec<&str> = self.kinds.iter().map(String::as_str).filter(|k| KINDS.contains(k)).collect();
         if !kinds.is_empty() {
-            v.push(kinds.join(", "));
+            v.push(format!("type:{}", kinds.join(",")));
         }
         if let Some(d) = self.days {
-            v.push(if d == 1 { "modified within a day".into() } else { format!("modified within {d} days") });
+            v.push(format!("modified<{d}d"));
         }
         if let Some(b) = self.bigger {
-            v.push(format!("over {}", crate::fsx::fmt_size(b)));
+            let unit = [(1u64 << 40, "T"), (1 << 30, "G"), (1 << 20, "M"), (1 << 10, "K")].into_iter().find(|u| b >= u.0 && b % u.0 == 0);
+            v.push(unit.map_or_else(|| format!("size>{b}"), |(n, u)| format!("size>{}{u}", b / n)));
         }
-        v.join(" · ")
-    }
-}
-
-impl Test {
-    /// What can be told from the name alone (so most files are never looked at).
-    pub fn name_ok(&self, lname: &str) -> bool {
-        if let Some(h) = &self.has {
-            if !lname.contains(h.as_str()) {
-                return false;
-            }
+        let q = self.query.trim();
+        if !q.is_empty() {
+            // Its alternatives kept together, next to the older conditions.
+            let ors = !v.is_empty() && (q.contains('|') || q.split_whitespace().any(|w| w == "OR"));
+            v.push(if ors { format!("({q})") } else { q.to_string() });
         }
-        if let Some(p) = &self.pattern {
-            if !glob(p, &lname.chars().collect::<Vec<_>>()) {
-                return false;
-            }
-        }
-        if !self.cats.is_empty() {
-            let ext = match lname.rfind('.') {
-                Some(i) if i > 0 => &lname[i + 1..],
-                _ => "",
-            };
-            if !self.cats.contains(&crate::theme::categorize(ext, false, false)) {
-                return false;
-            }
-        }
-        true
+        v.join(" ")
     }
 
-    pub fn ok(&self, e: &Entry) -> bool {
-        !e.is_dir && self.name_ok(e.lname()) && self.since.is_none_or(|s| e.modified.is_some_and(|m| m >= s)) && self.bigger.is_none_or(|b| e.size > b)
+    /// The folder and the query, for the sidebar's tooltip.
+    pub fn summary(&self) -> String {
+        let q = self.query_text();
+        if q.is_empty() { pp::home_short(&self.root) } else { format!("{} · “{q}”", pp::home_short(&self.root)) }
     }
 }
 
@@ -224,7 +179,16 @@ pub fn walk(sf: SmartFolder, ctx: egui::Context) -> Walk {
 /// The search itself: `send` takes each batch and says whether to go on.
 pub fn search(sf: &SmartFolder, send: &mut dyn FnMut(Vec<Entry>) -> bool, cancel: &AtomicBool, truncated: &AtomicBool) {
     use std::os::unix::fs::MetadataExt;
-    let test = sf.test(SystemTime::now());
+    let text = sf.query_text();
+    if text.contains("owner:") || text.contains("user:") {
+        let _ = crate::query::users(true);
+    }
+    let f = crate::query::parse(&text, SystemTime::now());
+    let stats = std::collections::HashMap::new();
+    // First what the name and path tell, so most files are never looked at; tags are
+    // read from the files, this being a worker.
+    let by_name = crate::query::Cx { stats: &stats, text: crate::query::Text::Full, meta: false, read_tags: true };
+    let full = crate::query::Cx { meta: true, ..by_name };
     let root = &sf.root;
     let Ok(dev) = std::fs::metadata(root).map(|m| m.dev()) else { return };
     let rb = root.as_os_str().as_encoded_bytes();
@@ -250,14 +214,19 @@ pub fn search(sf: &SmartFolder, send: &mut dyn FnMut(Vec<Entry>) -> bool, cancel
                 }
                 continue;
             }
-            if !ft.is_file() || !test.name_ok(&name.to_lowercase()) {
+            if !ft.is_file() {
+                continue;
+            }
+            let mut probe = Entry::placeholder(path.clone(), name.clone(), false);
+            probe.rel_at = rel_at;
+            if !f.may(&probe, &by_name) {
                 continue;
             }
             let Some(mut e) = Entry::from_path(path) else { continue };
-            if !test.ok(&e) {
+            e.rel_at = rel_at;
+            if f.score(&e, &full).is_none() {
                 continue;
             }
-            e.rel_at = rel_at;
             batch.push(e);
             total += 1;
             if total >= crate::fsx::WALK_LIMIT {
@@ -278,21 +247,12 @@ pub fn search(sf: &SmartFolder, send: &mut dyn FnMut(Vec<Entry>) -> bool, cancel
     }
 }
 
-/// A smart folder from what a tab's filter is searching for: its folder, its words, and
-/// the size and age conditions the filter holds.
+/// A smart folder from what a tab's filter is searching for: its folder and the whole
+/// filter, named after the words in it.
 pub fn from_filter(folder: &Path, filter: &str) -> SmartFolder {
-    let now = SystemTime::now();
-    let f = crate::query::parse(filter, now);
-    let (bigger, days) = f.floor_and_days(now);
-    let words = f.name.trim().to_string();
-    let name = if words.is_empty() { folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Search".into()) } else { words.clone() };
-    SmartFolder { id: 0, name, root: folder.to_path_buf(), name_has: words, kinds: vec![], days, bigger, tag: String::new() }
-}
-
-/// "10 MB", "1.5G", "500k": bytes.
-pub fn parse_bytes(s: &str) -> Option<u64> {
-    let t: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    crate::query::size(&t).filter(|&n| n >= 0).map(|n| n as u64)
+    let words = crate::query::parse(filter, SystemTime::now()).name.trim().to_string();
+    let name = if words.is_empty() { folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Search".into()) } else { words };
+    SmartFolder { name, root: folder.to_path_buf(), query: filter.trim().to_string(), ..Default::default() }
 }
 
 // ------------------------------------------------------------------ the dialog
@@ -302,10 +262,7 @@ pub struct Edit {
     pub id: Option<u64>,
     pub name: String,
     pub root: String,
-    pub name_has: String,
-    pub kinds: Vec<String>,
-    pub days: String,
-    pub bigger: String,
+    pub query: String,
     focus: bool,
     pub error: Option<String>,
 }
@@ -315,10 +272,7 @@ pub fn edit(sf: &SmartFolder, existing: bool) -> Popup {
         id: existing.then_some(sf.id),
         name: sf.name.clone(),
         root: pp::home_short(&sf.root),
-        name_has: sf.name_has.clone(),
-        kinds: sf.kinds.clone(),
-        days: sf.days.map(|d| d.to_string()).unwrap_or_default(),
-        bigger: sf.bigger.map(crate::fsx::fmt_size).unwrap_or_default(),
+        query: sf.query_text(),
         focus: true,
         error: None,
     })
@@ -335,15 +289,11 @@ impl Edit {
         if !root.is_dir() {
             return Err(format!("There is no folder at {}", self.root.trim()));
         }
-        let days = match self.days.trim() {
-            "" => None,
-            d => Some(d.parse::<u32>().ok().filter(|&n| n > 0).ok_or("Days: a whole number, like 30")?),
-        };
-        let bigger = match self.bigger.trim() {
-            "" => None,
-            b => Some(parse_bytes(b).ok_or("Size: a number and a unit, like 10 MB")?),
-        };
-        Ok(SmartFolder { id: self.id.unwrap_or(0), name, root, name_has: self.name_has.trim().to_string(), kinds: self.kinds.clone(), days, bigger, tag: String::new() })
+        let query = self.query.trim().to_string();
+        if let Some(&(a, b)) = crate::query::parse(&query, SystemTime::now()).bad.first() {
+            return Err(format!("Find: {} is not a regular expression", &query[a..b]));
+        }
+        Ok(SmartFolder { id: self.id.unwrap_or(0), name, root, query, ..Default::default() })
     }
 }
 
@@ -392,41 +342,17 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut Edit) -> bool {
             edited |= changed(&field(ui, &mut st.root, "smart root", "~/Documents", wide));
         });
         ui.horizontal(|ui| {
-            label(ui, "File name");
-            edited |= changed(&field(ui, &mut st.name_has, "smart words", "contains, or a pattern like IMG_*.jpg", wide));
-        });
-        // The kinds wrap under each other, not under the labels, when the row is short.
-        ui.horizontal_top(|ui| {
-            // As tall as a wrapped row, so the word sits level with the first of them.
-            let h = ui.spacing().interact_size.y.max(22.0);
-            let (r, _) = ui.allocate_exact_size(vec2(label_w, h), Sense::hover());
-            ui.painter().text(pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, "Kind", FontId::proportional(fs - 0.5), pal.text_dim);
-            ui.vertical(|ui| {
-                ui.set_width(wide);
-                ui.horizontal_wrapped(|ui| {
-                    for (id, shown) in KINDS {
-                        let on = st.kinds.iter().any(|x| x == id);
-                        if crate::devtools::chip(ui, shown, on, "smart kind", shown, &pal, false) {
-                            if on {
-                                st.kinds.retain(|x| x != id);
-                            } else {
-                                st.kinds.push(id.to_string());
-                            }
-                            edited = true;
-                        }
-                    }
-                });
-            });
-        });
-        ui.horizontal(|ui| {
-            label(ui, "Modified");
-            ui.label(egui::RichText::new("within").size(small).color(pal.text_dim));
-            edited |= changed(&field(ui, &mut st.days, "smart days", "", (fs * 3.0).round()));
-            ui.label(egui::RichText::new("days").size(small).color(pal.text_dim));
-        });
-        ui.horizontal(|ui| {
-            label(ui, "Bigger than");
-            edited |= changed(&field(ui, &mut st.bigger, "smart size", "10 MB", (fs * 6.0).round()));
+            label(ui, "Find");
+            // Marked as the filter marks it, conditions in the accent.
+            let (text, accent, danger) = (pal.text, pal.accent, pal.danger);
+            let mut marks = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+                let mut job = crate::query::job(buf.as_str(), egui::TextStyle::Body.resolve(ui.style()), text, accent, danger);
+                job.wrap.max_width = wrap;
+                ui.fonts_mut(|f| f.layout_job(job))
+            };
+            let r = ui.add(egui::TextEdit::singleline(&mut st.query).id(Id::new(("smart folder", "smart query"))).hint_text(egui::RichText::new("invoice type:pdfs modified<30d").color(pal.text_dim)).desired_width(wide).margin(egui::Margin::symmetric(6, 3)).layouter(&mut marks));
+            crate::ui::note_control(ui, r.rect, "smart query");
+            edited |= changed(&r);
         });
         if edited {
             st.error = None;
