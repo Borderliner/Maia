@@ -210,7 +210,7 @@ pub enum Popup {
     /// One stash: apply, pop, drop.
     Stash { panel: u64, root: PathBuf, stash: crate::gitwork::Stash, anchor: Pos2, sel: usize },
     /// One branch of the branch menu: switch to it (or, a remote one, check it out),
-    /// compare it with the branch HEAD is on (`into`), rename, delete.
+    /// compare it with the branch HEAD is on (`into`) or merge it in, rename, delete.
     Branch { root: PathBuf, branch: crate::gitwork::Branch, anchor: Pos2, sel: usize, panel: u64, into: String, remote: bool },
     /// A commit in the history.
     GitCommit(CommitMenu),
@@ -6287,7 +6287,8 @@ fn history_in(app: &mut App, panel: u64) -> Option<&mut crate::gitlog::History> 
 }
 
 /// One branch's menu (the branch menu's right click, or Shift+F10): switch to it or, a
-/// remote one, check it out; compare it with the branch HEAD is on; rename it, delete it. The branch HEAD is on can only be renamed.
+/// remote one, check it out; compare it with the branch HEAD is on, or merge it in;
+/// rename it, delete it. The branch HEAD is on can only be renamed.
 fn branch_actions(app: &mut App, ctx: &egui::Context, root: &Path, b: &crate::gitwork::Branch, anchor: Pos2, sel: &mut usize, (panel, into, remote): (u64, &str, bool)) -> bool {
     let pal = app.pal;
     let k = take_keys(ctx);
@@ -6299,13 +6300,14 @@ fn branch_actions(app: &mut App, ctx: &egui::Context, root: &Path, b: &crate::gi
         Switch,
         Track,
         Compare,
+        Merge,
         Rename,
         Delete,
     }
     let items: &[It] = match (remote, b.current) {
-        (true, _) => &[It::Track, It::Compare],
+        (true, _) => &[It::Track, It::Compare, It::Merge],
         (false, true) => &[It::Rename],
-        (false, false) => &[It::Switch, It::Compare, It::Rename, It::Delete],
+        (false, false) => &[It::Switch, It::Compare, It::Merge, It::Rename, It::Delete],
     };
     if *sel == usize::MAX && (k.up || k.down) {
         *sel = 0;
@@ -6328,6 +6330,7 @@ fn branch_actions(app: &mut App, ctx: &egui::Context, root: &Path, b: &crate::gi
                 It::Switch => "Switch to it".into(),
                 It::Track => "Check out".into(),
                 It::Compare => format!("Compare with {into}"),
+                It::Merge => format!("Merge into {into}"),
                 It::Rename => "Rename…".into(),
                 It::Delete => "Delete".into(),
             };
@@ -6335,6 +6338,7 @@ fn branch_actions(app: &mut App, ctx: &egui::Context, root: &Path, b: &crate::gi
             let resp = match it {
                 It::Track => resp.on_hover_text("A local branch of it, tracking it"),
                 It::Compare => resp.on_hover_text(format!("The commits each has that the other doesn't, and what {} changes since they split", b.name)),
+                It::Merge => resp.on_hover_text("A fast-forward when it can be, else a merge commit. Reset to the commit it was at takes it back."),
                 _ => resp,
             };
             if resp.clicked() {
@@ -6353,6 +6357,7 @@ fn branch_actions(app: &mut App, ctx: &egui::Context, root: &Path, b: &crate::gi
                 h.compare([into.to_string(), name.clone()], ["HEAD".into(), name], false);
             }
         }
+        It::Merge => crate::gitwork::start(&app.ctx, root, crate::gitwork::Op::Merge(name.clone()), format!("Couldn't merge {name}")),
         It::Rename => rename_branch(app, root, name),
         It::Delete => delete_branch(app, root, name),
     }

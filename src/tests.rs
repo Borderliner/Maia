@@ -11066,3 +11066,127 @@ fn git_compare_branches_and_commits() {
     assert_eq!((heading(0, "x"), heading(1, "main"), heading(1200, "topic")), ("Nothing only on x".to_string(), "1 commit only on main".to_string(), "1,200 commits only on topic".to_string()));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Merging a branch into the one HEAD is on: a fast-forward, nothing to merge, a merge
+/// commit with git's own message, git's refusals in plain words (changes or untracked
+/// files in the way, a name it doesn't know, no history in common, a merge still going),
+/// conflicts given up on and then settled and finished, `merge.ff` honoured, and the
+/// merge taken back by a reset to the commit it says it was at.
+#[test]
+fn git_merge_into_the_current_branch() {
+    use crate::gitsync::{CONFLICTS, Doing, Side, doing};
+    use crate::gitwork::{Op, run};
+    if !crate::media::have("git") {
+        return;
+    }
+    let d = tmpdir("gitmerge");
+    work_repo(&d);
+    git(&d, &["config", "merge.ff", "true"]);
+    let commit = |day: u32, file: &str, text: &str, msg: &str| {
+        touch(&d.join(file), text);
+        git_on(&d, day, &["add", "-A"]);
+        git_on(&d, day, &["commit", "-qm", msg]);
+    };
+    let rev = |r: &str| git_said(&d, &["rev-parse", r]);
+    let short = |h: &str| h[..7].to_string();
+    let merge = |b: &str| run(&d, &Op::Merge(b.into()));
+    commit(1, "notes.txt", "one\ntwo\nthree\n", "Start");
+    let start = rev("HEAD");
+    git(&d, &["switch", "-qc", "topic"]);
+    commit(2, "a.txt", "a\n", "Add a");
+    git(&d, &["switch", "-q", "main"]);
+    assert_eq!(merge("topic").unwrap(), format!("Fast-forwarded main to topic · it was at {}", short(&start)));
+    assert_eq!(rev("HEAD"), rev("topic"));
+    assert_eq!(merge("topic").unwrap(), "main already has everything on topic");
+    // Both moved on: a merge commit, git's message, no editor.
+    git(&d, &["switch", "-q", "topic"]);
+    commit(3, "b.txt", "b\n", "Add b");
+    git(&d, &["switch", "-q", "main"]);
+    commit(3, "c.txt", "c\n", "Add c");
+    let before = rev("HEAD");
+    assert_eq!(merge("topic").unwrap(), format!("Merged topic into main · it was at {}", short(&before)));
+    assert_eq!(git_said(&d, &["log", "-1", "--format=%P"]).split_whitespace().count(), 2);
+    assert_eq!(git_said(&d, &["log", "-1", "--format=%s"]), "Merge branch 'topic'");
+    assert!(d.join("b.txt").exists() && d.join("c.txt").exists());
+    // Taken back: the reset the commit menu offers, to the commit it was at.
+    run(&d, &Op::Reset { to: before.clone(), hard: true }).unwrap();
+    assert_eq!((rev("HEAD"), d.join("b.txt").exists()), (before.clone(), false));
+    // Refused: a change of its own in the way, then a file git doesn't track.
+    git(&d, &["switch", "-q", "topic"]);
+    commit(4, "notes.txt", "one\ntwo from topic\nthree\n", "Topic's two");
+    commit(4, "new.txt", "new\n", "Topic's new file");
+    git(&d, &["switch", "-q", "main"]);
+    touch(&d.join("notes.txt"), "one\ntwo, not committed\nthree\n");
+    assert_eq!(merge("topic").unwrap_err(), "Your uncommitted changes to notes.txt would be overwritten by the merge. Commit or stash them first.");
+    assert_eq!((doing(&d), std::fs::read_to_string(d.join("notes.txt")).unwrap(), rev("HEAD")), (None, "one\ntwo, not committed\nthree\n".to_string(), before.clone()));
+    git(&d, &["checkout", "--", "notes.txt"]);
+    touch(&d.join("new.txt"), "mine\n");
+    assert_eq!(merge("topic").unwrap_err(), "The merge would overwrite new.txt, which git doesn't track. Move them away or commit them first.");
+    std::fs::remove_file(d.join("new.txt")).unwrap();
+    assert_eq!(merge("nope").unwrap_err(), "git doesn't know nope.");
+    // Conflicts: given up on, everything as before.
+    commit(5, "notes.txt", "one\ntwo from main\nthree\n", "Main's two");
+    let ours = rev("HEAD");
+    assert_eq!(merge("topic").unwrap_err(), CONFLICTS);
+    assert_eq!((doing(&d), work_of(&d).doing), (Some(Doing::Merge), Some(Doing::Merge)));
+    assert!(Op::Merge("topic".into()).moved(&Err(CONFLICTS.into())), "the history reads its new state");
+    assert_eq!(merge("topic").unwrap_err(), "Merging is still in progress: continue or abort it on the Changes page first.");
+    assert_eq!(run(&d, &Op::Continue).unwrap_err(), "Some files are still in conflict.");
+    assert_eq!(run(&d, &Op::Abort).unwrap(), "Stopped merging and went back");
+    assert_eq!((doing(&d), rev("HEAD"), std::fs::read_to_string(d.join("notes.txt")).unwrap()), (None, ours.clone(), "one\ntwo from main\nthree\n".to_string()));
+    // Again, settled with theirs and finished: the commit has git's message.
+    assert_eq!(merge("topic").unwrap_err(), CONFLICTS);
+    assert!(crate::gitsync::conflicts(&std::fs::read_to_string(d.join("notes.txt")).unwrap()).len() == 1);
+    run(&d, &Op::Settle { path: "notes.txt".into(), at: 0, side: Side::Theirs }).unwrap();
+    assert_eq!(run(&d, &Op::Continue).unwrap(), "Finished the merge");
+    assert_eq!((doing(&d), git_said(&d, &["log", "-1", "--format=%s"])), (None, "Merge branch 'topic'".to_string()));
+    assert_eq!(std::fs::read_to_string(d.join("notes.txt")).unwrap(), "one\ntwo from topic\nthree\n");
+    assert!(d.join("new.txt").exists());
+    // git's own setting asks for a merge commit even when a fast-forward would do.
+    git(&d, &["switch", "-qc", "later"]);
+    commit(6, "d.txt", "d\n", "Add d");
+    git(&d, &["switch", "-q", "main"]);
+    git(&d, &["config", "merge.ff", "false"]);
+    let at = rev("HEAD");
+    assert_eq!(merge("later").unwrap(), format!("Merged later into main · it was at {}", short(&at)));
+    assert_eq!(git_said(&d, &["log", "-1", "--format=%P"]), format!("{at} {}", rev("later")));
+    // Nothing in common.
+    git(&d, &["switch", "-q", "--orphan", "lone"]);
+    commit(7, "lone.txt", "alone\n", "Alone");
+    git(&d, &["switch", "-q", "main"]);
+    assert_eq!(merge("lone").unwrap_err(), "lone and main have no history in common, so git won't merge them.");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A remote branch merged in: fetched from a real bare repository, fast-forwarded to,
+/// then merged with a commit once both sides have moved on.
+#[test]
+fn git_merge_a_remote_branch() {
+    use crate::gitwork::{Op, run};
+    if !crate::media::have("git") {
+        return;
+    }
+    let (d, a, b) = sync_fixture("gitmergeremote");
+    git(&a, &["switch", "-qc", "topic"]);
+    touch(&a.join("t.txt"), "topic\n");
+    git(&a, &["add", "-A"]);
+    git(&a, &["commit", "-qm", "Topic work"]);
+    git(&a, &["push", "-q", "-u", "origin", "topic"]);
+    git(&b, &["config", "merge.ff", "true"]);
+    run(&b, &Op::Fetch).unwrap();
+    let was = git_said(&b, &["rev-parse", "--short=7", "HEAD"]);
+    assert_eq!(run(&b, &Op::Merge("origin/topic".into())).unwrap(), format!("Fast-forwarded main to origin/topic · it was at {was}"));
+    assert!(b.join("t.txt").exists());
+    touch(&a.join("t2.txt"), "more\n");
+    git(&a, &["add", "-A"]);
+    git(&a, &["commit", "-qm", "More topic work"]);
+    git(&a, &["push", "-q"]);
+    touch(&b.join("b.txt"), "b\n");
+    git(&b, &["add", "-A"]);
+    git(&b, &["commit", "-qm", "B's own"]);
+    run(&b, &Op::Fetch).unwrap();
+    let was = git_said(&b, &["rev-parse", "--short=7", "HEAD"]);
+    assert_eq!(run(&b, &Op::Merge("origin/topic".into())).unwrap(), format!("Merged origin/topic into main · it was at {was}"));
+    assert_eq!(git_said(&b, &["log", "-1", "--format=%s"]), "Merge remote-tracking branch 'origin/topic'");
+    let _ = std::fs::remove_dir_all(&d);
+}

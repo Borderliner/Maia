@@ -1102,7 +1102,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(170) {
+    match rng.below(171) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2614,6 +2614,24 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                     _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowDown", "Enter", "Home", "End", "Escape", "CloseBracket"]))),
                 }
                 s.idle(3);
+            }
+        }
+        170 => {
+            into_repo(s, rng);
+            // A branch merged in from its own menu: a fast-forward, nothing to merge, a
+            // refusal or conflicts, each answered.
+            if crate::gitstatus::repo_for(&s.tab().path).is_none() || !branch_own_menu(s, rng) {
+                return;
+            }
+            pick_starting(s, "Merge into ");
+            s.settle();
+            match &s.app.popup {
+                Popup::Confirm { .. } | Popup::Notice { .. } => s.act(rng.pick(&["key Enter", "key Escape"])),
+                _ if rng.below(2) == 0 => click_control_at(s, rng.pick(&["conflict abort", "keep theirs", "keep ours", "conflict continue"])),
+                _ => s.act("key Escape"),
+            }
+            if matches!(s.app.popup, Popup::Confirm { .. }) {
+                s.act(rng.pick(&["key Enter", "key Escape"]));
             }
         }
         _ => {
@@ -15044,7 +15062,7 @@ mod journeys {
         s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
         assert!(matches!(s.app.popup, Popup::Branch { .. }), "the branch's menu");
         s.idle(12);
-        for t in ["Switch to it", "Compare with main", "Rename…", "Delete"] {
+        for t in ["Switch to it", "Compare with main", "Merge into main", "Rename…", "Delete"] {
             assert!(some_text(&s, t), "{t:?} in the menu");
         }
         s.shot("branch-actions-compare");
@@ -15144,5 +15162,118 @@ mod journeys {
         look(&mut s, "comparison light");
         s.shot("compare-light");
         report("gitcompare", &s);
+    }
+
+    /// Merging from the branch menu: a branch fast-forwarded to, git's refusal in plain
+    /// words while a change is in the way, a merge that stops at a conflict settled on the
+    /// Changes page and finished with git's message, one given up on with Abort, and a
+    /// remote branch merged with a merge commit.
+    #[test]
+    fn git_merge_branches() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let home = fixture("gitmerge");
+        let repo = home.join("Code/merging");
+        crate::tests::branches_fixture(&repo);
+        let g = |args: &[&str]| crate::tests::git(&repo, args);
+        crate::tests::work_repo(&repo);
+        g(&["config", "merge.ff", "true"]);
+        g(&["switch", "-qc", "quick"]);
+        std::fs::write(repo.join("quick.txt"), "quick\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "A quick fix"]);
+        g(&["switch", "-q", "main"]);
+        let mut s = Sim::new(&repo, vec2(1280.0, 800.0));
+        wait_until(&mut s, "branch read", 10, |s| branch_now(s) == "main");
+        s.idle(2);
+        open_history(&mut s);
+        wait_until(&mut s, "history", 20, |s| history(s).is_some_and(|h| h.1 && h.0 == 6));
+        let menu_pick = |s: &mut Sim, branch: &str, item: &str| {
+            open_branches(s);
+            let r = s.text_rect(branch);
+            s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+            s.idle(12);
+            s.click_text(item);
+        };
+        let was = git_out(&repo, &["rev-parse", "--short=7", "HEAD"]);
+        menu_pick(&mut s, "quick", "Merge into main");
+        wait_until(&mut s, "fast-forwarded", 20, |s| toast_is(s, &format!("Fast-forwarded main to quick · it was at {was}")));
+        assert_eq!(git_out(&repo, &["rev-parse", "HEAD"]), git_out(&repo, &["rev-parse", "quick"]));
+        wait_until(&mut s, "the graph read again", 20, |s| history(s).is_some_and(|h| h.1 && h.0 == 6) && some_text(s, "quick"));
+        // A change of its own in the way: git's refusal, plainly.
+        std::fs::write(repo.join("notes.txt"), "one\ntwo, not committed\nthree\n").unwrap();
+        crate::gitstatus::rescan(&repo);
+        menu_pick(&mut s, "topic", "Merge into main");
+        wait_until(&mut s, "refused", 20, |s| matches!(s.app.popup, Popup::Notice { .. }));
+        s.idle(12);
+        assert!(some_text(&s, "Couldn't merge topic") && some_text(&s, "Your uncommitted changes to notes.txt would be overwritten by the merge. Commit or stash them first."));
+        look(&mut s, "merge refused");
+        s.shot("merge-refused");
+        s.act("key Enter");
+        assert!(!s.popup_open());
+        // Committed on main as well: the merge stops at the conflict.
+        std::fs::write(repo.join("notes.txt"), "one\ntwo on main\nthree\n").unwrap();
+        g(&["commit", "-qam", "Main's own two"]);
+        crate::gitstatus::rescan(&repo);
+        menu_pick(&mut s, "topic", "Merge into main");
+        wait_until(&mut s, "the Changes page", 20, |s| git_hist(s).changes.open && changes(s).unstaged.contains(&"notes.txt".to_string()));
+        assert_eq!(crate::gitsync::doing(&repo), Some(crate::gitsync::Doing::Merge));
+        s.idle(3);
+        see(&mut s, "Merging · 1 file in conflict");
+        // Given up on: as before.
+        click_control(&mut s, "conflict abort");
+        assert!(matches!(s.app.popup, Popup::Confirm { .. }), "Abort asks first");
+        s.idle(12);
+        look(&mut s, "abort the merge");
+        s.act("key Enter");
+        wait_until(&mut s, "aborted", 20, |s| crate::gitsync::doing(&repo).is_none() && !changes(s).busy);
+        assert_eq!(std::fs::read_to_string(repo.join("notes.txt")).unwrap(), "one\ntwo on main\nthree\n");
+        // Again, settled and finished.
+        s.act("key Escape");
+        menu_pick(&mut s, "topic", "Merge into main");
+        wait_until(&mut s, "the Changes page", 20, |s| git_hist(s).changes.open && changes(s).unstaged.contains(&"notes.txt".to_string()));
+        s.idle(3);
+        click_in_inspector(&mut s, "notes.txt", "click");
+        wait_until(&mut s, "the conflict shown", 10, |s| s.texts.iter().any(|(_, t)| t == "Keep both"));
+        s.idle(3);
+        for t in ["two on main", "TWO on topic"] {
+            assert!(some_text(&s, t), "{t:?} shown");
+        }
+        look(&mut s, "merge conflict");
+        s.shot("merge-conflict");
+        click_control(&mut s, "keep theirs");
+        wait_until(&mut s, "settled", 20, |s| changes(s).staged.contains(&"notes.txt".to_string()) && !changes(s).busy);
+        click_control(&mut s, "conflict continue");
+        wait_until(&mut s, "merged", 20, |s| matches!(changes(s).said, Some(Ok(ref m)) if m == "Finished the merge"));
+        assert_eq!(git_out(&repo, &["log", "-1", "--format=%s"]), "Merge branch 'topic'");
+        assert_eq!(std::fs::read_to_string(repo.join("notes.txt")).unwrap(), "one\nTWO on topic\nthree\n");
+        s.act("key Escape");
+        // A remote branch nothing tracks: its own menu, merged with a commit.
+        std::fs::write(repo.join("side.txt"), "side\n").unwrap();
+        g(&["switch", "-qc", "side", "main~2"]);
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "Work on the side"]);
+        g(&["update-ref", "refs/remotes/origin/side", "HEAD"]);
+        g(&["switch", "-q", "main"]);
+        g(&["branch", "-D", "side"]);
+        crate::gitstatus::rescan(&repo);
+        let was = git_out(&repo, &["rev-parse", "--short=7", "HEAD"]);
+        open_branches(&mut s);
+        let r = s.text_rect("origin/side");
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(12);
+        for t in ["Remote branch", "Check out", "Compare with main", "Merge into main"] {
+            assert!(some_text(&s, t), "{t:?} in the menu");
+        }
+        look(&mut s, "remote branch menu");
+        s.shot("remote-branch-menu");
+        s.click_text("Merge into main");
+        wait_until(&mut s, "merged", 20, |s| toast_is(s, &format!("Merged origin/side into main · it was at {was}")));
+        assert_eq!(git_out(&repo, &["log", "-1", "--format=%s"]), "Merge remote-tracking branch 'origin/side'");
+        wait_until(&mut s, "the graph read again", 20, |s| history(s).is_some_and(|h| h.1) && some_text(s, "Merge remote-tracking branch 'origin/side'"));
+        look(&mut s, "merged graph");
+        s.shot("merged-graph");
+        report("gitmerge", &s);
     }
 }
