@@ -202,7 +202,7 @@ commands! {
     FindInTerminal, "find_in_terminal", Panels, "Find in Terminal", "Search what the shell shown wrote, scrollback included: Enter for the next match, Shift+Enter for the one before. Ctrl+Shift+F in the terminal.", [];
 
     ToggleFlatten, "toggle_flatten", View, "Toggle Expand Folder", "Show every file under this folder in one flat, searchable list.", ["Ctrl+E"];
-    FocusFilter, "focus_filter", View, "Focus Filter", "Put the cursor in the filter box.", ["Ctrl+F"];
+    FocusFilter, "focus_filter", View, "Focus Filter", "Put the cursor in the filter box. It also takes size>10M, modified<7d, type:pictures, ext:pdf, owner:root, /regex/, a | b and -word.", ["Ctrl+F"];
     MeaningSearch, "search_meaning", View, "Search Everywhere", "Find files and folders in your home folder by name, and by what they are about with search by meaning on.", ["Ctrl+K"];
     ContentSearch, "search_contents", View, "Search File Contents", "Switch the filter between file names and the text inside files.", ["Ctrl+Shift+F"];
     SaveSmart, "save_smart_folder", View, "Save As Smart Folder…", "Keep this folder's search in the sidebar, searched again each time it opens.", [];

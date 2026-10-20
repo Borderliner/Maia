@@ -62,9 +62,12 @@ places), `udisksctl` (drives), `pkexec` (administrator retries), `sqlite3`, TeX
 maia [PATH...]
 ```
 
-Start typing to filter the folder you are in; the filter also takes conditions such as
-`size>100M`, `modified<7d` or `tag:red`. Every command is in the palette, Ctrl+Shift+P,
-with its hotkey, and every hotkey can be changed there. Some to start with:
+Start typing to filter the folder you are in. The filter also takes conditions:
+`size>100M`, `modified<7d` (and `created`, `accessed`), `tag:red`, `type:pictures`,
+`ext:jpg,png`, `owner:root`, `*.rs`, `/^IMG_\d+/`, a `"quoted phrase"`. `a | b` (or
+`OR`) is either, `-draft` (or `NOT`) leaves out, and parentheses group. Every command
+is in the palette, Ctrl+Shift+P, with its hotkey, and every hotkey can be changed
+there. Some to start with:
 
 | Action | Keys |
 |---|---|

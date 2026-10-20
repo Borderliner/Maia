@@ -1191,7 +1191,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
         104 => {
             // Size, date and tag conditions in the filter, alone or with a name.
             s.act("key ctrl+f");
-            s.act(&format!("text {}", rng.pick(&["size>1k", "modified<7d", "tag:red", "size<10 doc", "created:today", "date>2026-01", "size>huge", "tag:"])));
+            s.act(&format!("text {}", rng.pick(&["size>1k", "modified<7d", "tag:red", "size<10 doc", "created:today", "date>2026-01", "size>huge", "tag:", "ext:png,md | type:pictures", "-doc a", "report !draft", "NOT a", "a OR doc", "/^re/", "/(/", "re:^[a-c]", "*.md", "name:IMG_*", "\"budget 2026\"", "type:folder -e", "(size>1k | tag:red) -ext:txt", "owner:root", "owner:65534", "accessed<1d", "(", "a |", "-", "kind:code,music"])));
         }
         105 => {
             // Tag what is under a random right-click, through the menu's search.
@@ -5529,6 +5529,115 @@ mod journeys {
         s.settle();
         assert!(s.tab().filter.is_empty() && names(&s).len() > 3);
         report("filterq", &s);
+    }
+
+    /// The filter's language typed in: either, not, kinds, endings, patterns, owners and
+    /// groups, in every view, flattened over 45,000 files, and a broken pattern.
+    #[test]
+    fn filter_language() {
+        if !sandboxed() {
+            return;
+        }
+        use std::os::unix::fs::MetadataExt;
+        let home = fixture("filterlang");
+        let d = home.join("Documents");
+        let now = std::time::SystemTime::now();
+        let day = std::time::Duration::from_secs(86_400);
+        for (name, n, age) in [("draft report.md", 900u64, 1u64), ("IMG_0001.jpg", 2 << 20, 3), ("IMG_0002.png", 300 << 10, 3), ("old scan.pdf", 5 << 20, 400)] {
+            let f = std::fs::File::create(d.join(name)).unwrap();
+            f.set_len(n).unwrap();
+            f.set_modified(now - day * age as u32).unwrap();
+        }
+        // A big tree for the flattened searches: names of four kinds in 45 folders (the
+        // fixture's own Big folder has more).
+        let big = home.join("Big");
+        for k in 0..45 {
+            let dir = big.join(format!("part {k:02}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            for i in 0..1000 {
+                let name = match i % 4 {
+                    0 => format!("img_{k}_{i}.jpg"),
+                    1 => format!("report {i}.pdf"),
+                    2 => format!("notes-{i}.txt"),
+                    _ => format!("main{i}.rs"),
+                };
+                std::fs::File::create(dir.join(name)).unwrap();
+            }
+        }
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        let names = |s: &Sim| -> Vec<String> {
+            let t = s.tab();
+            let mut v: Vec<String> = t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect();
+            v.sort();
+            v
+        };
+        let typed = |s: &mut Sim, q: &str| {
+            s.act("key ctrl+a");
+            s.act(&format!("text {q}"));
+            s.settle();
+        };
+        s.act("key ctrl+f");
+        typed(&mut s, "ext:pdf | type:pictures");
+        assert_eq!(names(&s), ["IMG_0001.jpg", "IMG_0002.png", "old scan.pdf"]);
+        assert!(s.texts.iter().any(|(_, t)| t == "ext:pdf | type:pictures"), "the query stays in the field");
+        look(&mut s, "either");
+        s.shot("filter-either");
+        for v in [ViewTree, ViewList, ViewMedium, ViewLarge, ViewDetails] {
+            s.cmd(v);
+            s.settle();
+            assert_eq!(names(&s).len(), 3, "{v:?}");
+            look(&mut s, &format!("either {v:?}"));
+        }
+        // Not, with a word and with a condition; a hyphen inside a name is the name's.
+        typed(&mut s, "report -draft");
+        assert_eq!(names(&s), ["report.md"]);
+        typed(&mut s, "type:documents !ext:md,txt");
+        assert_eq!(names(&s), ["budget 2026.csv", "old scan.pdf"]);
+        typed(&mut s, "résumé – final");
+        assert_eq!(names(&s), ["résumé – final (v3).txt"]);
+        // Patterns, globs and a group.
+        typed(&mut s, r"/^img_\d+\.png$/");
+        assert_eq!(names(&s), ["IMG_0002.png"]);
+        typed(&mut s, "*.jpg | name:scan");
+        assert_eq!(names(&s), ["IMG_0001.jpg", "old scan.pdf"]);
+        typed(&mut s, "(type:pictures | ext:pdf) size>1M modified<1y");
+        assert_eq!(names(&s), ["IMG_0001.jpg"]);
+        look(&mut s, "a group");
+        // The owner by name: the users are read off the frame, then the list follows.
+        let uid = std::fs::metadata(d.join("notes.txt")).unwrap().uid();
+        let who = crate::perms::read_ids("/etc/passwd").into_iter().find(|u| u.0 == uid).map_or_else(|| uid.to_string(), |u| u.1);
+        typed(&mut s, &format!("owner:{who} ext:pdf"));
+        wait_until(&mut s, "the owner's files", 10, |s| names(s) == ["old scan.pdf"]);
+        typed(&mut s, "owner:65534");
+        assert!(names(&s).is_empty());
+        // A broken pattern: nothing matches, and the empty list says what was typed.
+        typed(&mut s, "/img_(/");
+        assert!(names(&s).is_empty());
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with("Nothing matches")));
+        look(&mut s, "broken pattern");
+        s.shot("filter-broken-pattern");
+        // Flattened over the big tree: a complex query keeps every frame quick.
+        s.act("key Escape");
+        go(&mut s, &big);
+        s.cmd(ToggleFlatten);
+        wait_until(&mut s, "the big walk", 20, |s| !s.tab().is_loading() && s.tab().entries.len() >= 45_000);
+        let all = s.tab().view.len();
+        s.act("key ctrl+f");
+        typed(&mut s, r#"(img | report) -"part 0" (ext:jpg | re:"^report 1\d\.") -size>1k"#);
+        let n = names(&s);
+        assert!(!n.is_empty() && n.iter().all(|x| x.ends_with(".jpg") || x.starts_with("report 1")), "{:?}", &n[..n.len().min(5)]);
+        assert!(s.tab().view.iter().all(|&i| !s.tab().entries[i as usize].rel().unwrap_or_default().contains("part 0")));
+        look(&mut s, "complex query flattened");
+        s.shot("filter-complex-flattened");
+        // OR binds loosest; "-main1" leaves out main1.rs, main103.rs…, "notes-99" is a word.
+        typed(&mut s, "main -main1 ext:rs | notes-99");
+        let n = names(&s);
+        assert_eq!(n.iter().filter(|x| x.ends_with(".rs")).count(), 45 * (250 - 28));
+        assert!(n.iter().any(|x| x.starts_with("notes-")) && n.iter().all(|x| x.ends_with(".rs") || x.starts_with("notes-") && x.matches('9').count() >= 2));
+        s.act("key Escape");
+        s.settle();
+        assert!(s.tab().filter.is_empty() && s.tab().view.len() == all);
+        report("filter language", &s);
     }
 
     /// Properties of a file: work out its SHA-256 and copy it; paste a checksum that is

@@ -8,7 +8,6 @@ use std::time::SystemTime;
 
 use crate::config::{GroupBy, SaveScope, SortKey, ViewSettings};
 use crate::fsx::{self, DEAD, Entry, Listing, Walk};
-use crate::fuzzy;
 use crate::rename::Rename;
 use crate::stats::DirStats;
 
@@ -980,8 +979,15 @@ impl Tab {
         self.stream_dirty = false;
         self.built_tree = self.tree_active();
         let walking = self.walk.as_ref().map(|w| !w.done.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(false);
+        // Parsed once per rebuild, so ages count from now; the rows only run the result.
         let fq = crate::query::parse(&self.filter, std::time::SystemTime::now());
-        let q = fuzzy::Query::new(if content.is_some() { "" } else { &fq.name });
+        let fcx = crate::query::Cx::view(c.stats, if content.is_some() { crate::query::Text::Off } else { crate::query::Text::Full });
+        let ranked = fq.ranked(&fcx);
+        if fq.pending {
+            // An owner's name waits for the list of users: look again shortly.
+            self.stream_dirty = true;
+            self.ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        }
         let only: HashSet<String> = self.settings.only_types.iter().cloned().collect();
         let (show_folders, show_files) = (self.settings.show_folders, self.settings.show_files);
         // A flattened walk lists every folder on the way; a tag's view lists those tagged.
@@ -1011,9 +1017,6 @@ impl Tab {
             if content.is_some_and(|h| e.is_dir || !h.contains_key(&e.path)) {
                 return false;
             }
-            if fq.has_conds() && !fq.ok(e, c.stats) {
-                return false;
-            }
             if pick.as_ref().is_some_and(|a| !a.ok(e)) {
                 return false;
             }
@@ -1026,10 +1029,11 @@ impl Tab {
         // Fuzzy score of each entry in `top` (same order), when filtering.
         let mut scores: Vec<i32> = vec![];
         let tree_view = self.tree_active();
-        let tree = tree_view && q.is_empty() && only.is_empty() && content.is_none() && !fq.has_conds() && pick.is_none();
+        let tree = tree_view && fq.is_empty() && only.is_empty() && content.is_none() && pick.is_none();
         self.dimmed.clear();
         if tree_view && !tree {
-            self.rebuild_tree_filtered(c, &q, &hidden_ok, &row_ok);
+            let ncx = crate::query::Cx::view(c.stats, crate::query::Text::Name);
+            self.rebuild_tree_filtered(c, &|e| fq.score(e, &ncx).is_some(), &hidden_ok, &row_ok);
             return;
         }
         // Big flat lists (a flattened folder): filter and score in parallel chunks, then
@@ -1037,7 +1041,7 @@ impl Tab {
         if !tree && self.entries.len() >= 40_000 {
             let threads = std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1).clamp(1, 8);
             let chunk = self.entries.len().div_ceil(threads);
-            let (hidden_ok, row_ok, q) = (&hidden_ok, &row_ok, &q);
+            let (hidden_ok, row_ok, fq, fcx) = (&hidden_ok, &row_ok, &fq, &fcx);
             let parts: Vec<(Vec<u32>, Vec<i32>, usize, usize, usize)> = std::thread::scope(|sc| {
                 let hs: Vec<_> = self
                     .entries
@@ -1059,13 +1063,10 @@ impl Tab {
                                 if !row_ok(e) {
                                     continue;
                                 }
-                                if !q.is_empty() {
-                                    let name_score = fuzzy::score(q, e.lname()).map(|s| s + 40);
-                                    let path_score = e.rel().as_ref().and_then(|r| fuzzy::score_ci(q, r));
-                                    match name_score.max(path_score) {
-                                        Some(sc) => scores.push(sc),
-                                        None => continue,
-                                    }
+                                match fq.score(e, fcx) {
+                                    Some(sc) if ranked => scores.push(sc),
+                                    Some(_) => {}
+                                    None => continue,
                                 }
                                 top.push(i);
                             }
@@ -1101,14 +1102,10 @@ impl Tab {
             if !row_ok(e) {
                 continue;
             }
-            if !q.is_empty() {
-                // Name matches rank above matches that only hit the relative path.
-                let name_score = fuzzy::score(&q, &e.lname()).map(|s| s + 40);
-                let path_score = e.rel().as_ref().and_then(|r| fuzzy::score_ci(&q, r));
-                match name_score.max(path_score) {
-                    Some(sc) => scores.push(sc),
-                    None => continue,
-                }
+            match fq.score(e, &fcx) {
+                Some(sc) if ranked => scores.push(sc),
+                Some(_) => {}
+                None => continue,
             }
             top.push(i as u32);
         }
@@ -1132,7 +1129,7 @@ impl Tab {
     /// Searched are the items currently shown in the tree (top level plus unfolded
     /// folders); a folder that does not match itself but leads to a match is kept as
     /// dimmed context, so you can see where each match lives.
-    fn rebuild_tree_filtered(&mut self, c: &ViewCtx, q: &fuzzy::Query, hidden_ok: &dyn Fn(&Entry) -> bool, row_ok: &dyn Fn(&Entry) -> bool) {
+    fn rebuild_tree_filtered(&mut self, c: &ViewCtx, q: &dyn Fn(&Entry) -> bool, hidden_ok: &dyn Fn(&Entry) -> bool, row_ok: &dyn Fn(&Entry) -> bool) {
         let walking = self.walk.as_ref().map(|w| !w.done.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(false);
         // Only ever asked for ancestor folders: index those (thousands), not every entry.
         let by_path: HashMap<&Path, u32> = self.entries.iter().enumerate().filter(|(_, e)| e.depth != DEAD && e.is_dir).map(|(i, e)| (e.path.as_path(), i as u32)).collect();
@@ -1170,7 +1167,7 @@ impl Tab {
             } else if !hidden_ok(e) {
                 continue;
             }
-            if !row_ok(e) || (!q.is_empty() && fuzzy::score(q, &e.lname()).is_none()) || !reachable(e) {
+            if !row_ok(e) || !q(e) || !reachable(e) {
                 continue;
             }
             matched.insert(i as u32);

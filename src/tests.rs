@@ -2372,6 +2372,141 @@ fn filter_conditions_by_size_and_date() {
 }
 
 #[test]
+fn filter_language_or_not_types_patterns_owners() {
+    use std::fs::{File, FileTimes};
+    use std::os::unix::fs::MetadataExt;
+    use std::time::SystemTime;
+    let d = tmpdir("filterlang");
+    let now = SystemTime::now();
+    let day = Duration::from_secs(86_400);
+    // name, bytes, modified and accessed this many days ago
+    let files = [
+        ("report-2026.pdf", 3 << 20, 2, 400),
+        ("report-draft.md", 1000, 0, 0),
+        ("notes.txt", 10, 40, 1),
+        ("IMG_0001.jpg", 500 << 10, 3, 3),
+        ("IMG_0002.png", 400 << 10, 3, 3),
+        ("photo (1).jpg", 2000, 5, 5),
+        ("my-file.txt", 20, 5, 5),
+        ("archive.tar.gz", 5000, 5, 5),
+        ("theirs.txt", 30, 5, 5),
+    ];
+    for (name, n, m, a) in files {
+        let f = File::create(d.join(name)).unwrap();
+        f.set_len(n).unwrap();
+        f.set_times(FileTimes::new().set_modified(now - day * m).set_accessed(now - day * a)).unwrap();
+    }
+    std::fs::create_dir_all(d.join("Projects/src")).unwrap();
+    touch(&d.join("Projects/src/main.rs"), "fn main() {}");
+    // Another user's file, where this user may give it away (root in the sandbox).
+    let me = std::fs::metadata(d.join("notes.txt")).unwrap().uid();
+    let given = std::os::unix::fs::chown(d.join("theirs.txt"), Some(65534), None).is_ok();
+    let tagged = crate::tags::write(&d.join("notes.txt"), &["work".into()]).is_ok();
+    let users = crate::query::users(true).unwrap();
+    let stats = HashMap::new();
+    let mut t = Tab::new(78, d.clone(), ViewSettings::default(), egui::Context::default());
+    pump(&mut t, &stats);
+    let ctx = egui::Context::default();
+    let shown = |t: &mut Tab, f: &str| -> Vec<String> {
+        t.filter = f.into();
+        let start = Instant::now();
+        loop {
+            pump(t, &stats);
+            crate::tags::flush(&ctx);
+            if !t.entries.iter().any(|e| crate::tags::get(&e.path, |_| ()).is_none()) || start.elapsed() > Duration::from_secs(5) {
+                pump(t, &stats);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut v: Vec<String> = t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect();
+        v.sort();
+        v
+    };
+    // Last access, as kept by the filesystem (read before anything opens the files).
+    assert_eq!(shown(&mut t, "accessed>1y"), ["report-2026.pdf"]);
+    assert_eq!(shown(&mut t, "accessed<2d ext:txt,md"), ["notes.txt", "report-draft.md"]);
+    // Either, written three ways.
+    for q in ["ext:pdf | ext:md", "ext:pdf OR ext:md", "ext:pdf,md", "ext:pdf|ext:md"] {
+        assert_eq!(shown(&mut t, q), ["report-2026.pdf", "report-draft.md"], "{q}");
+    }
+    // A lowercase "or" is a word, as it always was: one fuzzy search of every word.
+    assert_eq!(shown(&mut t, "report or draft"), Vec::<String>::new());
+    // Not: a word after it is matched as typed, a condition is turned around.
+    for q in ["report -draft", "report !draft", "report NOT draft"] {
+        assert_eq!(shown(&mut t, q), ["report-2026.pdf"], "{q}");
+    }
+    assert_eq!(shown(&mut t, "ext:md,pdf -ext:pdf"), ["report-draft.md"]);
+    assert_eq!(shown(&mut t, "-size<1k -type:folder"), ["IMG_0001.jpg", "IMG_0002.png", "archive.tar.gz", "photo (1).jpg", "report-2026.pdf"]);
+    // A hyphen inside a word is part of it; a lone one is a word too.
+    assert_eq!(shown(&mut t, "my-file"), ["my-file.txt"]);
+    assert_eq!(shown(&mut t, "-"), ["my-file.txt", "report-2026.pdf", "report-draft.md"]);
+    // Kinds, the smart folders' and the type's own description.
+    assert_eq!(shown(&mut t, "type:pictures"), ["IMG_0001.jpg", "IMG_0002.png", "photo (1).jpg"]);
+    assert_eq!(shown(&mut t, "kind:pdfs,archives"), ["archive.tar.gz", "report-2026.pdf"]);
+    assert_eq!(shown(&mut t, "type:folder"), ["Projects"]);
+    assert_eq!(shown(&mut t, "type:png"), ["IMG_0002.png"], "Filter By Type's label");
+    // Endings: several, with or without the dot, two-part ones.
+    assert_eq!(shown(&mut t, "ext:.GZ"), ["archive.tar.gz"]);
+    assert_eq!(shown(&mut t, "ext:tar.gz,jpg"), ["IMG_0001.jpg", "archive.tar.gz", "photo (1).jpg"]);
+    // Patterns: regular expressions on the name, globs, name:, phrases.
+    assert_eq!(shown(&mut t, r"/^img_\d+\.(jpg|png)$/"), ["IMG_0001.jpg", "IMG_0002.png"]);
+    assert_eq!(shown(&mut t, "re:^report|notes"), ["notes.txt", "report-2026.pdf", "report-draft.md"]);
+    assert_eq!(shown(&mut t, "/(?-i)^img/"), Vec::<String>::new(), "case when asked for");
+    assert_eq!(shown(&mut t, "*.jpg"), ["IMG_0001.jpg", "photo (1).jpg"]);
+    assert_eq!(shown(&mut t, "name:img_*"), ["IMG_0001.jpg", "IMG_0002.png"]);
+    assert_eq!(shown(&mut t, r#"name:"photo (1)""#), ["photo (1).jpg"]);
+    assert_eq!(shown(&mut t, r#""to (1""#), ["photo (1).jpg"], "a phrase, its quote left open while typing");
+    // A broken pattern matches nothing and is marked; an unclosed one is a word.
+    assert_eq!(shown(&mut t, "/img_(/"), Vec::<String>::new());
+    let f = crate::query::parse("/img_(/ x", now);
+    assert_eq!((f.bad.clone(), f.spans.clone()), (vec![(0, 7)], vec![]));
+    assert_eq!(crate::query::parse("/usr/lib", now).spans, vec![]);
+    // Groups, in a query with an OR; without one "(1)" is part of the name as before.
+    assert_eq!(shown(&mut t, "(type:pictures | ext:pdf) size>450k"), ["IMG_0001.jpg", "report-2026.pdf"]);
+    assert_eq!(shown(&mut t, "-(type:pictures | ext:pdf) size>1k"), ["archive.tar.gz"]);
+    assert_eq!(shown(&mut t, "photo (1)"), ["photo (1).jpg"]);
+    // Everything that matched the words before still ranks first.
+    t.filter = "report | ext:jpg".into();
+    pump(&mut t, &stats);
+    let order: Vec<&str> = t.view.iter().map(|&i| t.entries[i as usize].name.as_str()).collect();
+    assert_eq!(order.len(), 4);
+    assert!(order[..2].iter().all(|n| n.starts_with("report")), "{order:?}");
+    // Owners, by name or number.
+    let name = users.iter().find(|u| u.0 == me).map(|u| u.1.clone()).unwrap_or_else(|| me.to_string());
+    let mine = shown(&mut t, &format!("owner:{name}"));
+    if given {
+        assert!(!mine.contains(&"theirs.txt".to_string()) && mine.len() == 9, "{mine:?}");
+        assert_eq!(shown(&mut t, "owner:65534"), ["theirs.txt"]);
+        assert_eq!(shown(&mut t, &format!("-owner:{name}")), ["theirs.txt"]);
+    } else {
+        eprintln!("files can't be given away here: owners of others skipped");
+        assert_eq!(mine.len(), 10);
+    }
+    assert_eq!(shown(&mut t, "owner:no-such-user-here"), Vec::<String>::new());
+    // Tags with the rest.
+    if tagged {
+        assert_eq!(shown(&mut t, "tag:work | ext:pdf"), ["notes.txt", "report-2026.pdf"]);
+        assert_eq!(shown(&mut t, "ext:txt -tag:work"), ["my-file.txt", "theirs.txt"]);
+    } else {
+        eprintln!("no user xattrs here: tags skipped");
+    }
+    // In a flattened listing words and NOT see the path below the folder.
+    t.set_flatten(true);
+    assert_eq!(shown(&mut t, "ext:rs"), ["main.rs"]);
+    assert_eq!(shown(&mut t, "ext:rs -src"), Vec::<String>::new());
+    assert_eq!(shown(&mut t, "ext:rs | report -draft"), ["main.rs", "report-2026.pdf"]);
+    // Marked in the accent: the operators and what is not a plain word.
+    let f = crate::query::parse("report -draft | type:pdf", now);
+    assert_eq!(f.spans, vec![(7, 8), (8, 13), (14, 15), (16, 24)]);
+    assert_eq!(f.name, "report");
+    assert_eq!(crate::query::name_part("report -draft"), "report");
+    assert_eq!(crate::query::name_part("my-file"), "my-file");
+    assert_eq!(crate::query::name_part(r#"todo "two words" ext:rs"#), "todo two words");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
 fn chosen_view_stays_while_browsing_and_saved_views_still_apply() {
     use crate::config::{SaveScope, SavedView, UserData};
     let d = tmpdir("viewstays");
@@ -4054,6 +4189,46 @@ fn a_broken_link_is_not_executable() {
 
 /// How long Search Code takes over a big tree (MAIA_BENCH_DIR, else /usr/include), warm,
 /// for plain text, whole words and expressions that match little, so all of it is read.
+/// How long the filter takes over a flattened tree of about 350,000 files (a real folder,
+/// /usr by default, repeated until it is that big), for plain words and for long queries.
+/// `cargo test --release filter_query_speed -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn filter_query_speed() {
+    let dir = PathBuf::from(std::env::var("MAIA_BENCH_DIR").unwrap_or_else(|_| "/usr".into()));
+    let _ = crate::query::users(true);
+    let w = crate::fsx::walk_async(dir.clone(), true, egui::Context::default());
+    let mut found = vec![];
+    while !w.done.load(std::sync::atomic::Ordering::Relaxed) {
+        found.extend(w.rx.try_iter().flatten());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    found.extend(w.rx.try_iter().flatten());
+    let mut entries = Vec::with_capacity(360_000);
+    while entries.len() < 350_000 && !found.is_empty() {
+        entries.extend(found.iter().cloned());
+    }
+    let stats = HashMap::new();
+    let recents = HashSet::new();
+    let ctx = ViewCtx { show_hidden: true, show_system: true, folders_first: true, recents_on_top: false, recents: &recents, stats: &stats };
+    let mut t = Tab::new(42, dir, ViewSettings::default(), egui::Context::default());
+    t.flatten = true;
+    t.set_entries(entries);
+    let queries = std::env::var("MAIA_BENCH_QUERIES").unwrap_or_else(|_| ";lib;lib size>10k;lib modified<1y size>1k;lib -test ext:so,h,py;(lib | share) -doc type:code,pictures size>1k;/^lib.*\\.so(\\.\\d+)*$/;re:^[a-m] -ext:gz,png modified>30d owner:root;type:png;*.h -name:config".into());
+    // Queries are split at ';' (`|` is the filter's own).
+    for q in queries.split(';') {
+        t.filter = q.to_string();
+        let mut ms = vec![];
+        for _ in 0..5 {
+            let t0 = Instant::now();
+            t.rebuild(&ctx);
+            ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+        ms.sort_by(|a, b| a.total_cmp(b));
+        eprintln!("{:>8.1} ms median {:>8.1} max  {:>7} of {} shown  {q:?}", ms[2], ms[4], t.view.len(), t.entries.len());
+    }
+}
+
 #[test]
 #[ignore]
 fn code_search_speed() {
