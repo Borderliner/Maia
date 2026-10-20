@@ -40,19 +40,21 @@ impl Cmd {
             Cmd::GroupFs => G::FileSystem,
             Cmd::GroupFull => G::PercentFull,
             Cmd::GroupTag => G::Tag,
+            Cmd::GroupTaken => G::Taken,
             _ => return None,
         })
     }
 }
 
 /// Every "Group By …" command, in menu order.
-pub const GROUP_CMDS: [Cmd; 15] = [
+pub const GROUP_CMDS: [Cmd; 16] = [
     Cmd::GroupNone,
     Cmd::GroupName,
     Cmd::GroupSize,
     Cmd::GroupCreated,
     Cmd::GroupDate,
     Cmd::GroupAccessed,
+    Cmd::GroupTaken,
     Cmd::GroupItems,
     Cmd::GroupType,
     Cmd::GroupTag,
@@ -238,6 +240,7 @@ commands! {
     GroupFs, "group_file_system", Group, "Group By File System", "Drives by file system (Computer only).", [];
     GroupFull, "group_percent_full", Group, "Group By Percent Full", "Drives by how full they are (Computer only).", [];
     GroupTag, "group_tag", Group, "Group By Tag", "One group per tag, colour labels first; an item shows under its first tag only.", [];
+    GroupTaken, "group_date_taken", Group, "Group By Date Taken", "Photos and films by the month they were taken, newest first.", [];
     GroupExpandAll, "group_expand_all", Group, "Expand All Groups", "Open every group.", [];
     GroupCollapseAll, "group_collapse_all", Group, "Collapse All Groups", "Close every group, leaving just the headers.", [];
     SavedView, "saved_view_settings", View, "Saved View Settings", "Remember this view for this folder, its subfolders, or everywhere.", [];
@@ -248,6 +251,9 @@ commands! {
     SortType, "sort_type", Sort, "Sort By Type", "Sort by type; repeat to reverse.", ["Ctrl+Alt+4"];
     SortCreated, "sort_created", Sort, "Sort By Date Created", "Sort by creation time; repeat to reverse.", [];
     SortTags, "sort_tags", Sort, "Sort By Tag", "By each item's first tag: colour labels in their order, then words A to Z; untagged last.", [];
+    SortTaken, "sort_date_taken", Sort, "Sort By Date Taken", "Photos by when they were taken, films by when they were made (newest first); the rest last.", [];
+    SortDimensions, "sort_dimensions", Sort, "Sort By Dimensions", "Pictures and films by their pixels (largest first); the rest last.", [];
+    SortDuration, "sort_duration", Sort, "Sort By Duration", "Recordings and films by how long they play (longest first); the rest last.", [];
     SortNameAsc, "sort_name_asc", Sort, "Sort By Name Asc", "Sort A to Z.", [];
     SortNameDesc, "sort_name_desc", Sort, "Sort By Name Desc", "Sort Z to A.", [];
     SortSizeAsc, "sort_size_asc", Sort, "Sort By Size Asc", "Smallest first (folders by their content size).", [];

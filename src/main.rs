@@ -27,6 +27,7 @@ mod datatree;
 mod envfile;
 mod errands;
 mod exif;
+mod facts;
 mod extpic;
 mod config;
 mod convert;

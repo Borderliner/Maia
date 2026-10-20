@@ -2539,6 +2539,14 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                         return;
                     }
                     let r = *rng.pick(&hdr);
+                    if rng.below(2) == 0 {
+                        // Sorted by it, then maybe the other way round.
+                        for _ in 0..1 + rng.below(2) {
+                            s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+                        }
+                        s.idle(rng.below(20));
+                        return;
+                    }
                     s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
                     s.idle(2);
                     let name = rng.pick(&crate::config::Column::ALL).title();
@@ -4953,6 +4961,104 @@ mod journeys {
         s.act("key ctrl+z");
         wait_until(&mut s, "removal undone", 10, |s| all("orchid") && sidebar_text(s, "orchid").is_some());
         report("tag views", &s);
+    }
+
+    /// The media columns: Date Taken, Dimensions and Duration chosen from the header's
+    /// menu, filled in as the workers read them (ffprobe through the real tools), sorted
+    /// by each with the rest last, grouped by month; the Details card of a film gives its
+    /// length, resolution and codecs. Then a folder of 5,000 photos sorted by when they
+    /// were taken, every frame drawn while their dates come in.
+    #[test]
+    fn media_columns_sorted_and_the_details_card() {
+        if !sandboxed() {
+            return;
+        }
+        let d = media_fixture("mediacols");
+        let Some(tools) = crate::tests::media_tools(&root().join("mediacols-tools")) else {
+            eprintln!("ffmpeg missing: skipped");
+            return;
+        };
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(tools.clone()));
+        let ff = |args: &[&str]| assert!(std::process::Command::new("ffmpeg").args(["-hide_banner", "-loglevel", "error", "-y"]).args(args).current_dir(&d).status().is_ok_and(|s| s.success()));
+        ff(&["-f", "lavfi", "-i", "testsrc=duration=4:size=640x360:rate=10", "-pix_fmt", "yuv420p", "-metadata", "creation_time=2025-03-09T08:00:00Z", "long clip.mp4"]);
+        ff(&["-f", "lavfi", "-i", "sine=frequency=330:duration=5", "chime.flac"]);
+        let jpeg = |name: &str, when: &str, dir: &Path| {
+            let raw = std::process::Command::new(tools.join("ffmpeg")).args(["-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=96x64", "-frames:v", "1", "-f", "mjpeg", "-"]).output().unwrap().stdout;
+            std::fs::write(dir.join(name), crate::tests::with_exif_taken(&raw, 1, when)).unwrap();
+        };
+        jpeg("beach.jpg", "2024:08:02 12:00:00", &d);
+        // Wide enough for three more columns.
+        let mut s = Sim::new(&d, vec2(1600.0, 900.0));
+        s.cmd(ViewDetails);
+        s.settle();
+        let add_column = |s: &mut Sim, title: &str| {
+            let r = list_text(s, "Name");
+            s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+            s.idle(2);
+            let r = s.texts.iter().rev().find(|(r, t)| t == title && r.left() > s.app.sidebar_width).map(|x| x.0).unwrap_or_else(|| s.fail(title));
+            s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+            s.act("click 700 760");
+        };
+        for c in ["Date Taken", "Dimensions", "Duration"] {
+            add_column(&mut s, c);
+        }
+        wait_until(&mut s, "facts drawn", 20, |s| some_text_at(s, "320 × 240") && some_text_at(s, "0:05") && some_text_at(s, "96 × 64"));
+        look(&mut s, "media columns");
+        let order = |s: &Sim| -> Vec<String> { s.tab().view.iter().map(|&i| s.tab().entries[i as usize].name.clone()).collect() };
+        let click_header = |s: &mut Sim, title: &str| {
+            let r = list_text(s, title);
+            s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        };
+        click_header(&mut s, "Duration");
+        wait_until(&mut s, "longest first", 20, |s| order(s)[..4] == ["chime.flac", "long clip.mp4", "song.mp3", "clip.mp4"] || order(s)[..4] == ["chime.flac", "long clip.mp4", "clip.mp4", "song.mp3"]);
+        look(&mut s, "sorted by duration");
+        click_header(&mut s, "Date Taken");
+        wait_until(&mut s, "newest first", 20, |s| order(s)[..3] == ["long clip.mp4", "beach.jpg", "clip.mp4"] || order(s)[..2] == ["long clip.mp4", "beach.jpg"]);
+        look(&mut s, "sorted by date taken");
+        click_header(&mut s, "Dimensions");
+        wait_until(&mut s, "largest first", 20, |s| order(s)[0] == "long clip.mp4");
+        look(&mut s, "sorted by dimensions");
+        s.cmd(GroupTaken);
+        wait_until(&mut s, "months", 20, |s| s.tab().header_labels().first().is_some_and(|l| l == "March 2025") && s.tab().header_labels().last().is_some_and(|l| l == "No date"));
+        look(&mut s, "grouped by month");
+        s.cmd(GroupNone);
+        for (w, h) in [(640.0, 480.0), (520.0, 340.0), (1280.0, 800.0)] {
+            s.resize(w, h);
+            look(&mut s, &format!("media columns {w}x{h}"));
+        }
+        // A film's Details card.
+        select_name(&mut s, "long clip.mp4");
+        s.cmd(ToggleInspector);
+        wait_until(&mut s, "the film probed", 20, |s| inspector(s).media_probe().is_some());
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("inspector"));
+        let r = s.texts.iter().find(|(r, t)| t == "long clip.mp4" && ir.contains(r.center()) && r.top() < ir.top() + 30.0).map(|x| x.0).unwrap_or_else(|| s.fail("the name in the inspector"));
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        wait_until(&mut s, "the card", 10, |s| some_text_at(s, "Resolution") && some_text_at(s, "640 × 360") && some_text_at(s, "0:04") && s.texts.iter().any(|(_, t)| t.starts_with("h264") || t.starts_with("mpeg4")));
+        look(&mut s, "film details");
+        select_name(&mut s, "chime.flac");
+        wait_until(&mut s, "a recording's card", 20, |s| some_text_at(s, "Codec") && some_text_at(s, "flac") && some_text_at(s, "0:05") && !some_text_at(s, "Resolution"));
+        look(&mut s, "recording details");
+        s.cmd(ToggleInspector);
+        // Five thousand photos, sorted by when they were taken while the dates come in.
+        let many = d.join("Camera");
+        std::fs::create_dir_all(&many).unwrap();
+        let raw = std::process::Command::new(tools.join("ffmpeg")).args(["-loglevel", "error", "-f", "lavfi", "-i", "color=c=0x6688aa:s=32x24", "-frames:v", "1", "-f", "mjpeg", "-"]).output().unwrap().stdout;
+        for i in 0..5000u32 {
+            let when = format!("20{:02}:{:02}:{:02} 10:{:02}:00", 10 + i % 15, 1 + i % 12, 1 + i % 28, i % 60);
+            std::fs::write(many.join(format!("IMG_{i:04}.jpg")), crate::tests::with_exif_taken(&raw, 1, &when)).unwrap();
+        }
+        let t0 = Instant::now();
+        go(&mut s, &many);
+        s.cmd(SortTaken);
+        wait_until(&mut s, "every date read", 120, |s| s.tab().entries.iter().all(|e| crate::facts::get(e).is_some_and(|f| f.taken.is_some())));
+        s.idle(5);
+        eprintln!("sim media columns: 5000 photos dated in {:.2} s", t0.elapsed().as_secs_f32());
+        let o = order(&s);
+        let first = crate::facts::get(&s.tab().entries[s.tab().view[0] as usize]).and_then(|f| f.taken);
+        assert!(s.tab().view.iter().all(|&i| crate::facts::get(&s.tab().entries[i as usize]).and_then(|f| f.taken) <= first), "newest first: {:?}", &o[..3]);
+        look(&mut s, "5000 photos by date taken");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        report("media columns", &s);
     }
 
     /// Compress With Password, from the Compress menu and the palette: the password

@@ -1027,6 +1027,9 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                     Column::Files => if e.is_dir { env.stats.map.get(&e.path).map(|s| abbrev(s.files)).unwrap_or_else(|| if e.is_link { "--".into() } else { String::new() }) } else { "--".into() },
                                     Column::Permissions => fsx::fmt_mode(e.mode, e.is_dir),
                                     Column::Extension => e.ext().to_string(),
+                                    Column::Taken => fmt_date(crate::facts::get(&e).and_then(|f| f.taken), env.cfg),
+                                    Column::Dimensions => crate::facts::get(&e).and_then(|f| f.dims).map(crate::facts::fmt_dims).unwrap_or_default(),
+                                    Column::Duration => crate::facts::get(&e).and_then(|f| f.duration).map(crate::media::fmt_time).unwrap_or_default(),
                                     _ => String::new(),
                                 };
                                 let g = elided(ui, &txt, small.clone(), inner.width(), dimc(sub));

@@ -1463,10 +1463,8 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             bui.painter().text(body.center(), Align2::CENTER_CENTER, "Preparing preview…", FontId::proportional(12.5), pal.text_dim);
             return;
         }
-        Content::Media(v) => {
-            media_view(&mut bui, body, &e, v, env);
-            return;
-        }
+        // Drawn, then the Details card over it as for a picture: its length, size and codecs.
+        Content::Media(v) => media_view(&mut bui, body, &e, v, env),
         Content::Font(v) => {
             font_view(&mut bui, body, v, env);
             return;
@@ -1566,6 +1564,10 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                 });
                 ui.add_space(4.0);
                 let extra = ins.extra_meta;
+                let probe = match &ins.content {
+                    Content::Media(v) => v.probe.clone(),
+                    _ => None,
+                };
                 egui::Grid::new(("metagrid", env.panel_id)).num_columns(2).spacing(vec2(14.0, 3.0)).show(ui, |ui| {
                     let mut row = |k: &str, v: String| {
                         ui.label(egui::RichText::new(k).color(pal.text_dim).size(11.5));
@@ -1606,6 +1608,19 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                                 let mp = l.dims[0] as f64 * l.dims[1] as f64 / 1e6;
                                 row("Megapixels", format!("{mp:.2}"));
                             }
+                        }
+                    }
+                    if let Some(p) = &probe {
+                        if p.duration > 0.0 {
+                            row("Duration", crate::media::fmt_time(p.duration));
+                        }
+                        match p.video {
+                            Some(d) => {
+                                row("Resolution", crate::facts::fmt_dims(d));
+                                row("Codecs", [p.codec.as_str(), p.acodec.as_str()].iter().filter(|c| !c.is_empty()).copied().collect::<Vec<_>>().join(", "));
+                            }
+                            None if !p.codec.is_empty() => row("Codec", p.codec.clone()),
+                            None => {}
                         }
                     }
                     if let Some([y, mo, d, h, mi, _]) = exif.as_ref().and_then(|x| x.taken) {

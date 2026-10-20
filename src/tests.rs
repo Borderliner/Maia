@@ -10708,3 +10708,184 @@ fn tag_changes_undo_and_redo_as_one() {
     assert!(many.iter().all(|f| read(f).is_empty()));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A JPEG with EXIF written the way a camera writes it: Orientation in IFD0, then
+/// DateTimeOriginal in the EXIF IFD it points to.
+/// The real ffmpeg and ffprobe on the PATH, linked into a stand-in folder; None when
+/// one is missing.
+pub(crate) fn media_tools(dir: &Path) -> Option<PathBuf> {
+    std::fs::create_dir_all(dir).unwrap();
+    for t in ["ffmpeg", "ffprobe"] {
+        let real = std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(t)).find(|m| m.is_file()))?;
+        let _ = std::os::unix::fs::symlink(real, dir.join(t));
+    }
+    Some(dir.to_path_buf())
+}
+
+pub(crate) fn with_exif_taken(jpeg: &[u8], orient: u16, taken: &str) -> Vec<u8> {
+    let mut t = b"MM\x00\x2a\x00\x00\x00\x08".to_vec();
+    let entry = |t: &mut Vec<u8>, tag: u16, kind: u16, n: u32, v: [u8; 4]| {
+        t.extend_from_slice(&tag.to_be_bytes());
+        t.extend_from_slice(&kind.to_be_bytes());
+        t.extend_from_slice(&n.to_be_bytes());
+        t.extend_from_slice(&v);
+    };
+    // IFD0 at 8: two entries (2 + 24 + 4 bytes), the EXIF IFD at 38.
+    t.extend_from_slice(&2u16.to_be_bytes());
+    let o = orient.to_be_bytes();
+    entry(&mut t, 0x0112, 3, 1, [o[0], o[1], 0, 0]);
+    entry(&mut t, 0x8769, 4, 1, 38u32.to_be_bytes());
+    t.extend_from_slice(&[0; 4]);
+    // EXIF IFD: one entry, its 20-byte date right after (38 + 2 + 12 + 4 = 56).
+    t.extend_from_slice(&1u16.to_be_bytes());
+    entry(&mut t, 0x9003, 2, 20, 56u32.to_be_bytes());
+    t.extend_from_slice(&[0; 4]);
+    t.extend_from_slice(taken.as_bytes());
+    t.push(0);
+    let mut app1 = b"Exif\x00\x00".to_vec();
+    app1.extend_from_slice(&t);
+    let mut out = jpeg[..2].to_vec();
+    out.extend_from_slice(&[0xff, 0xe1]);
+    out.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&app1);
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+/// Real pictures, films and recordings made by ImageMagick and ffmpeg: the date a photo
+/// was taken from its EXIF (a film's from its container), sizes from every header kind
+/// (a photo stored turned counted turned), lengths from ffprobe, read off the frame and
+/// kept on disk for the next time; the list sorts by each with the rest last either way
+/// round, and groups photos by month.
+#[test]
+fn media_facts_from_real_files_sort_and_group() {
+    use crate::config::GroupBy;
+    use crate::facts;
+    let _one = FACTS_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    facts::focus(vec![]);
+    let d = tmpdir("facts");
+    let Some(tools) = media_tools(&d.join("tools")) else {
+        eprintln!("ffmpeg missing: skipped");
+        return;
+    };
+    let w = d.join("media");
+    std::fs::create_dir_all(&w).unwrap();
+    let run = |prog: &str, args: &[&str]| assert!(std::process::Command::new(tools.join(prog)).args(args).current_dir(&w).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success()), "{prog} {args:?}");
+    let ff = |args: &[&str]| run("ffmpeg", &[&["-hide_banner", "-loglevel", "error", "-y"], args].concat());
+    ff(&["-f", "lavfi", "-i", "testsrc=size=400x240", "-frames:v", "1", "raw.jpg"]);
+    let raw = std::fs::read(w.join("raw.jpg")).unwrap();
+    std::fs::write(w.join("turned.jpg"), with_exif_taken(&raw, 6, "2023:07:14 18:30:05")).unwrap();
+    std::fs::write(w.join("later.jpg"), with_exif_taken(&raw, 1, "2024:01:02 09:00:00")).unwrap();
+    std::fs::remove_file(w.join("raw.jpg")).unwrap();
+    // Both kinds of WebP: lossy (VP8) and lossless (VP8L).
+    for (f, size, extra) in [("wide.png", "300x20", ""), ("anim.gif", "64x48", ""), ("small.webp", "90x60", ""), ("flat.webp", "70x50", "-lossless 1"), ("old.bmp", "33x17", "")] {
+        let src = format!("testsrc=size={size}");
+        let mut a = vec!["-f", "lavfi", "-i", src.as_str(), "-frames:v", "1"];
+        a.extend(extra.split_whitespace());
+        a.push(f);
+        ff(&a);
+    }
+    ff(&["-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=10", "-pix_fmt", "yuv420p", "-metadata", "creation_time=2024-05-01T10:00:00Z", "clip.mp4"]);
+    ff(&["-f", "lavfi", "-i", "sine=frequency=440:duration=3", "tone.flac"]);
+    touch(&w.join("notes.txt"), "x");
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(tools.clone()));
+    let ctx = egui::Context::default();
+    let stats = HashMap::new();
+    let mut t = Tab::new(93, w.clone(), ViewSettings::default(), ctx.clone());
+    let settle = |t: &mut Tab| {
+        let start = Instant::now();
+        loop {
+            t.dirty = true;
+            pump(t, &stats);
+            facts::flush(&ctx);
+            if t.entries.iter().all(|e| facts::get(e).is_some()) {
+                t.dirty = true;
+                pump(t, &stats);
+                return;
+            }
+            assert!(start.elapsed() < Duration::from_secs(20), "facts read");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    t.settings.columns.push((crate::config::Column::Duration, 80.0));
+    settle(&mut t);
+    let of = |t: &Tab, n: &str| facts::get(t.entries.iter().find(|e| e.name == n).unwrap()).unwrap();
+    let local = |s: &str| crate::timefmt::parse_local(s).unwrap();
+    assert_eq!(of(&t, "turned.jpg"), facts::Facts { taken: Some(local("2023-07-14T18:30:05")), dims: Some((240, 400)), duration: None }, "stored turned, shown upright");
+    assert_eq!(of(&t, "later.jpg").dims, Some((400, 240)));
+    for (n, dims) in [("wide.png", (300, 20)), ("anim.gif", (64, 48)), ("small.webp", (90, 60)), ("flat.webp", (70, 50)), ("old.bmp", (33, 17))] {
+        assert_eq!(of(&t, n).dims, Some(dims), "{n}");
+    }
+    let clip = of(&t, "clip.mp4");
+    assert_eq!((clip.dims, clip.taken), (Some((320, 240)), Some(std::time::UNIX_EPOCH + Duration::from_secs(1_714_557_600))));
+    assert!((clip.duration.unwrap() - 2.0).abs() < 0.1 && (of(&t, "tone.flac").duration.unwrap() - 3.0).abs() < 0.1);
+    assert_eq!((of(&t, "tone.flac").dims, of(&t, "tone.flac").taken), (None, None), "a recording has no size nor date taken");
+    assert_eq!(of(&t, "notes.txt"), facts::Facts::default());
+    // Sorted by each, the rest after, whichever way round.
+    let names = |t: &mut Tab, k: SortKey, desc: bool| -> Vec<String> {
+        t.settings.sort = k;
+        t.settings.desc = desc;
+        settle(t);
+        t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect()
+    };
+    assert_eq!(&names(&mut t, SortKey::Duration, true)[..2], ["tone.flac", "clip.mp4"]);
+    assert_eq!(&names(&mut t, SortKey::Duration, false)[..2], ["clip.mp4", "tone.flac"]);
+    assert_eq!(&names(&mut t, SortKey::Taken, true)[..3], ["clip.mp4", "later.jpg", "turned.jpg"]);
+    assert_eq!(names(&mut t, SortKey::Dimensions, false), ["old.bmp", "anim.gif", "flat.webp", "small.webp", "wide.png", "clip.mp4", "later.jpg", "turned.jpg", "notes.txt", "tone.flac"]);
+    t.settings.group = GroupBy::Taken;
+    names(&mut t, SortKey::Name, false);
+    assert_eq!(t.header_labels(), ["May 2024", "January 2024", "July 2023", "No date"]);
+    // What ffprobe found is kept, by path, size and time changed.
+    let kept = std::fs::read_to_string(facts::kept_path()).unwrap();
+    assert!(kept.lines().any(|l| l.ends_with(&*w.join("clip.mp4").to_string_lossy()) && l.contains("\t320\t240\t")), "{kept}");
+    // A film changed is read again.
+    facts::invalidate(&w.join("clip.mp4"));
+    assert!(facts::get(t.entries.iter().find(|e| e.name == "clip.mp4").unwrap()).is_none(), "asked again");
+    settle(&mut t);
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The folders shown are one setting for the whole process: one test at a time.
+static FACTS_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A probe for a folder no longer shown is killed, and the file is asked for again
+/// when its folder is shown again. A stand-in ffprobe that hangs, writing its pid.
+#[test]
+fn media_probes_stop_when_their_folder_is_left() {
+    use crate::facts;
+    let _one = FACTS_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    let d = tmpdir("factsgone");
+    let fake = d.join("tools");
+    std::fs::create_dir_all(&fake).unwrap();
+    let pidf = d.join("pid");
+    std::fs::write(fake.join("ffprobe"), format!("#!/bin/sh\necho $$ > {}\nexec sleep 30\n", pidf.display())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(fake.join("ffprobe"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let here = d.join("films");
+    touch(&here.join("long.mkv"), "not really");
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    facts::focus(vec![here.clone()]);
+    let e = crate::fsx::Entry::from_path(&here.join("long.mkv")).unwrap();
+    assert!(facts::get(&e).is_none());
+    facts::flush(&egui::Context::default());
+    let t0 = Instant::now();
+    while !pidf.exists() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "probe started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pid = std::fs::read_to_string(&pidf).unwrap().trim().parse::<i32>().unwrap();
+    facts::focus(vec![d.join("elsewhere")]);
+    let t0 = Instant::now();
+    while unsafe { libc::kill(pid, 0) } == 0 && std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| !s.contains(") Z ")) {
+        assert!(t0.elapsed() < Duration::from_secs(5), "probe killed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Not taken for an answer: shown again, it is asked for again.
+    std::thread::sleep(Duration::from_millis(100));
+    facts::focus(vec![here.clone()]);
+    assert!(facts::get(&e).is_none());
+    facts::focus(vec![]);
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    let _ = std::fs::remove_dir_all(&d);
+}

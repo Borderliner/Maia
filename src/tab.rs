@@ -1219,8 +1219,10 @@ impl Tab {
             // either way round.
             let keyed: Option<Vec<Option<u64>>> = match s.sort {
                 SortKey::Tags => Some(crate::tags::sort_keys(top.iter().map(|&i| entries[i as usize].path.as_path()))),
+                SortKey::Taken | SortKey::Dimensions | SortKey::Duration => Some(top.iter().map(|&i| crate::facts::sort_key(&entries[i as usize], s.sort)).collect()),
                 _ => None,
             };
+            let by_name = |a: &u32, b: &u32| compare(&entries[*a as usize], &entries[*b as usize], SortKey::Name, s.desc, c, tm);
             let primary = |e: &Entry| -> Option<u64> {
                 Some(match s.sort {
                     SortKey::Name => 0,
@@ -1231,7 +1233,7 @@ impl Tab {
                     SortKey::Folders => stat(e).map(|x| x.folders as u64).unwrap_or(0),
                     SortKey::Files => stat(e).map(|x| x.files as u64).unwrap_or(0),
                     SortKey::Deleted => when(tm.get(&e.path).and_then(|t| t.1)),
-                    SortKey::Type | SortKey::Original | SortKey::Tags => return None,
+                    SortKey::Type | SortKey::Original | SortKey::Tags | SortKey::Taken | SortKey::Dimensions | SortKey::Duration => return None,
                 })
             };
             if !matches!(s.sort, SortKey::Type | SortKey::Original) || keyed.is_some() {
@@ -1273,7 +1275,8 @@ impl Tab {
                                 return if s.desc { o.reverse() } else { o };
                             }
                         }
-                        cmp(&a.4, &b.4)
+                        // The key read from a cache is settled already: by name from here.
+                        if keyed.is_some() { by_name(&a.4, &b.4) } else { cmp(&a.4, &b.4) }
                     })
                 });
                 top = dec.into_iter().map(|d| d.4).collect();
@@ -1645,6 +1648,10 @@ fn compare(a: &Entry, b: &Entry, key: SortKey, desc: bool, c: &ViewCtx, trash: &
                 (x, y) => return y.is_none().cmp(&x.is_none()).reverse().then_with(|| natural_cmp(a.lname(), b.lname())),
             }
         }
+        SortKey::Taken | SortKey::Dimensions | SortKey::Duration => match (crate::facts::sort_key(a, key), crate::facts::sort_key(b, key)) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (x, y) => return y.is_none().cmp(&x.is_none()).reverse().then_with(|| natural_cmp(a.lname(), b.lname())),
+        },
     };
     let o = o.then_with(|| natural_cmp(&a.lname(), &b.lname()));
     if desc { o.reverse() } else { o }
@@ -1755,6 +1762,8 @@ fn group_label(e: &Entry, g: GroupBy, c: &GroupCtx) -> String {
         GroupBy::FileSystem => c.vols.get(&e.path).map(|v| v.fstype.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "Unknown".into()),
         // The first tag only: an item shows once, under the tag it sorts by.
         GroupBy::Tag => crate::tags::get(&e.path, |t| crate::tags::leading(t).cloned()).flatten().unwrap_or_else(|| NO_TAGS.into()),
+        // By the month: photos span years, and a day's group would hold a handful.
+        GroupBy::Taken => crate::facts::month_label(e),
         GroupBy::PercentFull => match c.vols.get(&e.path) {
             Some(v) if v.total > 0 => match (v.total - v.free) as f64 / v.total as f64 {
                 f if f >= 0.9 => "Nearly full (90%+)".into(),
@@ -1772,6 +1781,9 @@ fn group_rank(l: &str, g: GroupBy) -> usize {
     if g == GroupBy::Tag {
         return if l == NO_TAGS { 99 } else { crate::tags::rank(l) as usize };
     }
+    if g == GroupBy::Taken {
+        return crate::facts::month_rank(l);
+    }
     let order: &[&str] = match g {
         GroupBy::Name => &["A – H", "I – P", "Q – Z", "Other"],
         GroupBy::Type => &["Folder"],
@@ -1781,7 +1793,7 @@ fn group_rank(l: &str, g: GroupBy) -> usize {
         GroupBy::Usage => &["Over half", "10 – 50%", "1 – 10%", "< 1%"],
         GroupBy::FreeSpace => &["Under 1 GB free", "1 – 10 GB free", "10 – 100 GB free", "Over 100 GB free", "Unknown"],
         GroupBy::PercentFull => &["Nearly full (90%+)", "Over half full", "Under half full", "Unknown"],
-        GroupBy::None | GroupBy::Original | GroupBy::FileSystem | GroupBy::Tag => &[],
+        GroupBy::None | GroupBy::Original | GroupBy::FileSystem | GroupBy::Tag | GroupBy::Taken => &[],
     };
     order.iter().position(|o| *o == l).unwrap_or(if g == GroupBy::Type { 1 } else { 99 })
 }

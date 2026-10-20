@@ -1327,6 +1327,20 @@ impl App {
         for f in &changed_files {
             self.thumbs.invalidate(f);
             crate::tags::invalidate(f);
+            crate::facts::invalidate(f);
+        }
+        // Dates taken, sizes and lengths: asked for by last frame's rows, read only for
+        // the folders shown; a list sorted or grouped by them looks again as they land.
+        let mut shown: Vec<PathBuf> = self.panels.values().map(|p| p.tab().path.clone()).collect();
+        shown.sort();
+        crate::facts::focus(shown);
+        crate::facts::flush(ctx);
+        if crate::facts::changed() {
+            for t in self.panels.values_mut().flat_map(|p| p.tabs.iter_mut()) {
+                if matches!(t.settings.sort, SortKey::Taken | SortKey::Dimensions | SortKey::Duration) || t.settings.group == crate::config::GroupBy::Taken {
+                    t.stream_dirty = true;
+                }
+            }
         }
         // Tags asked for by last frame's rows go to the reader; when some land, a tag:
         // filter looks again.
@@ -2453,6 +2467,15 @@ impl App {
                 t.dirty = true;
             }
             Cmd::SortTags => self.tab().set_sort(SortKey::Tags),
+            Cmd::SortTaken => self.tab().set_sort(SortKey::Taken),
+            Cmd::SortDimensions => self.tab().set_sort(SortKey::Dimensions),
+            Cmd::SortDuration => self.tab().set_sort(SortKey::Duration),
+            Cmd::GroupTaken => {
+                let t = self.tab();
+                t.settings.group = crate::config::GroupBy::Taken;
+                t.collapsed_groups.clear();
+                t.dirty = true;
+            }
             Cmd::GroupExpandAll => {
                 let t = self.tab();
                 t.collapsed_groups.clear();
