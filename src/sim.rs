@@ -1559,7 +1559,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 if !matches!(s.app.popup, Popup::Viewer(_)) {
                     break;
                 }
-                match rng.below(6) {
+                match rng.below(8) {
                     0 => {
                         let (x, y) = p(rng);
                         s.act(&format!("scroll {x:.0} {y:.0} {:.1}", rng.f(-10.0, 10.0)));
@@ -1568,8 +1568,16 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                         let ((x, y), (x2, y2)) = (p(rng), p(rng));
                         s.act(&format!("drag {x:.0} {y:.0} {x2:.0} {y2:.0}"));
                     }
-                    2 => click_control_at(s, rng.pick(&["viewer next", "viewer previous", "viewer close"])),
+                    2 => click_control_at(s, rng.pick(&["viewer next", "viewer previous", "viewer close", "viewer trash", "viewer rotate right", "viewer rotate left", "viewer tags", "viewer compare", "viewer tag"])),
                     3 => s.idle(rng.below(300)),
+                    // Sorting: the trash and back, turns, labels, the strip, a pinned one.
+                    4 => s.act(&format!("key {}", rng.pick(&["Delete", "ctrl+z", "r", "l", "t", "c", "ctrl+1", "ctrl+4", "Enter"]))),
+                    5 => {
+                        if viewer_strip_typing(s) {
+                            s.act(&format!("text {}", rng.pick(&["keep", "a,b", "日本", " "])));
+                        }
+                        s.act(rng.pick(&["key Enter", "key Escape", "key ArrowRight"]));
+                    }
                     _ => s.act(&format!("key {}", rng.pick(&["ArrowRight", "ArrowLeft", "Space", "Plus", "Minus", "0", "1", "Home", "End", "Escape"]))),
                 }
             }
@@ -2439,6 +2447,11 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             s.idle(rng.below(20) + 1);
         }
     }
+}
+
+/// The viewer's tag strip is waiting for a new tag's name.
+fn viewer_strip_typing(s: &Sim) -> bool {
+    matches!(&s.app.popup, Popup::Viewer(v) if v.strip.as_ref().is_some_and(|t| t.typing.is_some()))
 }
 
 fn some_text_at(s: &Sim, want: &str) -> bool {
@@ -13581,5 +13594,182 @@ mod journeys {
         wait_until(&mut s, "bytes read", 10, |s| s.copied.len() > n);
         assert_eq!(last_copy(&s), blob[16..20].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "));
         report("select and copy", &s);
+    }
+
+    /// ImageMagick as this machine has it (`magick`, or version 6's `convert`), as the
+    /// only tool the session may run.
+    fn magick_tools(dir: &Path) -> Option<PathBuf> {
+        let _ = std::fs::create_dir_all(dir);
+        let path = std::env::var_os("PATH")?;
+        let mut any = false;
+        for name in ["magick", "convert"] {
+            if let Some(real) = std::env::split_paths(&path).map(|d| d.join(name)).find(|m| m.is_file()) {
+                let _ = std::os::unix::fs::symlink(real, dir.join(name));
+                any = true;
+            }
+        }
+        any.then(|| dir.to_path_buf())
+    }
+
+    /// Sorting pictures in the viewer, as someone going through a day's photos would:
+    /// Delete sends one to the trash and the next shows, Ctrl+Z brings it back here and
+    /// in the list after; R and L turn the picture shown through ImageMagick and it shows
+    /// turned, two turns keeping one original, Ctrl+Z putting it back; Ctrl+1 and the tag
+    /// strip (arrows, Enter, a click, a new tag typed) set tags, shown in the pill; C pins
+    /// one to compare the next ones beside it, zoomed together; Escape backs out a step
+    /// at a time. Without ImageMagick a turn says what it needs. Nothing repaints at rest;
+    /// a small window keeps its buttons apart.
+    #[test]
+    fn sort_pictures_in_the_viewer() {
+        if !sandboxed() {
+            return;
+        }
+        let d = root().join("home/sortpics");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        png_file(&d.join("a.png"), 320, 200, 1);
+        png_file(&d.join("b.png"), 200, 320, 2);
+        png_file(&d.join("c.png"), 320, 200, 3);
+        png_file(&d.join("d.png"), 320, 200, 4);
+        png_file(&d.join("e.png"), 2400, 1200, 5);
+        let tools = magick_tools(&root().join("sortpics-tools"));
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(tools.clone().unwrap_or_else(|| root().join("sortpics-none"))));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        let pic = |s: &Sim| viewer(s).current().map(|p| p.name.clone()).unwrap_or_default();
+        let dims = |name: &str| crate::imgdec::load(&d.join(name), 512).map(|x| x.1);
+        select_path(&mut s, &d.join("a.png"));
+        s.act("key F3");
+        wait_until(&mut s, "a decoded", 10, |s| s.app.thumbs.dims(&d.join("a.png")).is_some());
+        s.idle(2);
+        for b in ["viewer trash", "viewer rotate right", "viewer rotate left", "viewer tags", "viewer compare", "viewer close"] {
+            assert!(has_control(&s, b), "{b} shown with the name");
+        }
+        shot_still(&mut s, "viewer-tools-graphite");
+        // Delete: to the trash, the next one shown; Ctrl+Z here brings it back.
+        s.act("key Delete");
+        assert_eq!((pic(&s), viewer(&s).pics.len(), viewer(&s).trashed_here()), ("b.png".to_string(), 4, 1));
+        wait_until(&mut s, "a in the trash", 10, |s| !d.join("a.png").exists() && s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Trashed(_))));
+        s.act("key ctrl+z");
+        assert!(d.join("a.png").exists(), "back from the trash");
+        assert_eq!((pic(&s), viewer(&s).pics.len()), ("a.png".to_string(), 5), "and shown where it was");
+        s.act("key ctrl+z");
+        assert!(some_text(&s, "Nothing to undo here"), "only what was done in the viewer");
+        // Deleted again, and back by Ctrl+Z in the list once the viewer is closed.
+        s.act("key Delete");
+        wait_until(&mut s, "a in the trash again", 10, |s| !d.join("a.png").exists() && s.app.jobs.iter().all(|j| j.finished_at.is_some()));
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        s.idle(3);
+        s.act("key ctrl+z");
+        s.settle();
+        assert!(d.join("a.png").exists(), "Undo in the list");
+        // Turns, shown without leaving the viewer.
+        select_path(&mut s, &d.join("b.png"));
+        s.act("key F3");
+        assert_eq!(pic(&s), "b.png");
+        let original = std::fs::read(d.join("b.png")).unwrap();
+        if tools.is_some() {
+            s.act("key r");
+            wait_until(&mut s, "the turn", 20, |s| viewer(s).turning.is_empty() && s.app.undo.last().is_some_and(|u| u.label == "Rotate b.png"));
+            assert_eq!(dims("b.png"), Some([320, 200]), "turned on disk");
+            wait_until(&mut s, "shown turned", 10, |s| viewer(s).current().is_some_and(|p| s.app.thumbs.dims(&p.path) == Some([320, 200])));
+            let undos = s.app.undo.len();
+            s.act("key r");
+            s.act("key l");
+            wait_until(&mut s, "two more turns", 20, |s| viewer(s).turning.is_empty() && s.app.errands.busy == 0);
+            s.idle(3);
+            assert_eq!(dims("b.png"), Some([320, 200]), "right, then left: as it was turned once");
+            assert_eq!(s.app.undo.len(), undos, "one Undo for every turn");
+            assert_eq!(crate::trashcan::list().into_iter().filter(|it| it.original == d.join("b.png")).count(), 1, "one original kept");
+            s.act("key r");
+            wait_until(&mut s, "a last turn", 20, |s| viewer(s).turning.is_empty() && s.app.errands.busy == 0);
+            s.act("key ctrl+z");
+            assert_eq!(std::fs::read(d.join("b.png")).unwrap(), original, "the original back, byte for byte");
+            wait_until(&mut s, "shown as it was", 10, |s| viewer(s).current().is_some_and(|p| s.app.thumbs.dims(&p.path) == Some([200, 320])));
+        } else {
+            eprintln!("sort pictures: no ImageMagick here, turns not tried");
+        }
+        // Colour labels by key; the strip by arrows, Enter, a click and a name typed.
+        s.act("key ctrl+1");
+        wait_until(&mut s, "red", 10, |_| crate::tags::read(&d.join("b.png")) == ["Red"]);
+        s.act("key ctrl+1");
+        wait_until(&mut s, "not red", 10, |_| crate::tags::read(&d.join("b.png")).is_empty());
+        s.act("key t");
+        assert!(viewer(&s).strip.is_some() && some_text(&s, "New Tag…"), "the strip");
+        for _ in 0..4 {
+            s.act("key ArrowRight");
+        }
+        assert_eq!(pic(&s), "b.png", "the arrows are the strip's while it is open");
+        s.act("key Enter");
+        wait_until(&mut s, "blue", 10, |_| crate::tags::read(&d.join("b.png")) == ["Blue"]);
+        s.click_text("New Tag…");
+        s.act("text keep");
+        s.act("key Enter");
+        wait_until(&mut s, "keep", 10, |_| crate::tags::read(&d.join("b.png")) == ["Blue", "keep"]);
+        s.idle(3);
+        assert!(some_text(&s, "keep"), "the tag in the pill and the strip");
+        shot_still(&mut s, "viewer-tags-graphite");
+        let r = s.text_rect("keep");
+        s.idle(40);
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        wait_until(&mut s, "keep off", 10, |_| crate::tags::read(&d.join("b.png")) == ["Blue"]);
+        s.act("key Escape");
+        assert!(viewer(&s).strip.is_none() && s.popup_open(), "Escape closes the strip first");
+        // Compare: pinned on the left, the next ones beside it, zoomed together.
+        s.act("key c");
+        assert_eq!(viewer(&s).pin.as_ref().map(|p| p.name.as_str()), Some("b.png"));
+        s.act("key ArrowRight");
+        assert_eq!(pic(&s), "c.png");
+        assert_eq!(viewer(&s).pin.as_ref().map(|p| p.name.as_str()), Some("b.png"), "the pinned one stays");
+        wait_until(&mut s, "both decoded", 10, |s| s.app.thumbs.dims(&d.join("c.png")).is_some());
+        s.idle(2);
+        assert!(some_text(&s, "b.png") && some_text(&s, "c.png") && some_text(&s, "3 / 5"), "both named");
+        shot_still(&mut s, "viewer-compare-graphite");
+        s.act("key Plus");
+        assert!((viewer(&s).zoom - 1.25).abs() < 1e-3);
+        s.act("key Escape");
+        assert!(viewer(&s).pin.is_none() && s.popup_open(), "Escape leaves the comparison");
+        click_control(&mut s, "viewer compare");
+        assert!(viewer(&s).pin.is_some(), "and its button pins");
+        click_control(&mut s, "viewer compare");
+        // At rest, nothing repaints (once the name has faded, and the app's memory trim
+        // two seconds after the last decode has run).
+        s.idle(240);
+        std::thread::sleep(std::time::Duration::from_millis(2200));
+        // The last message gone too (it shows for three seconds by the clock).
+        while s.app.toast.as_ref().is_some_and(|t| t.1.elapsed().as_secs_f32() < 3.2) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        s.idle(3);
+        // (The sidebar looks at the drives every few seconds: that wake is the app's.)
+        let causes = format!("{:?}", s.ctx.repaint_causes());
+        assert!(s.repaint == std::time::Duration::MAX || !causes.contains("viewer.rs"), "the viewer asks for nothing while it rests: {:?} {causes}", s.repaint);
+        // Without ImageMagick.
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(root().join("sortpics-none")));
+        s.act("key r");
+        assert!(some_text(&s, "Turning pictures needs ImageMagick"), "said over the viewer");
+        s.idle(2);
+        s.shot("viewer-no-magick-graphite");
+        // A small window: the buttons that fit, apart.
+        s.resize(520.0, 340.0);
+        s.act("move 200 200");
+        s.act("key c");
+        s.act("key t");
+        s.idle(3);
+        s.shot("viewer-small-tools-graphite");
+        s.act("key Escape");
+        s.act("key Escape");
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        report("sort pictures", &s);
     }
 }

@@ -9781,3 +9781,63 @@ fn preview_selections_copy_what_is_shown() {
     assert_eq!(lines_text(&s, env.len(), shown(true)), "export API_KEY=sk-live-0123456789\nDATABASE_URL=\"postgres://u:pw@localhost/db\"");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// What the picture viewer does to files, on real ones: turns through the ImageMagick
+/// here (`magick`, or version 6's `convert`), three in a row keeping one original in the
+/// trash and Undo bringing it back byte for byte; a tag toggled on and off by what the
+/// file holds, even when the tag cache read it before the change.
+#[test]
+fn viewer_turns_and_tags_real_pictures() {
+    let d = tmpdir("viewer-sort");
+    let pic = d.join("shot.png");
+    std::fs::write(&pic, png_bytes(40, 20, 4)).unwrap();
+    let shown = |p: &Path| crate::imgdec::load(p, 64).map(|x| x.1);
+    // Tags: the cache asked first, then changed under it.
+    assert!(crate::tags::get(&pic, |t| t.to_vec()).is_none(), "not read yet");
+    crate::viewer::toggle_tag(&pic, "Red").unwrap();
+    assert_eq!(crate::tags::read(&pic), ["Red"]);
+    crate::viewer::toggle_tag(&pic, "red").unwrap();
+    assert!(crate::tags::read(&pic).is_empty(), "off again, whatever its case");
+    crate::viewer::toggle_tag(&pic, "keep").unwrap();
+    crate::viewer::toggle_tag(&pic, "Blue").unwrap();
+    assert_eq!(crate::tags::read(&pic), ["keep", "Blue"]);
+    // Turns.
+    let tools = d.join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for name in ["magick", "convert"] {
+        if let Some(real) = std::env::split_paths(&path).map(|p| p.join(name)).find(|m| m.is_file()) {
+            let _ = std::os::unix::fs::symlink(real, tools.join(name));
+        }
+    }
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(tools.clone()));
+    let t = crate::drives::Tools::current().unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    let Some(prog) = crate::picfix::magick(&t) else {
+        eprintln!("viewer turns: no ImageMagick, skipped");
+        return;
+    };
+    let original = std::fs::read(&pic).unwrap();
+    let kept = std::sync::Mutex::new(HashSet::new());
+    let trashed = || crate::trashcan::list().into_iter().filter(|it| it.original == pic).count();
+    let before = trashed();
+    let (r, again) = crate::viewer::turn_once(&t, prog, &pic, true, &kept);
+    assert!(r.is_ok() && !again, "{r:?}");
+    assert_eq!(shown(&pic), Some([20, 40]));
+    let (r, again) = crate::viewer::turn_once(&t, prog, &pic, true, &kept);
+    assert!(r.is_ok() && again);
+    assert_eq!(shown(&pic), Some([40, 20]));
+    let (r, _) = crate::viewer::turn_once(&t, prog, &pic, false, &kept);
+    assert!(r.is_ok());
+    assert_eq!(shown(&pic), Some([20, 40]), "right, right, left: one turn right");
+    assert_eq!(trashed(), before + 1, "one original kept for three turns");
+    assert_eq!(crate::picfix::undo_replaced(std::slice::from_ref(&pic)), 0);
+    assert_eq!(std::fs::read(&pic).unwrap(), original, "the original back, byte for byte");
+    // Not a picture ImageMagick writes back: refused, the file as it was.
+    let svg = d.join("drawing.svg");
+    std::fs::write(&svg, "<svg xmlns='http://www.w3.org/2000/svg'/>").unwrap();
+    let (r, _) = crate::viewer::turn_once(&t, prog, &svg, true, &kept);
+    assert!(r.is_err());
+    assert_eq!(std::fs::read_to_string(&svg).unwrap(), "<svg xmlns='http://www.w3.org/2000/svg'/>");
+    let _ = std::fs::remove_dir_all(&d);
+}
