@@ -6877,7 +6877,7 @@ fn smart_folders_find_what_they_say() {
         v.sort();
         v
     };
-    let sf = |has: &str, kinds: &[&str], days: Option<u32>, bigger: Option<u64>| SmartFolder { id: 1, name: "x".into(), root: d.clone(), name_has: has.into(), kinds: kinds.iter().map(|k| k.to_string()).collect(), days, bigger };
+    let sf = |has: &str, kinds: &[&str], days: Option<u32>, bigger: Option<u64>| SmartFolder { id: 1, name: "x".into(), root: d.clone(), name_has: has.into(), kinds: kinds.iter().map(|k| k.to_string()).collect(), days, bigger, tag: String::new() };
     assert_eq!(found(&sf("invoice", &[], None, None)), ["Invoices/2025/invoice-001.pdf", "Invoices/2026/Invoice-030.PDF", "Invoices/2026/invoice-031.pdf"], "any case; no folders, hidden, installed or linked copies");
     assert_eq!(found(&sf("invoice-0??.pdf", &[], None, None)), ["Invoices/2025/invoice-001.pdf", "Invoices/2026/Invoice-030.PDF", "Invoices/2026/invoice-031.pdf"]);
     assert_eq!(found(&sf("IMG_*", &[], None, None)), ["Photos/IMG_0001.jpg", "Photos/IMG_0002.png"]);
@@ -10580,5 +10580,131 @@ fn picker_answers_each_mode() {
     frame(&mut app, vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]);
     assert!(done(&app).is_none() && app.tab().filter.is_empty());
     let _ = crate::picker::ANSWER.lock().unwrap().take();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A tag's view finds what carries it under a folder, in any case, folders too, and
+/// skips what smart folders skip; the list sorts and groups by each item's first tag,
+/// colour labels in their order before the words, the untagged last either way round.
+#[test]
+fn tag_views_find_and_sort_by_the_first_tag() {
+    use crate::config::GroupBy;
+    use crate::tags;
+    let d = tmpdir("tagview");
+    for f in ["a.txt", "b.txt", "c.txt", "d.txt", "sub/e.txt", ".hidden/g.txt", "node_modules/h.txt"] {
+        touch(&d.join(f), "x");
+    }
+    std::fs::create_dir_all(d.join("sub/f")).unwrap();
+    if tags::write(&d.join("a.txt"), &["work".into()]).is_err() {
+        eprintln!("no user xattrs here: skipped");
+        return;
+    }
+    let set = |f: &str, t: &[&str]| tags::write(&d.join(f), &t.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
+    set("b.txt", &["archive", "Blue"]);
+    set("c.txt", &["Red"]);
+    set("sub/e.txt", &["Work"]);
+    set("sub/f", &["work", "Gray"]);
+    set(".hidden/g.txt", &["work"]);
+    set("node_modules/h.txt", &["work"]);
+    let found = std::sync::Mutex::new(vec![]);
+    let (cancel, cut) = (std::sync::atomic::AtomicBool::new(false), std::sync::atomic::AtomicBool::new(false));
+    tags::search(&d, "WORK", &|b| {
+        found.lock().unwrap().extend(b.into_iter().map(|e| e.path.strip_prefix(&d).unwrap().to_path_buf()));
+        true
+    }, &cancel, &cut);
+    let mut found = found.into_inner().unwrap();
+    found.sort();
+    assert_eq!(found, [PathBuf::from("a.txt"), PathBuf::from("sub/e.txt"), PathBuf::from("sub/f")]);
+    // A file's first tag in the Tags order: Blue before the word "archive".
+    assert_eq!(tags::leading(&tags::read(&d.join("b.txt"))).map(String::as_str), Some("Blue"));
+    assert_eq!(tags::ordered(&["work".into(), "Gray".into(), "Red".into(), "archive".into()]), ["Red", "Gray", "archive", "work"]);
+    assert_eq!(tags::edited(&["a".into(), "b".into()], &tags::How::Rename("A".into(), "b".into())), ["b"], "renamed onto one it had");
+    // The listing, once the reader has every file's tags.
+    let stats = HashMap::new();
+    let ctx = egui::Context::default();
+    let mut t = Tab::new(92, d.clone(), ViewSettings::default(), ctx.clone());
+    let order = |t: &mut Tab, sort: SortKey, desc: bool, group: GroupBy| -> (Vec<String>, Vec<String>) {
+        t.settings.sort = sort;
+        t.settings.desc = desc;
+        t.settings.group = group;
+        let start = Instant::now();
+        loop {
+            t.dirty = true;
+            pump(t, &stats);
+            tags::flush(&ctx);
+            if t.entries.iter().all(|e| tags::get(&e.path, |_| ()).is_some()) || start.elapsed() > Duration::from_secs(5) {
+                t.dirty = true;
+                pump(t, &stats);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect(), t.header_labels())
+    };
+    assert_eq!(order(&mut t, SortKey::Tags, false, GroupBy::None).0, ["node_modules", "sub", "c.txt", "b.txt", "a.txt", "d.txt"]);
+    assert_eq!(order(&mut t, SortKey::Tags, true, GroupBy::None).0, ["sub", "node_modules", "a.txt", "b.txt", "c.txt", "d.txt"], "untagged still last");
+    let (names, groups) = order(&mut t, SortKey::Name, false, GroupBy::Tag);
+    assert_eq!(groups, ["Red", "Blue", "work", "No tags"], "an item under its first tag only");
+    assert_eq!(names, ["c.txt", "b.txt", "a.txt", "node_modules", "sub", "d.txt"]);
+    // Every tag read so far, colour labels too, for the sidebar.
+    let mut known = vec!["work".to_string()];
+    assert!(tags::remember(&mut known));
+    for t in ["Red", "Blue", "archive", "Work"] {
+        assert!(known.iter().any(|k| k.eq_ignore_ascii_case(t)), "{t} known");
+    }
+    assert_eq!(known.iter().filter(|k| k.eq_ignore_ascii_case("work")).count(), 1, "one entry whatever the case");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A tag change is one change for Undo, however many files it touched: taken back and
+/// done again, only where each file's tags are still what the change left. Past a few
+/// hundred files it runs on a worker and is recorded when it ends.
+#[test]
+fn tag_changes_undo_and_redo_as_one() {
+    use crate::tags::{self, How, Job, Record};
+    let ctx = egui::Context::default();
+    let d = tmpdir("tagundo");
+    let files: Vec<PathBuf> = (0..3).map(|i| d.join(format!("f{i}.txt"))).collect();
+    for f in &files {
+        touch(f, "x");
+    }
+    if tags::write(&files[0], &["Red".into()]).is_err() {
+        eprintln!("no user xattrs here: skipped");
+        return;
+    }
+    let mut app = crate::app::App::new(&ctx, vec![d.clone()]);
+    app.undo_keep = crate::undofile::Keeper::new(None, &ctx);
+    let read = |f: &PathBuf| tags::read(f);
+    tags::start(&mut app, Job::Edit(files.clone(), How::Add("work".into())), Record::New("Tag 3 items work".into()));
+    assert_eq!(read(&files[0]), ["Red", "work"]);
+    assert_eq!(read(&files[2]), ["work"]);
+    assert_eq!((app.undo.len(), app.undo.last().map(|u| u.label.as_str())), (1, Some("Tag 3 items work")));
+    assert!(app.undo_last());
+    assert_eq!(read(&files[0]), ["Red"]);
+    assert!(read(&files[2]).is_empty() && app.undo.can_redo());
+    assert!(app.redo_last());
+    assert_eq!(read(&files[1]), ["work"]);
+    // Renamed everywhere, then one file changed by someone else before Undo: that one
+    // is left as it is.
+    tags::start(&mut app, Job::Edit(files.clone(), How::Rename("work".into(), "job".into())), Record::New("Rename tag “work” to “job”".into()));
+    assert_eq!(read(&files[0]), ["Red", "job"]);
+    tags::write(&files[1], &["job".into(), "mine".into()]).unwrap();
+    app.undo_last();
+    assert_eq!(read(&files[0]), ["Red", "work"]);
+    assert_eq!(read(&files[1]), ["job", "mine"], "changed since: left alone");
+    assert_eq!(app.undo.redos().last().map(|u| u.kind.count()), Some(2), "redo holds what was taken back");
+    // Many files: on a worker, one change when it ends.
+    let many: Vec<PathBuf> = (0..260).map(|i| d.join(format!("m/{i}.txt"))).collect();
+    for f in &many {
+        touch(f, "x");
+    }
+    let before = app.undo.len();
+    tags::start(&mut app, Job::Edit(many.clone(), How::Add("Green".into())), Record::New("Tag 260 items Green".into()));
+    app_until(&mut app, &ctx, "the tagging", |a| !tags::busy() && a.undo.len() == before + 1);
+    assert!(many.iter().all(|f| read(f) == ["Green"]));
+    assert_eq!(app.undo.last().map(|u| u.kind.count()), Some(260));
+    app.undo_last();
+    app_until(&mut app, &ctx, "the untagging", |_| !tags::busy() && read(&many[259]).is_empty());
+    assert!(many.iter().all(|f| read(f).is_empty()));
     let _ = std::fs::remove_dir_all(&d);
 }

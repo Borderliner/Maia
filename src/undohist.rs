@@ -36,6 +36,7 @@ fn what(k: &UndoKind) -> &'static str {
         UndoKind::Copied(..) => "Copied, replacing",
         UndoKind::MovedOver(..) => "Moved, replacing",
         UndoKind::Synced(..) => "Synced",
+        UndoKind::Tagged(..) => "Tags changed",
     }
 }
 

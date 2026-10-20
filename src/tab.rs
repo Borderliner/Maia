@@ -975,7 +975,8 @@ impl Tab {
         let q = fuzzy::Query::new(if content.is_some() { "" } else { &fq.name });
         let only: HashSet<String> = self.settings.only_types.iter().cloned().collect();
         let (show_folders, show_files) = (self.settings.show_folders, self.settings.show_files);
-        let flatten = self.flatten;
+        // A flattened walk lists every folder on the way; a tag's view lists those tagged.
+        let flatten = self.flatten && !self.smart.as_ref().is_some_and(|s| !s.tag.is_empty());
         let db = crate::mime::mime_db();
         let (git_hide, here) = (self.git_hide.clone(), self.path.clone());
         let git_only = self.git_only.clone();
@@ -1214,6 +1215,12 @@ impl Tab {
                 (ns as u64) ^ (1 << 63) // order-preserving signed -> unsigned
             };
             let stat = |e: &Entry| c.stats.get(&e.path);
+            // Keys read from caches filled off this thread; an item without one goes last
+            // either way round.
+            let keyed: Option<Vec<Option<u64>>> = match s.sort {
+                SortKey::Tags => Some(crate::tags::sort_keys(top.iter().map(|&i| entries[i as usize].path.as_path()))),
+                _ => None,
+            };
             let primary = |e: &Entry| -> Option<u64> {
                 Some(match s.sort {
                     SortKey::Name => 0,
@@ -1224,10 +1231,10 @@ impl Tab {
                     SortKey::Folders => stat(e).map(|x| x.folders as u64).unwrap_or(0),
                     SortKey::Files => stat(e).map(|x| x.files as u64).unwrap_or(0),
                     SortKey::Deleted => when(tm.get(&e.path).and_then(|t| t.1)),
-                    SortKey::Type | SortKey::Original => return None,
+                    SortKey::Type | SortKey::Original | SortKey::Tags => return None,
                 })
             };
-            if !matches!(s.sort, SortKey::Type | SortKey::Original) {
+            if !matches!(s.sort, SortKey::Type | SortKey::Original) || keyed.is_some() {
                 // Name tie-break: the first 16 bytes of the lowercase name. Where two
                 // prefixes first differ, byte order equals natural order unless a number is
                 // being compared there (a digit at that byte or just before it); only
@@ -1244,8 +1251,12 @@ impl Tab {
                         // Recents on top (one lookup per item, not per comparison), then
                         // folders-first.
                         let recent = c.recents_on_top && c.recents.contains(&e.path);
-                        let rank = if recent { 0 } else { 2 } + if e.is_dir == c.folders_first { 0 } else { 1 };
-                        (tier(k), rank, primary(e).unwrap_or(0), u128::from_be_bytes(p), i)
+                        let (missing, key) = match &keyed {
+                            Some(v) => (v[k].is_none(), v[k].unwrap_or(0)),
+                            None => (false, primary(e).unwrap_or(0)),
+                        };
+                        let rank = if recent { 0 } else { 4 } + if e.is_dir == c.folders_first { 0 } else { 2 } + missing as u8;
+                        (tier(k), rank, key, u128::from_be_bytes(p), i)
                     })
                     .collect();
                 par_sort_by(&mut dec, &|a: &(i32, u8, u64, u128, u32), b: &(i32, u8, u64, u128, u32)| {
@@ -1626,6 +1637,14 @@ fn compare(a: &Entry, b: &Entry, key: SortKey, desc: bool, c: &ViewCtx, trash: &
         SortKey::Original => trash.get(&a.path).map(|t| t.0.as_path()).cmp(&trash.get(&b.path).map(|t| t.0.as_path())),
         SortKey::Folders => c.stats.get(&a.path).map(|s| s.folders).unwrap_or(0).cmp(&c.stats.get(&b.path).map(|s| s.folders).unwrap_or(0)),
         SortKey::Files => c.stats.get(&a.path).map(|s| s.files).unwrap_or(0).cmp(&c.stats.get(&b.path).map(|s| s.files).unwrap_or(0)),
+        SortKey::Tags => {
+            let lead = |p: &Path| crate::tags::get(p, |t| crate::tags::leading(t).map(|l| (crate::tags::rank(l), l.to_lowercase()))).flatten();
+            match (lead(&a.path), lead(&b.path)) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                // Without one last, whichever way round.
+                (x, y) => return y.is_none().cmp(&x.is_none()).reverse().then_with(|| natural_cmp(a.lname(), b.lname())),
+            }
+        }
     };
     let o = o.then_with(|| natural_cmp(&a.lname(), &b.lname()));
     if desc { o.reverse() } else { o }
@@ -1734,6 +1753,8 @@ fn group_label(e: &Entry, g: GroupBy, c: &GroupCtx) -> String {
             None => "Unknown".into(),
         },
         GroupBy::FileSystem => c.vols.get(&e.path).map(|v| v.fstype.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "Unknown".into()),
+        // The first tag only: an item shows once, under the tag it sorts by.
+        GroupBy::Tag => crate::tags::get(&e.path, |t| crate::tags::leading(t).cloned()).flatten().unwrap_or_else(|| NO_TAGS.into()),
         GroupBy::PercentFull => match c.vols.get(&e.path) {
             Some(v) if v.total > 0 => match (v.total - v.free) as f64 / v.total as f64 {
                 f if f >= 0.9 => "Nearly full (90%+)".into(),
@@ -1745,7 +1766,12 @@ fn group_label(e: &Entry, g: GroupBy, c: &GroupCtx) -> String {
     }
 }
 
+const NO_TAGS: &str = "No tags";
+
 fn group_rank(l: &str, g: GroupBy) -> usize {
+    if g == GroupBy::Tag {
+        return if l == NO_TAGS { 99 } else { crate::tags::rank(l) as usize };
+    }
     let order: &[&str] = match g {
         GroupBy::Name => &["A – H", "I – P", "Q – Z", "Other"],
         GroupBy::Type => &["Folder"],
@@ -1755,7 +1781,7 @@ fn group_rank(l: &str, g: GroupBy) -> usize {
         GroupBy::Usage => &["Over half", "10 – 50%", "1 – 10%", "< 1%"],
         GroupBy::FreeSpace => &["Under 1 GB free", "1 – 10 GB free", "10 – 100 GB free", "Over 100 GB free", "Unknown"],
         GroupBy::PercentFull => &["Nearly full (90%+)", "Over half full", "Under half full", "Unknown"],
-        GroupBy::None | GroupBy::Original | GroupBy::FileSystem => &[],
+        GroupBy::None | GroupBy::Original | GroupBy::FileSystem | GroupBy::Tag => &[],
     };
     order.iter().position(|o| *o == l).unwrap_or(if g == GroupBy::Type { 1 } else { 99 })
 }

@@ -39,13 +39,14 @@ impl Cmd {
             Cmd::GroupFree => G::FreeSpace,
             Cmd::GroupFs => G::FileSystem,
             Cmd::GroupFull => G::PercentFull,
+            Cmd::GroupTag => G::Tag,
             _ => return None,
         })
     }
 }
 
 /// Every "Group By …" command, in menu order.
-pub const GROUP_CMDS: [Cmd; 14] = [
+pub const GROUP_CMDS: [Cmd; 15] = [
     Cmd::GroupNone,
     Cmd::GroupName,
     Cmd::GroupSize,
@@ -54,6 +55,7 @@ pub const GROUP_CMDS: [Cmd; 14] = [
     Cmd::GroupAccessed,
     Cmd::GroupItems,
     Cmd::GroupType,
+    Cmd::GroupTag,
     Cmd::GroupUsage,
     Cmd::GroupDeleted,
     Cmd::GroupOriginal,
@@ -235,6 +237,7 @@ commands! {
     GroupFree, "group_free_space", Group, "Group By Free Space", "Drives by free space (Computer only).", [];
     GroupFs, "group_file_system", Group, "Group By File System", "Drives by file system (Computer only).", [];
     GroupFull, "group_percent_full", Group, "Group By Percent Full", "Drives by how full they are (Computer only).", [];
+    GroupTag, "group_tag", Group, "Group By Tag", "One group per tag, colour labels first; an item shows under its first tag only.", [];
     GroupExpandAll, "group_expand_all", Group, "Expand All Groups", "Open every group.", [];
     GroupCollapseAll, "group_collapse_all", Group, "Collapse All Groups", "Close every group, leaving just the headers.", [];
     SavedView, "saved_view_settings", View, "Saved View Settings", "Remember this view for this folder, its subfolders, or everywhere.", [];
@@ -244,6 +247,7 @@ commands! {
     SortModified, "sort_modified", Sort, "Sort By Date Modified", "Sort by modification time (newest first); repeat to reverse.", ["Ctrl+Alt+3"];
     SortType, "sort_type", Sort, "Sort By Type", "Sort by type; repeat to reverse.", ["Ctrl+Alt+4"];
     SortCreated, "sort_created", Sort, "Sort By Date Created", "Sort by creation time; repeat to reverse.", [];
+    SortTags, "sort_tags", Sort, "Sort By Tag", "By each item's first tag: colour labels in their order, then words A to Z; untagged last.", [];
     SortNameAsc, "sort_name_asc", Sort, "Sort By Name Asc", "Sort A to Z.", [];
     SortNameDesc, "sort_name_desc", Sort, "Sort By Name Desc", "Sort Z to A.", [];
     SortSizeAsc, "sort_size_asc", Sort, "Sort By Size Asc", "Smallest first (folders by their content size).", [];

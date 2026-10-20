@@ -329,11 +329,13 @@ pub enum SortKey {
     Accessed,
     Deleted,
     Original,
+    /// By each item's first tag: the colour labels in their order, then the words.
+    Tags,
 }
 
 impl SortKey {
     pub fn default_desc(self) -> bool {
-        !matches!(self, SortKey::Name | SortKey::Type | SortKey::Original)
+        !matches!(self, SortKey::Name | SortKey::Type | SortKey::Original | SortKey::Tags)
     }
 }
 
@@ -354,10 +356,11 @@ pub enum Column {
     Deleted,
     /// Trash only: the folder it was deleted from.
     Original,
+    Tags,
 }
 
 impl Column {
-    pub const ALL: [Column; 13] = [
+    pub const ALL: [Column; 14] = [
         Column::Name,
         Column::Type,
         Column::Size,
@@ -371,6 +374,7 @@ impl Column {
         Column::Accessed,
         Column::Deleted,
         Column::Original,
+        Column::Tags,
     ];
     pub fn title(self) -> &'static str {
         match self {
@@ -387,6 +391,7 @@ impl Column {
             Column::Accessed => "Date Accessed",
             Column::Deleted => "Date Deleted",
             Column::Original => "Original Location",
+            Column::Tags => "Tags",
         }
     }
     pub fn sort_key(self) -> Option<SortKey> {
@@ -402,6 +407,7 @@ impl Column {
             Column::Accessed => SortKey::Accessed,
             Column::Deleted => SortKey::Deleted,
             Column::Original => SortKey::Original,
+            Column::Tags => SortKey::Tags,
             Column::Permissions => return None,
         })
     }
@@ -416,6 +422,7 @@ impl Column {
             Column::Usage => 120.0,
             Column::Permissions => 100.0,
             Column::Extension => 80.0,
+            Column::Tags => 140.0,
         }
     }
     pub fn right_aligned(self) -> bool {
@@ -448,6 +455,8 @@ pub enum GroupBy {
     FileSystem,
     /// Computer only.
     PercentFull,
+    /// By each item's first tag (as the Tags sort orders them).
+    Tag,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -566,6 +575,8 @@ pub struct UserData {
     pub smart: Vec<crate::smart::SmartFolder>,
     /// The newest version started (the welcome tour and What's New are shown once).
     pub seen_version: String,
+    /// Tags and colour labels known to be on some file, for the sidebar.
+    pub tags: Vec<String>,
 }
 
 impl UserData {

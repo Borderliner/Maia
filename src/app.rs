@@ -190,6 +190,7 @@ impl UndoKind {
             UndoKind::Copied(v, _) => v.len(),
             UndoKind::Created(v) | UndoKind::Trashed(v) | UndoKind::Replaced(v) => v.len(),
             UndoKind::Synced(made, _, removed) => made.len() + removed.len(),
+            UndoKind::Tagged(v) => v.len(),
         }
     }
 }
@@ -212,6 +213,8 @@ pub enum UndoKind {
     /// A sync: copies made, those among them over something (in the trash now), and what
     /// mirroring sent to the trash.
     Synced(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>),
+    /// Files' tags changed: each one's before and after.
+    Tagged(Vec<crate::tags::Change>),
 }
 
 pub struct App {
@@ -1095,7 +1098,7 @@ impl App {
                     t.scroll_to_cursor = true;
                 }
                 t.saved_scope = self.ud.views.get(&path).map(|v| v.scope);
-                match ts.smart.and_then(|id| crate::smart::by_id(&self.ud.smart, id)) {
+                match ts.smart.and_then(|id| crate::smart::by_id_in(&self.ud, id)) {
                     Some(sf) if sf.root == path => t.open_smart(sf, None),
                     _ if ts.flatten => t.set_flatten(true),
                     _ => {}
@@ -1294,6 +1297,7 @@ impl App {
         self.pump_shares(ctx);
         self.age_trash();
         crate::errands::pump(self);
+        crate::tags::pump(self);
         self.shelf.pump(ctx);
         let look = self.appearance.load(std::sync::atomic::Ordering::Relaxed);
         if look != self.appearance_seen {
@@ -1331,10 +1335,12 @@ impl App {
         if tg != self.tags_gen {
             self.tags_gen = tg;
             for t in self.panels.values_mut().flat_map(|p| p.tabs.iter_mut()) {
-                if t.filter.contains("tag") {
+                if t.filter.contains("tag") || t.settings.sort == SortKey::Tags || t.settings.group == crate::config::GroupBy::Tag {
                     t.stream_dirty = true;
                 }
             }
+            // Tags met on files join the sidebar's.
+            self.ud_dirty |= crate::tags::remember(&mut self.ud.tags);
         }
         for d in &changed_dirs {
             self.stats.invalidate(d);
@@ -2440,6 +2446,13 @@ impl App {
                 t.collapsed_groups.clear();
                 t.dirty = true;
             }
+            Cmd::GroupTag => {
+                let t = self.tab();
+                t.settings.group = crate::config::GroupBy::Tag;
+                t.collapsed_groups.clear();
+                t.dirty = true;
+            }
+            Cmd::SortTags => self.tab().set_sort(SortKey::Tags),
             Cmd::GroupExpandAll => {
                 let t = self.tab();
                 t.collapsed_groups.clear();
@@ -3405,6 +3418,10 @@ impl App {
             self.toast("Undo waits for the move under way");
             return false;
         }
+        if crate::tags::busy() {
+            self.toast("Undo waits for the tags being changed");
+            return false;
+        }
         let Some(u) = self.undo.pop() else {
             self.toast("Nothing to undo");
             return true;
@@ -3414,6 +3431,11 @@ impl App {
         let mut moved_back = ops::Changed::default();
         // What Redo would do again: the part of the change that was taken back.
         let again = match &u.kind {
+            UndoKind::Tagged(ch) => {
+                self.toast(format!("Undid “{}”", u.label));
+                crate::tags::start(self, crate::tags::Job::Restore(ch.clone(), true), crate::tags::Record::Undid(u.label.clone()));
+                return true;
+            }
             UndoKind::Rename(pairs) => {
                 let plan: Vec<(PathBuf, String)> = pairs
                     .iter()

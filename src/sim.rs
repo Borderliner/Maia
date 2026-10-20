@@ -1102,7 +1102,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(167) {
+    match rng.below(168) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2509,6 +2509,47 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
         }
         165 => picker_start_or_stop(s, rng),
         166 => picker_step(s, rng),
+        167 => {
+            // A tag from the sidebar: opened, or its menu used; or a column chosen from
+            // the list header's menu and sorted by.
+            let side: Vec<(Rect, String)> = s.texts.iter().filter(|(r, t)| r.right() <= s.app.sidebar_width + 1.0 && s.app.ud.tags.iter().any(|k| k == t)).cloned().collect();
+            match (rng.below(3), side.is_empty()) {
+                (0, false) => {
+                    let (r, _) = rng.pick(&side).clone();
+                    s.act(&format!("click {:.0} {:.0}{}", r.center().x, r.center().y, if rng.below(3) == 0 { " ctrl" } else { "" }));
+                }
+                (1, false) => {
+                    let (r, _) = rng.pick(&side).clone();
+                    s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+                    s.idle(2);
+                    let pick = *rng.pick(&["Open", "Open In New Tab", "Rename Tag…", "Remove From All Files…"]);
+                    if some_text_at(s, pick) {
+                        s.click_text(pick);
+                        s.idle(2);
+                        if matches!(s.app.popup, Popup::Prompt { .. }) {
+                            s.act("key ctrl+a");
+                            s.act(&format!("text {}", rng.pick(&["renamed", "work", "Red"])));
+                        }
+                        s.act(rng.pick(&["key Enter", "key Escape"]));
+                    }
+                }
+                _ => {
+                    let hdr: Vec<Rect> = s.texts.iter().filter(|(r, t)| r.left() > s.app.sidebar_width && crate::config::Column::ALL.iter().any(|c| c.title() == t)).map(|x| x.0).collect();
+                    if hdr.is_empty() {
+                        return;
+                    }
+                    let r = *rng.pick(&hdr);
+                    s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+                    s.idle(2);
+                    let name = rng.pick(&crate::config::Column::ALL).title();
+                    if let Some((r, _)) = s.texts.iter().rev().find(|(_, t)| t == name).cloned() {
+                        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+                    }
+                    s.act("move -50 -50");
+                    s.idle(rng.below(10));
+                }
+            }
+        }
         _ => {
             s.note("idle".into());
             s.idle(rng.below(20) + 1);
@@ -4823,6 +4864,95 @@ mod journeys {
         wait_until(&mut s, "properties shows tags", 5, |s| s.texts.iter().any(|(_, t)| t == "taxes 2025") && s.texts.iter().any(|(_, t)| t == "Tags"));
         s.act("key Escape");
         report("tags", &s);
+    }
+
+    /// Tags as places: the sidebar lists those met on files, one opens a view of every
+    /// file in the home folder carrying it, the Tags column shows and sorts them, the list
+    /// groups by them, and a tag is renamed and taken off every file from its menu, each
+    /// as one change Undo takes back.
+    #[test]
+    fn tags_in_the_sidebar_column_and_everywhere() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("tagviews");
+        let d = home.join("Documents");
+        let (notes, rep, wide) = (d.join("notes.txt"), d.join("report.md"), home.join("Pictures/wide.png"));
+        let tag = |p: &Path, t: &[&str]| crate::tags::write(p, &t.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+        if tag(&notes, &["Red", "orchid"]).is_err() {
+            eprintln!("no user xattrs here: skipped");
+            return;
+        }
+        tag(&rep, &["orchid"]).unwrap();
+        tag(&wide, &["orchid", "Blue"]).unwrap();
+        let all = |want: &str| [&notes, &rep, &wide].iter().all(|p| crate::tags::read(p).iter().any(|t| t == want));
+        let none = |want: &str| [&notes, &rep, &wide].iter().all(|p| !crate::tags::read(p).iter().any(|t| t == want));
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.cmd(ViewDetails);
+        // Met on the files drawn, the tags join the sidebar.
+        wait_until(&mut s, "tags in the sidebar", 5, |s| sidebar_text(s, "orchid").is_some() && sidebar_text(s, "Red").is_some());
+        look(&mut s, "sidebar tags");
+        let r = sidebar_text(&s, "orchid").unwrap_or_else(|| s.fail("orchid"));
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        wait_until(&mut s, "the tag's view", 10, |s| s.tab().smart.as_ref().is_some_and(|f| f.tag == "orchid") && !s.tab().is_loading() && s.tab().view.len() == 3);
+        assert_eq!(s.tab().title(), "orchid");
+        look(&mut s, "orchid's view");
+        // The Tags column, from the header's menu; the names leave their tags to it.
+        let r = list_text(&s, "Name");
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(2);
+        let r = s.texts.iter().rev().find(|(r, t)| t == "Tags" && r.left() > s.app.sidebar_width).map(|x| x.0).unwrap_or_else(|| s.fail("Tags in the column menu"));
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        // Away from the menu (Escape would leave the view).
+        s.act("click 800 700");
+        assert!(s.tab().settings.columns.iter().any(|c| c.0 == crate::config::Column::Tags), "Tags column on");
+        look(&mut s, "tags column");
+        // Sorted by it: Red before Blue before the word.
+        let r = list_text(&s, "Tags");
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        wait_until(&mut s, "sorted by tag", 5, |s| s.tab().view.iter().map(|&i| s.tab().entries[i as usize].name.as_str()).collect::<Vec<_>>() == ["notes.txt", "wide.png", "report.md"]);
+        look(&mut s, "sorted by tag");
+        for v in [ViewTree, ViewList, ViewMedium, ViewDetails] {
+            s.cmd(v);
+            look(&mut s, &format!("tag view {v:?}"));
+        }
+        // Grouped in a folder, each under its first tag.
+        go(&mut s, &d);
+        s.cmd(GroupTag);
+        wait_until(&mut s, "groups", 5, |s| s.tab().header_labels() == ["Red", "orchid", "No tags"]);
+        look(&mut s, "grouped by tag");
+        s.cmd(GroupNone);
+        // Renamed on every file from its menu, and back with Undo.
+        let menu = |s: &mut Sim, name: &str| {
+            let r = sidebar_text(s, name).unwrap_or_else(|| s.fail(name));
+            s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+            s.idle(2);
+        };
+        menu(&mut s, "orchid");
+        look(&mut s, "tag menu");
+        s.click_text("Rename Tag…");
+        s.idle(2);
+        assert!(matches!(s.app.popup, Popup::Prompt { .. }), "asks for the name");
+        s.act("key ctrl+a");
+        s.act("text iris");
+        s.act("key Enter");
+        wait_until(&mut s, "renamed everywhere", 10, |_| all("iris") && none("orchid"));
+        wait_until(&mut s, "sidebar follows", 5, |s| sidebar_text(s, "iris").is_some() && sidebar_text(s, "orchid").is_none());
+        look(&mut s, "renamed");
+        s.act("key ctrl+z");
+        wait_until(&mut s, "rename undone", 10, |s| all("orchid") && none("iris") && sidebar_text(s, "orchid").is_some());
+        // Taken off every file: asked first, with how many.
+        menu(&mut s, "orchid");
+        s.click_text("Remove From All Files…");
+        wait_until(&mut s, "asked", 10, |s| matches!(&s.app.popup, Popup::Confirm { msg, .. } if msg.contains("3 files")));
+        look(&mut s, "remove asks");
+        s.act("key Enter");
+        wait_until(&mut s, "removed everywhere", 10, |s| none("orchid") && sidebar_text(s, "orchid").is_none());
+        assert_eq!(crate::tags::read(&notes), ["Red"], "the other tags stay");
+        look(&mut s, "removed");
+        s.act("key ctrl+z");
+        wait_until(&mut s, "removal undone", 10, |s| all("orchid") && sidebar_text(s, "orchid").is_some());
+        report("tag views", &s);
     }
 
     /// Compress With Password, from the Compress menu and the palette: the password

@@ -100,6 +100,10 @@ impl App {
             self.toast("Redo waits for the move under way");
             return false;
         }
+        if crate::tags::busy() {
+            self.toast("Redo waits for the tags being changed");
+            return false;
+        }
         let Some(u) = self.undo.pop_redo() else {
             self.toast("Nothing to redo");
             return true;
@@ -107,6 +111,11 @@ impl App {
         let mut errs = 0;
         let mut changed = ops::Changed::default();
         let did = match &u.kind {
+            UndoKind::Tagged(ch) => {
+                self.toast(format!("Redid “{}”", u.label));
+                crate::tags::start(self, crate::tags::Job::Restore(ch.clone(), false), crate::tags::Record::Redid(u.label.clone()));
+                return true;
+            }
             UndoKind::Rename(pairs) => {
                 let plan: Vec<(PathBuf, String)> = pairs.iter().map(|(from, to)| (from.clone(), to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())).collect();
                 errs = crate::rename::apply(&plan).len();

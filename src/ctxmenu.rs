@@ -33,7 +33,37 @@ pub enum Act {
     Smart(SmartAct, u64, u64),
     /// Copy what is selected in a panel's preview (true), or select all of it.
     Preview(bool, u64),
+    /// A tag in the sidebar: (what, the tag, panel to act in).
+    TagPlace(TagAct, String, u64),
     None,
+}
+
+#[derive(Clone, Copy)]
+pub enum TagAct {
+    Open,
+    NewTab,
+    Rename,
+    Remove,
+}
+
+/// The menu of a tag in the sidebar. A colour label keeps its name.
+pub fn build_tag(panel: u64, tag: &str, pos: Pos2) -> Popup {
+    let it = |key: &str, label: &str, a: TagAct| Item { id: format!("tagplace:{key}"), label: label.into(), act: Act::TagPlace(a, tag.to_string(), panel), children: vec![] };
+    let mut items = vec![it("open", "Open", TagAct::Open), it("new_tab", "Open In New Tab", TagAct::NewTab), Item::sep()];
+    if crate::tags::color_of(tag).is_none() {
+        items.push(it("rename", "Rename Tag…", TagAct::Rename));
+    }
+    items.push(it("remove", "Remove From All Files…", TagAct::Remove));
+    let key = smart_key(crate::smart::tag_id(tag));
+    Popup::Ctx(CtxState { sidebar: Some(key), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![], focus: true, reveal: None })
+}
+
+/// "notes.txt", "3 items": what a tag change was made to, for Undo's list.
+fn what_tagged(paths: &[PathBuf]) -> String {
+    match paths {
+        [one] => one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        v => format!("{} items", v.len()),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -856,9 +886,9 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
             }
             Act::Tag(tag, on) => {
                 let paths = app.tab().targets();
-                if let Err(e) = crate::tags::toggle(&paths, &tag, !on) {
-                    app.toast(format!("Couldn't tag {e}"));
-                }
+                let label = format!("{} {} {tag}", if on { "Untag" } else { "Tag" }, what_tagged(&paths));
+                let how = if on { crate::tags::How::Remove(tag) } else { crate::tags::How::Add(tag) };
+                crate::tags::start(app, crate::tags::Job::Edit(paths, how), crate::tags::Record::New(label));
             }
             Act::NewTag => {
                 let paths = app.tab().targets();
@@ -870,9 +900,8 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                         if name.is_empty() {
                             return;
                         }
-                        if let Err(e) = crate::tags::toggle(&paths, &name, true) {
-                            app.toast(format!("Couldn't tag {e}"));
-                        }
+                        let label = format!("Tag {} {name}", what_tagged(&paths));
+                        crate::tags::start(app, crate::tags::Job::Edit(paths, crate::tags::How::Add(name)), crate::tags::Record::New(label));
                     }),
                 )));
             }
@@ -910,6 +939,24 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                 }
             }
             Act::Preview(copy, panel) => crate::textsel::menu_act(app, panel, copy),
+            Act::TagPlace(a, tag, panel) => {
+                let id = crate::smart::tag_id(&tag);
+                match a {
+                    TagAct::Open => app.actions.push(Action::OpenSmart { panel, id, new_tab: false, focus: true }),
+                    TagAct::NewTab => app.actions.push(Action::OpenSmart { panel, id, new_tab: true, focus: true }),
+                    TagAct::Rename => app.actions.push(Action::Open(Popup::prompt(
+                        "Rename tag",
+                        tag.clone(),
+                        Box::new(move |app: &mut App, name: String| {
+                            let name = name.replace(',', " ").trim().to_string();
+                            if !name.is_empty() && name != tag {
+                                crate::tags::bulk(app, crate::tags::Bulk::Rename(tag, name));
+                            }
+                        }),
+                    ))),
+                    TagAct::Remove => crate::tags::bulk(app, crate::tags::Bulk::Remove(tag)),
+                }
+            }
             Act::None => {}
         }
         return false;

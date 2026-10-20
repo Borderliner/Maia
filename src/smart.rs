@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, SystemTime};
 
 use egui::{FontId, Id, Sense, pos2, vec2};
@@ -32,6 +32,8 @@ pub struct SmartFolder {
     pub days: Option<u32>,
     /// Bigger than this many bytes.
     pub bigger: Option<u64>,
+    /// A tag's view: every file and folder carrying it (the other conditions unused).
+    pub tag: String,
 }
 
 /// The Timeline's id: a smart folder Maia keeps itself (saved ones count up from 1).
@@ -51,6 +53,29 @@ pub fn by_id(saved: &[SmartFolder], id: u64) -> Option<SmartFolder> {
         return Some(timeline());
     }
     saved.iter().find(|s| s.id == id).cloned()
+}
+
+/// Ids of tag views: the top 16 bits set, then a hash of the tag. Saved smart folders
+/// count up from 1, so the two never meet.
+const TAG_IDS: u64 = 0xFFFE << 48;
+
+pub fn tag_id(tag: &str) -> u64 {
+    // FNV-1a over the lowercase name: the same in every run, so a saved session finds it.
+    let h = tag.to_lowercase().bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+    TAG_IDS | (h & 0xFFFF_FFFF_FFFF)
+}
+
+/// Every file and folder in the home folder with this tag.
+pub fn tag_view(tag: &str) -> SmartFolder {
+    SmartFolder { id: tag_id(tag), name: tag.to_string(), root: crate::fsx::home(), tag: tag.to_string(), ..Default::default() }
+}
+
+/// A smart folder, the Timeline or a known tag's view, by id.
+pub fn by_id_in(ud: &crate::config::UserData, id: u64) -> Option<SmartFolder> {
+    if id & (0xFFFF << 48) == TAG_IDS {
+        return ud.tags.iter().find(|t| tag_id(t) == id).map(|t| tag_view(t));
+    }
+    by_id(&ud.smart, id)
 }
 
 /// The Timeline's view: newest first, in the date groups (today, yesterday, this week…).
@@ -182,7 +207,12 @@ pub fn walk(sf: SmartFolder, ctx: egui::Context) -> Walk {
     let truncated = Arc::new(AtomicBool::new(false));
     let (c2, d2, t2) = (cancel.clone(), done.clone(), truncated.clone());
     let _ = std::thread::Builder::new().name("smart folder".into()).spawn(move || {
-        if !crate::fsx::is_virtual_fs(&sf.root) {
+        if crate::fsx::is_virtual_fs(&sf.root) {
+        } else if !sf.tag.is_empty() {
+            let tx = Mutex::new(tx);
+            let send = |batch| tx.lock().unwrap_or_else(|e| e.into_inner()).send(batch).is_ok() && { ctx.request_repaint(); true };
+            crate::tags::search(&sf.root, &sf.tag, &send, &c2, &t2);
+        } else {
             search(&sf, &mut |batch| tx.send(batch).is_ok() && { ctx.request_repaint(); true }, &c2, &t2);
         }
         d2.store(true, Ordering::Relaxed);
@@ -256,7 +286,7 @@ pub fn from_filter(folder: &Path, filter: &str) -> SmartFolder {
     let (bigger, days) = f.floor_and_days(now);
     let words = f.name.trim().to_string();
     let name = if words.is_empty() { folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Search".into()) } else { words.clone() };
-    SmartFolder { id: 0, name, root: folder.to_path_buf(), name_has: words, kinds: vec![], days, bigger }
+    SmartFolder { id: 0, name, root: folder.to_path_buf(), name_has: words, kinds: vec![], days, bigger, tag: String::new() }
 }
 
 /// "10 MB", "1.5G", "500k": bytes.
@@ -313,7 +343,7 @@ impl Edit {
             "" => None,
             b => Some(parse_bytes(b).ok_or("Size: a number and a unit, like 10 MB")?),
         };
-        Ok(SmartFolder { id: self.id.unwrap_or(0), name, root, name_has: self.name_has.trim().to_string(), kinds: self.kinds.clone(), days, bigger })
+        Ok(SmartFolder { id: self.id.unwrap_or(0), name, root, name_has: self.name_has.trim().to_string(), kinds: self.kinds.clone(), days, bigger, tag: String::new() })
     }
 }
 
@@ -435,7 +465,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut Edit) -> bool {
 impl App {
     /// Show smart folder `id` in `panel`'s tab, or in a new tab there.
     pub fn open_smart(&mut self, panel: u64, id: u64, new_tab: bool, focus: bool) {
-        let Some(sf) = by_id(&self.ud.smart, id) else { return };
+        let Some(sf) = by_id_in(&self.ud, id) else { return };
         if !sf.root.is_dir() {
             self.toast(format!("{} is no longer there", pp::home_short(&sf.root)));
             return;

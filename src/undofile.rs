@@ -143,6 +143,7 @@ fn alive(k: &UndoKind, undo: bool, trashed: &HashSet<PathBuf>) -> bool {
         UndoKind::Synced(v, _, removed) => made(v) || removed.iter().any(|p| if undo { binned(p) } else { here(p) }),
         UndoKind::Trashed(v) => v.iter().any(|p| if undo { binned(p) } else { here(p) }),
         UndoKind::Replaced(v) => v.iter().any(|p| here(p) && binned(p)),
+        UndoKind::Tagged(v) => v.iter().any(|c| here(&c.0)),
     }
 }
 

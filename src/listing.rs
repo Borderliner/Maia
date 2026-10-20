@@ -248,6 +248,21 @@ fn paint_tags(ui: &Ui, x: f32, y: f32, tags: &(Vec<Color32>, String), font: &Fon
     }
 }
 
+/// The Tags column: the dots, then the words cut to the room left.
+fn tags_cell(ui: &Ui, r: Rect, tags: &(Vec<Color32>, String), font: &FontId, dim: Color32, ring: Color32) {
+    let rad = (font.size * 0.28).clamp(3.0, 5.0);
+    // As many dots as fit, the words after them when room is left.
+    let fit = (((r.width() + 2.5) / (rad * 2.0 + 2.5)).floor() as usize).min(tags.0.len());
+    let mut x = r.left();
+    if fit > 0 {
+        x += paint_dots(ui.painter(), x, r.center().y, &tags.0[..fit], rad, ring) + 6.0;
+    }
+    if !tags.1.is_empty() && r.right() - x > 16.0 {
+        let g = elided(ui, &tags.1, FontId::proportional(font.size - 1.5), r.right() - x, dim);
+        ui.painter().galley(pos2(x, r.center().y - g.size().y / 2.0), g, dim);
+    }
+}
+
 /// A matched line after the name, with the words it matched in the accent colour.
 fn append_match(job: &mut LayoutJob, line: &str, needle: &str, font: &FontId, dim: Color32, accent: Color32) {
     let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
@@ -800,6 +815,8 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
     let col_w = |c: Column, w: f32| if c == Column::Name { w + spare } else { w };
     let computer = tab::is_computer(&t.path);
     let tree = t.tree_active();
+    // With a Tags column the name leaves them to it.
+    let tag_col = cols.iter().any(|(c, _)| *c == Column::Tags);
     // Usage needs the parent's total.
     let needs_usage = cols.iter().any(|(c, _)| *c == Column::Usage);
     let parent_total: u64 = if needs_usage {
@@ -943,7 +960,7 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                     let name = display_name(&e, env.cfg);
                                     let rel = e.rel();
                                     let suffix = rel.as_deref().and_then(|r| std::path::Path::new(r).parent()).filter(|p| !p.as_os_str().is_empty()).map(|p| format!("› {}", p.display()));
-                                    let tags = if computer { None } else { row_tags(&e.path) };
+                                    let tags = if computer || tag_col { None } else { row_tags(&e.path) };
                                     let room = tags.as_ref().map_or(0.0, |tg| tags_width(ui, tg, &font));
                                     let mut job = name_job(&name, suffix.as_deref(), q, &font, dimc(pal.text), dimc(sub), acc, (name_r.width() - room).max(24.0), 1);
                                     // The line that matched, after the name (elided with it).
@@ -990,6 +1007,11 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                     let col = if computer && frac > 0.9 { pal.danger } else if computer && frac > 0.75 { Color32::from_rgb(0xe8, 0xa3, 0x3d) } else { pal.accent };
                                     ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * frac.clamp(0.0, 1.0), bar.height())), CornerRadius::same(4), col.gamma_multiply(0.75));
                                     ui.painter().text(bar.center(), Align2::CENTER_CENTER, label, FontId::proportional(env.cfg.font_size - 2.5), pal.text);
+                                }
+                            }
+                            Column::Tags => {
+                                if let Some(tg) = row_tags(&e.path) {
+                                    tags_cell(ui, inner, &tg, &font, dimc(sub), ring);
                                 }
                             }
                             other => {

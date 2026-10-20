@@ -1492,6 +1492,8 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::GroupDeleted | Cmd::GroupOriginal => crate::trashcan::is_trash_files(&t.path),
         Cmd::GroupFree | Cmd::GroupFs | Cmd::GroupFull => tab::is_computer(&t.path),
         Cmd::GroupItems | Cmd::GroupUsage | Cmd::GroupName | Cmd::GroupType | Cmd::GroupDate | Cmd::GroupCreated | Cmd::GroupAccessed | Cmd::GroupSize => !tab::is_computer(&t.path) && !t.tree_active(),
+        Cmd::GroupTag => !tab::is_computer(&t.path) && !t.tree_active(),
+        Cmd::SortTags => !tab::is_computer(&t.path),
         Cmd::GroupExpandAll => t.settings.group != crate::config::GroupBy::None && !t.collapsed_groups.is_empty(),
         Cmd::GroupCollapseAll => t.settings.group != crate::config::GroupBy::None,
         _ => true,
