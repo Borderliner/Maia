@@ -4219,13 +4219,13 @@ fn filter_query_speed() {
     for q in queries.split(';') {
         t.filter = q.to_string();
         let mut ms = vec![];
-        for _ in 0..5 {
+        for _ in 0..9 {
             let t0 = Instant::now();
             t.rebuild(&ctx);
             ms.push(t0.elapsed().as_secs_f64() * 1000.0);
         }
         ms.sort_by(|a, b| a.total_cmp(b));
-        eprintln!("{:>8.1} ms median {:>8.1} max  {:>7} of {} shown  {q:?}", ms[2], ms[4], t.view.len(), t.entries.len());
+        eprintln!("{:>7.1} ms least {:>7.1} median  {:>7} of {} shown  {q:?}", ms[0], ms[4], t.view.len(), t.entries.len());
     }
 }
 

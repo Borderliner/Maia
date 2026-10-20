@@ -92,15 +92,17 @@ pub fn timeline_view(mut v: crate::config::ViewSettings) -> crate::config::ViewS
 /// The kinds older smart folders could ask for, by their stored names.
 const KINDS: [&str; 7] = ["pictures", "documents", "pdfs", "videos", "music", "archives", "code"];
 
-/// `*` for any run of characters, `?` for one; both sides already lowercase.
-pub fn glob(pat: &[char], name: &[char]) -> bool {
+/// `*` for any run of characters, `?` for one; both sides already lowercase. Bytes do for
+/// plain ASCII, without making a list of characters per name.
+pub fn glob<T: Copy + PartialEq + From<u8>>(pat: &[T], name: &[T]) -> bool {
+    let (any, one) = (T::from(b'*'), T::from(b'?'));
     let (mut p, mut n) = (0, 0);
     let (mut star, mut mark) = (None, 0);
     while n < name.len() {
-        if p < pat.len() && (pat[p] == '?' || pat[p] == name[n]) {
+        if p < pat.len() && (pat[p] == one || pat[p] == name[n]) {
             p += 1;
             n += 1;
-        } else if p < pat.len() && pat[p] == '*' {
+        } else if p < pat.len() && pat[p] == any {
             star = Some(p);
             mark = n;
             p += 1;
@@ -112,7 +114,7 @@ pub fn glob(pat: &[char], name: &[char]) -> bool {
             return false;
         }
     }
-    pat[p..].iter().all(|&c| c == '*')
+    pat[p..].iter().all(|&c| c == any)
 }
 
 impl SmartFolder {

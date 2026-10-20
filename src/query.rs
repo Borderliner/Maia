@@ -47,8 +47,10 @@ enum Node {
     Has(String, bool),
     /// Part of the name alone (`name:`), or a pattern with * and ? for the whole name.
     Name(String),
-    Glob(Vec<char>),
-    Re(regex_lite::Regex),
+    /// The pattern, and as bytes when it is plain ASCII.
+    Glob(Vec<char>, Option<Vec<u8>>),
+    /// With text every name it matches holds, so most names skip the expression.
+    Re(regex_lite::Regex, Vec<String>),
     /// A pattern that did not compile.
     Never,
     Cond(Cond),
@@ -56,7 +58,8 @@ enum Node {
     /// Endings with their dot (".jpg", ".tar.gz").
     Ext(Vec<String>),
     /// Kinds of file, folders, files, or words of the type's description ("png image").
-    Kind { cats: Vec<FileCat>, dirs: bool, files: bool, labels: Vec<String> },
+    /// `id` names this query in each thread's memory of which extensions matched.
+    Kind { cats: Vec<FileCat>, dirs: bool, files: bool, labels: Vec<String>, id: u64 },
     Owner(Vec<u32>),
 }
 
@@ -189,11 +192,12 @@ fn eval(n: &Node, e: &Entry, cx: &Cx, ranked: bool) -> R {
             _ => yes(e.lname().contains(s.as_str()) || e.rel().is_some_and(|r| contains_ci(&r, s))),
         },
         Node::Name(s) => yes(e.lname().contains(s.as_str())),
-        Node::Glob(p) => yes(crate::smart::glob(p, &e.lname().chars().collect::<Vec<_>>())),
-        Node::Re(r) => yes(r.is_match(&e.name)),
+        Node::Glob(_, Some(b)) if e.lname().is_ascii() => yes(crate::smart::glob(b, e.lname().as_bytes())),
+        Node::Glob(p, _) => yes(crate::smart::glob(p, &e.lname().chars().collect::<Vec<_>>())),
+        Node::Re(r, need) => yes((need.is_empty() || need.iter().any(|n| e.lname().contains(n.as_str()))) && r.is_match(&e.name)),
         Node::Never => R::No,
         Node::Ext(v) => yes(!e.is_dir && v.iter().any(|x| e.lname().len() > x.len() && e.lname().ends_with(x.as_str()))),
-        Node::Kind { cats, dirs, files, labels } => {
+        Node::Kind { cats, dirs, files, labels, id } => {
             if e.is_dir {
                 return yes(*dirs);
             }
@@ -206,8 +210,30 @@ fn eval(n: &Node, e: &Entry, cx: &Cx, ranked: bool) -> R {
             if !cx.meta {
                 return R::Open;
             }
-            let l = crate::mime::mime_db().label(&e.name, e.ext(), false, e.is_executable()).to_lowercase();
-            yes(labels.iter().any(|w| l.contains(w.as_str())))
+            let db = crate::mime::mime_db();
+            let exec = e.is_executable();
+            let test = || {
+                let l = db.label(&e.name, e.ext(), false, exec).to_lowercase();
+                labels.iter().any(|w| l.contains(w.as_str()))
+            };
+            if db.named(&e.name) {
+                return yes(test());
+            }
+            // Descriptions are per extension (and whether the file runs), so each is
+            // looked at once per thread, not once per file under the database's lock.
+            SEEN_TYPES.with(|m| {
+                let mut m = m.borrow_mut();
+                if m.0 != *id {
+                    *m = (*id, Default::default());
+                }
+                let seen = &mut m.1[exec as usize];
+                if let Some(&b) = seen.get(e.ext()) {
+                    return yes(b);
+                }
+                let b = test();
+                seen.insert(e.ext().into(), b);
+                yes(b)
+            })
         }
         _ if !cx.meta => R::Open,
         Node::Cond(c) => {
@@ -226,6 +252,14 @@ fn eval(n: &Node, e: &Entry, cx: &Cx, ranked: bool) -> R {
         Node::Tag(t) => yes(crate::tags::get(&e.path, |v| v.iter().any(|x| x.eq_ignore_ascii_case(t))).unwrap_or(false)),
         Node::Owner(v) => yes(v.contains(&e.uid)),
     }
+}
+
+static KIND_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+thread_local! {
+    /// For one `type:` with a description: whether each extension's matched, for files
+    /// that can't run and files that can.
+    static SEEN_TYPES: std::cell::RefCell<(u64, [HashMap<Box<str>, bool>; 2])> = std::cell::RefCell::new((0, Default::default()));
 }
 
 /// Whether `hay` holds `needle` (already lowercase), in any case, without allocating
@@ -583,7 +617,12 @@ impl<'a> Parser<'a> {
     /// What a word means: a condition, a broken pattern, or (None) a plain word.
     fn atom(&mut self, w: &str) -> Option<Result<Node, ()>> {
         let unq = |v: &str| v.replace('"', "");
-        let re = |p: &str| regex_lite::RegexBuilder::new(p).case_insensitive(true).build().map(Node::Re).map_err(|_| ());
+        let re = |p: &str| {
+            // Flags could turn case back on, or let a dot reach further: no shortcut then.
+            let need = (!p.contains("(?")).then(|| crate::codesearch::required_literals(p)).flatten().unwrap_or_default();
+            let need = if need.iter().all(|n| n.is_ascii()) { need.iter().map(|n| n.to_ascii_lowercase()).collect() } else { vec![] };
+            regex_lite::RegexBuilder::new(p).case_insensitive(true).build().map(|r| Node::Re(r, need)).map_err(|_| ())
+        };
         if w.len() >= 3 && w.starts_with('/') && w.ends_with('/') {
             return Some(re(&w[1..w.len() - 1]));
         }
@@ -594,7 +633,7 @@ impl<'a> Parser<'a> {
                 "re" => return Some(re(&unq(v))),
                 "name" => {
                     let v = unq(v).to_lowercase();
-                    return Some(Ok(if v.contains(['*', '?']) { Node::Glob(v.chars().collect()) } else { Node::Name(v) }));
+                    return Some(Ok(if v.contains(['*', '?']) { glob(&v) } else { Node::Name(v) }));
                 }
                 "ext" => return Some(Ok(Node::Ext(list().into_iter().map(|x| format!(".{}", x.trim_start_matches('.'))).collect()))),
                 "type" | "kind" => {
@@ -609,7 +648,7 @@ impl<'a> Parser<'a> {
                             },
                         }
                     }
-                    return Some(Ok(Node::Kind { cats, dirs, files, labels }));
+                    return Some(Ok(Node::Kind { cats, dirs, files, labels, id: KIND_IDS.fetch_add(1, Ordering::Relaxed) }));
                 }
                 "owner" | "user" => {
                     let mut ids = vec![];
@@ -635,18 +674,22 @@ impl<'a> Parser<'a> {
             return (!p.trim().is_empty()).then_some(Ok(Node::Has(p, true)));
         }
         if w.contains(['*', '?']) {
-            return Some(Ok(Node::Glob(w.to_lowercase().chars().collect())));
+            return Some(Ok(glob(&w.to_lowercase())));
         }
         None
     }
+}
+
+fn glob(p: &str) -> Node {
+    Node::Glob(p.chars().collect(), p.is_ascii().then(|| p.as_bytes().to_vec()))
 }
 
 fn cost(n: &Node) -> u8 {
     match n {
         Node::Cond(_) | Node::Ext(_) | Node::Owner(_) | Node::Name(_) | Node::Never => 0,
         Node::Kind { labels, .. } if labels.is_empty() => 0,
-        Node::Words(_) | Node::Has(..) | Node::Glob(_) => 1,
-        Node::Re(_) | Node::All(_) | Node::Any(_) | Node::Not(_) => 2,
+        Node::Words(_) | Node::Has(..) | Node::Glob(..) => 1,
+        Node::Re(..) | Node::All(_) | Node::Any(_) | Node::Not(_) => 2,
         Node::Tag(_) | Node::Kind { .. } => 3,
     }
 }
