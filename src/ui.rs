@@ -1417,9 +1417,10 @@ impl App {
         // Conditions and operators the filter understands (size>10M, -draft, a | b) show
         // in the accent, a broken pattern in the danger colour.
         let (accent, text, danger) = (pal.accent, pal.text, pal.danger);
-        let mut conds = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
-            let mut job = crate::query::job(buf.as_str(), egui::TextStyle::Body.resolve(ui.style()), text, accent, danger);
-            job.wrap.max_width = wrap;
+        // One line that scrolls, as egui lays out a single-line field itself: a long
+        // query wrapped onto a second line below the box.
+        let mut conds = |ui: &Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
+            let job = crate::query::job(buf.as_str(), egui::TextStyle::Body.resolve(ui.style()), text, accent, danger);
             ui.fonts_mut(|f| f.layout_job(job))
         };
         let mut edit = egui::TextEdit::singleline(&mut t.filter).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(false).margin(egui::Margin::symmetric(4, 0)).desired_width(edit_rect.width()).font(egui::TextStyle::Body);

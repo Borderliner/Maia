@@ -5630,6 +5630,9 @@ mod journeys {
         let n = names(&s);
         assert!(!n.is_empty() && n.iter().all(|x| x.ends_with(".jpg") || x.starts_with("report 1")), "{:?}", &n[..n.len().min(5)]);
         assert!(s.tab().view.iter().all(|&i| !s.tab().entries[i as usize].rel().unwrap_or_default().contains("part 0")));
+        // Longer than the box: it stays on its one line and scrolls.
+        let line = s.texts.iter().find(|(_, t)| t.starts_with("(img | report)")).map(|(r, t)| (r.height(), t.ends_with("-size>1k")));
+        assert!(line.is_some_and(|(h, whole)| whole && h < s.app.cfg.font_size * 2.0), "{line:?}");
         look(&mut s, "complex query flattened");
         s.shot("filter-complex-flattened");
         // OR binds loosest; "-main1" leaves out main1.rs, main103.rs…, "notes-99" is a word.

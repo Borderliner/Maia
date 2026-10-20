@@ -347,9 +347,9 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut Edit) -> bool {
             label(ui, "Find");
             // Marked as the filter marks it, conditions in the accent.
             let (text, accent, danger) = (pal.text, pal.accent, pal.danger);
-            let mut marks = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
-                let mut job = crate::query::job(buf.as_str(), egui::TextStyle::Body.resolve(ui.style()), text, accent, danger);
-                job.wrap.max_width = wrap;
+            // On one line that scrolls, like any single-line field.
+            let mut marks = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
+                let job = crate::query::job(buf.as_str(), egui::TextStyle::Body.resolve(ui.style()), text, accent, danger);
                 ui.fonts_mut(|f| f.layout_job(job))
             };
             let r = ui.add(egui::TextEdit::singleline(&mut st.query).id(Id::new(("smart folder", "smart query"))).hint_text(egui::RichText::new("invoice type:pdfs modified<30d").color(pal.text_dim)).desired_width(wide).margin(egui::Margin::symmetric(6, 3)).layouter(&mut marks));
