@@ -2507,6 +2507,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 }
             }
         }
+        133 | 134 => columns_step(s, rng),
         165 => picker_start_or_stop(s, rng),
         166 => picker_step(s, rng),
         167 => {
@@ -2640,6 +2641,40 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
         }
     }
     picker_check(s);
+}
+
+/// The Columns view at random: into it, then its own moves (Left and Right, a click or
+/// a right-click in another column, the wheel along the strip).
+fn columns_step(s: &mut Sim, rng: &mut Rng) {
+    if !s.tab().settings.column_view {
+        s.cmd(Cmd::ViewColumns);
+        return;
+    }
+    let list = s.app.panels.get(&s.app.active).map(|p| p.list_rect).unwrap_or(Rect::NOTHING);
+    let names: Vec<Rect> = s.texts.iter().filter(|(r, _)| list.contains(r.center())).map(|(r, _)| *r).collect();
+    match rng.below(5) {
+        0 | 1 => {
+            for _ in 0..1 + rng.below(4) {
+                s.act(rng.pick(&["key ArrowRight", "key ArrowLeft", "key ArrowDown"]));
+            }
+        }
+        2 | 3 if !names.is_empty() => {
+            let r = *rng.pick(&names);
+            let right = rng.below(2) == 1;
+            s.act(&format!("click {:.0} {:.0}{}", r.center().x, r.center().y, if right { " right" } else { "" }));
+            if right {
+                s.idle(2);
+                s.act("key Escape");
+            }
+        }
+        _ => {
+            let (x, y) = (rng.f(list.left(), list.right()), rng.f(list.top(), list.bottom()));
+            s.note(format!("wheel along the strip at {x:.0} {y:.0}"));
+            s.frame(vec![Event::PointerMoved(pos2(x, y))]);
+            s.frame(vec![Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: vec2(rng.f(-6.0, 6.0), 0.0), modifiers: egui::Modifiers::NONE }]);
+            s.idle(rng.below(12));
+        }
+    }
 }
 
 /// Picker sessions the random walks started, and how many of them answered (0) or were
@@ -2844,7 +2879,7 @@ mod journeys {
         let folders = [home.clone(), home.join("Documents"), home.join("Big"), home.join("Pictures/Trip"), home.join("Code/maia"), home.join("Empty")];
         for f in &folders {
             go(&mut s, f);
-            for v in [ViewDetails, ViewTree, ViewList, ViewMedium, ViewLarge, ViewXL] {
+            for v in [ViewDetails, ViewTree, ViewList, ViewMedium, ViewLarge, ViewXL, ViewColumns] {
                 s.cmd(v);
                 for g in [GroupNone, GroupType, GroupName, GroupSize] {
                     s.cmd(g);
@@ -2861,7 +2896,7 @@ mod journeys {
         s.cmd(ToggleSidebar);
         for f in &folders {
             go(&mut s, f);
-            for v in [ViewDetails, ViewTree, ViewList, ViewLarge] {
+            for v in [ViewDetails, ViewTree, ViewList, ViewLarge, ViewColumns] {
                 s.cmd(v);
                 s.act("key ArrowDown");
                 look(&mut s, &format!("inspector {} {v:?}", f.display()));
@@ -3651,7 +3686,7 @@ mod journeys {
         }
         let home = fixture("keys");
         let mut s = Sim::new(&home.join("Big"), vec2(1280.0, 800.0));
-        for v in [ViewDetails, ViewList, ViewMedium, ViewLarge, ViewXL] {
+        for v in [ViewDetails, ViewList, ViewMedium, ViewLarge, ViewXL, ViewColumns] {
             s.cmd(v);
             s.settle();
             let n = s.tab().view.len();
@@ -5389,7 +5424,7 @@ mod journeys {
         let home = fixture("viewstays");
         let mut s = Sim::new(&home, vec2(1280.0, 800.0));
         s.settle();
-        for v in [ViewMedium, ViewTree, ViewList, ViewLarge, ViewXL, ViewDetails] {
+        for v in [ViewMedium, ViewTree, ViewList, ViewLarge, ViewXL, ViewColumns, ViewDetails] {
             go(&mut s, &home);
             s.cmd(v);
             s.settle();
@@ -5410,6 +5445,7 @@ mod journeys {
             s.cmd(Up);
             s.settle();
             assert_eq!(s.tab().settings.zoom, zoom, "{v:?} kept going back and up");
+            assert_eq!(s.tab().settings.column_view, v == ViewColumns, "{v:?}: Columns kept, or not taken up");
             look(&mut s, &format!("{v:?} after browsing"));
             s.idle(30);
         }
@@ -14105,6 +14141,10 @@ mod journeys {
             s.app.requests = Some(rx);
             let mut rng = Rng::new(seed);
             s.note(format!("seed {seed}"));
+            // Every third session starts in the Columns view, so all the rest is tried there.
+            if seed % 3 == 0 {
+                s.cmd(Cmd::ViewColumns);
+            }
             for k in 0..steps {
                 if rng.below(80) == 0 {
                     let picks = [home.join("Music"), home.join("Documents/notes.txt"), home.join("bundle.zip"), home.join("gone")];
@@ -15275,5 +15315,339 @@ mod journeys {
         look(&mut s, "merged graph");
         s.shot("merged-graph");
         report("gitmerge", &s);
+    }
+
+    fn strip(s: &Sim) -> &crate::columns::Strip {
+        s.tab().strip.as_deref().unwrap_or_else(|| s.fail("no column strip"))
+    }
+
+    /// Where a name is drawn in the list (the first found), for telling columns apart.
+    fn in_list(s: &Sim, name: &str) -> Rect {
+        let list = s.app.panels[&s.app.active].list_rect;
+        s.texts.iter().find(|(r, t)| t == name && list.contains(r.center())).map(|(r, _)| *r).unwrap_or_else(|| {
+            let near: Vec<&str> = s.texts.iter().filter(|(r, _)| list.contains(r.center())).map(|(_, t)| t.as_str()).take(60).collect();
+            s.fail(&format!("{name:?} not drawn in the list; there: {near:?}"))
+        })
+    }
+
+    fn cursor_name(s: &Sim) -> String {
+        let t = s.tab();
+        t.cursor.and_then(|c| t.entries.get(c as usize)).map(|e| e.name.clone()).unwrap_or_default()
+    }
+
+    fn click_at(s: &mut Sim, r: Rect, how: &str) {
+        s.act(&format!("click {:.0} {:.0}{how}", r.center().x, r.center().y));
+    }
+
+    /// The tab's own column lies inside the list, all of it when the list is wide enough.
+    fn own_column_shown(s: &mut Sim, what: &str) {
+        s.idle(30);
+        let list = s.app.panels[&s.app.active].list_rect;
+        let st = strip(s);
+        let w = crate::listing::column_width(&s.app.cfg).min(list.width().max(60.0));
+        let left = list.left() + st.chain.len() as f32 * w - st.scroll;
+        if (st.scroll - st.target).abs() > 0.5 {
+            s.fail(&format!("{what}: the strip is still moving ({} to {})", st.scroll, st.target));
+        }
+        if left < list.left() - 1.0 || left + w > list.right() + 1.0 {
+            s.fail(&format!("{what}: the tab's column at {left:.0}..{:.0} is not inside the list {list:?}", left + w));
+        }
+    }
+
+    /// The Columns view: one column per folder from home down, walked with the keys and
+    /// the mouse, worked in (rename, new folder, copy, paste, drag and drop, trash, undo,
+    /// rubber band, menus), filtered, with saved views, split, narrow and wide, in every
+    /// theme, with the inspector and with animations off.
+    #[test]
+    fn columns_view_walks_the_folders() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("columns");
+        let docs = home.join("Documents");
+        let mut s = Sim::new(&docs, vec2(1280.0, 800.0));
+        // Wide enough for four columns at any look, so the mouse can reach the ones above
+        // (narrow windows come later).
+        let wide = (s.app.sidebar_width + 4.4 * crate::listing::column_width(&s.app.cfg)).max(1280.0);
+        s.resize(wide, 800.0);
+        s.act("key ctrl+shift+7");
+        s.settle();
+        assert!(s.tab().settings.column_view, "Ctrl+Shift+7 picks Columns");
+        // (The fixture is a folder in the session's home.)
+        let top = crate::fsx::home();
+        assert_eq!(strip(&s).chain, vec![top.clone(), home.clone()], "the strip starts at the home folder");
+        look(&mut s, "Documents in columns");
+        assert!(some_text(&s, "Columns"), "the status chip names the view");
+        assert!(!s.texts.iter().any(|(_, t)| t.ends_with('%')), "no zoom chip: Columns has no zoom");
+        assert!(in_list(&s, "Documents").right() < in_list(&s, "notes.txt").left(), "home's column is left of Documents'");
+        s.shot("columns-documents");
+
+        // Keys: Down to a folder shows it in the next column, Right goes in, Left back.
+        cursor_to(&mut s, "Taxes");
+        s.settle();
+        assert_eq!(strip(&s).preview.as_deref(), Some(docs.join("Taxes").as_path()), "the folder under the cursor opens in the next column");
+        assert!(in_list(&s, "2025").left() > in_list(&s, "Taxes").right(), "Taxes' folders right of it");
+        s.act("key ArrowRight");
+        wait_until(&mut s, "into Taxes", 10, |s| s.tab().path == docs.join("Taxes"));
+        s.settle();
+        assert_eq!(strip(&s).chain, vec![top.clone(), home.clone(), docs.clone()]);
+        assert_eq!(cursor_name(&s), "2024", "the cursor starts on the first item");
+        s.act("key ArrowDown");
+        assert_eq!(cursor_name(&s), "2025");
+        s.act("key ArrowRight");
+        wait_until(&mut s, "into 2025", 10, |s| s.tab().path == docs.join("Taxes/2025"));
+        s.settle();
+        s.act("key ArrowRight");
+        s.settle();
+        assert_eq!(s.tab().path, docs.join("Taxes/2025"), "Right on a file stays");
+        s.act("key ArrowLeft");
+        wait_until(&mut s, "back in Taxes", 10, |s| s.tab().path == docs.join("Taxes"));
+        s.settle();
+        assert_eq!(cursor_name(&s), "2025", "Left lands on the folder it came from");
+        s.act("key ArrowLeft");
+        wait_until(&mut s, "back in Documents", 10, |s| s.tab().path == docs);
+        s.settle();
+        assert_eq!(cursor_name(&s), "Taxes");
+        // Enter opens a folder as in any view, and Backspace goes up.
+        s.act("key Enter");
+        wait_until(&mut s, "Enter into Taxes", 10, |s| s.tab().path == docs.join("Taxes"));
+        s.act("key Backspace");
+        wait_until(&mut s, "Backspace up", 10, |s| s.tab().path == docs);
+        s.settle();
+
+        // The mouse: a click in the home column makes home the tab's folder, Code picked.
+        s.act("move -50 -50");
+        s.idle(2);
+        let code = in_list(&s, "Code");
+        click_at(&mut s, code, "");
+        wait_until(&mut s, "home from its column", 10, |s| s.tab().path == home);
+        s.settle();
+        assert_eq!(cursor_name(&s), "Code");
+        assert_eq!(s.tab().selected.len(), 1);
+        assert_eq!(strip(&s).preview.as_deref(), Some(home.join("Code").as_path()));
+        // A click in the next column, then a double-click on a folder in the one after.
+        let deep = in_list(&s, "deep");
+        click_at(&mut s, deep, "");
+        wait_until(&mut s, "Code from its column", 10, |s| s.tab().path == home.join("Code"));
+        s.settle();
+        s.idle(40);
+        let a = in_list(&s, "a");
+        s.act(&format!("dclick {:.0} {:.0}", a.center().x, a.center().y));
+        wait_until(&mut s, "a double-click goes in", 10, |s| s.tab().path == home.join("Code/deep/a"));
+        s.settle();
+        // All the way down: the strip scrolls to keep the tab's column in sight.
+        for _ in 0..7 {
+            s.act("key ArrowRight");
+            s.settle();
+        }
+        assert_eq!(s.tab().path, home.join("Code/deep/a/b/c/d/e/f/g/h"));
+        assert!(strip(&s).scroll > 0.0, "the strip scrolled along");
+        own_column_shown(&mut s, "deep");
+        look(&mut s, "deep path");
+        s.shot("columns-deep");
+        for _ in 0..9 {
+            s.act("key ArrowLeft");
+            s.settle();
+        }
+        assert_eq!(s.tab().path, home.join("Code"));
+        own_column_shown(&mut s, "back up");
+        let (st, list) = (strip(&s), s.app.panels[&s.app.active].list_rect);
+        let n = st.chain.len() + 1 + usize::from(st.preview.is_some());
+        let w = crate::listing::column_width(&s.app.cfg).min(list.width());
+        assert!(st.scroll <= (n as f32 * w - list.width()).max(0.0) + 0.5, "back up, the strip scrolled back ({} for {n} columns)", st.scroll);
+
+        // File work in the tab's column: rename, a new folder, copy and paste into it.
+        go(&mut s, &docs);
+        cursor_to(&mut s, "notes.txt");
+        s.act("key F2");
+        assert!(s.tab().rename.is_some(), "F2 renames in a column");
+        s.act("key ctrl+a");
+        s.act("text notes2.txt");
+        s.act("key Enter");
+        s.settle();
+        assert!(docs.join("notes2.txt").exists(), "renamed on disk");
+        s.cmd(NewFolder);
+        s.settle();
+        s.idle(3);
+        assert!(s.tab().rename.is_some(), "a new folder is named in its column");
+        s.act("key ctrl+a");
+        s.act("text Fresh");
+        s.act("key Enter");
+        s.settle();
+        assert!(docs.join("Fresh").is_dir());
+        cursor_to(&mut s, "report.md");
+        s.act("key ctrl+c");
+        cursor_to(&mut s, "Fresh");
+        s.act("key ArrowRight");
+        wait_until(&mut s, "into Fresh", 10, |s| s.tab().path == docs.join("Fresh"));
+        s.settle();
+        paste_lands(&mut s, &[docs.join("Fresh/report.md")]);
+        let fresh = in_list(&s, "Fresh");
+        assert!(s.texts.iter().any(|(r, t)| t == "report.md" && r.left() > fresh.right()), "the pasted file shows in Fresh's column");
+        s.act("key ArrowLeft");
+        wait_until(&mut s, "back in Documents", 10, |s| s.tab().path == docs);
+        s.settle();
+        // Drag a file onto a folder in the home column, and one onto that column's blank.
+        s.act("move -50 -50");
+        s.idle(2);
+        let (from, to) = (in_list(&s, "notes2.txt").center(), in_list(&s, "Music").center());
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", from.x, from.y, to.x, to.y));
+        wait_until(&mut s, "dropped on Music", 10, |s| home.join("Music/notes2.txt").exists() && s.app.jobs.iter().all(|j| j.finished_at.is_some()));
+        s.settle();
+        let list = s.app.panels[&s.app.active].list_rect;
+        let (from, to) = (in_list(&s, "budget 2026.csv").center(), pos2(in_list(&s, "Music").center().x, list.bottom() - 20.0));
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", from.x, from.y, to.x, to.y));
+        wait_until(&mut s, "dropped in home", 10, |s| home.join("budget 2026.csv").exists() && s.app.jobs.iter().all(|j| j.finished_at.is_some()));
+        s.settle();
+        assert_eq!(s.tab().path, docs, "a drop does not move the tab");
+        // Trash and undo.
+        cursor_to(&mut s, "report.md");
+        s.act("key Delete");
+        if s.popup_open() {
+            s.act("key Enter");
+        }
+        s.settle();
+        assert!(!docs.join("report.md").exists(), "Delete trashes from a column");
+        s.act("key ctrl+z");
+        s.settle();
+        assert!(docs.join("report.md").exists(), "undo brings it back");
+        // A rubber band from the blank under the rows, then Ctrl+click.
+        s.act("key Escape");
+        s.act("move -50 -50");
+        s.idle(2);
+        let x = in_list(&s, "report.md").left() + 20.0;
+        let top = in_list(&s, "Taxes").top();
+        s.act(&format!("drag {x:.0} {:.0} {x:.0} {:.0}", list.bottom() - 20.0, top - 3.0));
+        s.settle();
+        assert!(s.tab().selected.len() >= 3, "rubber band selected {}", s.tab().selected.len());
+        assert!(strip(&s).preview.is_none(), "several picked: nothing to show after them");
+        s.act("key Escape");
+        let (a, b) = (in_list(&s, "report.md"), in_list(&s, "Taxes"));
+        s.act(&format!("click {:.0} {:.0}", a.center().x, a.center().y));
+        s.act(&format!("click {:.0} {:.0} ctrl", b.center().x, b.center().y));
+        s.settle();
+        assert_eq!(s.tab().selected.len(), 2, "Ctrl+click adds to the selection");
+        // A right-click in the home column: home with Music picked, and its menu.
+        s.idle(40);
+        let m = in_list(&s, "Music");
+        s.act(&format!("click {:.0} {:.0} right", m.center().x, m.center().y));
+        s.idle(2);
+        assert!(s.popup_open(), "the menu opens");
+        assert_eq!(s.tab().path, home);
+        assert_eq!(s.tab().selected_paths(), vec![home.join("Music")], "the menu is for what was clicked");
+        s.act("key Escape");
+        s.settle();
+        // Typing filters the tab's column.
+        go(&mut s, &docs);
+        s.act("text rep");
+        s.idle(3);
+        assert_eq!(s.tab().filter, "rep");
+        assert!(s.tab().view.iter().all(|&i| s.tab().entries[i as usize].name.to_lowercase().contains('r')), "the filter narrows the column");
+        look(&mut s, "filtered column");
+        s.act("key Escape");
+        s.act("key Escape");
+
+        // A folder with a saved view of its own keeps the columns when walked into.
+        s.app.ud.views.insert(docs.join("Taxes"), crate::config::SavedView { scope: crate::config::SaveScope::ThisFolder, view: crate::config::ViewSettings { sort: crate::config::SortKey::Modified, ..Default::default() } });
+        cursor_to(&mut s, "Taxes");
+        s.act("key ArrowRight");
+        wait_until(&mut s, "into Taxes", 10, |s| s.tab().path == docs.join("Taxes"));
+        assert!(s.tab().settings.column_view, "still in Columns");
+        assert_eq!(s.tab().settings.sort, crate::config::SortKey::Modified, "with the saved sort");
+        s.act("key ArrowLeft");
+        wait_until(&mut s, "back", 10, |s| s.tab().path == docs);
+        assert_eq!(s.tab().settings.sort, crate::config::SortKey::Name, "the sort it had");
+        s.app.ud.views.clear();
+
+        // Finished copies' cards and the last message off the screen, for the pictures.
+        s.app.jobs.retain(|j| j.finished_at.is_none());
+        s.app.toast = None;
+        // The inspector beside the columns follows the cursor.
+        s.cmd(ToggleInspector);
+        s.settle();
+        cursor_to(&mut s, "Taxes");
+        s.act("key ArrowRight");
+        wait_until(&mut s, "into Taxes with the inspector", 10, |s| s.tab().path == docs.join("Taxes"));
+        own_column_shown(&mut s, "with the inspector");
+        look(&mut s, "inspector beside the columns");
+        s.shot("columns-inspector");
+        s.cmd(ToggleInspector);
+        s.act("key ArrowLeft");
+        s.settle();
+
+        // Split: both panels in columns, each its own strip.
+        s.cmd(SplitRight);
+        s.settle();
+        s.cmd(ViewColumns);
+        s.settle();
+        assert_eq!(s.app.panels.len(), 2);
+        assert!(s.app.panels.values().all(|p| p.tab().settings.column_view), "both panels in Columns");
+        cursor_to(&mut s, "Taxes");
+        s.act("key ArrowRight");
+        s.settle();
+        own_column_shown(&mut s, "split");
+        look(&mut s, "split columns");
+        s.shot("columns-split");
+        s.cmd(ClosePanel);
+        s.settle();
+
+        // Narrow and wide windows.
+        go(&mut s, &home.join("Code/deep/a/b/c"));
+        for (w, h) in [(520.0, 340.0), (640.0, 480.0), (900.0, 1200.0), (1920.0, 1080.0), (1280.0, 800.0), (wide, 800.0)] {
+            s.resize(w, h);
+            own_column_shown(&mut s, &format!("{w}x{h}"));
+            look(&mut s, &format!("columns {w}x{h}"));
+            if w < 600.0 {
+                s.shot("columns-narrow");
+            }
+        }
+
+        // Every theme, quickly.
+        for th in crate::theme::ThemeName::ALL {
+            s.app.cfg.theme = th;
+            s.idle(2);
+        }
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        look(&mut s, "a light theme");
+        s.shot("columns-paper");
+        s.app.cfg.theme = crate::theme::ThemeName::Midnight;
+        look(&mut s, "after the themes");
+        // The view chip's popup: Columns marked under the zoom axis; a stop leaves it, the
+        // Columns row goes back.
+        s.click_text("Columns");
+        s.idle(3);
+        assert!(matches!(s.app.popup, Popup::Zoom { .. }), "the chip opens the views");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        s.idle(10);
+        s.shot("columns-viewpopup");
+        s.click_text("List");
+        s.idle(2);
+        assert!(!s.tab().settings.column_view && (s.tab().settings.zoom - 0.2).abs() < 1e-3, "a named stop leaves Columns");
+        if !s.popup_open() {
+            s.click_text("List");
+            s.idle(3);
+        }
+        let row = s.texts.iter().rev().find(|(_, t)| t == "Columns").map(|(r, _)| *r).unwrap_or_else(|| s.fail("the popup's Columns row"));
+        s.act(&format!("click {:.0} {:.0}", row.center().x, row.center().y));
+        s.idle(2);
+        assert!(s.tab().settings.column_view, "the popup's Columns row picks it");
+        s.act("key Escape");
+        s.settle();
+
+        // Animations off: the strip jumps to its place at once.
+        s.app.cfg.animations = false;
+        s.act("key ArrowLeft");
+        s.settle();
+        s.act("key ArrowRight");
+        s.idle(1);
+        let st = strip(&s);
+        assert_eq!(st.scroll, st.target, "no easing with animations off");
+        s.app.cfg.animations = true;
+
+        // Back to Details from the menu's View list, and the columns' listings go.
+        s.cmd(ViewDetails);
+        s.settle();
+        assert!(!s.tab().settings.column_view && s.tab().strip.is_none(), "Details leaves Columns and its listings");
+        report("columns", &s);
     }
 }
