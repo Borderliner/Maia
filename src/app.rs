@@ -2045,6 +2045,11 @@ impl App {
                 }
             }
             Cmd::TerminalPanel => crate::terminal::toggle(self),
+            Cmd::NewTerminal => crate::terminal::new_shell(self),
+            Cmd::CloseTerminal => crate::terminal::close_shell(self, self.terminal.cur),
+            Cmd::NextTerminal => crate::terminal::switch(self, 1),
+            Cmd::PrevTerminal => crate::terminal::switch(self, -1),
+            Cmd::FindInTerminal => crate::terminal::find(self),
             Cmd::OpenTerminal => {
                 let p = self.panel().path();
                 let dir = if tab::is_computer(&p) { PathBuf::from("/") } else { p };

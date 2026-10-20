@@ -191,6 +191,11 @@ commands! {
     SelectDifferences, "select_differences", Panels, "Select Differences", "Select the entries Compare Panels marks in this panel.", [];
     SyncPanels, "sync_to_other_panel", Panels, "Sync To Other Panel", "Copy what is missing or newer here into the other panel's folder.", [];
     TerminalPanel, "terminal_panel", Panels, "Terminal Panel", "Show a terminal under the files that follows the folder shown.", ["Ctrl+Backtick"];
+    NewTerminal, "new_terminal", Panels, "New Terminal", "Open another shell in the terminal panel, in the folder shown. Ctrl+Shift+T does it too while the terminal has the keyboard.", [];
+    CloseTerminal, "close_terminal", Panels, "Close Terminal", "Close the shell shown in the terminal panel; the panel closes with the last one. Ctrl+Shift+W in the terminal.", [];
+    NextTerminal, "next_terminal", Panels, "Next Terminal", "Show the next shell in the terminal panel. Ctrl+Shift+PageDown in the terminal.", [];
+    PrevTerminal, "prev_terminal", Panels, "Previous Terminal", "Show the shell before in the terminal panel. Ctrl+Shift+PageUp in the terminal.", [];
+    FindInTerminal, "find_in_terminal", Panels, "Find in Terminal", "Search what the shell shown wrote, scrollback included: Enter for the next match, Shift+Enter for the one before. Ctrl+Shift+F in the terminal.", [];
 
     ToggleFlatten, "toggle_flatten", View, "Toggle Expand Folder", "Show every file under this folder in one flat, searchable list.", ["Ctrl+E"];
     FocusFilter, "focus_filter", View, "Focus Filter", "Put the cursor in the filter box.", ["Ctrl+F"];

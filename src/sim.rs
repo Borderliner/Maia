@@ -1102,7 +1102,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(164) {
+    match rng.below(165) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2442,6 +2442,69 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             s.idle(rng.below(30));
             if s.popup_open() {
                 s.act("key Escape");
+            }
+        }
+        164 => {
+            // The terminal's own: shells opened, closed and switched, the scrollback by
+            // keys and found in, links under Ctrl, words and lines clicked, a program
+            // that hears the mouse, Shift dragging over it.
+            if s.app.terminal.shells.is_empty() || !s.app.terminal.focused {
+                s.act("key ctrl+Backtick");
+            }
+            let top = (h - s.app.terminal.height.min(h * 0.8)).max(0.0) + 40.0;
+            let q = |rng: &mut Rng| (rng.f(0.0, w), rng.f(top.min(h - 1.0), h));
+            match rng.below(9) {
+                0 => s.act(&format!("key {}", rng.pick(&["ctrl+shift+t", "ctrl+shift+w", "ctrl+shift+PageDown", "ctrl+shift+PageUp"]))),
+                1 => s.act(&format!("key {}", rng.pick(&["shift+PageUp", "shift+PageDown", "shift+Home", "shift+End"]))),
+                2 => {
+                    s.act("text seq 1 120");
+                    s.act("key enter");
+                    s.idle(5);
+                }
+                3 => {
+                    s.act("key ctrl+shift+f");
+                    s.act(&format!("text {}", rng.pick(&["1", "seq", "zz", "Ab", "é"])));
+                    s.act(&format!("key {}", rng.pick(&["Enter", "shift+Enter", "F3", "Escape"])));
+                }
+                4 => {
+                    let (x, y) = q(rng);
+                    s.act("hold ctrl");
+                    s.act(&format!("move {x:.0} {y:.0}"));
+                    s.idle(3);
+                    if rng.below(2) == 0 {
+                        s.act(&format!("click {x:.0} {y:.0} left ctrl"));
+                    }
+                    s.act("hold none");
+                }
+                5 => {
+                    let (x, y) = q(rng);
+                    s.act(&format!("{} {x:.0} {y:.0}", rng.pick(&["dclick", "tclick"])));
+                }
+                6 => {
+                    s.act("text printf 'https://example.com/x src/main.rs:1:2 ~/ \\033]8;;https://maia.example\\033\\\\here\\033]8;;\\033\\\\\\n'");
+                    s.act("key enter");
+                    s.idle(3);
+                }
+                7 => {
+                    s.act("text seq 1 200 | LESSHISTFILE=- less --mouse");
+                    s.act("key enter");
+                    s.idle(10);
+                    for _ in 0..rng.below(4) + 1 {
+                        let (x, y) = q(rng);
+                        if rng.below(2) == 0 {
+                            s.act(&format!("scroll {x:.0} {y:.0} {:.1}", rng.f(-4.0, 4.0)));
+                        } else {
+                            s.act(&format!("click {x:.0} {y:.0}"));
+                        }
+                    }
+                    s.act("text q");
+                }
+                _ => {
+                    let ((x, y), (x2, y2)) = (q(rng), q(rng));
+                    s.act("hold shift");
+                    s.act(&format!("drag {x:.0} {y:.0} {x2:.0} {y2:.0} left shift"));
+                    s.act("hold none");
+                }
             }
         }
         _ => {
@@ -7835,11 +7898,11 @@ mod journeys {
         let home = fixture("terminal");
         let docs = home.join("Documents");
         let mut s = Sim::new(&home, vec2(1280.0, 800.0));
-        let idle = |s: &Sim| s.app.terminal.pty.as_ref().is_some_and(|p| p.idle());
+        let idle = |s: &Sim| s.app.terminal.pty().is_some_and(|p| p.idle());
         s.act("key ctrl+Backtick");
-        assert!(s.app.terminal.pty.is_some() && s.app.terminal.focused, "open, with the keyboard");
+        assert!(s.app.terminal.pty().is_some() && s.app.terminal.focused, "open, with the keyboard");
         wait_until(&mut s, "the prompt", 10, |s| idle(s) && !s.app.terminal.text().trim().is_empty());
-        let pid = s.app.terminal.pty.as_ref().and_then(|p| p.pid()).unwrap();
+        let pid = s.app.terminal.pty().and_then(|p| p.pid()).unwrap();
         let cwd = || std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
         assert_eq!(cwd(), Some(home.clone()), "started in the folder shown");
         // Ctrl+A is the shell's (start of the line) here, not Select All.
@@ -7865,7 +7928,7 @@ mod journeys {
         s.idle(10);
         s.shot("terminal-icons");
         s.resize(560.0, 800.0);
-        let size = |s: &Sim| s.app.terminal.pty.as_ref().map(|p| {
+        let size = |s: &Sim| s.app.terminal.pty().map(|p| {
             let t = p.shared.term();
             (t.screen.cols, t.screen.rows)
         }).unwrap_or_default();
@@ -7902,19 +7965,19 @@ mod journeys {
         wait_until(&mut s, "the numbers", 10, |s| some_text(s, "300"));
         let body = s.text_rect("300");
         s.act(&format!("scroll {:.0} {:.0} 5", body.center().x, body.center().y));
-        let back = s.app.terminal.pty.as_ref().map(|p| p.shared.term().screen.scroll).unwrap();
+        let back = s.app.terminal.pty().map(|p| p.shared.term().screen.scroll).unwrap();
         assert!(back > 0, "scrolled back");
         s.act("text x");
-        assert_eq!(s.app.terminal.pty.as_ref().map(|p| p.shared.term().screen.scroll), Some(0));
+        assert_eq!(s.app.terminal.pty().map(|p| p.shared.term().screen.scroll), Some(0));
         s.act("key backspace");
         // A click on the files takes the keyboard; the key gives it back, then closes.
         let list = s.app.panels[&s.app.active].list_rect;
         s.act(&format!("click {:.0} {:.0}", list.center().x, list.center().y));
         assert!(!s.app.terminal.focused);
         s.act("key ctrl+Backtick");
-        assert!(s.app.terminal.focused && s.app.terminal.pty.is_some());
+        assert!(s.app.terminal.focused && s.app.terminal.pty().is_some());
         s.act("key ctrl+Backtick");
-        assert!(s.app.terminal.pty.is_none(), "closed");
+        assert!(s.app.terminal.pty().is_none(), "closed");
         wait_until(&mut s, "the shell reaped", 10, |_| !Path::new(&format!("/proc/{pid}")).exists());
         s.idle(20);
         // In a light theme too.
@@ -7930,10 +7993,410 @@ mod journeys {
         // The shell ending closes the pane.
         s.act("text exit");
         s.act("key enter");
-        wait_until(&mut s, "the pane closed", 10, |s| s.app.terminal.pty.is_none());
+        wait_until(&mut s, "the pane closed", 10, |s| s.app.terminal.pty().is_none());
         s.app.cfg.theme = crate::theme::ThemeName::default();
         look(&mut s, "after the terminal");
         report("terminal", &s);
+    }
+
+    /// Where the terminal drew `row` (the whole row's text), at its column `col`.
+    fn term_cell(s: &Sim, row: &str, col: usize) -> (f32, f32) {
+        let r = s.text_rect(row);
+        let cw = r.width() / row.chars().count() as f32;
+        (r.left() + cw * (col as f32 + 0.5), r.center().y)
+    }
+
+    fn controls_named(what: &str) -> Vec<Rect> {
+        crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == what).map(|(_, r, _)| *r).collect())
+    }
+
+    /// Several terminals: Ctrl+Shift+T opens another shell in the folder shown, with a tab
+    /// strip only while there is more than one; each keeps its own screen, title and
+    /// folder; Ctrl+Shift+PageUp/PageDown, the tabs and the palette switch; only the one
+    /// shown follows the panel, and one shown again goes on from where it was; Ctrl+Shift+W,
+    /// a tab's ×, a middle click and `exit` close one, the last closing the pane.
+    #[test]
+    fn terminal_tabs() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("terminal-tabs");
+        let (docs, music, pics) = (home.join("Documents"), home.join("Music"), home.join("Pictures"));
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        let idle = |s: &Sim| s.app.terminal.pty().is_some_and(|p| p.idle());
+        let cwd = |s: &Sim, i: usize| s.app.terminal.shells.get(i).and_then(|sh| sh.pty.cwd());
+        let ready = |s: &mut Sim, what: &str| wait_until(s, what, 10, |s| idle(s) && (s.app.terminal.text().contains('$') || s.app.terminal.text().contains('#')));
+        s.act("key ctrl+Backtick");
+        ready(&mut s, "the prompt");
+        s.idle(2);
+        assert!(controls_named("terminal tab").is_empty(), "one shell, no tabs");
+        s.act("text printf '\\033]0;first\\007'; echo one-here");
+        s.act("key enter");
+        wait_until(&mut s, "the first shell's echo", 10, |s| some_text(s, "one-here") && some_text(s, "first"));
+        go(&mut s, &docs);
+        wait_until(&mut s, "the first shell in Documents", 10, |s| cwd(s, 0) == Some(docs.clone()));
+        wait_until(&mut s, "its prompt", 10, idle);
+        s.act("key ctrl+shift+t");
+        assert_eq!((s.app.terminal.shells.len(), s.app.terminal.cur), (2, 1));
+        ready(&mut s, "the second prompt");
+        assert_eq!(cwd(&s, 1), Some(docs.clone()), "started in the folder shown");
+        assert!(!some_text(&s, "one-here"), "a screen of its own");
+        s.act("text printf '\\033]0;second\\007'; echo two-here");
+        s.act("key enter");
+        wait_until(&mut s, "the second echo and both titles", 10, |s| some_text(s, "two-here") && some_text(s, "first") && some_text(s, "second"));
+        assert_eq!(controls_named("terminal tab").len(), 2);
+        s.idle(20);
+        s.shot("terminal-tabs");
+        s.act("key ctrl+shift+PageUp");
+        assert_eq!(s.app.terminal.cur, 0);
+        s.idle(2);
+        assert!(some_text(&s, "one-here") && !some_text(&s, "two-here"));
+        s.act("key ctrl+shift+PageDown");
+        s.act("key ctrl+shift+PageDown");
+        assert_eq!(s.app.terminal.cur, 0, "round the end");
+        assert!(s.app.terminal.focused, "the keyboard stays in the terminal");
+        // The shell shown follows the panel; the other stays where it was.
+        go(&mut s, &music);
+        wait_until(&mut s, "the first shell in Music", 10, |s| cwd(s, 0) == Some(music.clone()));
+        s.idle(20);
+        assert_eq!(cwd(&s, 1), Some(docs.clone()), "the hidden shell stayed");
+        let tabs = controls_named("terminal tab");
+        s.act(&format!("click {:.0} {:.0}", tabs[1].center().x, tabs[1].center().y));
+        assert_eq!(s.app.terminal.cur, 1);
+        s.idle(20);
+        assert_eq!(cwd(&s, 1), Some(docs.clone()), "shown again, it goes on from where it was");
+        go(&mut s, &pics);
+        wait_until(&mut s, "the second shell in Pictures", 10, |s| cwd(s, 1) == Some(pics.clone()));
+        assert_eq!(cwd(&s, 0), Some(music.clone()));
+        // From the palette and the +.
+        s.cmd(NewTerminal);
+        assert_eq!((s.app.terminal.shells.len(), s.app.terminal.cur), (3, 2));
+        // Once its tab has grown in, and the + moved along.
+        s.idle(10);
+        click_control(&mut s, "terminal new");
+        assert_eq!((s.app.terminal.shells.len(), s.app.terminal.cur), (4, 3));
+        ready(&mut s, "the fourth prompt");
+        s.cmd(PrevTerminal);
+        assert_eq!(s.app.terminal.cur, 2);
+        s.cmd(NextTerminal);
+        assert_eq!(s.app.terminal.cur, 3);
+        // A tab is named for its folder, as the panels' tabs are, with the whole path as
+        // its tooltip; a cd typed by hand renames it once the shell is back at its prompt.
+        let in_tab = |s: &Sim, want: &str| {
+            let tabs = controls_named("terminal tab");
+            s.texts.iter().any(|(r, t)| t == want && tabs.iter().any(|tr| tr.contains(r.center())))
+        };
+        assert!(in_tab(&s, "Pictures"), "named for its folder");
+        s.act("text cd Trip");
+        s.act("key enter");
+        wait_until(&mut s, "the tab renamed", 10, |s| in_tab(s, "Trip"));
+        let t = controls_named("terminal tab")[3];
+        s.act(&format!("move {:.0} {:.0}", t.center().x, t.center().y));
+        s.idle(50);
+        assert!(s.texts.iter().any(|(_, t)| t.ends_with("terminal-tabs/Pictures/Trip")), "the whole path on hover");
+        s.shot("terminal-tab-tooltip");
+        let list = s.app.panels[&s.app.active].list_rect;
+        s.act(&format!("move {:.0} {:.0}", list.center().x, list.center().y));
+        s.idle(20);
+        look(&mut s, "four terminals");
+        s.resize(640.0, 600.0);
+        s.idle(20);
+        s.shot("terminal-tabs-narrow");
+        look(&mut s, "four terminals, narrow");
+        s.resize(1280.0, 800.0);
+        // Closing: the key, the ×, a middle click; the next one along shows.
+        let pids: Vec<u32> = s.app.terminal.shells.iter().filter_map(|sh| sh.pty.pid()).collect();
+        // Once the pane has eased to the new height.
+        s.settle();
+        click_control(&mut s, "terminal tab");
+        s.act("key ctrl+shift+w");
+        assert_eq!((s.app.terminal.shells.len(), s.app.terminal.cur), (3, 0));
+        wait_until(&mut s, "the closed shell reaped", 10, |_| !Path::new(&format!("/proc/{}", pids[0])).exists());
+        // Once the closed tab's room has closed up.
+        s.idle(10);
+        // The ×, at the shown tab's right end.
+        let t = controls_named("terminal tab")[s.app.terminal.cur];
+        s.act(&format!("move {:.0} {:.0}", t.right() - 14.0, t.center().y));
+        s.act(&format!("click {:.0} {:.0}", t.right() - 14.0, t.center().y));
+        assert_eq!(s.app.terminal.shells.len(), 2);
+        s.idle(10);
+        let tabs = controls_named("terminal tab");
+        s.act(&format!("click {:.0} {:.0} middle", tabs[1].center().x, tabs[1].center().y));
+        assert_eq!(s.app.terminal.shells.len(), 1);
+        s.idle(2);
+        assert!(controls_named("terminal tab").is_empty(), "one again: no tabs");
+        s.act("key ctrl+shift+t");
+        ready(&mut s, "another prompt");
+        // A shell that ends closes its tab, the last one the pane.
+        s.act("text exit");
+        s.act("key enter");
+        wait_until(&mut s, "the ended shell's tab gone", 10, |s| s.app.terminal.shells.len() == 1);
+        assert!(s.app.terminal.pty().is_some());
+        s.act("key ctrl+shift+w");
+        assert!(s.app.terminal.pty().is_none(), "the last one closed the pane");
+        // A light theme, no animations, split panels.
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        s.app.cfg.animations = false;
+        s.cmd(SplitRight);
+        s.act("key ctrl+Backtick");
+        s.act("key ctrl+shift+t");
+        assert_eq!(s.app.terminal.shells.len(), 2);
+        ready(&mut s, "a prompt (light)");
+        s.idle(2);
+        assert_eq!(controls_named("terminal tab").len(), 2, "tabs at once, without growing in");
+        s.act("key ctrl+shift+f");
+        s.act("text root");
+        s.idle(3);
+        s.shot("terminal-tabs-light");
+        look(&mut s, "terminals, light and split");
+        s.act("key Escape");
+        assert!(s.app.terminal.focused, "Escape gave the keyboard back to the shell");
+        s.act("key ctrl+Backtick");
+        assert!(s.app.terminal.pty().is_none());
+        s.app.cfg.theme = crate::theme::ThemeName::default();
+        s.app.cfg.animations = true;
+        look(&mut s, "after the terminals");
+        report("terminal tabs", &s);
+    }
+
+    /// The scrollback from the keyboard: Shift+PageUp and PageDown a page at a time,
+    /// Shift+Home and End to its ends, while a full-screen program gets those keys
+    /// itself. Ctrl+Shift+F finds in it: the count, the newest match first, Enter and
+    /// Shift+Enter stepping and scrolling to each, none found, Escape back to the shell.
+    #[test]
+    fn terminal_scrollback_and_find() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("terminal-find");
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        let idle = |s: &Sim| s.app.terminal.pty().is_some_and(|p| p.idle());
+        let screen = |s: &Sim| s.app.terminal.pty().map(|p| {
+            let t = p.shared.term();
+            (t.screen.scroll, t.screen.history(), t.screen.rows)
+        }).unwrap();
+        s.act("key ctrl+Backtick");
+        wait_until(&mut s, "the prompt", 10, |s| idle(s) && !s.app.terminal.text().trim().is_empty());
+        s.act("text seq 1 400");
+        s.act("key enter");
+        wait_until(&mut s, "the numbers", 10, |s| idle(s) && some_text(s, "400"));
+        let (_, history, rows) = screen(&s);
+        let page = rows - 1;
+        s.act("key shift+PageUp");
+        assert_eq!(screen(&s).0, page);
+        s.act("key shift+PageUp");
+        assert_eq!(screen(&s).0, 2 * page);
+        s.act("key shift+PageDown");
+        assert_eq!(screen(&s).0, page);
+        s.act("key shift+Home");
+        assert_eq!(screen(&s).0, history);
+        assert!(some_text(&s, "seq 1 400") || s.texts.iter().any(|(_, t)| t.ends_with("seq 1 400")), "the top of what went by");
+        s.act("key shift+End");
+        assert_eq!(screen(&s).0, 0);
+        // The find bar leaves the newest rows in sight: the top ones make room for it.
+        s.act("key ctrl+shift+f");
+        s.idle(10);
+        let prompt = s.app.terminal.text().lines().rev().find(|l| !l.trim().is_empty()).unwrap_or_default().to_string();
+        let r = s.text_rect(&prompt);
+        assert!(r.bottom() <= s.size.y - crate::findbar::BAR_H + 0.5, "the prompt above the bar: {r:?}");
+        s.act("key Escape");
+        assert!(s.app.terminal.found().is_none());
+        // Find.
+        s.act("key shift+PageUp");
+        s.act("key ctrl+shift+f");
+        s.idle(2);
+        assert!(s.app.terminal.found().is_some());
+        s.act("text 37");
+        s.idle(3);
+        // 37, 137, 237, 337, 370 to 379: the newest first.
+        let (n, cur, hit) = s.app.terminal.found().unwrap();
+        assert_eq!((n, cur), (14, 13));
+        assert!(some_text(&s, "14 of 14"));
+        let text = |s: &Sim, h: crate::vt::Span| s.app.terminal.pty().unwrap().shared.term().screen.text(h.0, h.1);
+        assert_eq!(text(&s, hit.unwrap()), "37");
+        s.act("key enter");
+        let (_, cur, hit) = s.app.terminal.found().unwrap();
+        assert_eq!(cur, 0, "Enter goes on past the last to the first");
+        s.idle(2);
+        assert!(some_text(&s, "1 of 14") && some_text(&s, "37"), "scrolled to it");
+        assert!(screen(&s).0 > 300, "far back");
+        assert_eq!(hit.map(|h| text(&s, h)).as_deref(), Some("37"));
+        s.act("key shift+Enter");
+        assert_eq!(s.app.terminal.found().unwrap().1, 13);
+        s.act("key shift+Enter");
+        s.idle(20);
+        s.shot("terminal-find");
+        assert!(some_text(&s, "13 of 14") && some_text(&s, "378"));
+        // F3 steps as Enter does.
+        s.act("key F3");
+        assert_eq!(s.app.terminal.found().unwrap().1, 13);
+        s.act("key ctrl+a");
+        s.act("text ZZZ");
+        s.idle(3);
+        assert!(some_text(&s, "No matches"));
+        s.idle(10);
+        s.shot("terminal-find-none");
+        s.act("key Escape");
+        assert!(s.app.terminal.found().is_none(), "Escape closes the bar");
+        s.act("text echo back-in-shell");
+        s.act("key enter");
+        wait_until(&mut s, "the shell has the keyboard again", 10, |s| some_text(s, "back-in-shell"));
+        assert_eq!(screen(&s).0, 0, "typing came back down");
+        // In a full-screen program the keys are its own.
+        s.act("text seq 1 400 | LESSHISTFILE=- less");
+        s.act("key enter");
+        let top = |s: &Sim| s.app.terminal.text().lines().next().unwrap_or_default().to_string();
+        wait_until(&mut s, "less", 10, |s| s.app.terminal.pty().is_some_and(|p| p.shared.term().screen.alt()) && top(s) == "1");
+        s.act("key shift+PageUp");
+        assert_eq!(screen(&s).0, 0);
+        s.act("text f");
+        wait_until(&mut s, "less paged", 10, |s| top(s) != "1");
+        s.act("text q");
+        wait_until(&mut s, "less gone", 10, |s| s.app.terminal.pty().is_some_and(|p| !p.shared.term().screen.alt()) && idle(s));
+        s.act("key ctrl+Backtick");
+        look(&mut s, "after finding");
+        report("terminal find", &s);
+    }
+
+    /// Links in the terminal: with Ctrl held, an address, a path with its line, a folder
+    /// relative to the shell's, a hyperlink a program wrote and `ls --hyperlink`'s names
+    /// underline under the pointer, and a click opens them: the browser, the editor at
+    /// the line, the folder in the panel, the file selected in its own. Double and triple
+    /// clicks select a word and a line. less and vim hear the mouse, and Shift still
+    /// selects over them.
+    #[test]
+    fn terminal_links_and_mouse() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("terminal-links");
+        let proj = home.join("proj");
+        let wf = |p: &str, t: &str| {
+            let p = proj.join(p);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, t).unwrap();
+        };
+        wf("src/lib.rs", "pub fn one() {}\npub fn two() {}\n");
+        wf("nums.txt", &(1..=300).map(|i| format!("{i}\n")).collect::<String>());
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake_editors("terminal-links")));
+        crate::editor::TEST_ENV.with(|e| e.borrow_mut().clear());
+        let mut s = Sim::new(&proj, vec2(1280.0, 800.0));
+        s.app.cfg.editor = "code".into();
+        let idle = |s: &Sim| s.app.terminal.pty().is_some_and(|p| p.idle());
+        s.act("key ctrl+Backtick");
+        wait_until(&mut s, "the prompt", 10, |s| idle(s) && !s.app.terminal.text().trim().is_empty());
+        s.act("text printf 'see https://example.com/docs.\\nerror: src/lib.rs:2:5: oops\\nlook in src\\n\\033]8;;https://maia.example/osc\\033\\\\linked\\033]8;;\\033\\\\ text\\n'");
+        s.act("key enter");
+        wait_until(&mut s, "the lines", 10, |s| idle(s) && some_text(s, "linked text"));
+        // The pane has eased open: its rows stay where they are.
+        s.settle();
+        let url_row = "see https://example.com/docs.";
+        let (x, y) = term_cell(&s, url_row, 10);
+        s.act(&format!("move {x:.0} {y:.0}"));
+        s.idle(2);
+        assert_eq!(s.app.terminal.hovered(), None, "nothing without Ctrl");
+        s.act("hold ctrl");
+        s.act(&format!("move {x:.0} {y:.0}"));
+        s.idle(2);
+        assert_eq!(s.app.terminal.hovered().as_deref(), Some("https://example.com/docs"));
+        s.shot("terminal-link");
+        let n = launched().len();
+        s.act(&format!("click {x:.0} {y:.0} left ctrl"));
+        let l = launched();
+        assert!(l.len() == n + 1 && l[n].contains("xdg-open") && l[n].contains("\"https://example.com/docs\""), "{:?}", l.last());
+        // A compiler's path and line: the editor, at the line.
+        let (x, y) = term_cell(&s, "error: src/lib.rs:2:5: oops", 12);
+        s.act(&format!("move {x:.0} {y:.0}"));
+        wait_until(&mut s, "the path found on disk", 10, |s| s.app.terminal.hovered().as_deref() == Some("src/lib.rs:2:5"));
+        let n = launched().len();
+        s.act(&format!("click {x:.0} {y:.0} left ctrl"));
+        let l = launched();
+        assert!(l.len() == n + 1 && l[n].contains("editors/terminal-links/code") && l[n].contains("lib.rs:2\""), "{:?}", l.last());
+        // A word that is no file there underlines nothing.
+        let (x, y) = term_cell(&s, "look in src", 6);
+        s.act(&format!("move {x:.0} {y:.0}"));
+        s.idle(10);
+        assert_eq!(s.app.terminal.hovered(), None, "\"in\" is no file");
+        // A folder opens in the panel (and the shell, at its prompt, follows).
+        let (x, y) = term_cell(&s, "look in src", 9);
+        s.act(&format!("move {x:.0} {y:.0}"));
+        wait_until(&mut s, "the folder found", 10, |s| s.app.terminal.hovered().as_deref() == Some("src"));
+        s.act(&format!("click {x:.0} {y:.0} left ctrl"));
+        s.settle();
+        assert_eq!(s.tab().path, proj.join("src"));
+        // A hyperlink a program wrote.
+        let (x, y) = term_cell(&s, "linked text", 2);
+        s.act(&format!("move {x:.0} {y:.0}"));
+        s.idle(2);
+        assert_eq!(s.app.terminal.hovered().as_deref(), Some("linked"));
+        let n = launched().len();
+        s.act(&format!("click {x:.0} {y:.0} left ctrl"));
+        assert!(launched().get(n).is_some_and(|l| l.contains("\"https://maia.example/osc\"")), "{:?}", launched().last());
+        s.act("hold none");
+        // ls's names link to their files: one opens selected in its folder.
+        wait_until(&mut s, "the shell in src", 10, |s| idle(s) && s.app.terminal.pty().and_then(|p| p.cwd()) == Some(proj.join("src")));
+        s.act("text cd .. && ls --hyperlink=always");
+        s.act("key enter");
+        wait_until(&mut s, "ls", 10, |s| idle(s) && s.texts.iter().any(|(_, t)| t.starts_with("nums.txt")));
+        let row = s.texts.iter().find(|(_, t)| t.starts_with("nums.txt")).map(|(_, t)| t.clone()).unwrap();
+        let (x, y) = term_cell(&s, &row, 1);
+        s.act("hold ctrl");
+        s.act(&format!("move {x:.0} {y:.0}"));
+        wait_until(&mut s, "ls's link", 10, |s| s.app.terminal.hovered().as_deref() == Some("nums.txt"));
+        s.act(&format!("click {x:.0} {y:.0} left ctrl"));
+        s.act("hold none");
+        s.settle();
+        assert_eq!(s.tab().path, proj);
+        assert_eq!(s.tab().cursor_path(), Some(proj.join("nums.txt")), "selected in its folder");
+        // Double and triple clicks (well after the last click, which would count).
+        s.idle(30);
+        let (x, y) = term_cell(&s, url_row, 12);
+        s.act(&format!("dclick {x:.0} {y:.0}"));
+        assert_eq!(s.app.terminal.selection().as_deref(), Some("https://example.com/docs"), "without the full stop");
+        s.idle(30);
+        s.act(&format!("tclick {x:.0} {y:.0}"));
+        assert_eq!(s.app.terminal.selection().as_deref(), Some(url_row));
+        s.act("key ctrl+shift+c");
+        assert_eq!(s.copied.last().map(String::as_str), Some(url_row));
+        // less hears the wheel.
+        s.act("text clear; LESSHISTFILE=- less --mouse nums.txt");
+        s.act("key enter");
+        let mode = |s: &Sim| s.app.terminal.pty().map(|p| p.shared.term().screen.mouse);
+        let top = |s: &Sim| s.app.terminal.text().lines().next().unwrap_or_default().to_string();
+        wait_until(&mut s, "less with the mouse", 10, |s| mode(s) == Some(crate::vt::Track::Click) && top(s) == "1");
+        s.idle(3);
+        let body = s.texts.iter().rev().find(|(_, t)| t == "2").map(|(r, _)| *r).unwrap_or_else(|| s.fail("less's second row"));
+        s.act(&format!("scroll {:.0} {:.0} -2", body.center().x, body.center().y));
+        wait_until(&mut s, "less scrolled", 10, |s| top(s) != "1");
+        s.idle(10);
+        s.shot("terminal-less-mouse");
+        s.act("text q");
+        wait_until(&mut s, "less gone", 10, |s| mode(s) == Some(crate::vt::Track::Off) && idle(s));
+        // vim: a click puts the cursor there; Shift drags select instead.
+        s.act("text clear; vim -u NONE -i NONE -n -N -c 'set mouse=a' nums.txt");
+        s.act("key enter");
+        wait_until(&mut s, "vim with the mouse", 10, |s| mode(s) == Some(crate::vt::Track::Drag) && some_text(s, "6"));
+        s.idle(5);
+        let six = s.text_rect("6");
+        s.act(&format!("click {:.0} {:.0}", six.center().x, six.center().y));
+        s.idle(5);
+        s.act("text iX");
+        s.act("key Escape");
+        wait_until(&mut s, "the X where vim was clicked", 10, |s| some_text(s, "X6"));
+        let eight = s.text_rect("8");
+        s.act("hold shift");
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0} left shift", eight.left() + 1.0, eight.center().y, eight.right() + 30.0, eight.center().y));
+        s.act("hold none");
+        assert_eq!(s.app.terminal.selection().as_deref(), Some("8"));
+        s.idle(10);
+        s.shot("terminal-vim-mouse");
+        s.act("text :q!");
+        s.act("key enter");
+        wait_until(&mut s, "vim gone", 10, |s| mode(s) == Some(crate::vt::Track::Off) && idle(s));
+        s.act("key ctrl+Backtick");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        look(&mut s, "after links");
+        report("terminal links", &s);
     }
 
     /// Clean Build Folders: the scan finds each kind under the folder, sizes them, sorts
@@ -12812,12 +13275,12 @@ mod journeys {
             let mut s = film_window(&p, fonts);
             let mut f = Film::new(&s, "terminal");
             s.act("key ctrl+Backtick");
-            wait_until(&mut s, "the prompt", 10, |s| s.app.terminal.pty.as_ref().is_some_and(|t| t.idle()) && s.app.terminal.text().contains('$'));
+            wait_until(&mut s, "the prompt", 10, |s| s.app.terminal.pty().is_some_and(|t| t.idle()) && s.app.terminal.text().contains('$'));
             f.shot(&mut s, 1500, "Ctrl `");
             s.act("text git log --oneline");
             s.act("key enter");
             wait_until(&mut s, "the log", 10, |s| s.app.terminal.text().contains("Start with today"));
-            wait_until(&mut s, "the prompt again", 10, |s| s.app.terminal.pty.as_ref().is_some_and(|t| t.idle()));
+            wait_until(&mut s, "the prompt again", 10, |s| s.app.terminal.pty().is_some_and(|t| t.idle()));
             f.shot(&mut s, 2300, "Enter");
             s.act("key ctrl+Backtick");
             f.finish(&s);
@@ -13208,7 +13671,7 @@ mod journeys {
         s.act("key Tab");
         s.settle();
         assert_eq!(s.tab().path, a);
-        let idle = |s: &Sim| s.app.terminal.pty.as_ref().is_some_and(|p| p.idle());
+        let idle = |s: &Sim| s.app.terminal.pty().is_some_and(|p| p.idle());
         s.act("key ctrl+Backtick");
         wait_until(&mut s, "the prompt", 10, |s| idle(s) && !s.app.terminal.text().trim().is_empty());
         // The files take the keyboard back; the preview's editor gets the typing, not the shell.
@@ -13314,7 +13777,7 @@ mod journeys {
         s.act("key ctrl+Backtick");
         s.act("text exit");
         s.act("key enter");
-        wait_until(&mut s, "the pane closed", 10, |s| s.app.terminal.pty.is_none());
+        wait_until(&mut s, "the pane closed", 10, |s| s.app.terminal.pty().is_none());
         look(&mut s, "after everything together");
         report("new_features_together", &s);
     }
