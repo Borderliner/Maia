@@ -20,6 +20,7 @@ mod versions;
 mod viewer;
 mod wallpaper;
 mod clipboard;
+mod columns;
 mod commands;
 mod compare;
 mod contentsearch;

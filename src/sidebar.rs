@@ -124,6 +124,11 @@ pub fn known(app: &App, ctx: &egui::Context) -> Known {
     })
 }
 
+/// Where the mounted drives are, as of the last refresh.
+pub fn mount_points() -> Vec<PathBuf> {
+    CACHE.with(|c| c.borrow().mounts.iter().map(|m| m.0.clone()).collect())
+}
+
 /// Generation of the cached refresh (cheap; no copies).
 pub fn generation() -> u64 {
     CACHE.with(|c| c.borrow().generation)

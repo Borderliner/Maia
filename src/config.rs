@@ -493,6 +493,9 @@ pub struct ViewSettings {
     pub only_types: Vec<String>,
     pub show_folders: bool,
     pub show_files: bool,
+    /// The Columns view: one column per folder level. It sits beside the zoom axis and
+    /// leaves `zoom` as it was.
+    pub column_view: bool,
 }
 
 impl Default for ViewSettings {
@@ -509,6 +512,7 @@ impl Default for ViewSettings {
             only_types: vec![],
             show_folders: true,
             show_files: true,
+            column_view: false,
         }
     }
 }

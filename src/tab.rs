@@ -173,6 +173,8 @@ pub struct Tab {
     pub check_drag: Option<bool>,
     /// The filter's contents mode and its running search.
     pub content: crate::contentsearch::State,
+    /// The Columns view's other folders (made when it is first drawn).
+    pub strip: Option<Box<crate::columns::Strip>>,
 }
 
 /// Rubber-band selection in content coordinates.
@@ -257,6 +259,7 @@ impl Tab {
             cursor_first: true,
             check_drag: None,
             content: Default::default(),
+            strip: None,
         };
         t.reload();
         t
@@ -465,7 +468,7 @@ impl Tab {
 
     /// Is the tree view active (Details view, not flattened)?
     pub fn tree_active(&self) -> bool {
-        !self.flatten && crate::listing::mode_for(self.settings.zoom) == crate::listing::Mode::Tree && !is_computer(&self.path) && self.archive.is_none()
+        !self.flatten && crate::listing::mode_of(&self.settings) == crate::listing::Mode::Tree && !is_computer(&self.path) && self.archive.is_none()
     }
 
     pub fn toggle_expand(&mut self, dir: &Path) {
@@ -524,6 +527,9 @@ impl Tab {
     /// tab of each panel and never a flattened walk, so without this a tab behind
     /// another or a flattened listing keeps showing what was moved out of it.
     pub fn changed(&mut self, c: &crate::ops::Changed) {
+        if let Some(s) = self.strip.as_mut() {
+            s.changed(c);
+        }
         if self.archive.is_some() || is_computer(&self.path) || self.rename.is_some() {
             return;
         }
@@ -704,6 +710,9 @@ impl Tab {
         match settings {
             Some((s, scope)) => {
                 let before = std::mem::replace(&mut self.settings, s);
+                // Browsing in Columns stays in Columns: a folder's saved view lends it
+                // its sort, not a view that would take the columns away.
+                self.settings.column_view |= before.column_view;
                 self.free_view.get_or_insert(before);
                 self.saved_scope = scope;
             }
@@ -1369,7 +1378,8 @@ impl Tab {
         // A flattened walk can be huge and is not grouped; the Timeline is bounded by its
         // month and reads by day.
         let timeline = self.smart.as_ref().is_some_and(|s| s.id == crate::smart::TIMELINE);
-        if self.settings.group == GroupBy::None || (self.flatten && !timeline) {
+        // Columns lists each folder in one run, as its other columns do.
+        if self.settings.group == GroupBy::None || self.settings.column_view || (self.flatten && !timeline) {
             ordered.push((None, top));
         } else {
             let mut order: Vec<String> = vec![];

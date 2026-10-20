@@ -225,6 +225,7 @@ commands! {
     ViewMedium, "view_medium", View, "View Medium Icons", "A grid of medium icons.", ["Ctrl+Shift+4"];
     ViewLarge, "view_large", View, "View Large Icons", "A grid of large thumbnails.", ["Ctrl+Shift+5"];
     ViewXL, "view_xl", View, "View XL Icons", "The biggest thumbnails.", ["Ctrl+Shift+6"];
+    ViewColumns, "view_columns", View, "View Columns", "One column per folder, from your home folder or the drive down to this one.", ["Ctrl+Shift+7"];
     GroupNone, "group_none", Group, "Clear Grouping", "List everything in one run, without group headers.", [];
     GroupName, "group_name", Group, "Group By Name", "Alphabetical ranges.", [];
     GroupType, "group_type", Group, "Group By Type", "One group per file type.", [];

@@ -1224,7 +1224,8 @@ impl App {
             0
         };
         let zoom = t.settings.zoom;
-        let view_name = listing::view_name(zoom);
+        let view_name = listing::view_label(&t.settings);
+        let view_mode = listing::mode_of(&t.settings);
         let error = t.error.clone();
         let (show_folders, show_files) = (t.settings.show_folders, t.settings.show_files);
         let mut toggle_folders = false;
@@ -1253,8 +1254,9 @@ impl App {
                 ui.painter().galley(pos2(r.left() + 6.0 + iw, r.center().y - g.size().y / 2.0), g, col);
                 if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
             };
-            // Zoom chip with a fill bar proportional to the zoom.
-            let zr = chip(ui, None, &format!("{}%", (zoom * 100.0 + 1e-3).floor() as i32), pal.text_dim, false, "View size (Ctrl+wheel)");
+            // Zoom chip with a fill bar proportional to the zoom (none in Columns, which has
+            // no zoom).
+            let zr = if view_mode == listing::Mode::Columns { ui.allocate_exact_size(Vec2::ZERO, Sense::hover()).1 } else { chip(ui, None, &format!("{}%", (zoom * 100.0 + 1e-3).floor() as i32), pal.text_dim, false, "View size (Ctrl+wheel)") };
             if zr.rect.width() > 10.0 {
                 let bar = Rect::from_min_max(pos2(zr.rect.left() + 5.0, zr.rect.bottom() - 4.0), pos2(zr.rect.right() - 5.0, zr.rect.bottom() - 2.5));
                 ui.painter().rect_filled(bar, CornerRadius::same(1), pal.border);
@@ -1263,7 +1265,7 @@ impl App {
             if zr.clicked() {
                 self.popup = Popup::zoom(id, zr.rect.right_top());
             }
-            let view_icon = move |p: &egui::Painter, r: Rect| listing::paint_view_glyph(p, r, listing::mode_for(zoom), pal.text_dim);
+            let view_icon = move |p: &egui::Painter, r: Rect| listing::paint_view_glyph(p, r, view_mode, pal.text_dim);
             let vr = chip(ui, Some(&view_icon), view_name, pal.text_dim, false, "Change view");
             if vr.clicked() {
                 self.popup = Popup::zoom(id, vr.rect.right_top());

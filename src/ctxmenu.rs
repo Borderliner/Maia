@@ -211,6 +211,7 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             Item::labeled(Cmd::ViewMedium, "Medium icons"),
             Item::labeled(Cmd::ViewLarge, "Large icons"),
             Item::labeled(Cmd::ViewXL, "Extra large icons"),
+            Item::labeled(Cmd::ViewColumns, "Columns"),
         ]));
         items.push(Item::sub("sort", "Sort by", vec![
             Item::labeled(Cmd::SortName, "Name"),
@@ -625,10 +626,10 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
         }
     }
     // Current choices, shown as radio marks on View / Sort by / Group by entries.
-    let (cur_group, cur_sort, cur_zoom) = app.panels.get(&app.active).map(|p| {
+    let (cur_group, cur_sort, cur_zoom, cur_columns) = app.panels.get(&app.active).map(|p| {
         let s = &p.tab().settings;
-        (s.group, s.sort, s.zoom)
-    }).unwrap_or((crate::config::GroupBy::None, crate::config::SortKey::Name, 0.0));
+        (s.group, s.sort, s.zoom, s.column_view)
+    }).unwrap_or((crate::config::GroupBy::None, crate::config::SortKey::Name, 0.0, false));
     let radio_of = |c: Cmd| -> Option<bool> {
         if let Some(g) = c.group_key() {
             return Some(g == cur_group);
@@ -654,7 +655,10 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
             Cmd::ViewXL => Some(1.0),
             _ => None,
         };
-        vz.map(|z: f32| crate::listing::view_name(z) == crate::listing::view_name(cur_zoom))
+        if c == Cmd::ViewColumns {
+            return Some(cur_columns);
+        }
+        vz.map(|z: f32| !cur_columns && crate::listing::view_name(z) == crate::listing::view_name(cur_zoom))
     };
     let screen = ctx.content_rect();
     let row_h = 24.0;

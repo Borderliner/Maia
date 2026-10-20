@@ -3416,9 +3416,12 @@ fn zoom(app: &mut App, ctx: &egui::Context, panel: u64, anchor: Pos2) -> bool {
         return false;
     }
     // Opens above the footer chip. The named views sit beside a vertical slider, each
-    // at the height of its zoom value, so the dense views bunch up at the bottom.
+    // at the height of its zoom value, so the dense views bunch up at the bottom; Columns,
+    // which has no zoom, below them. It hangs from its lower edge, whatever the Spacing.
     let (w, track) = (176.0, 168.0);
-    let (_, rect) = anchored(ctx, "zoom", pos2(anchor.x - w + 30.0, anchor.y - track - 40.0), w, &pal, |ui| {
+    let columns = t.settings.column_view;
+    let mut set_columns = false;
+    let (_, rect) = anchored_from(ctx, "zoom", pos2(anchor.x - w + 30.0, anchor.y - 10.0), Align2::LEFT_BOTTOM, w, &pal, |ui| {
         let (r, resp) = ui.allocate_exact_size(vec2(w - 16.0, track + 20.0), Sense::click_and_drag());
         let rail_x = r.right() - 10.0;
         let (y0, y1) = (r.bottom() - 10.0, r.top() + 10.0);
@@ -3429,7 +3432,7 @@ fn zoom(app: &mut App, ctx: &egui::Context, panel: u64, anchor: Pos2) -> bool {
         for (name, v) in crate::listing::VIEW_STOPS {
             let y = y_of(v);
             let lr = Rect::from_min_max(pos2(r.left(), y - 10.0), pos2(rail_x - 14.0, y + 10.0));
-            let on = crate::listing::view_name(z) == name || (name == "M Icons" && (z - 0.3).abs() < 0.001);
+            let on = !columns && (crate::listing::view_name(z) == name || (name == "M Icons" && (z - 0.3).abs() < 0.001));
             let hov = ui.rect_contains_pointer(lr);
             if on {
                 painter.rect_filled(lr, CornerRadius::same(4), pal.accent);
@@ -3449,7 +3452,7 @@ fn zoom(app: &mut App, ctx: &egui::Context, panel: u64, anchor: Pos2) -> bool {
         // Slider rail and knob.
         painter.line_segment([pos2(rail_x, y0), pos2(rail_x, y1)], Stroke::new(4.0, pal.border));
         painter.line_segment([pos2(rail_x, y0), pos2(rail_x, y_of(z))], Stroke::new(4.0, pal.accent.gamma_multiply(0.6)));
-        painter.circle_filled(pos2(rail_x, y_of(z)), 7.0, pal.accent);
+        painter.circle_filled(pos2(rail_x, y_of(z)), 7.0, if columns { pal.text_dim } else { pal.accent });
         if let Some(pp) = resp.interact_pointer_pos() {
             if resp.dragged() || (resp.clicked() && pp.x > rail_x - 16.0) {
                 let v = ((pp.y - y0) / (y1 - y0)).clamp(0.0, 1.0);
@@ -3457,11 +3460,30 @@ fn zoom(app: &mut App, ctx: &egui::Context, panel: u64, anchor: Pos2) -> bool {
                 set = Some(if v < 0.3 { (v * 10.0).round() / 10.0 } else { v });
             }
         }
+        let (sep, _) = ui.allocate_exact_size(vec2(w - 16.0, 3.0), Sense::hover());
+        ui.painter().line_segment([pos2(sep.left() + 4.0, sep.center().y), pos2(sep.right() - 4.0, sep.center().y)], Stroke::new(1.0, pal.border));
+        let (cr, cresp) = ui.allocate_exact_size(vec2(w - 16.0, 20.0), Sense::click());
+        let lr = Rect::from_min_max(cr.min, pos2(rail_x - 14.0, cr.bottom()));
+        if columns {
+            ui.painter().rect_filled(lr, CornerRadius::same(4), pal.accent);
+        } else if cresp.hovered() {
+            ui.painter().rect_filled(lr, CornerRadius::same(4), pal.hover);
+        }
+        let col = if columns { Color32::WHITE } else { pal.text };
+        crate::listing::paint_view_glyph(ui.painter(), Rect::from_center_size(pos2(lr.left() + 12.0, lr.center().y), Vec2::splat(11.0)), crate::listing::Mode::Columns, col);
+        ui.painter().text(pos2(lr.left() + 26.0, lr.center().y), Align2::LEFT_CENTER, "Columns", FontId::proportional(12.5), col);
+        set_columns = cresp.clicked();
         if let Some(v) = set {
             t.settings.zoom = v;
+            t.dirty |= std::mem::take(&mut t.settings.column_view);
             t.scroll_to_cursor = true;
         }
     });
+    if set_columns {
+        t.settings.column_view = true;
+        t.dirty = true;
+        t.scroll_to_cursor = true;
+    }
     !clicked_outside(ctx, rect)
 }
 

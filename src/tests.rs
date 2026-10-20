@@ -11190,3 +11190,144 @@ fn git_merge_a_remote_branch() {
     assert_eq!(git_said(&b, &["log", "-1", "--format=%s"]), "Merge remote-tracking branch 'origin/topic'");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Let a Columns tab and its strip's listings land, sorting as the view does.
+fn strip_settle(t: &mut Tab, hidden: bool) {
+    let (stats, recents) = (HashMap::new(), HashSet::new());
+    let c = ViewCtx { show_hidden: hidden, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, stats: &stats };
+    let start = Instant::now();
+    loop {
+        t.poll();
+        if t.dirty {
+            t.rebuild(&c);
+        }
+        crate::columns::sync(t, &c);
+        let busy = t.is_loading() || t.strip.as_ref().is_some_and(|s| s.cols.iter().any(|c| c.tab.is_loading()) || s.preview.as_ref().is_some_and(|p| s.get(p).is_none()));
+        if !busy {
+            crate::columns::sync(t, &c);
+            return;
+        }
+        assert!(start.elapsed() < Duration::from_secs(10), "the strip's listings never landed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn col_names(t: &Tab, dir: &Path) -> Vec<String> {
+    let st = t.strip.as_ref().expect("a strip");
+    let col = &st.get(dir).unwrap_or_else(|| panic!("no column for {}", dir.display())).tab;
+    col.view.iter().map(|&i| col.entries[i as usize].name.clone()).collect()
+}
+
+#[test]
+fn columns_start_at_home_or_the_root() {
+    let home = crate::fsx::home();
+    assert_eq!(crate::columns::root_for(&home.join("Documents/Taxes")), home);
+    assert_eq!(crate::columns::root_for(&home), home);
+    if !Path::new("/proc").starts_with(&home) {
+        assert_eq!(crate::columns::root_for(Path::new("/proc/self")), PathBuf::from("/"));
+    }
+    let chain = crate::columns::chain(Path::new("/h"), Path::new("/h/a/b"));
+    assert_eq!(chain, vec![PathBuf::from("/h"), PathBuf::from("/h/a"), PathBuf::from("/h/a/b")]);
+    // Inside an archive the folders go on past the archive's name.
+    let chain = crate::columns::chain(Path::new("/h"), Path::new("/h/x.zip/docs"));
+    assert_eq!(chain.last(), Some(&PathBuf::from("/h/x.zip/docs")));
+    assert_eq!(chain.len(), 3);
+}
+
+#[test]
+fn columns_strip_lists_the_way_down() {
+    let d = tmpdir("columns");
+    touch(&d.join("a/b/c/deep.txt"), "x");
+    touch(&d.join("a/b/note.txt"), "x");
+    touch(&d.join("a/zz.txt"), "x");
+    touch(&d.join("a/y/keep.txt"), "x");
+    touch(&d.join("a/.hid/inner/x.txt"), "x");
+    let v = ViewSettings { column_view: true, ..Default::default() };
+    let mut t = Tab::new(1, d.join("a/b"), v, egui::Context::default());
+    strip_settle(&mut t, false);
+    let st = t.strip.as_ref().unwrap();
+    assert!(st.chain.ends_with(&[d.clone(), d.join("a")]), "the folders above, the root first: {:?}", st.chain);
+    // The column above lists its folder like the tab would, the way down marked.
+    assert_eq!(col_names(&t, &d.join("a")), vec!["b", "y", "zz.txt"], "hidden left out, folders first, by name");
+    let a = &st.get(&d.join("a")).unwrap().tab;
+    assert_eq!(st.get(&d.join("a")).unwrap().child.map(|i| a.entries[i as usize].name.as_str()), Some("b"));
+    // The cursor rests on c: its listing is the next column.
+    assert_eq!(t.cursor_path(), Some(d.join("a/b/c")));
+    assert_eq!(st.preview, Some(d.join("a/b/c")));
+    assert_eq!(col_names(&t, &d.join("a/b/c")), vec!["deep.txt"]);
+    // A file under the cursor has nothing after it, nor has a selection of several.
+    t.move_cursor(1, false, false);
+    strip_settle(&mut t, false);
+    assert_eq!(t.cursor_path(), Some(d.join("a/b/note.txt")));
+    assert_eq!(t.strip.as_ref().unwrap().preview, None);
+    t.move_cursor(-1, true, false);
+    strip_settle(&mut t, false);
+    assert_eq!(t.selected.len(), 2);
+    assert_eq!(t.strip.as_ref().unwrap().preview, None, "two picked: no next column");
+    // The columns follow the tab's sort, never its grouping.
+    t.settings.desc = true;
+    t.settings.group = crate::config::GroupBy::Type;
+    strip_settle(&mut t, false);
+    assert_eq!(col_names(&t, &d.join("a")), vec!["y", "b", "zz.txt"], "descending, folders still first");
+    assert!(t.strip.as_ref().unwrap().cols.iter().all(|c| c.tab.settings.group == crate::config::GroupBy::None));
+    t.settings.desc = false;
+    // Going up, the folder left keeps its column filled and the one above shows at once:
+    // the tab has its listing before its own read lands.
+    t.up(|_| None);
+    assert!(t.entries.is_empty(), "a fresh read is under way");
+    let (stats, recents) = (HashMap::new(), HashSet::new());
+    let c = ViewCtx { show_hidden: false, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, stats: &stats };
+    crate::columns::sync(&mut t, &c);
+    assert_eq!(t.path, d.join("a"));
+    assert!(!t.view.is_empty(), "the column's listing stands in");
+    assert_eq!(t.cursor_path(), Some(d.join("a/b")), "on the folder come from");
+    assert_eq!(t.strip.as_ref().unwrap().preview, Some(d.join("a/b")));
+    assert!(col_names(&t, &d.join("a/b")).contains(&"note.txt".to_string()), "the folder left is still listed beside");
+    strip_settle(&mut t, false);
+    // A hidden folder on the way down shows in its column even with hidden files off.
+    t.navigate(d.join("a/.hid/inner"), None);
+    strip_settle(&mut t, false);
+    let names = col_names(&t, &d.join("a"));
+    assert!(names.contains(&".hid".to_string()) && !names.contains(&".hidden".to_string()), "{names:?}");
+    assert_eq!(names.iter().position(|n| n == ".hid"), Some(0), "among the folders by name");
+    // A change Maia made reads the column again.
+    std::fs::write(d.join("a/new.txt"), "x").unwrap();
+    t.changed(&crate::ops::Changed { arrived: vec![d.join("a")], left: vec![], gone: vec![] });
+    strip_settle(&mut t, false);
+    assert!(col_names(&t, &d.join("a")).contains(&"new.txt".to_string()), "the column above caught the new file");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn columns_stay_through_a_saved_view() {
+    let d = tmpdir("colsaved");
+    for n in ["a", "b"] {
+        std::fs::create_dir_all(d.join(n)).unwrap();
+    }
+    let ctx = egui::Context::default();
+    let mut t = Tab::new(1, d.clone(), ViewSettings { column_view: true, ..Default::default() }, ctx.clone());
+    let saved = ViewSettings { sort: SortKey::Modified, zoom: 0.65, ..Default::default() };
+    t.navigate(d.join("a"), Some((saved, Some(crate::config::SaveScope::ThisFolder))));
+    assert!(t.settings.column_view, "walked into, a folder's saved view keeps the columns");
+    assert_eq!(t.settings.sort, SortKey::Modified, "and lends them its sort");
+    t.navigate(d.join("b"), None);
+    assert!(t.settings.column_view);
+    assert_eq!(t.settings.sort, SortKey::Name, "the view of before, back");
+    // Columns saved for a folder: shown there, and the view of before after it.
+    let mut t = Tab::new(2, d.clone(), ViewSettings::default(), ctx);
+    t.navigate(d.join("a"), Some((ViewSettings { column_view: true, ..Default::default() }, Some(crate::config::SaveScope::ThisFolder))));
+    assert!(t.settings.column_view);
+    assert!(!t.tree_active(), "no tree under the columns");
+    t.navigate(d.join("b"), None);
+    assert!(!t.settings.column_view, "out of the folder, Details again");
+    // Settings written before Columns existed read as not Columns.
+    let old: ViewSettings = serde_json::from_str(r#"{"zoom":0.1,"sort":"Name"}"#).unwrap();
+    assert!(!old.column_view && crate::listing::mode_of(&old) == crate::listing::Mode::Tree);
+    let new: ViewSettings = serde_json::from_str(r#"{"zoom":0.1,"column_view":true}"#).unwrap();
+    assert_eq!(crate::listing::mode_of(&new), crate::listing::Mode::Columns);
+    assert_eq!(crate::listing::view_label(&new), "Columns");
+    // Its key, the next free one after the six views on the zoom axis.
+    let km = Keymap::build(&Default::default());
+    assert_eq!(km.lookup(&commands::parse_binding("Ctrl+Shift+7").unwrap()).0, Some(Cmd::ViewColumns));
+    let _ = std::fs::remove_dir_all(&d);
+}

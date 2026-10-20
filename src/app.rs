@@ -1400,6 +1400,9 @@ impl App {
                 if t.is_loading() {
                     any_loading = true;
                 }
+                if ti == p.active {
+                    crate::columns::watch(t, &changed_dirs, &mut want);
+                }
                 if ti == p.active && !tab::is_computer(&t.path) && !t.flatten && t.archive.is_none() {
                     want.insert(t.path.clone());
                     if t.tree_active() {
@@ -1968,6 +1971,9 @@ impl App {
             }
             _ => return false,
         };
+        if matches!(k, Key::ArrowLeft | Key::ArrowRight) && t.settings.column_view {
+            return crate::columns::step(self, k == Key::ArrowRight);
+        }
         if matches!(k, Key::ArrowLeft | Key::ArrowRight) && t.nav_col_step == 0 {
             // Details tree: Right expands / enters, Left collapses / goes to the parent row.
             if !t.tree_active() {
@@ -2438,6 +2444,8 @@ impl App {
                 self.set_config_changed();
             }
             Cmd::ToggleSidebar => self.sidebar = !self.sidebar,
+            // Columns sits beside the zoom axis: there is nothing in it to grow.
+            Cmd::ZoomIn | Cmd::ZoomOut if self.tab().settings.column_view => {}
             Cmd::ZoomIn | Cmd::ZoomOut => {
                 let t = self.tab();
                 t.settings.zoom = crate::listing::zoom_step(t.settings.zoom, if cmd == Cmd::ZoomIn { 1 } else { -1 });
@@ -2454,6 +2462,14 @@ impl App {
                 };
                 let t = self.tab();
                 t.settings.zoom = z;
+                // (Groups come back with the other views.)
+                t.dirty |= std::mem::take(&mut t.settings.column_view);
+                t.scroll_to_cursor = true;
+            }
+            Cmd::ViewColumns => {
+                let t = self.tab();
+                t.settings.column_view = true;
+                t.dirty = true;
                 t.scroll_to_cursor = true;
             }
             Cmd::GroupNone | Cmd::GroupName | Cmd::GroupType | Cmd::GroupDate | Cmd::GroupCreated | Cmd::GroupAccessed | Cmd::GroupSize | Cmd::GroupItems | Cmd::GroupUsage | Cmd::GroupDeleted | Cmd::GroupOriginal | Cmd::GroupFree | Cmd::GroupFs | Cmd::GroupFull => {
