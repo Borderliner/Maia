@@ -10889,3 +10889,90 @@ fn media_probes_stop_when_their_folder_is_left() {
     crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// What the history's find bar makes of its text: plain words, "quoted words", the
+/// `author:`, `path:`, `since:` and `until:` terms (half typed ones ignored, a date form
+/// that isn't one kept as a word), case only when a word has capitals, git's flags, what
+/// a row marks, and the text a search starts with in a subfolder.
+#[test]
+fn git_search_text_read() {
+    use crate::gitfind::{hash_hit, parse, spans, start_text};
+    let now = 1_790_000_000;
+    let q = parse("fix  \"two words\" author:ada path:./src/ui/ since:7d until:2026-09 author: path:", now);
+    assert_eq!(q.words, ["fix", "two words"]);
+    assert_eq!((q.authors.as_slice(), q.paths.as_slice()), (&["ada".to_string()][..], &["src/ui".to_string()][..]));
+    assert_eq!(q.since, Some(now - 7 * 86_400));
+    let oct = crate::timefmt::parse_local("2026-10-01T00:00:00").map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64).unwrap();
+    assert_eq!(q.until, Some(oct - 1), "the whole of September");
+    assert!(!q.case, "a capital in a path or a date says nothing");
+    assert_eq!(q.flags(), ["--fixed-strings", "--regexp-ignore-case", "--author=ada", &format!("--since=@{}", now - 7 * 86_400), &format!("--until=@{}", oct - 1)]);
+    assert!(parse("Fix", now).case && parse("author:Ada", now).case && !parse("path:README.md fix", now).case);
+    assert_eq!(parse("until:3d", now).until, Some(now - 3 * 86_400), "an age's moment itself");
+    assert_eq!(parse("since:soon", now).words, ["since:soon"], "not a date: a word");
+    assert_eq!(parse("Author:\"Grace Hopper\"", now).authors, ["Grace Hopper"]);
+    assert!(parse("  author: path:/ ", now).is_empty(), "nothing to look for yet");
+    assert!(parse("", now).flags().is_empty());
+    let q = parse("pan panel lay", now);
+    assert_eq!(spans(&q, "Lay out the panels", false), [(0, 3), (12, 17)], "overlaps joined");
+    let q = parse("grace author:hop", now);
+    assert_eq!((spans(&q, "Grace Hopper", true), spans(&q, "Grace Hopper", false)), (vec![(0, 5), (6, 9)], vec![(0, 5)]));
+    let q = parse("1a2B", now);
+    assert_eq!((hash_hit(&q, "1a2b3c4d"), hash_hit(&q, "ffff1a2b"), hash_hit(&parse("1a2", now), "1a2b")), (4, 0, 0), "four hex digits at least, from the start");
+    assert_eq!((start_text("src/ui"), start_text(""), start_text("my notes/"), start_text(".")), ("path:src/ui ".to_string(), String::new(), "path:\"my notes\" ".to_string(), String::new()));
+}
+
+/// Commits found as the history's search finds them: git run with the flags the view
+/// gives it, its output read as the view reads it. Words are looked for in the subject,
+/// the rest of the message, the author and their email and the hash; the terms narrow in
+/// git; a file's history keeps to its file.
+#[test]
+fn git_history_search_finds_commits() {
+    use std::io::BufRead;
+    if !crate::media::have("git") {
+        return;
+    }
+    let d = tmpdir("gitsearch");
+    commit_view_fixture(&d);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let read = |path: Option<&str>, text: &str, n: usize| -> (Vec<String>, bool) {
+        let q = crate::gitfind::parse(text, now);
+        let mut child = std::process::Command::new("git").arg("-C").arg(&d).args(crate::gitlog::list_args(path, Some(&q))).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let mut r = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut got = vec![];
+        let end = crate::gitlog::read_matching(&mut r, n, &q, |v| got.extend(v));
+        drop(r.fill_buf().map(|_| ()));
+        let _ = child.kill();
+        let _ = child.wait();
+        (got.into_iter().map(|c| c.subject).collect(), end)
+    };
+    let found = |text: &str| read(None, text, usize::MAX).0;
+    let all = ["Tune the panel", "Remove the logo", "Write the long notes", "Lay out the panels", "Start the project"];
+    assert_eq!(found("panels"), ["Lay out the panels"]);
+    assert_eq!(found("Panels"), Vec::<String>::new(), "a capital matches case");
+    assert_eq!(found("handbook"), ["Lay out the panels"], "in the message under the subject");
+    assert_eq!(found("grace"), ["Tune the panel", "Lay out the panels"], "the author's name");
+    assert_eq!(found("linus@example"), ["Write the long notes"], "their email");
+    assert_eq!(found("panel grace"), ["Tune the panel", "Lay out the panels"], "every word, each anywhere");
+    assert_eq!(found("\"long notes\""), ["Write the long notes"]);
+    assert_eq!(found("zzz"), Vec::<String>::new());
+    let logo = git_said(&d, &["log", "-1", "--format=%H", "--grep=Remove the logo"]);
+    assert_eq!(found(&logo[..6]), ["Remove the logo"], "the start of its hash");
+    assert_eq!(found("author:ada"), ["Remove the logo", "Start the project"]);
+    assert_eq!(found("author:ADA"), Vec::<String>::new());
+    assert_eq!(found("author:\"Grace Hopper\" author:linus"), ["Tune the panel", "Write the long notes", "Lay out the panels"], "any of several");
+    assert_eq!(found("path:notes.md"), ["Write the long notes", "Start the project"]);
+    assert_eq!(found("path:assets"), ["Remove the logo", "Lay out the panels", "Start the project"], "a folder");
+    assert_eq!(found("path:./src/ui/"), ["Tune the panel", "Lay out the panels", "Start the project"]);
+    assert_eq!(found("author:grace path:src"), ["Tune the panel", "Lay out the panels"]);
+    assert_eq!(found("since:2026-09-04"), ["Tune the panel", "Remove the logo"]);
+    assert_eq!(found("until:2026-09-02"), ["Lay out the panels", "Start the project"]);
+    assert_eq!(found("since:2026-09-02 until:2026-09-03 the"), ["Write the long notes", "Lay out the panels"]);
+    assert_eq!((found("since:1d"), found("until:1d")), (vec![], all.map(String::from).to_vec()), "ages count back from now");
+    // A file's history searched: its own commits only, other paths left out.
+    assert_eq!(read(Some("src/ui/panel.rs"), "tune", usize::MAX).0, ["Tune the panel"]);
+    assert_eq!(read(Some("src/ui/panel.rs"), "path:assets", usize::MAX).0, ["Tune the panel", "Lay out the panels"]);
+    // A page of one: the reader stops there, the log not ended.
+    assert_eq!(read(None, "the", 1), (vec!["Tune the panel".to_string()], false));
+    assert_eq!(read(None, "the", 10), (all.map(String::from).to_vec(), true));
+    let _ = std::fs::remove_dir_all(&d);
+}

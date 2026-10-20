@@ -1102,7 +1102,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(168) {
+    match rng.below(169) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2558,6 +2558,29 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 }
             }
         }
+        168 => {
+            into_repo(s, rng);
+            // The history searched: by the palette or Ctrl+F in an open history, words and
+            // terms typed, stepped through, gone into, a commit opened, then closed again.
+            if crate::gitstatus::repo_for(&s.tab().path).is_none() {
+                return;
+            }
+            if rng.below(2) == 0 && history_open(s) {
+                s.act("key ctrl+f");
+            } else {
+                s.cmd(Cmd::GitSearch);
+            }
+            s.idle(2);
+            s.act(&format!("text {}", rng.pick(&["panel", "author:ada", "path:src", "since:2026-09-02", "until:1d", "Grace", "zzz", "\"long notes\" ", "path:\"no such\" x", "1a2b", " "])));
+            s.idle(rng.below(30));
+            for _ in 0..rng.below(5) {
+                match rng.below(4) {
+                    0 => click_control_at(s, "Find (Ctrl+F)"),
+                    _ => s.act(&format!("key {}", rng.pick(&["Enter", "shift+Enter", "F3", "ArrowDown", "ArrowDown", "Enter", "Escape", "Backspace", "ctrl+f"]))),
+                }
+                s.idle(2);
+            }
+        }
         _ => {
             s.note("idle".into());
             s.idle(rng.below(20) + 1);
@@ -2677,6 +2700,11 @@ fn picker_check(s: &mut Sim) {
 /// The viewer's tag strip is waiting for a new tag's name.
 fn viewer_strip_typing(s: &Sim) -> bool {
     matches!(&s.app.popup, Popup::Viewer(v) if v.strip.as_ref().is_some_and(|t| t.typing.is_some()))
+}
+
+/// An open history in the active panel's inspector.
+fn history_open(s: &Sim) -> bool {
+    s.app.panels.get(&s.app.active).and_then(|p| p.inspector.as_ref()).is_some_and(|i| i.git.is_some())
 }
 
 fn some_text_at(s: &Sim, want: &str) -> bool {
@@ -14808,5 +14836,113 @@ mod journeys {
         s.act("key Escape");
         assert!(!s.popup_open());
         report("sort pictures", &s);
+    }
+
+    /// The subjects the history lists now.
+    fn listed(s: &Sim) -> Vec<String> {
+        git_hist(s).subjects()
+    }
+
+    /// Searching the history, as someone hunting for a change uses it: Ctrl+F over the
+    /// graph, a name found in authors and marked in the rows, the count, Enter stepping
+    /// through what was found and Down going into it, one opened and left again, the
+    /// prefixes typed over the old text, nothing found, Escape putting the whole graph back
+    /// where it was; the toolbar's button; started in a subfolder it looks there; then small
+    /// windows and a light theme.
+    #[test]
+    fn git_history_search() {
+        if !sandboxed() || !crate::media::have("git") {
+            return;
+        }
+        let home = fixture("gitsearch");
+        let repo = home.join("Code/project");
+        crate::tests::commit_view_fixture(&repo);
+        let mut s = Sim::new(&repo, vec2(1280.0, 800.0));
+        wait_until(&mut s, "branch read", 10, |s| branch_now(s) == "main");
+        s.idle(2);
+        open_history(&mut s);
+        wait_until(&mut s, "history", 20, |s| history(s).is_some_and(|h| h.1 && h.0 == 5));
+        // The place the search must give back.
+        s.act("key ArrowDown");
+        s.act("key ArrowDown");
+        assert_eq!(git_hist(&s).sel(), 2);
+        s.act("key ctrl+f");
+        assert_eq!(probe(&s).search.as_deref(), Some(""), "the bar, empty at the top of the work tree");
+        s.act("text grace");
+        wait_until(&mut s, "narrowed", 10, |s| probe(s).narrowed && history(s).is_some_and(|h| h.1));
+        assert_eq!(listed(&s), ["Tune the panel", "Lay out the panels"]);
+        s.idle(3);
+        assert!(some_text(&s, "2 commits"), "the count");
+        assert!(!some_text(&s, "Changes") && !some_text(&s, "Write the long notes"), "only what was found");
+        look(&mut s, "search by author");
+        s.shot("search-author");
+        // Enter steps through them, the field keeping the keyboard; Down goes into them.
+        s.act("key Enter");
+        assert_eq!(git_hist(&s).sel(), 0);
+        s.act("key Enter");
+        assert_eq!(git_hist(&s).sel(), 1);
+        s.act("key shift+Enter");
+        assert_eq!(git_hist(&s).sel(), 0);
+        s.act("key ArrowDown");
+        s.act("key ArrowDown");
+        s.act("key Enter");
+        wait_until(&mut s, "the commit", 10, |s| probe(s).subject.as_deref() == Some("Lay out the panels") && history(s).is_some_and(|h| h.3.is_some()));
+        s.act("key Escape");
+        assert!(probe(&s).narrowed && probe(&s).at.is_none(), "back among what was found");
+        assert_eq!(listed(&s).len(), 2);
+        // Words in the message, typed over what was there (Ctrl+F selects it).
+        let find = |s: &mut Sim, text: &str, want: &[&str]| {
+            s.act("key ctrl+f");
+            s.act(&format!("text {text}"));
+            let want: Vec<String> = want.iter().map(|w| w.to_string()).collect();
+            wait_until(s, text, 10, |s| history(s).is_some_and(|h| h.1) && probe(s).search.as_deref() == Some(text) && (listed(s) == want));
+            s.idle(3);
+        };
+        find(&mut s, "handbook", &["Lay out the panels"]);
+        find(&mut s, "author:ada", &["Remove the logo", "Start the project"]);
+        look(&mut s, "search author term");
+        find(&mut s, "path:assets since:2026-09-02", &["Remove the logo", "Lay out the panels"]);
+        s.shot("search-path-since");
+        let logo = git_out(&repo, &["rev-parse", "HEAD~1"]);
+        find(&mut s, &logo[..6], &["Remove the logo"]);
+        look(&mut s, "search by hash");
+        find(&mut s, "zzz", &[]);
+        assert!(some_text(&s, "No matches") && some_text(&s, "No commits match"));
+        look(&mut s, "nothing found");
+        s.shot("search-none");
+        // Escape in the field: the whole history, at the commit it was on.
+        s.act("key Escape");
+        assert_eq!((probe(&s).search, probe(&s).narrowed, git_hist(&s).sel()), (None, false, 2));
+        assert_eq!(listed(&s).len(), 5);
+        look(&mut s, "search closed");
+        // The toolbar's button opens it as well, and closes it.
+        click_control(&mut s, "Find (Ctrl+F)");
+        assert!(probe(&s).search.is_some());
+        s.act("text panel");
+        wait_until(&mut s, "narrowed", 10, |s| probe(s).narrowed && history(s).is_some_and(|h| h.1 && h.0 == 2));
+        click_control(&mut s, "Find (Ctrl+F)");
+        assert_eq!((probe(&s).search, probe(&s).narrowed), (None, false));
+        // In a subfolder: the search starts in it, typing goes after its path.
+        go(&mut s, &repo.join("src/ui"));
+        s.act("key ctrl+f");
+
+        wait_until(&mut s, "the folder's commits", 10, |s| probe(s).narrowed && history(s).is_some_and(|h| h.1));
+        assert_eq!(probe(&s).search.as_deref(), Some("path:src/ui "));
+        assert_eq!(listed(&s), ["Tune the panel", "Lay out the panels", "Start the project"]);
+        s.act("text tune");
+        wait_until(&mut s, "and a word", 10, |s| probe(s).search.as_deref() == Some("path:src/ui tune") && listed(s) == ["Tune the panel"]);
+        s.idle(3);
+        look(&mut s, "search in a subfolder");
+        s.shot("search-subfolder");
+        for (w, h) in [(720.0, 480.0), (520.0, 400.0)] {
+            s.resize(w, h);
+            look(&mut s, "search narrow");
+        }
+        s.resize(1280.0, 800.0);
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        look(&mut s, "search light");
+        s.act("key Escape");
+        assert!(probe(&s).search.is_none());
+        report("gitsearch", &s);
     }
 }

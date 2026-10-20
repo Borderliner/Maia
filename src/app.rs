@@ -2295,6 +2295,8 @@ impl App {
                     t.set_flatten(on);
                 }
             }
+            // Ctrl+F searches an open history that has the keyboard.
+            Cmd::FocusFilter | Cmd::FindInPreview if self.panels.get(&self.active).and_then(|p| p.inspector.as_ref()).is_some_and(|i| i.git.is_some() && (i.keys || cmd == Cmd::FindInPreview)) => self.run(Cmd::GitSearch),
             // Ctrl+F finds in a preview that was clicked last, else filters the list.
             Cmd::FocusFilter if self.panels.get(&self.active).and_then(|p| p.inspector.as_ref()).is_some_and(|i| i.keys || i.find.is_some() && self.ctx.memory(|m| m.focused()) == Some(egui::Id::new(("insp-find", self.active)))) => self.run(Cmd::FindInPreview),
             Cmd::FocusFilter => self.panel().focus_filter = true,
@@ -2580,6 +2582,20 @@ impl App {
                     self.toast("Not in a git repository");
                 } else {
                     self.toast(if on { "Showing only changed files" } else { "Showing every file" });
+                }
+            }
+            Cmd::GitSearch => {
+                let p = self.panel();
+                // An open history is searched as it is; else this folder's is opened.
+                if p.inspector.as_ref().and_then(|i| i.git.as_ref()).is_none() {
+                    let Some(r) = crate::gitstatus::repo_for(&p.path()) else { return };
+                    let opened = p.inspector.is_none();
+                    p.inspector.get_or_insert_with(Inspector::default).show_history(crate::gitlog::History::new(r.root.clone(), r.branch.clone(), opened));
+                }
+                let here = p.path();
+                if let Some(h) = p.inspector.as_mut().and_then(|i| i.git.as_mut()) {
+                    h.here = here.strip_prefix(&h.root).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+                    h.find();
                 }
             }
             Cmd::GitChanges => {

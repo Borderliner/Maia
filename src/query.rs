@@ -175,6 +175,16 @@ pub(crate) fn size(v: &str) -> Option<i64> {
     Some((n * unit as f64).round() as i64)
 }
 
+/// The seconds a filter's date form spans, for the history's `since:` and `until:`: an
+/// age is the moment that long ago (both ends), a day, month or year its local start and
+/// end. The flag says it was an age.
+pub(crate) fn bounds(v: &str, now: i64) -> Option<(i64, i64, bool)> {
+    match age(v) {
+        Some(a) => Some((now - a, now - a, true)),
+        None => when(v, now).map(|(a, b)| (a, b, false)),
+    }
+}
+
 /// "30min", "12h", "7d", "2w", "3mo", "1y" in seconds.
 fn age(v: &str) -> Option<i64> {
     let digits = v.find(|c: char| !c.is_ascii_digit()).filter(|&d| d > 0)?;

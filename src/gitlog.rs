@@ -136,6 +136,8 @@ pub fn parse(rec: &[u8]) -> Option<Commit> {
 }
 
 pub const FORMAT: &str = "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%D%x1f%s";
+/// The same with the rest of the message after it, for a search to look in.
+const FORMAT_BODY: &str = "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%D%x1f%s%x1f%b";
 
 /// Up to `n` records from a running `git log -z`.
 pub fn read_page(r: &mut impl BufRead, n: usize) -> Vec<Commit> {
@@ -148,6 +150,40 @@ pub fn read_page(r: &mut impl BufRead, n: usize) -> Vec<Commit> {
         v.extend(parse(buf.strip_suffix(&[0]).unwrap_or(&buf)));
     }
     v
+}
+
+/// The message after the subject in a `FORMAT_BODY` record.
+fn body_of(rec: &[u8]) -> std::borrow::Cow<'_, str> {
+    let mut f = rec.splitn(8, |&b| b == 0x1f);
+    String::from_utf8_lossy(f.nth(7).unwrap_or_default())
+}
+
+/// Up to `n` records of a running `git log -z` that match `q`, handed over as they are
+/// found (every 60 ms at most) so a rare word's first commits show while git is still
+/// walking. True when the log has ended.
+pub fn read_matching(r: &mut impl BufRead, n: usize, q: &crate::gitfind::Query, mut hand: impl FnMut(Vec<Commit>)) -> bool {
+    let (mut buf, mut got, mut found) = (vec![], vec![], 0);
+    let mut last = std::time::Instant::now();
+    loop {
+        buf.clear();
+        if r.read_until(0, &mut buf).unwrap_or(0) == 0 {
+            hand(got);
+            return true;
+        }
+        let rec = buf.strip_suffix(&[0]).unwrap_or(&buf);
+        if let Some(c) = parse(rec).filter(|c| crate::gitfind::matches(q, c, &body_of(rec))) {
+            got.push(c);
+            found += 1;
+        }
+        if found >= n {
+            hand(got);
+            return false;
+        }
+        if !got.is_empty() && last.elapsed() > std::time::Duration::from_millis(60) {
+            hand(std::mem::take(&mut got));
+            last = std::time::Instant::now();
+        }
+    }
 }
 
 pub(crate) fn git(root: &Path) -> std::process::Command {
@@ -167,6 +203,26 @@ pub fn log_args() -> [&'static str; 11] {
 /// The commits on HEAD that changed one file, following it back through renames.
 pub fn file_log_args(path: &str) -> Vec<String> {
     ["log", "-z", "--no-color", "--decorate=full", FORMAT, "--follow", "HEAD", "--", path].map(String::from).to_vec()
+}
+
+/// The `git log` a list reads: the whole history or one file's, and a search's flags
+/// before the `--`, its paths after it (a file's history follows its one file, so it keeps
+/// that alone). Words to look for need the whole message.
+pub fn list_args(path: Option<&str>, q: Option<&crate::gitfind::Query>) -> Vec<String> {
+    let mut a = path.map_or_else(|| log_args().map(String::from).to_vec(), file_log_args);
+    if let Some(q) = q {
+        if !q.words.is_empty() {
+            for x in a.iter_mut().filter(|x| *x == FORMAT) {
+                *x = FORMAT_BODY.into();
+            }
+        }
+        let dd = a.iter().position(|x| x == "--").unwrap_or(a.len());
+        a.splice(dd..dd, q.flags());
+        if path.is_none() {
+            a.extend(q.paths.iter().cloned());
+        }
+    }
+    a
 }
 
 /// Output of a short git command, at most `limit` bytes (the rest is cut, and the
@@ -558,7 +614,7 @@ impl Drop for Feed {
     }
 }
 
-fn feed(root: PathBuf, ctx: &egui::Context, args: Vec<String>) -> Feed {
+fn feed(root: PathBuf, ctx: &egui::Context, args: Vec<String>, filter: Option<Arc<crate::gitfind::Query>>) -> Feed {
     let f = Feed(Arc::default());
     let (sh, ctx) = (Arc::clone(&f.0), ctx.clone());
     std::thread::spawn(move || {
@@ -581,10 +637,21 @@ fn feed(root: PathBuf, ctx: &egui::Context, args: Vec<String>) -> Feed {
                 }
                 p.want = false;
                 drop(p);
-                let page = read_page(&mut r, PAGE);
+                let end = match filter.as_deref() {
+                    // A search's page fills as matches turn up.
+                    Some(q) => read_matching(&mut r, PAGE, q, |v| {
+                        lock(m).got.extend(v);
+                        ctx.request_repaint();
+                    }),
+                    None => {
+                        let page = read_page(&mut r, PAGE);
+                        let end = page.len() < PAGE;
+                        lock(m).got.extend(page);
+                        end
+                    }
+                };
                 let mut p = lock(m);
-                p.end = page.len() < PAGE;
-                p.got.extend(page);
+                p.end = end;
                 ctx.request_repaint();
                 if p.end || p.closed {
                     break;
@@ -602,9 +669,11 @@ fn feed(root: PathBuf, ctx: &egui::Context, args: Vec<String>) -> Feed {
     f
 }
 
-/// One list of commits: the whole history, or the commits that changed one file.
+/// One list of commits: the whole history, or the commits that changed one file, either
+/// narrowed by a search.
 struct List {
     path: Option<String>,
+    query: Option<Arc<crate::gitfind::Query>>,
     commits: Vec<Commit>,
     rows: Vec<Row>,
     lanes: Lanes,
@@ -616,7 +685,16 @@ struct List {
 
 impl List {
     fn new(path: Option<String>) -> List {
-        List { path, commits: vec![], rows: vec![], lanes: Lanes::default(), feed: None, asked: false, done: false, sel: 0 }
+        List { path, query: None, commits: vec![], rows: vec![], lanes: Lanes::default(), feed: None, asked: false, done: false, sel: 0 }
+    }
+
+    fn args(&self) -> Vec<String> {
+        list_args(self.path.as_deref(), self.query.as_deref())
+    }
+
+    /// Drawn in one line rather than as a graph: its commits' parents may not be in it.
+    fn straight(&self) -> bool {
+        self.path.is_some() || self.query.is_some()
     }
     fn ask(&mut self) {
         if let Some(f) = self.feed.as_ref().filter(|_| !self.done && !self.asked) {
@@ -877,7 +955,30 @@ pub struct History {
     /// Where the selected commit's menu opens from the keyboard: under its row when it
     /// was drawn last frame.
     menu_at: Pos2,
+    /// The find bar over the graph, while it is open.
+    search: Option<Box<Search>>,
+    /// The folder shown, from the top of the work tree (a search started there looks in it).
+    pub here: String,
 }
+
+/// Searching the history: the bar, and the list as it was before, put back as it was
+/// (its place and its scroll included) once the search is cleared.
+struct Search {
+    find: crate::findbar::Finder,
+    /// The text the list was narrowed for, and the text as last seen with when it changed:
+    /// git starts once typing pauses.
+    applied: String,
+    seen: (String, f64),
+    base: Option<List>,
+    /// A path filled in: the caret goes after it rather than selecting it.
+    caret_end: bool,
+    /// Enter has stepped through this list's commits: the first Enter picks the first.
+    stepped: bool,
+}
+
+/// How long typing pauses before the search runs.
+const SEARCH_WAIT: f64 = 0.25;
+
 
 /// What a simulated user can check: the state behind the view.
 #[cfg(test)]
@@ -902,6 +1003,9 @@ pub struct Probe {
     pub pictures: usize,
     pub failed: usize,
     pub folded: usize,
+    /// The search's text as typed, and whether the list is narrowed by it.
+    pub search: Option<String>,
+    pub narrowed: bool,
 }
 
 #[cfg(test)]
@@ -931,7 +1035,17 @@ impl History {
             pictures: o.map_or(0, |o| o.pics.iter().filter(|p| p.tex.is_some()).count()),
             failed: o.map_or(0, |o| o.pics.iter().filter(|p| p.failed).count()),
             folded: o.map_or(0, |o| o.folded.len()),
+            search: self.search.as_ref().map(|s| s.find.query.clone()),
+            narrowed: self.list.query.is_some(),
         }
+    }
+    /// The subjects of the commits listed, in order.
+    pub fn subjects(&self) -> Vec<String> {
+        self.list.commits.iter().map(|c| c.subject.clone()).collect()
+    }
+    /// The keyboard's commit in the graph.
+    pub fn sel(&self) -> usize {
+        self.list.sel
     }
     /// The open commit's files, as listed.
     pub fn files(&self) -> Vec<Change> {
@@ -974,10 +1088,11 @@ impl History {
 impl History {
     pub fn new(root: PathBuf, branch: String, opened: bool) -> History {
         let changes = crate::gitchanges::Changes::new(root.clone());
-        History { root, branch, opened, list: List::new(None), all: None, keyed: false, reveal: false, open: None, wrapped: None, side: Default::default(), tree: true, want: None, changes, on_changes: false, menu_at: Pos2::ZERO }
+        History { root, branch, opened, list: List::new(None), all: None, keyed: false, reveal: false, open: None, wrapped: None, side: Default::default(), tree: true, want: None, changes, on_changes: false, menu_at: Pos2::ZERO, search: None, here: String::new() }
     }
 
-    /// Read the history again from the top: HEAD moved (a commit, a switch).
+    /// Read the history again from the top: HEAD moved (a commit, a switch). A search
+    /// runs again over the new history.
     pub fn reload(&mut self) {
         self.list = List::new(None);
         self.all = None;
@@ -985,7 +1100,78 @@ impl History {
         self.want = None;
         self.wrapped = None;
         self.reveal = true;
+        if let Some(s) = self.search.as_mut() {
+            s.base = None;
+            s.applied.clear();
+            s.seen.1 = f64::MIN;
+        }
     }
+
+    /// Ctrl+F: the find bar over the graph, its field focused. Started in a subfolder of
+    /// the work tree, it begins with that folder's `path:`, the caret after it.
+    pub fn find(&mut self) {
+        self.open = None;
+        self.changes.open = false;
+        if self.search.is_none() {
+            let text = if self.list.path.is_some() { String::new() } else { crate::gitfind::start_text(&self.here) };
+            let caret_end = !text.is_empty();
+            self.search = Some(Box::new(Search { find: crate::findbar::Finder::new(text), applied: String::new(), seen: (String::new(), f64::MIN), base: None, caret_end, stepped: false }));
+        }
+        if let Some(s) = self.search.as_mut() {
+            s.find.focus = true;
+        }
+    }
+
+    /// The search closed: the list as it was before it.
+    pub fn end_search(&mut self) {
+        if let Some(b) = self.search.take().and_then(|s| s.base) {
+            self.list = b;
+            self.open = None;
+            self.want = None;
+            self.wrapped = None;
+        }
+    }
+
+    /// The search's text, once typing pauses, as the list's query: a narrower `git log`,
+    /// or the list from before the search when nothing is left to look for.
+    fn narrow(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        let Some(s) = self.search.as_mut() else { return };
+        let text = s.find.query.trim();
+        if text != s.seen.0 {
+            s.seen = (text.to_string(), now);
+        }
+        if s.seen.0 == s.applied {
+            return;
+        }
+        let wait = SEARCH_WAIT - (now - s.seen.1);
+        if wait > 0.0 && !s.seen.0.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait));
+            return;
+        }
+        s.applied = s.seen.0.clone();
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let q = crate::gitfind::parse(&s.applied, secs);
+        if self.list.query.as_deref() == Some(&q) {
+            return;
+        }
+        if q.is_empty() {
+            match s.base.take() {
+                Some(b) => self.list = b,
+                None => return,
+            }
+        } else {
+            let base = s.base.get_or_insert_with(|| std::mem::replace(&mut self.list, List::new(None)));
+            let mut l = List::new(base.path.clone());
+            l.query = Some(Arc::new(q));
+            self.list = l;
+        }
+        s.stepped = false;
+        self.open = None;
+        self.want = None;
+        self.wrapped = None;
+    }
+
 
     /// The status marks were read anew (`repo`): follow the work tree's changes, and a
     /// branch switched elsewhere.
@@ -1018,9 +1204,13 @@ impl History {
         if self.changes.poll(ctx) {
             self.reload();
         }
+        self.narrow(ctx);
         // The first page is asked for here, the next ones as the graph nears its end.
         let l = &mut self.list;
-        let f = l.feed.get_or_insert_with(|| feed(self.root.clone(), ctx, l.path.as_deref().map_or_else(|| log_args().map(String::from).to_vec(), file_log_args)));
+        if l.feed.is_none() {
+            l.feed = Some(feed(self.root.clone(), ctx, l.args(), l.query.clone()));
+        }
+        let Some(f) = l.feed.as_ref() else { return };
         if l.commits.is_empty() && !l.asked && !l.done {
             f.ask();
             l.asked = true;
@@ -1032,8 +1222,8 @@ impl History {
         if !page.is_empty() || l.done {
             l.asked = false;
         }
-        // One file's commits are not a graph: they go down in one line.
-        let follow = l.path.is_some();
+        // One file's commits are not a graph, nor are a search's: they go down in one line.
+        let follow = l.straight();
         for c in page {
             l.rows.push(if follow { Row { col: 0, up: !l.commits.is_empty(), ins: vec![], outs: vec![0], pass: vec![] } } else { l.lanes.place(&c) });
             l.commits.push(c);
@@ -1128,8 +1318,11 @@ impl History {
     }
 
     /// A commit by its hash (a parent link, a blame line): looked for in the pages still
-    /// to come, and in the whole history when one file's does not have it.
+    /// to come, and in the whole history when one file's or a search's does not have it.
     pub fn open_hash(&mut self, hash: String) {
+        if self.list.query.is_some() && !self.list.commits.iter().any(|c| c.hash == hash) {
+            self.end_search();
+        }
         if self.list.path.is_some() && !self.list.commits.iter().any(|c| c.hash == hash) {
             self.show_all();
         }
@@ -1194,6 +1387,7 @@ impl History {
 
     /// The commits that changed one file, in place of the whole history.
     pub fn show_file_history(&mut self, path: String) {
+        self.end_search();
         let whole = std::mem::replace(&mut self.list, List::new(Some(path)));
         if whole.path.is_none() {
             self.all = Some(whole);
@@ -1205,6 +1399,7 @@ impl History {
 
     /// The whole history again, where it was left.
     pub fn show_all(&mut self) {
+        self.end_search();
         if let Some(l) = self.all.take() {
             self.list = l;
             self.open = None;
@@ -1220,6 +1415,12 @@ impl History {
             return self.changes.takes(k);
         }
         matches!(k, Key::ArrowUp | Key::ArrowDown | Key::PageUp | Key::PageDown | Key::Home | Key::End | Key::Enter | Key::Escape) || matches!(k, Key::OpenBracket | Key::CloseBracket) && self.open.is_some()
+    }
+
+    /// The work tree's changes are drawn as a row over the commits: not over one file's
+    /// or a search's.
+    fn changes_row(&self) -> bool {
+        self.list.path.is_none() && self.list.query.is_none() && self.changes.any()
     }
 
     /// A key while the history has the keyboard; false when it should close.
@@ -1245,15 +1446,19 @@ impl History {
         self.keyed = true;
         let tree = self.tree;
         if k == Key::Escape {
+            // egui lets go of the field on Escape before this runs: it had it last frame.
+            let typing = self.search.as_ref().is_some_and(|s| s.find.focused);
             match &self.open {
+                _ if typing => self.end_search(),
                 Some(_) => self.back(),
+                None if self.search.is_some() => self.end_search(),
                 None if self.all.is_some() => self.show_all(),
                 None => return false,
             }
             return true;
         }
-        // The Changes row sits above the first commit.
-        let changes = self.changes.any();
+        // The Changes row sits above the first commit, in the whole history only.
+        let changes = self.changes_row();
         self.on_changes &= changes;
         match &mut self.open {
             None if k == Key::Enter && self.on_changes => self.show_changes(),
@@ -1427,6 +1632,10 @@ pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, wrap: &mut bool, env: &mut
     hui.set_clip_rect(hdr.intersect(ui.clip_rect()));
     hui.spacing_mut().item_spacing.x = 2.0;
     let deep = h.open.is_some() || h.changes.open;
+    // The find bar is only over the graph: nothing typed in it while it is away.
+    if let Some(s) = h.search.as_mut().filter(|_| deep) {
+        s.find.focused = false;
+    }
     if crate::ui::glyph_button(&mut hui, Glyph::Close, if deep { "Close history" } else { "Close history (Esc)" }, true, &pal).clicked() {
         return false;
     }
@@ -1460,6 +1669,19 @@ pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, wrap: &mut bool, env: &mut
             (_, true, false) => h.step_commit(1),
             _ => {}
         }
+    }
+    // The graph is searched as a preview's text is, from the same button.
+    if !deep {
+        hui.add_space(4.0);
+        crate::inspector::seg_frame(&mut hui, &pal, |ui| {
+            if crate::inspector::seg_button(ui, h.search.is_some(), "Find (Ctrl+F)", &pal, |p, r, c| crate::theme::paint_glyph(p, r, Glyph::Search, c)) {
+                if h.search.is_some() {
+                    h.end_search();
+                } else {
+                    h.find();
+                }
+            }
+        });
     }
     // A diff wraps like a code preview, from the same button; a file's own diff can also
     // be shown side by side.
@@ -1515,11 +1737,64 @@ pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, wrap: &mut bool, env: &mut
         return true;
     }
     match h.open.as_ref().map(|o| o.diff.is_some()) {
-        None => graph(&mut bui, body, h, env),
+        None => {
+            let body = search_bar(&mut bui, body, h, env);
+            graph(&mut bui, body, h, env)
+        }
         Some(false) => commit(&mut bui, body, h, *wrap, env),
         Some(true) => whole(&mut bui, body, h, *wrap, env),
     }
     true
+}
+
+/// The find bar along the graph's foot while searching, Maia's find bar with its keys:
+/// Enter and Shift+Enter (or F3) step through the commits found, Down goes into them,
+/// Escape closes it and puts the whole history back. Returns the room left above it.
+fn search_bar(ui: &mut Ui, body: Rect, h: &mut History, env: &Env) -> Rect {
+    let Some(s) = h.search.as_mut() else { return body };
+    let id = env.panel_id;
+    let fid = egui::Id::new(("insp-find", id));
+    // Down from the field: the keyboard goes to the commits.
+    let down = s.find.focused && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown));
+    let l = &h.list;
+    let n = l.commits.len();
+    let more = if l.done { "" } else { "+" };
+    let count = match n {
+        _ if s.find.query.trim().is_empty() || l.query.is_none() => String::new(),
+        0 if l.done => "No matches".into(),
+        0 => String::new(),
+        1 if l.done => "1 commit".into(),
+        n => format!("{}{more} commits", crate::table::fmt_count(n)),
+    };
+    let (out, rest) = crate::findbar::bar(ui, body, &mut s.find, &count, n > 0 && l.query.is_some(), id, env.cfg.animations, env.pal);
+    if std::mem::take(&mut s.caret_end) {
+        if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), fid) {
+            let end = egui::text::CCursor::new(s.find.query.chars().count());
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+            st.store(ui.ctx(), fid);
+        }
+    }
+    let step = |h: &mut History, d: isize| {
+        let n = h.list.commits.len();
+        let Some(s) = h.search.as_mut().filter(|_| n > 0) else { return };
+        h.list.sel = if s.stepped { (h.list.sel as isize + d).rem_euclid(n as isize) as usize } else { h.list.sel.min(n - 1) };
+        s.stepped = true;
+        (h.keyed, h.reveal, h.on_changes) = (true, true, false);
+    };
+    match out {
+        crate::findbar::Out::Next => step(h, 1),
+        crate::findbar::Out::Prev => step(h, -1),
+        crate::findbar::Out::Close => h.end_search(),
+        _ => {}
+    }
+    if down {
+        ui.memory_mut(|m| m.surrender_focus(fid));
+        if let Some(s) = h.search.as_mut() {
+            s.find.focused = false;
+        }
+        step(h, 0);
+    }
+    rest
 }
 
 fn dim(ui: &Ui, at: Rect, msg: &str, fs: f32, pal: &Palette) {
@@ -1554,12 +1829,14 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
         }
     }
     // The work tree's changes come first, as a commit still to be made.
-    let off = usize::from(h.list.path.is_none() && h.changes.any());
+    let off = usize::from(h.changes_row());
     if h.list.commits.is_empty() && off == 0 {
-        let msg = match (h.list.done, h.list.path.is_some()) {
-            (false, _) => "Loading…",
-            (true, true) => "No commits changed this file",
-            (true, false) => "No commits yet",
+        let msg = match (h.list.done, h.list.path.is_some(), h.list.query.is_some()) {
+            (false, _, true) => "Searching…",
+            (false, ..) => "Loading…",
+            (true, _, true) => "No commits match",
+            (true, true, _) => "No commits changed this file",
+            (true, false, _) => "No commits yet",
         };
         dim(ui, body, msg, fs, &pal);
         return;
@@ -1584,9 +1861,13 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
     let ctx = ui.ctx().clone();
     let root = &h.root;
     let (mut open, mut menu) = (None, None);
+    let hit_bg = pal.accent.gamma_multiply(0.3);
     h.menu_at = body.center();
     let mut inner = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(4.0, 4.0))));
-    ScrollArea::vertical().auto_shrink([false, false]).id_salt(("git_graph", l.path.is_some())).show_viewport(&mut inner, |ui, vp| {
+    // A scroll area is at least 64 points tall: in a short panel the rows would run on
+    // under the find bar below.
+    inner.set_clip_rect(body.intersect(ui.clip_rect()));
+    ScrollArea::vertical().auto_shrink([false, false]).id_salt(("git_graph", l.path.is_some(), l.query.is_some())).show_viewport(&mut inner, |ui, vp| {
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), n as f32 * row_h), Sense::hover());
         if std::mem::take(&mut h.reveal) {
             let at = if on_changes { 0 } else { l.sel + off };
@@ -1721,11 +2002,18 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
                 }
                 px += pill(ui, &p, pos2(px, y0 + g.size().y / 2.0), name, *remote, &tag, *kind, dc, &pal, room) + 4.0;
             }
-            let g = if px > tx { crate::listing::elided(ui, &c.subject, font.clone(), tx + w - px - 2.0, pal.text) } else { g };
+            let g = match l.query.as_deref() {
+                // What was searched for, marked in the subject.
+                Some(q) => marked(ui, &c.subject, &crate::gitfind::spans(q, &c.subject, false), font.clone(), tx + w - px - 2.0, pal.text, hit_bg),
+                None if px > tx => crate::listing::elided(ui, &c.subject, font.clone(), tx + w - px - 2.0, pal.text),
+                None => g,
+            };
             p.galley(pos2(px + if px > tx { 2.0 } else { 0.0 }, y0), g.clone(), pal.text);
             // Meta line: short hash, the author after a dot of their colour, when.
             let my = y0 + g.size().y + 1.0;
-            let hg = p.layout_no_wrap(c.hash[..7].to_string(), FontId::monospace(small.size - 0.5), pal.text_dim.gamma_multiply(0.8));
+            let hf = FontId::monospace(small.size - 0.5);
+            let hl = l.query.as_deref().map_or(0, |q| crate::gitfind::hash_hit(q, &c.hash)).min(7);
+            let hg = if hl > 0 { marked(ui, &c.hash[..7], &[(0, hl)], hf, f32::INFINITY, pal.text_dim, hit_bg) } else { p.layout_no_wrap(c.hash[..7].to_string(), hf, pal.text_dim.gamma_multiply(0.8)) };
             let hw = hg.size().x;
             let mh = small.size * 1.3;
             p.galley(pos2(tx, my + (mh - hg.size().y) / 2.0), hg, pal.text_dim);
@@ -1738,7 +2026,11 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
                         p.circle_filled(dc, 3.0, author_color(&pal, &c.email, &c.author));
                     }
                 }
-                let ag = crate::listing::elided(ui, &format!("{}  ·  {}", c.author, ago(c.time, now)), small.clone(), tx + w - nx, pal.text_dim);
+                let who = format!("{}  ·  {}", c.author, ago(c.time, now));
+                let ag = match l.query.as_deref() {
+                    Some(q) => marked(ui, &who, &crate::gitfind::spans(q, &c.author, true), small.clone(), tx + w - nx, pal.text_dim, hit_bg),
+                    None => crate::listing::elided(ui, &who, small.clone(), tx + w - nx, pal.text_dim),
+                };
                 p.galley(pos2(nx, my + (mh - ag.size().y) / 2.0), ag, pal.text_dim);
             }
         }
@@ -1756,6 +2048,26 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
         h.on_changes = true;
         h.show_changes();
     }
+}
+
+/// `text` on one line, cut with "…" at `width`, its `spans` (byte ranges) on a tint.
+#[allow(clippy::too_many_arguments)]
+fn marked(ui: &Ui, text: &str, spans: &[(usize, usize)], font: FontId, width: f32, color: Color32, bg: Color32) -> Arc<egui::Galley> {
+    let mut job = LayoutJob::default();
+    let f = |bg: Color32| TextFormat { font_id: font.clone(), color, background: bg, ..Default::default() };
+    let mut at = 0;
+    for &(a, b) in spans {
+        let (a, b) = (a.max(at).min(text.len()), b.min(text.len()));
+        if a >= b || !text.is_char_boundary(a) || !text.is_char_boundary(b) {
+            continue;
+        }
+        job.append(&text[at..a], 0.0, f(Color32::TRANSPARENT));
+        job.append(&text[a..b], 0.0, f(bg));
+        at = b;
+    }
+    job.append(&text[at..], 0.0, f(Color32::TRANSPARENT));
+    job.wrap = TextWrapping { max_width: width.max(8.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    ui.fonts_mut(|f| f.layout_job(job))
 }
 
 /// What a click in the file list does, once the list is drawn.

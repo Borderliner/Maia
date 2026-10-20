@@ -276,6 +276,7 @@ commands! {
     GitBranches, "git_branches", Inspector, "Git Branches", "Switch or create a branch, use the stash, open another work tree.", [];
     OnlyChanged, "only_changed", View, "Show Only Changed Files", "List only what git marks as changed in this folder, and the folders with changes inside; again to show everything.", ["Ctrl+Shift+G"];
     GitChanges, "git_changes", Inspector, "Show Git Changes", "Stage, discard and commit this repository's changes, in the inspector.", [];
+    GitSearch, "search_git_history", Inspector, "Search Git History", "The commits whose message, author or hash has the words typed; author:, path:, since: and until: narrow them further. Ctrl+F does it too in an open history.", [];
     Properties, "properties", Inspector, "Properties", "Details, sizes and permissions of the selection.", ["Alt+Enter"];
 
     Copy, "copy", Files, "Copy", "Copy the selection to the clipboard.", ["Ctrl+C", "Ctrl+Insert"];

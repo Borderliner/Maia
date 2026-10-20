@@ -1445,7 +1445,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::ClosePanel | Cmd::FocusNextPanel | Cmd::FocusPrevPanel | Cmd::CopyToOther | Cmd::MoveToOther => panels > 1,
         Cmd::InspectorLineNumbers | Cmd::InspectorWrap | Cmd::InspectorMinimap | Cmd::InspectorBlame | Cmd::InspectorFollow => p.inspector.is_some(),
         Cmd::InspectorSource => p.inspector.as_ref().is_some_and(|i| i.rich_kind().is_some()),
-        Cmd::GitHistory | Cmd::GitBranches | Cmd::GitChanges => crate::gitstatus::repo_for(&t.path).is_some(),
+        Cmd::GitHistory | Cmd::GitBranches | Cmd::GitChanges | Cmd::GitSearch => crate::gitstatus::repo_for(&t.path).is_some(),
         Cmd::OnlyChanged => t.only_changed || crate::gitstatus::repo_for(&t.path).is_some(),
         Cmd::ComparePanels | Cmd::SelectDifferences | Cmd::SyncPanels => panels > 1,
         Cmd::OpenLinkTarget => t.target_entries().first().map(|e| e.is_link).unwrap_or(false),

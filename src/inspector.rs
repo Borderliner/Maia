@@ -676,6 +676,8 @@ impl Inspector {
         self.pending = None;
         self.git = Some(Box::new(h));
         self.compare = None;
+        // Just opened, it has the keyboard: Ctrl+F searches it.
+        self.keys = true;
     }
 
     /// Start showing `e`. Anything that touches the disk (folder listings, file contents)
@@ -1096,6 +1098,17 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
     if let Some(h) = ins.git.as_mut() {
         // The changes follow the status marks; a branch switched elsewhere shows.
         h.follow(crate::gitstatus::repo_for(&here).as_ref(), ui.ctx());
+        // A search starts in the folder shown; Ctrl+F is the history's once it is clicked.
+        if let Ok(rel) = here.strip_prefix(&h.root) {
+            if Path::new(&h.here) != rel {
+                h.here = rel.to_string_lossy().into_owned();
+            }
+        }
+        if ui.input(|i| i.pointer.any_pressed()) {
+            if let Some(pp) = ui.ctx().pointer_interact_pos() {
+                ins.keys = rect.contains(pp);
+            }
+        }
         // Leaving the work tree closes its history. Diffs wrap as code previews do.
         if !here.starts_with(&h.root) || !crate::gitlog::view(ui, rect, h, &mut ins.wrap_code, env) {
             close_history(panel);

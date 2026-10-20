@@ -158,8 +158,11 @@ pub fn bar(ui: &mut Ui, body: Rect, f: &mut Finder, count: &str, any: bool, id: 
                 out = o;
             }
         }
-        let (cr, _) = ui.allocate_exact_size(cg.size() + vec2(10.0, 0.0), Sense::hover());
-        ui.painter().galley(pos2(cr.left() + 4.0, cr.center().y - cg.size().y / 2.0), cg, pal.text_dim);
+        // In a narrow panel the field keeps room to type in; the count gives way.
+        if ui.available_width() - cg.size().x - 10.0 >= 40.0 {
+            let (cr, _) = ui.allocate_exact_size(cg.size() + vec2(10.0, 0.0), Sense::hover());
+            ui.painter().galley(pos2(cr.left() + 4.0, cr.center().y - cg.size().y / 2.0), cg, pal.text_dim);
+        }
         let te = egui::TextEdit::singleline(&mut f.query).id(fid).hint_text(egui::RichText::new("Find").color(pal.text_dim)).frame(false).desired_width(ui.available_width()).font(FontId::proportional(12.5));
         r = Some(ui.add(te));
     });
