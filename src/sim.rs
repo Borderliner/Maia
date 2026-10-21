@@ -1102,7 +1102,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(174) {
+    match rng.below(176) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2618,6 +2618,47 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                     _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowDown", "Enter", "Home", "End", "Escape", "CloseBracket"]))),
                 }
                 s.idle(3);
+            }
+        }
+        174 | 175 => {
+            // Inside an archive: a delete, a rename, a new folder or a paste, each a job
+            // that rewrites it; Undo now and then.
+            if s.tab().archive.is_none() {
+                // Into the fixture's zip (or what became of it).
+                let z = std::fs::read_dir(root().join("home")).ok().and_then(|r| r.flatten().flat_map(|d| [d.path().join("bundle.zip"), d.path().join("locked.zip")]).find(|p| p.is_file()));
+                let Some(z) = z else { return };
+                let id = s.app.active;
+                if let Some(p) = s.app.panels.get_mut(&id) {
+                    p.tab_mut().navigate(z, None);
+                }
+                s.idle(10);
+                if s.tab().archive.is_none() {
+                    return;
+                }
+            }
+            if !s.tab().entries.is_empty() {
+                let i = rng.below(s.tab().entries.len()) as u32;
+                let id = s.app.active;
+                s.app.panels.get_mut(&id).unwrap().tab_mut().select_only(i);
+            }
+            match rng.below(5) {
+                0 => s.act("key Delete"),
+                1 => {
+                    s.act("key F2");
+                    s.act(&format!("text {}", rng.pick(&["x", " 2", "é"])));
+                    s.act("key Enter");
+                }
+                2 => {
+                    s.act("key ctrl+shift+n");
+                    s.act(&format!("text {}", rng.pick(&["", "a", "/"])));
+                    s.act(rng.pick(&["key Enter", "key Escape"]));
+                }
+                3 => s.act("key ctrl+v"),
+                _ => s.act("key ctrl+z"),
+            }
+            s.idle(5 + rng.below(40));
+            if matches!(s.app.popup, Popup::Choose { .. } | Popup::ArchivePassword(_)) {
+                s.act(rng.pick(&["key Enter", "key Escape"]));
             }
         }
         170 => {
@@ -4900,8 +4941,8 @@ mod journeys {
     }
 
     /// Archives as folders: Enter opens a zip, folders inside open and Up leaves them, a
-    /// file inside previews and opens (extracted to the cache), changes are refused, Copy
-    /// and Paste take files out, Extract Here and Compress work from the context menu and
+    /// file inside previews and opens (extracted to the cache), Cut is refused, Copy and
+    /// Paste take files out, Extract Here and Compress work from the context menu and
     /// undo removes what they made.
     #[test]
     fn archives_open_extract_compress() {
@@ -4948,12 +4989,10 @@ mod journeys {
         assert!(cmd.contains("maia/archives") && cmd.contains("readme.txt"), "{cmd}");
         let extracted = crate::archive::open_cache(&zip).join("readme.txt");
         assert_eq!(std::fs::read_to_string(&extracted).unwrap(), "inside the zip");
-        // Read-only inside.
-        s.act("key Delete");
+        // Copied out, not cut.
+        s.act("key ctrl+x");
         s.idle(2);
-        assert!(s.app.toast.as_ref().is_some_and(|t| t.0.contains("read-only")) && s.app.jobs.is_empty(), "no deleting inside an archive");
-        s.act("key F2");
-        assert!(s.tab().rename.is_none());
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0 == "Files in an archive are copied out, not cut") && s.app.jobs.is_empty(), "no cutting inside an archive");
         // Copy out.
         s.act("key ctrl+c");
         go(&mut s, &docs);
@@ -5361,6 +5400,168 @@ mod journeys {
     fn wait_jobs(s: &mut Sim, what: &str) {
         wait_until(s, what, 30, |s| s.app.jobs.iter().all(|j| j.progress.lock().unwrap().finished));
         s.settle();
+    }
+
+    fn names_here(s: &Sim) -> Vec<String> {
+        let mut v: Vec<String> = s.tab().entries.iter().map(|e| e.name.clone()).collect();
+        v.sort();
+        v
+    }
+
+    /// Changing a zip in place, as a user does it: Delete takes a file out (the job's
+    /// card, then the row gone) and Undo puts it back; F2 renames; New Folder asks for
+    /// the name first; Paste adds, and a name already there asks Keep both or Replace; a
+    /// file dragged in from the other panel lands in it; a locked zip asks for its
+    /// password before it changes. A tarball takes the same, and an ISO, which is only
+    /// read, says so. Every change checked in the archive itself.
+    #[test]
+    fn archive_edits_in_place() {
+        if !sandboxed() || !crate::archive::available() {
+            return;
+        }
+        let home = fixture("archedits");
+        let docs = home.join("Documents");
+        let src = root().join("editsrc");
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(src.join("Trip")).unwrap();
+        std::fs::write(src.join("Trip/beach.txt"), "sand and sea").unwrap();
+        std::fs::write(src.join("readme.txt"), "inside the zip").unwrap();
+        let zip = docs.join("photos.zip");
+        crate::archive::create(&zip, &src, &["Trip".into(), "readme.txt".into()]).unwrap();
+        let inside = |a: &Path| -> Vec<String> {
+            let mut v: Vec<String> = crate::archive::list(a).unwrap().iter().map(|i| i.path.display().to_string()).collect();
+            v.sort();
+            v
+        };
+        let mut s = Sim::new(&docs, vec2(1280.0, 800.0));
+        s.cmd(ViewDetails);
+        s.settle();
+        select_path(&mut s, &zip);
+        s.act("key Enter");
+        wait_until(&mut s, "inside the zip", 10, |s| s.tab().path == zip && s.tab().entries.len() == 2);
+        // Delete: a job with its card, the row gone, the old zip in the trash.
+        select_path(&mut s, &zip.join("readme.txt"));
+        s.act("key Delete");
+        s.idle(2);
+        assert!(s.app.jobs.iter().any(|j| j.label == "Deleting readme.txt from photos.zip"), "a job: {:?}", s.app.jobs.iter().map(|j| &j.label).collect::<Vec<_>>());
+        wait_jobs(&mut s, "deleted");
+        wait_until(&mut s, "the row gone", 10, |s| names_here(s) == ["Trip"]);
+        assert_eq!(inside(&zip), ["Trip", "Trip/beach.txt"]);
+        look(&mut s, "after a delete in the zip");
+        s.act("key ctrl+z");
+        wait_until(&mut s, "undone", 10, |s| names_here(s) == ["Trip", "readme.txt"]);
+        assert_eq!(inside(&zip), ["Trip", "Trip/beach.txt", "readme.txt"]);
+        // Rename by F2.
+        select_path(&mut s, &zip.join("readme.txt"));
+        s.act("key F2");
+        assert!(s.tab().rename.is_some(), "F2 renames inside a zip");
+        s.act("key ctrl+a");
+        s.act("text read me first.txt");
+        s.act("key Enter");
+        s.idle(2);
+        wait_jobs(&mut s, "renamed");
+        wait_until(&mut s, "the new name", 10, |s| names_here(s) == ["Trip", "read me first.txt"]);
+        assert_eq!(crate::archive::read_member(&zip, Path::new("read me first.txt"), 1 << 20).unwrap(), b"inside the zip");
+        // New Folder: named first, then made.
+        s.act("key ctrl+shift+n");
+        s.idle(2);
+        assert!(matches!(s.app.popup, Popup::Prompt { .. }), "the name asked for");
+        look(&mut s, "new folder in a zip");
+        s.act("key ctrl+a");
+        s.act("text Holiday – 2026");
+        s.act("key Enter");
+        wait_jobs(&mut s, "folder made");
+        wait_until(&mut s, "the folder", 10, |s| names_here(s).contains(&"Holiday – 2026".to_string()));
+        assert!(crate::archive::list(&zip).unwrap().iter().any(|i| i.path == Path::new("Holiday – 2026") && i.is_dir));
+        // Paste in: a file from the folder outside.
+        go(&mut s, &docs);
+        select_path(&mut s, &docs.join("notes.txt"));
+        s.act("key ctrl+c");
+        go(&mut s, &zip.join("Holiday – 2026"));
+        wait_until(&mut s, "in the new folder", 10, |s| s.tab().path == zip.join("Holiday – 2026") && !s.tab().is_loading());
+        s.act("key ctrl+v");
+        s.idle(2);
+        wait_jobs(&mut s, "pasted");
+        wait_until(&mut s, "pasted row", 10, |s| names_here(s) == ["notes.txt"]);
+        // Again: the name is there, so Keep both or Replace.
+        s.act("key ctrl+v");
+        s.idle(3);
+        assert!(some_text(&s, "“notes.txt” is in the archive already"), "asked");
+        look(&mut s, "keep both or replace");
+        shot_still(&mut s, "archive-keep-both");
+        s.click_text("Keep both");
+        wait_jobs(&mut s, "kept both");
+        wait_until(&mut s, "both", 10, |s| names_here(s) == ["notes (1).txt", "notes.txt"]);
+        // Dragged in from the other panel.
+        s.cmd(SplitRight);
+        go(&mut s, &docs);
+        s.settle();
+        let from = list_text(&s, "report.md");
+        s.act("key Tab");
+        s.settle();
+        if s.tab().path != zip.join("Holiday – 2026") {
+            s.fail("the zip's panel");
+        }
+        let to = s.app.panels[&s.app.active].list_rect.center();
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", from.center().x, from.center().y, to.x, to.y + 120.0));
+        s.idle(3);
+        wait_jobs(&mut s, "dropped");
+        wait_until(&mut s, "dropped row", 10, |s| s.app.panels.values().any(|p| p.tab().path == zip.join("Holiday – 2026") && p.tab().entries.iter().any(|e| e.name == "report.md")));
+        assert!(docs.join("report.md").exists(), "a drop into an archive copies");
+        assert_eq!(crate::archive::read_member(&zip, Path::new("Holiday – 2026/report.md"), 1 << 20).unwrap(), std::fs::read(docs.join("report.md")).unwrap());
+        // The other panel closed: the zip's is left.
+        if s.tab().path != docs {
+            s.act("key Tab");
+        }
+        s.cmd(ClosePanel);
+        s.settle();
+        assert_eq!(s.tab().path, zip.join("Holiday – 2026"));
+        for v in [ViewList, ViewLarge, ViewTree, ViewDetails] {
+            s.cmd(v);
+            look(&mut s, &format!("edited zip {v:?}"));
+        }
+        // A locked zip: the password asked for before it changes.
+        let locked = docs.join("locked.zip");
+        crate::archive::create_locked(&locked, &src, &["readme.txt".into()], "open sesame").unwrap();
+        crate::archive::forget_password(&locked);
+        go(&mut s, &locked);
+        wait_until(&mut s, "in the locked zip", 10, |s| names_here(s) == ["readme.txt"]);
+        select_path(&mut s, &locked.join("readme.txt"));
+        s.act("key Delete");
+        wait_until(&mut s, "the password asked", 20, |s| matches!(s.app.popup, Popup::ArchivePassword(_)));
+        look(&mut s, "password for a change");
+        s.act("text open sesame");
+        s.act("key Enter");
+        s.idle(2);
+        wait_jobs(&mut s, "locked one changed");
+        wait_until(&mut s, "emptied", 10, |s| s.tab().entries.is_empty());
+        assert!(crate::archive::list(&locked).unwrap().is_empty());
+        // A tarball: the same, rebuilt.
+        let tgz = docs.join("bundle.tar.gz");
+        assert!(std::process::Command::new("bsdtar").env("LC_ALL", "C.UTF-8").arg("-czf").arg(&tgz).arg("-C").arg(&src).args(["Trip", "readme.txt"]).status().unwrap().success());
+        go(&mut s, &tgz.join("Trip"));
+        wait_until(&mut s, "in the tarball", 10, |s| names_here(s) == ["beach.txt"]);
+        select_path(&mut s, &tgz.join("Trip/beach.txt"));
+        s.act("key F2");
+        s.act("key ctrl+a");
+        s.act("text shore.txt");
+        s.act("key Enter");
+        wait_jobs(&mut s, "tarball renamed");
+        wait_until(&mut s, "tar renamed", 10, |s| names_here(s) == ["shore.txt"]);
+        assert_eq!(crate::archive::read_member(&tgz, Path::new("Trip/shore.txt"), 1 << 20).unwrap(), b"sand and sea");
+        // An ISO is only read: said, and nothing starts.
+        let iso = docs.join("disc.iso");
+        assert!(std::process::Command::new("bsdtar").env("LC_ALL", "C.UTF-8").arg("-cf").arg(&iso).args(["--format", "iso9660"]).arg("-C").arg(&src).arg("readme.txt").status().unwrap().success());
+        go(&mut s, &iso);
+        wait_until(&mut s, "in the iso", 10, |s| s.tab().entries.len() == 1);
+        s.cmd(SelectAll);
+        s.act("key Delete");
+        s.idle(2);
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0 == "ISO archives can only be read here: extract it to change it") && s.app.jobs.iter().all(|j| j.progress.lock().unwrap().finished), "{:?}", s.app.toast);
+        s.act("key ctrl+shift+n");
+        assert!(!matches!(s.app.popup, Popup::Prompt { .. }), "no new folder in an iso");
+        look(&mut s, "an iso refuses");
+        report("archive edits", &s);
     }
 
     /// The Compress dialog: opened from the menu with its format chosen, the name typed

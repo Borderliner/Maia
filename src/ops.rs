@@ -35,6 +35,9 @@ pub enum OpKind {
     /// `srcs` packed into the archive `out` at `level`, locked with a password when there
     /// is one.
     Compress { srcs: Vec<PathBuf>, out: PathBuf, password: Option<crate::archive::Secret>, level: crate::archwrite::Level },
+    /// A change inside `archive`, made beside it and swapped in once whole (the old one
+    /// to the trash).
+    ArchiveEdit { archive: PathBuf, edit: crate::archwrite::Edit },
     /// One command run as administrator (through pkexec).
     Admin { task: crate::admin::Task, tools: crate::drives::Tools },
     /// Files converted to another format beside them (all into `out`, when one file is
@@ -64,6 +67,7 @@ impl OpKind {
             OpKind::Delete { .. } => "Deleting",
             OpKind::Extract { .. } => "Extracting",
             OpKind::Compress { .. } => "Compressing",
+            OpKind::ArchiveEdit { .. } => "Changing",
             OpKind::Admin { .. } => "Working as administrator",
             OpKind::Convert { .. } => "Converting",
             OpKind::Sort { .. } => "Moving",
@@ -137,6 +141,7 @@ pub fn spawn_in(id: u64, kind: OpKind, ctx: egui::Context, queue: &Arc<Queue>, c
         OpKind::Copy { srcs, .. } | OpKind::Move { srcs, .. } | OpKind::Compress { srcs, .. } | OpKind::Convert { srcs, .. } => srcs.len(),
         OpKind::Trash { paths } | OpKind::Delete { paths } | OpKind::Extract { members: paths, .. } => paths.len(),
         OpKind::Admin { .. } => 1,
+        OpKind::ArchiveEdit { edit, .. } => edit.count(),
         OpKind::Sort { moves, .. } => moves.len(),
         OpKind::Sync { copies, remove } => copies.len() + remove.len(),
         OpKind::Perms { paths, .. } => paths.len(),
@@ -145,6 +150,7 @@ pub fn spawn_in(id: u64, kind: OpKind, ctx: egui::Context, queue: &Arc<Queue>, c
     let label = match &kind {
         OpKind::Extract { archive, members, .. } if members.is_empty() => format!("Extracting {}", name_of(archive)),
         OpKind::Compress { out, .. } => format!("Compressing into {}", name_of(out)),
+        OpKind::ArchiveEdit { archive, edit } => crate::archwrite::label(archive, edit),
         OpKind::Admin { task, .. } => task.label(),
         OpKind::Convert { srcs, to, .. } => crate::convert::label(srcs, *to),
         OpKind::Sort { label, .. } | OpKind::Place { label, .. } => label.clone(),
@@ -199,6 +205,14 @@ pub struct Gate<'a> {
 pub(crate) struct Check {
     keys: std::collections::hash_map::RandomState,
     written: std::cell::RefCell<Vec<(PathBuf, u64)>>,
+}
+
+#[cfg(test)]
+impl<'a> Gate<'a> {
+    /// A gate for work run on the test's own thread.
+    pub fn new(cancel: &'a AtomicBool, pause: &'a AtomicBool) -> Gate<'a> {
+        Gate { cancel, pause, check: None }
+    }
 }
 
 impl Gate<'_> {
@@ -456,6 +470,24 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 Err(e) => p.lock().unwrap().errors.push(format!("{}: {e}", name_of(out))),
             }
         }
+        OpKind::ArchiveEdit { archive, edit } => {
+            p.lock().unwrap().current = name_of(archive);
+            match crate::archwrite::edit(archive, edit, p, cancel, ctx) {
+                Ok(()) => {
+                    let mut g = p.lock().unwrap();
+                    g.replaced.push(archive.clone());
+                    g.done_items = g.total_items;
+                }
+                Err(_) if cancel.cancelled() => {}
+                Err(e) => {
+                    let mut g = p.lock().unwrap_or_else(|e| e.into_inner());
+                    if crate::archive::wants_password(&e) {
+                        g.password = Some((archive.clone(), e == crate::archive::WRONG_PASSWORD));
+                    }
+                    g.errors.push(format!("{}: {e}", name_of(archive)));
+                }
+            }
+        }
         OpKind::Delete { paths } => {
             p.lock().unwrap().total_items = paths.len();
             for s in paths {
@@ -554,6 +586,11 @@ impl Changed {
             }
             OpKind::Trash { paths } | OpKind::Delete { paths } | OpKind::Admin { task: Task::Delete { paths }, .. } => parents(&mut c.left, paths),
             OpKind::Compress { out, .. } => Changed::add(&mut c.arrived, out.parent()),
+            // The archive is a folder to the tabs inside it, and changed in the one it is in.
+            OpKind::ArchiveEdit { archive, .. } => {
+                Changed::add(&mut c.arrived, Some(archive));
+                Changed::add(&mut c.arrived, archive.parent());
+            }
             OpKind::Sync { copies, remove } => {
                 copies.iter().for_each(|(_, d)| Changed::add(&mut c.arrived, d.parent()));
                 parents(&mut c.left, remove);
@@ -1028,6 +1065,16 @@ pub fn copy_xattrs(src: &Path, dst: &Path) {
     }
 }
 
+/// One file copied for a job, its bytes counted; a copy cut short is removed.
+pub(crate) fn copy_file(src: &Path, dst: &Path, p: &Mutex<Progress>, gate: &Gate, ctx: &egui::Context) -> std::io::Result<()> {
+    let r = fs::File::open(src)?;
+    let w = fs::File::create_new(dst)?;
+    let len = r.metadata()?.len();
+    copy_data(&r, &w, len, p, gate, ctx).map(|_| ()).inspect_err(|_| {
+        let _ = fs::remove_file(dst);
+    })
+}
+
 pub fn remove_tree(p: &Path) -> std::io::Result<()> {
     let m = fs::symlink_metadata(p)?;
     if m.is_dir() { fs::remove_dir_all(p) } else { fs::remove_file(p) }
@@ -1239,6 +1286,10 @@ fn disks_of(kind: &OpKind) -> Vec<String> {
         OpKind::Sync { copies, .. } => copies.iter().flat_map(|(f, t)| [f.as_path(), t.as_path()]).collect(),
         OpKind::Extract { archive, dest, .. } => vec![archive.as_path(), dest.as_path()],
         OpKind::Compress { srcs, out, .. } => srcs.iter().map(PathBuf::as_path).chain([out.as_path()]).collect(),
+        OpKind::ArchiveEdit { archive, edit } => match edit {
+            crate::archwrite::Edit::Add { srcs, .. } => srcs.iter().map(PathBuf::as_path).chain([archive.as_path()]).collect(),
+            _ => vec![archive.as_path()],
+        },
         _ => vec![],
     };
     let mut devs: Vec<u64> = paths.into_iter().filter_map(dev_of).collect();

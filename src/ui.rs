@@ -276,7 +276,7 @@ pub fn cancelled_label(label: &str) -> String {
 }
 
 fn job_title(label: &str, failed: bool) -> String {
-    for (now, done, verb) in [("Copying", "Copied", "copy"), ("Moving", "Moved", "move"), ("Deleting", "Deleted", "delete"), ("Extracting", "Extracted", "extract"), ("Compressing", "Compressed", "compress"), ("Converting", "Converted", "convert"), ("Merging", "Merged", "merge"), ("Splitting", "Split", "split"), ("Tidying", "Tidied", "tidy")] {
+    for (now, done, verb) in [("Copying", "Copied", "copy"), ("Moving", "Moved", "move"), ("Deleting", "Deleted", "delete"), ("Extracting", "Extracted", "extract"), ("Compressing", "Compressed", "compress"), ("Converting", "Converted", "convert"), ("Merging", "Merged", "merge"), ("Splitting", "Split", "split"), ("Tidying", "Tidied", "tidy"), ("Renaming", "Renamed", "rename"), ("Creating", "Created", "create")] {
         if let Some(rest) = label.strip_prefix(now) {
             return if failed { format!("Couldn't {verb}{rest}") } else { format!("{done}{rest}") };
         }
@@ -287,7 +287,7 @@ fn job_title(label: &str, failed: bool) -> String {
 /// What Undo takes back, from the job's title: "Moving notes.txt to the trash" is
 /// "Move notes.txt to the trash".
 pub fn job_undo_label(label: &str) -> String {
-    for (now, verb) in [("Copying", "Copy"), ("Moving", "Move"), ("Deleting", "Delete"), ("Extracting", "Extract"), ("Compressing", "Compress"), ("Converting", "Convert"), ("Merging", "Merge"), ("Splitting", "Split"), ("Tidying", "Tidy")] {
+    for (now, verb) in [("Copying", "Copy"), ("Moving", "Move"), ("Deleting", "Delete"), ("Extracting", "Extract"), ("Compressing", "Compress"), ("Converting", "Convert"), ("Merging", "Merge"), ("Splitting", "Split"), ("Tidying", "Tidy"), ("Renaming", "Rename"), ("Creating", "Create")] {
         if let Some(rest) = label.strip_prefix(now) {
             return format!("{verb}{rest}");
         }

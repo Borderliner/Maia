@@ -93,6 +93,20 @@ pub fn swap_each(paths: &[PathBuf], errs: &mut usize) -> Vec<PathBuf> {
         .collect()
 }
 
+/// `swap_each`, with the version trashed by `by` (when the change, or its Undo, was
+/// made): one trashed since belongs to a later change.
+pub fn swap_each_by(paths: &[PathBuf], by: Option<std::time::SystemTime>, errs: &mut usize) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .filter(|p| {
+            let ok = crate::picfix::undo_replaced_by(std::slice::from_ref(*p), by) == 0;
+            *errs += !ok as usize;
+            ok
+        })
+        .cloned()
+        .collect()
+}
+
 impl App {
     /// Do again the change Undo took back last; false when some of it couldn't be.
     pub fn redo_last(&mut self) -> bool {
@@ -104,6 +118,7 @@ impl App {
             self.toast("Redo waits for the tags being changed");
             return false;
         }
+        let undone = self.undo.redos().len().checked_sub(1).and_then(|i| self.undo.undone_when(i));
         let Some(u) = self.undo.pop_redo() else {
             self.toast("Nothing to redo");
             return true;
@@ -187,7 +202,7 @@ impl App {
                 changed = ops::Changed::at(&[], &gone);
                 UndoKind::Trashed(gone)
             }
-            UndoKind::Replaced(paths) => UndoKind::Replaced(swap_each(paths, &mut errs)),
+            UndoKind::Replaced(paths) => UndoKind::Replaced(swap_each_by(paths, undone, &mut errs)),
             UndoKind::Sorted(pairs, made) => {
                 // The folders again, outermost first, then each file into its own.
                 let mut new = vec![];

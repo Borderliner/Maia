@@ -1,7 +1,7 @@
 //! Archives as folders, through `bsdtar` (libarchive: zip, tar and its compressions, 7z,
 //! rar, iso, cpio). A path inside an archive is the archive's path joined with the path
-//! inside it, so tabs, breadcrumbs and history need nothing special. Archives are
-//! read-only here: what is inside is extracted to be opened or copied out.
+//! inside it, so tabs, breadcrumbs and history need nothing special. What is inside is
+//! extracted to be opened or copied out; changes are `archwrite`'s.
 //!
 //! Passwords: libarchive decrypts zip but not 7z, so encrypted 7z goes to the `7z`
 //! command when it is installed. Both tools run without a terminal and read the password
@@ -324,6 +324,11 @@ fn remember(archive: &Path, mtime: Option<SystemTime>, items: Listing) {
     g.push((archive.to_path_buf(), mtime, items));
 }
 
+/// The listing already read, if any (never runs a tool: for the UI thread).
+pub fn cached(archive: &Path) -> Option<Listing> {
+    CACHE.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|c| c.0 == archive).map(|c| c.2.clone())
+}
+
 /// The entries directly inside `inner` (a folder in the archive), as listing rows whose
 /// paths continue the archive's path.
 pub fn entries(archive: &Path, inner: &Path) -> Result<Vec<crate::fsx::Entry>, String> {
@@ -412,7 +417,17 @@ pub fn read_member(archive: &Path, inner: &Path, cap: usize) -> Result<Vec<u8>, 
 
 /// The 7z command, under whichever name it is installed.
 pub(crate) fn seven() -> Result<&'static str, String> {
+    #[cfg(test)]
+    if NO_SEVEN.with(|n| n.get()) {
+        return Err("Encrypted 7z archives need the 7z command".into());
+    }
     ["7z", "7zz", "7za"].into_iter().find(|t| crate::media::have(t)).ok_or_else(|| "Encrypted 7z archives need the 7z command".to_string())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests on this thread see no 7z command, as on a system without it.
+    pub static NO_SEVEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Failures of the 7z tool, which only runs for encrypted archives: without a password
@@ -458,10 +473,13 @@ fn extract7(archive: &Path, members: &[PathBuf], dir: &Path, pw: Option<&str>, g
     go(c, pw).map_err(|e| seven_err(e, pw))
 }
 
-/// Where a member is extracted to be opened (one folder per archive and version).
+/// Where a member is extracted to be opened (one folder per archive and version). An
+/// archive changed in place twice in one second is two versions: nanoseconds and size.
 pub fn open_cache(archive: &Path) -> PathBuf {
-    let mtime = std::fs::metadata(archive).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-    let key = crate::thumbcache::md5_hex(format!("{}\0{mtime}", archive.display()).as_bytes());
+    let m = std::fs::metadata(archive).ok();
+    let mtime = m.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0);
+    let size = m.map(|m| m.len()).unwrap_or(0);
+    let key = crate::thumbcache::md5_hex(format!("{}\0{mtime}\0{size}", archive.display()).as_bytes());
     // Tests run outside the sandbox too: never the real cache.
     let base = if cfg!(test) { None } else { dirs::cache_dir() };
     base.unwrap_or_else(std::env::temp_dir).join("maia/archives").join(key)
@@ -549,7 +567,7 @@ pub fn create(out: &Path, parent: &Path, names: &[std::ffi::OsString]) -> Result
 
 pub(crate) fn format_for(out: &Path) -> &'static str {
     let n = out.to_string_lossy().to_lowercase();
-    if n.ends_with(".zip") {
+    if [".zip", ".cbz"].iter().any(|e| n.ends_with(e)) {
         "zip"
     } else if n.ends_with(".7z") {
         "7zip"
@@ -562,11 +580,11 @@ pub(crate) fn filter_for(out: &Path) -> Vec<&'static str> {
     let n = out.to_string_lossy().to_lowercase();
     if n.ends_with(".gz") || n.ends_with(".tgz") {
         vec!["-z"]
-    } else if n.ends_with(".xz") {
+    } else if n.ends_with(".xz") || n.ends_with(".txz") {
         vec!["-J"]
-    } else if n.ends_with(".bz2") {
+    } else if n.ends_with(".bz2") || n.ends_with(".tbz2") || n.ends_with(".tbz") {
         vec!["-j"]
-    } else if n.ends_with(".zst") {
+    } else if n.ends_with(".zst") || n.ends_with(".tzst") {
         vec!["--zstd"]
     } else {
         vec![]

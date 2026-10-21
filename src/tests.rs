@@ -11763,6 +11763,18 @@ fn select_matching_prompt_says_how_many() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Run one archive change on this thread, as its job would: Ok, or the error it ends with.
+fn archive_edit(a: &Path, e: crate::archwrite::Edit) -> Result<(), String> {
+    let (cancel, pause) = (std::sync::atomic::AtomicBool::new(false), std::sync::atomic::AtomicBool::new(false));
+    let p = std::sync::Mutex::new(ops::Progress::default());
+    let r = crate::archwrite::edit(a, &e, &p, &ops::Gate::new(&cancel, &pause), &egui::Context::default());
+    if r.is_ok() {
+        let g = p.lock().unwrap();
+        assert!(g.total_bytes > 0 && g.done_bytes == g.total_bytes, "{}: {} of {} bytes counted", a.display(), g.done_bytes, g.total_bytes);
+    }
+    r
+}
+
 /// An archive's names and, for files, contents, as the real bsdtar (or 7z, for a locked
 /// one) gives them back.
 fn archive_contents(a: &Path) -> std::collections::BTreeMap<String, String> {
@@ -11773,6 +11785,198 @@ fn archive_contents(a: &Path) -> std::collections::BTreeMap<String, String> {
     let m = all.iter().map(|i| (i.path.display().to_string(), if i.is_dir { "/".to_string() } else { std::fs::read_to_string(x.join(&i.path)).unwrap_or_else(|e| format!("unreadable: {e}")) })).collect();
     let _ = std::fs::remove_dir_all(&x);
     m
+}
+
+/// The versions of `a` an edit sent to the trash, gone from it again.
+fn purge_trashed(a: &Path) {
+    for it in crate::trashcan::list().into_iter().filter(|it| it.original == a) {
+        let _ = crate::trashcan::purge(&it);
+    }
+}
+
+/// Files added, members deleted and renamed, new folders: in zips (one written by bsdtar,
+/// with data descriptors 7z can't rename in place, and one by 7z), 7z and every tarball
+/// kind, each made by the real tools; with the 7z command and, on a thread that can't
+/// see it, without (every change a rebuild). Each change leaves the old archive in the
+/// trash, where Undo's swap finds it, and nothing of its work beside the archive.
+#[test]
+fn archives_change_in_place() {
+    use crate::archwrite::Edit;
+    if !crate::archive::available() {
+        return;
+    }
+    let d = tmpdir("archedit");
+    let src = d.join("src");
+    touch(&src.join("notes.txt"), "the notes");
+    touch(&src.join("docs/a.txt"), "first doc");
+    touch(&src.join("Trip – é/b.txt"), "sand");
+    let add = d.join("add");
+    touch(&add.join("new.txt"), "brand new");
+    touch(&add.join("more/c.txt"), "more inside");
+    touch(&add.join("notes.txt"), "other notes");
+    let have7 = crate::archive::seven().is_ok();
+    let mut kinds = vec!["zip", "7z", "tar", "tar.gz", "tgz", "tar.xz", "tar.zst", "tar.bz2", "cbz"];
+    if have7 {
+        kinds.push("7zip.zip");
+    }
+    for without7 in [false, true] {
+        if without7 && !have7 {
+            continue;
+        }
+        crate::archive::NO_SEVEN.with(|n| n.set(without7));
+        for ext in &kinds {
+            let a = d.join(format!("pack-{without7}.{ext}"));
+            let names = ["notes.txt", "docs", "Trip – é"];
+            let made = if *ext == "7zip.zip" {
+                std::process::Command::new("7z").env("LC_ALL", "C.UTF-8").args(["a", "-bso0", "-bsp0", "-tzip"]).arg(&a).args(names).current_dir(&src).status().is_ok_and(|s| s.success())
+            } else {
+                let fmt = match *ext {
+                    "zip" | "cbz" => "zip",
+                    "7z" => "7zip",
+                    _ => "pax",
+                };
+                let filter: &[&str] = match *ext {
+                    "tar.gz" | "tgz" => &["-z"],
+                    "tar.xz" => &["-J"],
+                    "tar.zst" => &["--zstd"],
+                    "tar.bz2" => &["-j"],
+                    _ => &[],
+                };
+                std::process::Command::new("bsdtar").env("LC_ALL", "C.UTF-8").arg("-cf").arg(&a).args(["--format", fmt]).args(filter).arg("-C").arg(&src).args(names).status().is_ok_and(|s| s.success())
+            };
+            assert!(made, "{ext}: made by the real tool");
+            let before = archive_contents(&a);
+            // When each change was made, as its Undo entry keeps it.
+            let made = std::cell::RefCell::new(vec![]);
+            let step = |what: &str, e: Edit| {
+                archive_edit(&a, e).unwrap_or_else(|e| panic!("{ext} ({}): {what}: {e}", if without7 { "no 7z" } else { "7z" }));
+                made.borrow_mut().push(std::time::SystemTime::now());
+                assert!(crate::picfix::newest_trashed(&a).is_some(), "{ext}: {what}: the old one in the trash");
+                let left: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with('.')).collect();
+                assert!(left.is_empty(), "{ext}: {what}: left beside it: {left:?}");
+                archive_contents(&a)
+            };
+            // Added into a folder inside, a folder with it; a name taken kept beside.
+            let c = step("add", Edit::Add { srcs: vec![add.join("new.txt"), add.join("more"), add.join("notes.txt")], into: PathBuf::from("docs"), replace: false });
+            assert_eq!(c.get("docs/new.txt").map(String::as_str), Some("brand new"), "{ext}: {c:?}");
+            assert_eq!(c.get("docs/more/c.txt").map(String::as_str), Some("more inside"), "{ext}");
+            assert_eq!(c.get("docs/notes.txt").map(String::as_str), Some("other notes"), "{ext}: not taken there");
+            let after_add = c.clone();
+            let c = step("add, keep both", Edit::Add { srcs: vec![add.join("notes.txt")], into: PathBuf::new(), replace: false });
+            assert_eq!((c.get("notes.txt").map(String::as_str), c.get("notes (1).txt").map(String::as_str)), (Some("the notes"), Some("other notes")), "{ext}");
+            let c = step("add, replace", Edit::Add { srcs: vec![add.join("notes.txt")], into: PathBuf::new(), replace: true });
+            assert_eq!(c.get("notes.txt").map(String::as_str), Some("other notes"), "{ext}: replaced");
+            // Deleted: a file, and a folder with what is in it.
+            let c = step("delete", Edit::Delete { members: vec![PathBuf::from("docs/a.txt"), PathBuf::from("Trip – é")] });
+            assert!(!c.contains_key("docs/a.txt") && !c.keys().any(|k| k.starts_with("Trip")), "{ext}: {c:?}");
+            assert_eq!(c.get("docs/new.txt").map(String::as_str), Some("brand new"), "{ext}: the rest stays");
+            // Renamed: a file, and a folder, which takes what is in it along.
+            let c = step("rename", Edit::Rename { pairs: vec![(PathBuf::from("notes (1).txt"), "kept.txt".into()), (PathBuf::from("docs"), "papers".into())] });
+            assert_eq!(c.get("kept.txt").map(String::as_str), Some("other notes"), "{ext}: {c:?}");
+            assert_eq!(c.get("papers/more/c.txt").map(String::as_str), Some("more inside"), "{ext}: {c:?}");
+            assert!(!c.keys().any(|k| k.starts_with("docs")), "{ext}: {c:?}");
+            // A new folder and a new file.
+            step("new folder", Edit::Make { at: PathBuf::from("papers/New folder"), folder: true });
+            let c = step("new file", Edit::Make { at: PathBuf::from("papers/New folder/empty.txt"), folder: false });
+            assert_eq!(c.get("papers/New folder").map(String::as_str), Some("/"), "{ext}: {c:?}");
+            assert_eq!(c.get("papers/New folder/empty.txt").map(String::as_str), Some(""), "{ext}");
+            // Refused before anything is done: a name taken, a member that isn't there.
+            assert!(archive_edit(&a, Edit::Rename { pairs: vec![(PathBuf::from("kept.txt"), "notes.txt".into())] }).is_err_and(|e| e.contains("already")), "{ext}");
+            assert!(archive_edit(&a, Edit::Delete { members: vec![PathBuf::from("nope.txt")] }).is_err(), "{ext}");
+            // Undo, change by change, is the archive as it was made; Redo of the first
+            // change is the archive after it.
+            let mut undone = vec![];
+            for t in made.borrow().iter().rev() {
+                assert_eq!(crate::picfix::undo_replaced_by(&[a.clone()], Some(*t)), 0, "{ext}: undone");
+                undone.push(std::time::SystemTime::now());
+            }
+            assert_eq!(archive_contents(&a), before, "{ext}: undone back to the start");
+            assert_eq!(crate::picfix::undo_replaced_by(&[a.clone()], undone.last().copied()), 0, "{ext}: redone");
+            assert_eq!(archive_contents(&a), after_add, "{ext}: the first change again");
+            purge_trashed(&a);
+        }
+    }
+    crate::archive::NO_SEVEN.with(|n| n.set(false));
+    // What can only be read says so.
+    for (n, why) in [("x.rar", "RAR archives can only be read here"), ("x.iso", "ISO archives"), ("x.deb", "DEB archives"), ("x.tar.lz", "LZ archives")] {
+        assert!(crate::archwrite::kind(Path::new(n)).is_err_and(|e| e.contains(why)), "{n}");
+    }
+    assert!(crate::archwrite::kind(Path::new("x.tar.zst")).is_ok() && crate::archwrite::kind(Path::new("X.ZIP")).is_ok());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Locked archives changed in place, made by the real tools (Info-ZIP's ZipCrypto, 7z's
+/// AES zip, 7z with and without its names locked): asked for the password, a wrong one
+/// refused with the archive untouched, and with the right one what is added is locked
+/// the same way, as the real 7z reports it; names locked stay locked. Without the 7z
+/// command the zips are rebuilt, locked again by bsdtar the way they were.
+#[test]
+fn locked_archives_change_and_stay_locked() {
+    use crate::archive::{NEEDS_PASSWORD, WRONG_PASSWORD, forget_password, set_password};
+    use crate::archwrite::Edit;
+    if !crate::archive::available() {
+        return;
+    }
+    let d = tmpdir("lockedit");
+    let src = d.join("src");
+    touch(&src.join("notes.txt"), "the secret plan");
+    touch(&src.join("Trip photos/beach.txt"), "sand");
+    touch(&d.join("add/late.txt"), "added later");
+    let Some(made) = encrypted_archives(&d, &src, "hunter2") else {
+        eprintln!("zip or 7z missing: skipped");
+        return;
+    };
+    let slt = |a: &Path| String::from_utf8_lossy(&std::process::Command::new("7z").args(["l", "-slt", "-ba", "-phunter2"]).arg(a).output().unwrap().stdout).into_owned();
+    let block = |t: &str, path: &str| t.split("\n\n").find(|b| b.lines().any(|l| l == format!("Path = {path}"))).unwrap_or("").to_string();
+    for without7 in [false, true] {
+        crate::archive::NO_SEVEN.with(|n| n.set(without7));
+        for m in &made {
+            let a = d.join(format!("{without7}-{}", m.file_name().unwrap().to_string_lossy()));
+            std::fs::copy(m, &a).unwrap();
+            let name = a.file_name().unwrap().to_string_lossy().into_owned();
+            let add = Edit::Add { srcs: vec![d.join("add/late.txt")], into: PathBuf::new(), replace: false };
+            if without7 && name.ends_with(".7z") {
+                set_password(&a, "hunter2".into());
+                let r = archive_edit(&a, add);
+                assert!(r.as_ref().is_err_and(|e| e.contains("7z command")), "{name}: {r:?}");
+                continue;
+            }
+            let bytes = std::fs::read(&a).unwrap();
+            forget_password(&a);
+            assert_eq!(archive_edit(&a, add.clone()).err().as_deref(), Some(NEEDS_PASSWORD), "{name}");
+            set_password(&a, "wrong".into());
+            assert_eq!(archive_edit(&a, add.clone()).err().as_deref(), Some(WRONG_PASSWORD), "{name}");
+            assert!(std::fs::read(&a).unwrap() == bytes && crate::picfix::newest_trashed(&a).is_none(), "{name}: untouched");
+            set_password(&a, "hunter2".into());
+            archive_edit(&a, add).unwrap_or_else(|e| panic!("{name}: {e}"));
+            archive_edit(&a, Edit::Rename { pairs: vec![(PathBuf::from("Trip photos"), "Holiday".into())] }).unwrap_or_else(|e| panic!("{name}: {e}"));
+            archive_edit(&a, Edit::Delete { members: vec![PathBuf::from("notes.txt")] }).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let c = archive_contents(&a);
+            assert_eq!(c.get("late.txt").map(String::as_str), Some("added later"), "{name}: {c:?}");
+            assert_eq!(c.get("Holiday/beach.txt").map(String::as_str), Some("sand"), "{name}: {c:?}");
+            assert!(!c.contains_key("notes.txt"), "{name}");
+            // Locked as it was: what was added too.
+            let t = slt(&a);
+            for f in ["late.txt", "Holiday/beach.txt"] {
+                let b = block(&t, f);
+                assert!(b.contains("Encrypted = +"), "{name}: {f} locked: {b}");
+                if name.ends_with("aes.zip") {
+                    assert!(b.contains("AES-256"), "{name}: {b}");
+                }
+                if name.ends_with("crypto.zip") {
+                    assert!(b.contains("ZipCrypto"), "{name}: {b}");
+                }
+            }
+            if name.contains("hidden") {
+                let o = std::process::Command::new("7z").args(["l", "-ba", "-pnot-it"]).arg(&a).output().unwrap();
+                assert!(!o.status.success(), "{name}: names still locked");
+            }
+            purge_trashed(&a);
+            let _ = std::fs::remove_dir_all(crate::archive::open_cache(&a));
+        }
+    }
+    crate::archive::NO_SEVEN.with(|n| n.set(false));
+    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// Compressing as a job, through the real bsdtar and 7z: every format at each level
@@ -11872,5 +12076,54 @@ fn compress_jobs_report_progress_and_cancel() {
     assert!(j.progress.lock().unwrap().errors.is_empty(), "a cancel is not an error");
     assert!(!out.exists(), "nothing made");
     assert!(std::fs::read_dir(&d).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with('.')), "no part file left");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// An archive change cancelled halfway (a big tarball being rebuilt) leaves the archive
+/// as it was and nothing beside it; refused kinds and a missing member change nothing.
+#[test]
+fn archive_change_cancelled_leaves_it_alone() {
+    use crate::archwrite::Edit;
+    use std::sync::atomic::Ordering;
+    if !crate::archive::available() {
+        return;
+    }
+    let d = tmpdir("editcancel");
+    let mut noise = vec![0u8; 40 << 20];
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    for b in noise.iter_mut() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *b = x as u8;
+    }
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::write(d.join("src/noise.bin"), &noise).unwrap();
+    touch(&d.join("src/small.txt"), "small");
+    let a = d.join("big.tar.xz");
+    assert!(std::process::Command::new("bsdtar").args(["-cJf"]).arg(&a).arg("-C").arg(d.join("src")).args(["noise.bin", "small.txt"]).status().unwrap().success());
+    let bytes = std::fs::read(&a).unwrap();
+    let j = ops::spawn(1, OpKind::ArchiveEdit { archive: a.clone(), edit: Edit::Delete { members: vec![PathBuf::from("small.txt")] } }, egui::Context::default());
+    let start = Instant::now();
+    // Into the packing, past the extraction.
+    while j.progress.lock().unwrap().done_bytes <= bytes.len() as u64 + (4 << 20) {
+        assert!(start.elapsed() < Duration::from_secs(60) && !j.progress.lock().unwrap().finished, "no progress");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    j.cancel.store(true, Ordering::Relaxed);
+    wait_job(&j);
+    let p = j.progress.lock().unwrap();
+    assert!(p.errors.is_empty() && p.replaced.is_empty(), "{:?}", p.errors);
+    assert!(std::fs::read(&a).unwrap() == bytes, "untouched");
+    assert!(crate::picfix::newest_trashed(&a).is_none(), "nothing trashed");
+    let left: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with('.')).collect();
+    assert!(left.is_empty(), "left beside it: {left:?}");
+    drop(p);
+    // A rar is only read; a member not there is not deleted.
+    let rar = d.join("x.rar");
+    std::fs::write(&rar, b"Rar!").unwrap();
+    assert!(archive_edit(&rar, Edit::Delete { members: vec![PathBuf::from("a")] }).is_err_and(|e| e.contains("can only be read")));
+    assert!(archive_edit(&a, Edit::Delete { members: vec![PathBuf::from("gone.txt")] }).is_err_and(|e| e.contains("isn't in it")));
+    assert!(std::fs::read(&a).unwrap() == bytes);
     let _ = std::fs::remove_dir_all(&d);
 }

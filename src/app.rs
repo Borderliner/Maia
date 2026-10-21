@@ -1574,6 +1574,12 @@ impl App {
                         self.undo.push(UndoEntry { label: crate::ui::job_undo_label(&j.label), kind: UndoKind::Synced(made, p.replaced.clone(), p.gone.clone()) });
                     }
                 }
+                // Changed in place: the old one is in the trash, for Undo to swap back.
+                if let OpKind::ArchiveEdit { archive, .. } = &j.kind {
+                    if !p.replaced.is_empty() {
+                        self.undo.push(UndoEntry { label: crate::ui::job_undo_label(&j.label), kind: UndoKind::Replaced(vec![archive.clone()]) });
+                    }
+                }
                 if let OpKind::Trash { paths } = &j.kind {
                     self.undo.push(UndoEntry { label: crate::ui::job_undo_label(&j.label), kind: UndoKind::Trashed(paths.clone()) });
                 }
@@ -2022,9 +2028,8 @@ impl App {
         if tab::is_computer(&self.panel().path()) && matches!(cmd, Cmd::Cut | Cmd::Trash | Cmd::DeletePermanent | Cmd::Duplicate | Cmd::CreateLink | Cmd::Paste | Cmd::Rename) {
             return;
         }
-        // Inside an archive nothing changes; copying out (Copy, then Paste elsewhere) works.
-        if self.tab().archive.is_some() && matches!(cmd, Cmd::Cut | Cmd::Trash | Cmd::DeletePermanent | Cmd::Duplicate | Cmd::CreateLink | Cmd::Paste | Cmd::Rename | Cmd::NewFolder | Cmd::NewFile) {
-            self.toast("Archives are read-only here: extract it to change it");
+        // Inside an archive: zip, 7z and tarballs change by a job that rewrites them.
+        if self.tab().archive.is_some() && matches!(cmd, Cmd::Cut | Cmd::Trash | Cmd::DeletePermanent | Cmd::Duplicate | Cmd::CreateLink | Cmd::Paste | Cmd::Rename | Cmd::NewFolder | Cmd::NewFile) && crate::archwrite::inside(self, cmd) {
             return;
         }
         match cmd {
@@ -3109,7 +3114,7 @@ impl App {
         t.target_entries().first().filter(|e| e.is_dir).map(|e| e.path.clone()).unwrap_or_else(|| t.path.clone())
     }
 
-    fn move_cursor_past_selection(&mut self) {
+    pub(crate) fn move_cursor_past_selection(&mut self) {
         let t = self.tab();
         let positions: Vec<usize> = t.targets_idx().iter().filter_map(|&i| t.view_pos(i)).collect();
         let (Some(&lo), Some(&hi)) = (positions.iter().min(), positions.iter().max()) else { return };
@@ -3335,11 +3340,12 @@ impl App {
 
     /// Start a copy/move, asking about conflicts first.
     pub fn begin_transfer(&mut self, srcs: Vec<PathBuf>, dest: PathBuf, mv: bool) {
-        // Out of an archive: extracted (always a copy; the archive stays as it is).
+        // Into an archive: a job that rewrites it.
         if crate::archive::split(&dest).is_some() && !dest.is_dir() {
-            self.toast("Archives are read-only here: extract it to change it");
+            crate::archwrite::add(self, srcs, &dest, mv);
             return;
         }
+        // Out of an archive: extracted (always a copy; the archive stays as it is).
         if srcs.iter().any(|s| !s.exists() && crate::archive::split(s).is_some()) {
             for (archive, members) in crate::archive::group(&srcs) {
                 self.actions.push(Action::StartJob(OpKind::Extract { archive, members, dest: dest.clone() }));
@@ -3459,6 +3465,9 @@ impl App {
             self.toast("Undo waits for the tags being changed");
             return false;
         }
+        // When the change was made: a version trashed after it (by an Undo since) is not
+        // the one it replaced.
+        let made = self.undo.len().checked_sub(1).and_then(|i| self.undo.when(i));
         let Some(u) = self.undo.pop() else {
             self.toast("Nothing to undo");
             return true;
@@ -3559,7 +3568,7 @@ impl App {
                 moved_back = ops::Changed::moved(&back);
                 UndoKind::Trashed(orig.iter().filter(|p| back.iter().any(|b| b.1 == **p)).cloned().collect())
             }
-            UndoKind::Replaced(paths) => UndoKind::Replaced(crate::redo::swap_each(paths, &mut errs)),
+            UndoKind::Replaced(paths) => UndoKind::Replaced(crate::redo::swap_each_by(paths, made, &mut errs)),
             UndoKind::Sorted(pairs, made) => {
                 let mut back = vec![];
                 for (src, dst) in pairs {
@@ -3904,6 +3913,9 @@ impl App {
     }
 
     fn commit_rename(&mut self, panel: u64) {
+        if crate::archwrite::commit_rename(self, panel) {
+            return;
+        }
         let Some(p) = self.panels.get_mut(&panel) else { return };
         let t = p.tab_mut();
         let Some(r) = t.rename.as_mut() else { return };

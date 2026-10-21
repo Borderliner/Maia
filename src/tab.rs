@@ -529,7 +529,14 @@ impl Tab {
         if let Some(s) = self.strip.as_mut() {
             s.changed(c);
         }
-        if self.archive.is_some() || is_computer(&self.path) || self.rename.is_some() {
+        // Inside an archive: read again when a change was made to it.
+        if let Some(a) = &self.archive {
+            if self.rename.is_none() && c.arrived.iter().any(|d| d == a) {
+                self.reload();
+            }
+            return;
+        }
+        if is_computer(&self.path) || self.rename.is_some() {
             return;
         }
         if c.gone.iter().any(|g| self.path.starts_with(g)) {

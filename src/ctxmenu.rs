@@ -192,6 +192,12 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
     let ents: Vec<(PathBuf, bool, bool, String)> = if background { vec![] } else { t.target_entries().iter().map(|e| (e.path.clone(), e.is_dir, e.is_link, e.ext().to_string())).collect() };
     let mut items = vec![];
     if ents.is_empty() {
+        if t.archive.as_deref().is_some_and(|a| crate::archwrite::kind(a).is_ok()) {
+            // Inside a zip, 7z or tarball: what can be made in it.
+            items.push(Item::cmd(Cmd::NewFolder));
+            items.push(Item::cmd(Cmd::Paste));
+            items.push(Item::sep());
+        }
         if !computer && t.archive.is_none() {
             items.push(Item::cmd(Cmd::NewFolder));
             items.push(Item::cmd(Cmd::NewFile));
@@ -256,11 +262,17 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             items.push(Item::cmd(Cmd::Properties));
         }
     } else if t.archive.is_some() {
-        // Inside an archive: open, copy out, extract.
+        // Inside an archive: open, copy out, extract; in one Maia can write, rename and
+        // delete too.
         items.push(Item::labeled(Cmd::Activate, "Open"));
         items.push(Item::cmd(Cmd::Copy));
         items.push(Item::cmd(Cmd::CopyTo));
         items.push(Item::cmd(Cmd::ExtractHere));
+        if t.archive.as_deref().is_some_and(|a| crate::archwrite::kind(a).is_ok()) {
+            items.push(Item::sep());
+            items.push(Item::cmd(Cmd::Rename));
+            items.push(Item::labeled(Cmd::Trash, "Delete"));
+        }
     } else if computer {
         let drives: Vec<crate::drives::Drive> = ents.iter().filter_map(|e| app.drive_at(&e.0)).collect();
         let mounted: Vec<&PathBuf> = ents.iter().filter(|e| tab::drive_dev(&e.0).is_none()).map(|e| &e.0).collect();
