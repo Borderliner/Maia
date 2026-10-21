@@ -213,7 +213,9 @@ pub fn parse_list(text: &str, now: SystemTime) -> Vec<Item> {
         let name = unescape(name);
         let dot = name.starts_with("./");
         let name = name.trim_start_matches("./").trim_end_matches('/');
-        if name.is_empty() || name == "." || name.split('/').any(|c| c == "..") {
+        // A rooted name ("/home/u/x") would become that path on this computer once joined
+        // to the archive's: refused like "../", as bsdtar refuses both when extracting.
+        if name.is_empty() || name == "." || name.starts_with('/') || name.split('/').any(|c| c == "..") {
             continue;
         }
         out.push(Item { path: PathBuf::from(name), is_dir: perms.starts_with('d'), link, size, modified: when(f[5], f[6], f[7], now), dot });
@@ -542,7 +544,7 @@ pub fn parse_slt(text: &str) -> Vec<Item> {
     let mut out = vec![];
     for block in text.split("\n\n") {
         let field = |k: &str| block.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix(" = "));
-        let Some(path) = field("Path").filter(|p| !p.is_empty() && !p.split('/').any(|c| c == "..")) else { continue };
+        let Some(path) = field("Path").filter(|p| !p.is_empty() && !p.starts_with('/') && !p.split('/').any(|c| c == "..")) else { continue };
         let attrs = field("Attributes").unwrap_or("");
         let unix = attrs.split_whitespace().nth(1).unwrap_or("");
         out.push(Item {

@@ -262,6 +262,22 @@ fn copy_keeps_tags_dates_and_bytes() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Network filesystems mounted by the user show in the sidebar beside the disks: sshfs,
+/// rclone (Google Drive, S3, ...), CIFS and NFS. Other FUSE mounts stay out.
+#[test]
+fn mounts_include_network_filesystems() {
+    let d = tmpdir("mounts");
+    let table = d.join("mounts");
+    touch(&table, "/dev/nvme0n1p3 / btrfs rw 0 0\n\
+gdrive: /home/u/gdrive fuse.rclone rw,nosuid,nodev 0 0\n\
+u@host:/srv /home/u/host fuse.sshfs rw 0 0\n\
+portal /run/user/1000/doc fuse.portal rw 0 0\n\
+gvfsd-fuse /run/user/1000/gvfs fuse.gvfsd-fuse rw 0 0\n");
+    let got: Vec<String> = crate::fsx::mounts_in(&table).into_iter().map(|m| m.path.display().to_string()).collect();
+    assert_eq!(got, ["/", "/home/u/gdrive", "/home/u/host"]);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// A move to another filesystem copies, then deletes the original. If part of it could
 /// not be copied (a FIFO is skipped), the original must stay. Needs /dev/shm on a
 /// different filesystem from the temp folder; skipped otherwise.
@@ -301,6 +317,43 @@ fn cross_device_move_keeps_original_when_something_was_skipped() {
     drop(g);
     let _ = std::fs::remove_dir_all(&src);
     let _ = std::fs::remove_dir_all(&dst);
+}
+
+/// Saving from the preview keeps each line's ending: a file of CR LF lines is written back
+/// so, and one with both kinds keeps every line as it was (a script with one stray CR LF
+/// line must not come back all CR LF, where `#!/bin/sh\r` no longer runs).
+#[test]
+fn quick_edit_keeps_line_endings() {
+    use crate::quickedit::Edit;
+    let d = tmpdir("qe-eol");
+    let (mixed, dos) = (d.join("run.sh"), d.join("dos.txt"));
+    std::fs::write(&mixed, "#!/bin/sh\necho a\r\necho b\n").unwrap();
+    std::fs::write(&dos, "a\r\nb\r\n").unwrap();
+    let mut e = Edit::open(&mixed).unwrap();
+    e.text.push_str("echo c\n");
+    assert!(e.save(false).is_ok());
+    assert_eq!(std::fs::read_to_string(&mixed).unwrap(), "#!/bin/sh\necho a\r\necho b\necho c\n");
+    let mut e = Edit::open(&dos).unwrap();
+    assert_eq!(e.text, "a\nb\n");
+    e.text.push_str("c\n");
+    assert!(e.save(false).is_ok());
+    assert_eq!(std::fs::read_to_string(&dos).unwrap(), "a\r\nb\r\nc\r\n");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Saving a file opened through a symlink writes the file it points to and keeps the link.
+#[test]
+fn quick_edit_through_a_symlink_keeps_the_link() {
+    let d = tmpdir("qe-link");
+    let (real, link) = (d.join("real.txt"), d.join("link.txt"));
+    std::fs::write(&real, "old\n").unwrap();
+    std::os::unix::fs::symlink("real.txt", &link).unwrap();
+    let mut e = crate::quickedit::Edit::open(&link).unwrap();
+    e.text = "new\n".into();
+    assert!(e.save(false).is_ok());
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link was replaced by a file");
+    assert_eq!(std::fs::read_to_string(&real).unwrap(), "new\n");
+    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// A finished move takes what it moved out of every listing that showed it, whichever
@@ -8854,6 +8907,32 @@ fn diffs_side_by_side() {
     assert_eq!(changed_span("é1", "é2"), ((2, 3), (2, 3)), "cut at character boundaries");
 }
 
+/// A folder here that can't be read must not look empty: everything in its twin there
+/// would be "only there", and Mirror would trash it. It is left out of the plan and named.
+#[test]
+fn sync_leaves_unreadable_folders_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tmpdir("sync-unread");
+    let (a, b) = (d.join("a"), d.join("b"));
+    touch(&a.join("photos/1.jpg"), "1");
+    touch(&b.join("photos/1.jpg"), "1");
+    touch(&b.join("photos/2.jpg"), "2");
+    touch(&a.join("new.txt"), "n");
+    let perms = |m| std::fs::set_permissions(a.join("photos"), std::fs::Permissions::from_mode(m)).unwrap();
+    perms(0o000);
+    if std::fs::read_dir(a.join("photos")).is_ok() {
+        perms(0o755); // root reads it anyway: nothing to test
+        let _ = std::fs::remove_dir_all(&d);
+        return;
+    }
+    let p = crate::compare::plan(&a, &b, &std::sync::atomic::AtomicBool::new(false));
+    perms(0o755);
+    assert!(p.extra.is_empty(), "would trash {:?}", p.extra);
+    assert_eq!(p.unread, vec![a.join("photos")]);
+    assert_eq!(p.copy, vec![(a.join("new.txt"), b.join("new.txt"))]);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// Sync all the way down: what the other side lacks copied, newer files over older ones
 /// (the older to the trash), mirroring sends what only it has to the trash, folders that
 /// differ inside are found, and Undo puts it all back as one step.
@@ -8896,6 +8975,47 @@ fn sync_plans_copies_and_undoes() {
     assert!(app.undo_last());
     assert_eq!(std::fs::read_to_string(b.join("sub/deep/edit.txt")).unwrap(), "old");
     assert!(!b.join("fresh").exists() && !b.join("sub/new.txt").exists() && b.join("sub/only-there.txt").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Syncing a folder with one inside it is refused: a parent synced into its child would
+/// copy the child into itself, and a child mirrored over its parent would send itself to
+/// the trash as "only there". The same folder on both sides plans nothing, as before.
+#[test]
+fn sync_refuses_nested_folders() {
+    use crate::compare::{Plan, nested, plan};
+    let d = tmpdir("sync-nested");
+    touch(&d.join("notes.txt"), "n");
+    touch(&d.join("backup/notes.txt"), "n");
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let p = plan(&d.join("backup"), &d, &stop);
+    assert!(!p.extra.contains(&d.join("backup")), "Mirror would trash the source: {:?}", p.extra);
+    assert_eq!(p, Plan::default());
+    assert_eq!(plan(&d, &d.join("backup"), &stop), Plan::default());
+    assert!(nested(&d, &d.join("backup")) && nested(&d.join("backup"), &d));
+    assert!(!nested(&d, &d) && !nested(&d.join("backup"), &d.join("notes.txt")));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// FAT (most USB sticks and SD cards) keeps a file's time only to two seconds, so a copy
+/// there can look up to two seconds older than its original. That is not "newer", or
+/// every sync would copy the file again; three seconds is.
+#[test]
+fn sync_allows_fat_two_second_times() {
+    let d = tmpdir("sync-fat");
+    let (a, b) = (d.join("a"), d.join("b"));
+    for f in ["fat.txt", "edited.txt"] {
+        touch(&a.join(f), "x");
+        touch(&b.join(f), "x");
+    }
+    let t = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let set = |p: &Path, t| std::fs::File::options().write(true).open(p).unwrap().set_modified(t).unwrap();
+    set(&a.join("fat.txt"), t + Duration::from_millis(1500));
+    set(&b.join("fat.txt"), t);
+    set(&a.join("edited.txt"), t + Duration::from_secs(3));
+    set(&b.join("edited.txt"), t);
+    let p = crate::compare::plan(&a, &b, &std::sync::atomic::AtomicBool::new(false));
+    assert_eq!(p.update, vec![(a.join("edited.txt"), b.join("edited.txt"))]);
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -12206,5 +12326,122 @@ fn archive_change_cancelled_leaves_it_alone() {
     assert!(archive_edit(&rar, Edit::Delete { members: vec![PathBuf::from("a")] }).is_err_and(|e| e.contains("can only be read")));
     assert!(archive_edit(&a, Edit::Delete { members: vec![PathBuf::from("gone.txt")] }).is_err_and(|e| e.contains("isn't in it")));
     assert!(std::fs::read(&a).unwrap() == bytes);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// On SELinux a copy takes the label of where it lands, as `cp` does, and a move to
+/// another filesystem keeps its own, as `mv` does. A copy left with a label from ~/.ssh or
+/// /etc can be refused to the programs that should read it where it is now. Skipped
+/// without SELinux, or where this user can't relabel a file.
+#[test]
+fn copy_takes_the_selinux_label_of_where_it_lands() {
+    use std::os::unix::fs::MetadataExt;
+    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+    let label = |p: &Path| -> Option<String> {
+        let mut buf = [0u8; 256];
+        let n = unsafe { libc::lgetxattr(c(p).as_ptr(), c"security.selinux".as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+        (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).trim_end_matches('\0').to_string())
+    };
+    let set = |p: &Path, l: &str| unsafe { libc::lsetxattr(c(p).as_ptr(), c"security.selinux".as_ptr(), l.as_ptr().cast(), l.len(), 0) } == 0;
+    let ctx = egui::Context::default();
+    let d = tmpdir("selinux");
+    let (src, out) = (d.join("src/key.txt"), d.join("out"));
+    touch(&src, "k");
+    touch(&out.join("fresh.txt"), "f");
+    let (Some(fresh), Some(own)) = (label(&out.join("fresh.txt")), label(&src)) else {
+        let _ = std::fs::remove_dir_all(&d);
+        return; // no SELinux here
+    };
+    // Give the source a type of its own, as a file under ~/.ssh has.
+    let mut parts: Vec<&str> = own.split(':').collect();
+    if parts.len() < 4 {
+        return;
+    }
+    parts[2] = if parts[2] == "user_home_t" { "ssh_home_t" } else { "user_home_t" };
+    let odd = parts.join(":");
+    if !set(&src, &odd) {
+        let _ = std::fs::remove_dir_all(&d);
+        return; // this user may not relabel
+    }
+    let j = ops::spawn(1, OpKind::Copy { srcs: vec![src.clone()], dest: out.clone(), decide: HashMap::new() }, ctx.clone());
+    wait_job(&j);
+    assert_eq!(label(&out.join("key.txt")).as_deref(), Some(fresh.as_str()), "the copy kept its source's label");
+    // A move to another filesystem keeps the label.
+    let shm = Path::new("/dev/shm");
+    if std::fs::metadata(shm).is_ok_and(|m| m.dev() != std::fs::metadata(&d).unwrap().dev()) {
+        let to = shm.join(format!("maia-test-selinux-{}", std::process::id()));
+        std::fs::create_dir_all(&to).unwrap();
+        let j = ops::spawn(2, OpKind::Move { srcs: vec![src.clone()], dest: to.clone(), decide: HashMap::new() }, ctx);
+        wait_job(&j);
+        if to.join("key.txt").exists() {
+            assert_eq!(label(&to.join("key.txt")).as_deref(), Some(odd.as_str()), "the move lost its label");
+        }
+        let _ = std::fs::remove_dir_all(&to);
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Merging a folder over one that holds a file of the same name sends the old file to the
+/// trash before the copy takes its name, so a copy the read-back check then finds wrong is
+/// removed with the old one still in the trash, not gone with it.
+#[test]
+fn merged_file_failing_its_check_leaves_the_old_one_in_the_trash() {
+    let ctx = egui::Context::default();
+    let q = std::sync::Arc::new(ops::Queue::default());
+    let d = tmpdir("mergecheck");
+    if reflinks(&d) {
+        let _ = std::fs::remove_dir_all(&d);
+        return; // shared extents write no bytes the check could find changed
+    }
+    let bad = format!("{} notes.txt", ops::SPOILED);
+    touch(&d.join("src/box").join(&bad), "new text");
+    touch(&d.join("out/box").join(&bad), "old text");
+    let mut decide = HashMap::new();
+    decide.insert(d.join("src/box"), Conflict::Merge);
+    let j = ops::spawn_in(1, OpKind::Copy { srcs: vec![d.join("src/box")], dest: d.join("out"), decide }, ctx, &q, true);
+    wait_job(&j);
+    assert!(!j.progress.lock().unwrap().errors.is_empty(), "the check found the copy wrong");
+    assert!(crate::picfix::newest_trashed(&d.join("out/box").join(&bad)).is_some(), "the old file is gone, not in the trash");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The names an app asks the Save dialog for keep only their last part, so a sandboxed
+/// app can't save past the folder the user chose.
+#[test]
+fn portal_save_names_stay_in_the_chosen_folder() {
+    let dir = Path::new("/home/u/Downloads");
+    let names: Vec<String> = ["report.pdf", "/home/u/.bashrc", "../../.profile", "..", "a/b.txt"].map(String::from).to_vec();
+    assert_eq!(crate::picker::save_targets(dir, &names), [dir.join("report.pdf"), dir.join(".bashrc"), dir.join(".profile"), dir.join("b.txt")]);
+}
+
+/// Rooted member names ("/home/u/taxes.pdf") are left out of a listing like "../" ones:
+/// joined to the archive's path they would name a real place on this computer.
+#[test]
+fn archive_listings_refuse_rooted_names() {
+    let now = std::time::SystemTime::now();
+    let tar = "-rw-r--r--  0 0      0           1 Oct 14 22:57 /home/u/taxes.pdf\n-rw-r--r--  0 0      0           2 Oct 14 22:57 ok.txt\n";
+    let names = |v: Vec<crate::archive::Item>| v.iter().map(|i| i.path.display().to_string()).collect::<Vec<_>>();
+    assert_eq!(names(crate::archive::parse_list(tar, now)), ["ok.txt"]);
+    assert_eq!(names(crate::archive::parse_slt("Path = /etc/passwd\nSize = 1\n\nPath = ok.txt\nSize = 2\n")), ["ok.txt"]);
+}
+
+/// Renaming a .7z member whose name holds a wildcard character ("draft?.txt") renames that
+/// member: 7z takes the names literally, as it does for adding and deleting.
+#[test]
+fn seven_zip_renames_names_with_wildcards() {
+    if !crate::media::have("7z") {
+        return;
+    }
+    let d = tmpdir("7zwild");
+    touch(&d.join("src/draft?.txt"), "q");
+    touch(&d.join("src/draft1.txt"), "1");
+    let a = d.join("a.7z");
+    let made = std::process::Command::new("7z").args(["a", "-bso0", "-bsp0", "-spd"]).arg(&a).args(["draft?.txt", "draft1.txt"]).current_dir(d.join("src")).status().unwrap();
+    assert!(made.success());
+    archive_edit(&a, crate::archwrite::Edit::Rename { pairs: vec![(PathBuf::from("draft?.txt"), "renamed.txt".into())] }).unwrap();
+    let out = String::from_utf8_lossy(&std::process::Command::new("7z").args(["l", "-slt", "-ba"]).arg(&a).output().unwrap().stdout).into_owned();
+    let mut paths: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("Path = ")).collect();
+    paths.sort();
+    assert_eq!(paths, ["draft1.txt", "renamed.txt"]);
     let _ = std::fs::remove_dir_all(&d);
 }

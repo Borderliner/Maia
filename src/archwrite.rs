@@ -722,7 +722,7 @@ fn in_place(t: &str, archive: &Path, part: &Path, kind: Kind, e: &Edit, lock: (L
             c.arg("--").arg(part).args(members);
         }
         Edit::Rename { pairs } => {
-            c.args(["rn", "-bso0", "-bsp0", "-y", ty]);
+            c.args(["rn", "-bso0", "-bsp0", "-y", ty, "-spd"]);
             lock_args(&mut c);
             c.arg("--").arg(part);
             for (a, b) in rename_moves(all, pairs) {
