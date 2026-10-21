@@ -2232,26 +2232,26 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             }
         }
         150 => {
-            // Compress With Password: the dialog typed into, the format switched, the
-            // two fields made to agree or not, then Compress or Escape.
-            s.cmd(Cmd::CompressLocked);
+            // Compress: the dialog typed into, the format and level switched, the two
+            // password fields made to agree or not, then Compress or Escape.
+            s.cmd(*rng.pick(&[Cmd::CompressLocked, Cmd::CompressZip, Cmd::CompressTarXz]));
             for _ in 0..rng.below(6) {
-                if !matches!(s.app.popup, Popup::Lock(_)) {
+                if !matches!(s.app.popup, Popup::Compress(_)) {
                     break;
                 }
                 match rng.below(3) {
-                    0 => click_control_at(s, rng.pick(&["lock zip", "lock 7z", "lock password", "lock again"])),
+                    0 => click_control_at(s, rng.pick(&["compress zip", "compress 7z", "compress tar.gz", "compress fast", "compress smallest", "compress name", "compress password", "compress again"])),
                     1 => s.act(&format!("text {}", rng.pick(&["pw", "pw", "ö 1", " "]))),
                     _ => s.act(&format!("key {}", rng.pick(&["Backspace", "Tab", "ctrl+a"]))),
                 }
             }
-            if matches!(s.app.popup, Popup::Lock(_)) {
+            if matches!(s.app.popup, Popup::Compress(_)) {
                 match rng.below(3) {
-                    0 => click_control_at(s, "lock compress"),
+                    0 => click_control_at(s, "compress button"),
                     1 => s.act("key Enter"),
                     _ => s.act("key Escape"),
                 }
-                if matches!(s.app.popup, Popup::Lock(_)) {
+                if matches!(s.app.popup, Popup::Compress(_)) {
                     s.act("key Escape");
                 }
             }
@@ -4934,7 +4934,7 @@ mod journeys {
         s.act("key Enter");
         wait_until(&mut s, "folder in the zip", 10, |s| s.tab().path == zip.join("Trip") && s.tab().entries.iter().any(|e| e.name == "beach.txt"));
         s.act("key Backspace");
-        wait_until(&mut s, "back at the top", 10, |s| s.tab().path == zip);
+        wait_until(&mut s, "back at the top", 10, |s| s.tab().path == zip && s.tab().entries.iter().any(|e| e.name == "readme.txt"));
         // Preview, then open.
         s.cmd(ToggleInspector);
         select_path(&mut s, &zip.join("readme.txt"));
@@ -4990,12 +4990,15 @@ mod journeys {
         s.click_text("Zip (.zip)");
         s.idle(5);
         // A long menu in a short window scrolls: a row under its edge takes no click.
-        if s.popup_open() {
+        if s.popup_open() && !matches!(s.app.popup, Popup::Compress(_)) {
             let at = s.text_rect("Compress").center();
             s.act(&format!("scroll {:.0} {:.0} -6", at.x, at.y));
             s.idle(10);
             s.click_text("Zip (.zip)");
         }
+        // The dialog, its name as the menu gave it before: Enter compresses.
+        assert!(matches!(&s.app.popup, Popup::Compress(st) if st.name == "Archive.zip"));
+        s.act("key Enter");
         let out = docs.join("Archive.zip");
         wait_until(&mut s, "compressed", 10, |_| out.exists());
         wait_until(&mut s, "job done", 10, |s| s.app.jobs.iter().all(|j| j.finished_at.is_some()));
@@ -5297,15 +5300,15 @@ mod journeys {
         assert!(s.texts.iter().any(|(_, t)| t == "Compress › With a password…"), "found by search");
         s.act("key Enter");
         s.idle(2);
-        assert!(matches!(s.app.popup, Popup::Lock(_)));
-        assert!(some_text(&s, "Compress 2 items with a password"));
+        assert!(matches!(s.app.popup, Popup::Compress(_)));
+        assert!(some_text(&s, "Compress 2 items"));
         s.act("text tide and time");
-        click_control(&mut s, "lock again");
+        click_control(&mut s, "compress again");
         s.act("text tide and tim");
         s.idle(2);
         assert!(some_text(&s, "The two passwords differ"));
         s.act("key Enter");
-        assert!(matches!(s.app.popup, Popup::Lock(_)), "Compress waits for the same password twice");
+        assert!(matches!(s.app.popup, Popup::Compress(_)), "Compress waits for the same password twice");
         look(&mut s, "two passwords that differ");
         shot_still(&mut s, "lock-differ");
         s.act("text e");
@@ -5338,12 +5341,12 @@ mod journeys {
             go(&mut s, &d);
             select_names(&mut s, &["Taxes"]);
             palette_run(&mut s, "Compress With Password…");
-            click_control(&mut s, "lock 7z");
-            click_control(&mut s, "lock password");
+            click_control(&mut s, "compress 7z");
+            click_control(&mut s, "compress password");
             s.act("text 7 seas");
-            click_control(&mut s, "lock again");
+            click_control(&mut s, "compress again");
             s.act("text 7 seas");
-            click_control(&mut s, "lock compress");
+            click_control(&mut s, "compress button");
             let sz = d.join("Taxes.7z");
             wait_until(&mut s, "the 7z", 30, |s| sz.exists() && s.app.jobs.iter().all(|j| j.progress.lock().unwrap().finished));
             crate::archive::forget_password(&sz);
@@ -5352,6 +5355,121 @@ mod journeys {
             assert!(crate::archive::list(&sz).unwrap().iter().any(|i| i.path == Path::new("Taxes/2025/receipt.pdf")));
         }
         report("compress with a password", &s);
+    }
+
+    /// Wait for every job to end, and for the tab to show `want` (names in its folder).
+    fn wait_jobs(s: &mut Sim, what: &str) {
+        wait_until(s, what, 30, |s| s.app.jobs.iter().all(|j| j.progress.lock().unwrap().finished));
+        s.settle();
+    }
+
+    /// The Compress dialog: opened from the menu with its format chosen, the name typed
+    /// (its extension picks the format, a chip changes the extension), a level, then a
+    /// long job whose card counts bytes and time left as bsdtar reads them, pauses (the
+    /// count holds), resumes and is cancelled, leaving nothing; then a quick one that
+    /// finishes and is undone.
+    #[test]
+    fn compress_dialog_and_progress() {
+        if !sandboxed() || !crate::archive::available() {
+            return;
+        }
+        let home = fixture("compressdlg");
+        let d = home.join("Documents");
+        let mut noise = vec![0u8; 40 << 20];
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for b in noise.iter_mut() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *b = x as u8;
+        }
+        std::fs::write(d.join("noise.bin"), &noise).unwrap();
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.cmd(ViewDetails);
+        s.settle();
+        select_names(&mut s, &["noise.bin", "notes.txt"]);
+        open_submenu(&mut s, "notes.txt", "Compress");
+        s.click_text("Tar.xz (.tar.xz)");
+        s.idle(3);
+        assert!(matches!(&s.app.popup, Popup::Compress(st) if st.name == "Archive.tar.xz"), "named as before");
+        assert!(some_text(&s, "Compress 2 items"));
+        look(&mut s, "the compress dialog");
+        shot_still(&mut s, "compress-dialog");
+        for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
+            s.app.cfg.font_size = font;
+            s.app.cfg.spacing = spacing;
+            s.idle(3);
+            look(&mut s, &format!("the compress dialog at font {font}, spacing {spacing}"));
+        }
+        // The name: an extension typed picks the format; a chip changes the extension.
+        click_control(&mut s, "compress name");
+        s.act("key ctrl+a");
+        s.act("text backup.zip");
+        s.idle(2);
+        assert!(matches!(&s.app.popup, Popup::Compress(st) if st.format == crate::archwrite::Format::Zip));
+        click_control(&mut s, "compress tar.xz");
+        assert!(matches!(&s.app.popup, Popup::Compress(st) if st.name == "backup.tar.xz"));
+        // Tarballs take no password: the field says so and takes none.
+        assert!(!matches!(&s.app.popup, Popup::Compress(st) if st.lockable()));
+        click_control(&mut s, "compress smallest");
+        assert!(matches!(&s.app.popup, Popup::Compress(st) if st.level == crate::archwrite::Level::Smallest));
+        look(&mut s, "the compress dialog, filled in");
+        s.act("key Enter");
+        s.idle(2);
+        let out = d.join("backup.tar.xz");
+        assert!(s.app.jobs.iter().any(|j| j.label == "Compressing into backup.tar.xz"));
+        // Real progress: bytes counted as bsdtar reads them, between the ends.
+        let done = |s: &Sim| s.app.jobs.first().map(|j| j.progress.lock().unwrap().done_bytes).unwrap_or(0);
+        wait_until(&mut s, "progress shown", 30, |s| (4 << 20..30 << 20).contains(&done(s)));
+        assert!(s.texts.iter().any(|(_, t)| t.contains(" of ") && t.contains("left")), "bytes and time left on the card");
+        s.shot("compress-progress");
+        s.click_text("Pause");
+        // The worker stops the tool on its next look, some milliseconds on.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        s.idle(5);
+        let held = done(&s);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        s.idle(5);
+        assert_eq!(done(&s), held, "paused: the count holds");
+        assert!(some_text(&s, "Resume"));
+        s.click_text("Resume");
+        wait_until(&mut s, "going again", 30, |s| done(s) > held);
+        s.click_text("Cancel");
+        wait_jobs(&mut s, "cancelled");
+        assert!(!out.exists() && std::fs::read_dir(&d).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with('.')), "nothing left of it");
+        assert!(s.app.jobs.iter().all(|j| j.progress.lock().unwrap().errors.is_empty()), "a cancel is not an error");
+        // A quick one, done, then undone. The level chosen is offered again.
+        select_names(&mut s, &["notes.txt"]);
+        s.cmd(CompressZip);
+        s.idle(2);
+        assert!(matches!(&s.app.popup, Popup::Compress(st) if st.name == "notes.zip" && st.level == crate::archwrite::Level::Smallest));
+        click_control(&mut s, "compress fast");
+        click_control(&mut s, "compress button");
+        let zip = d.join("notes.zip");
+        wait_jobs(&mut s, "compressed");
+        assert_eq!(crate::archive::read_member(&zip, Path::new("notes.txt"), 1 << 20).unwrap(), std::fs::read(d.join("notes.txt")).unwrap());
+        s.act("key ctrl+z");
+        wait_until(&mut s, "undone", 10, |_| !zip.exists());
+        // Two with one name: said, and Compress waits.
+        select_names(&mut s, &["Taxes"]);
+        s.cmd(Compress7z);
+        click_control(&mut s, "compress name");
+        s.act("key ctrl+a");
+        s.act("text notes.txt");
+        s.idle(2);
+        click_control(&mut s, "compress 7z");
+        s.idle(2);
+        std::fs::write(d.join("taken.7z"), "x").unwrap();
+        click_control(&mut s, "compress name");
+        s.act("key ctrl+a");
+        s.act("text taken.7z");
+        s.idle(2);
+        assert!(some_text(&s, "There is a “taken.7z” here already"));
+        s.act("key Enter");
+        assert!(matches!(s.app.popup, Popup::Compress(_)), "Compress waits for a free name");
+        look(&mut s, "a name taken");
+        s.act("key Escape");
+        report("compress dialog", &s);
     }
 
     /// Password-protected archives: Extract Here asks for the password (a wrong one is

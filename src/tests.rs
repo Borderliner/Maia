@@ -11762,3 +11762,115 @@ fn select_matching_prompt_says_how_many() {
     assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("Nothing here matches *.gif"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// An archive's names and, for files, contents, as the real bsdtar (or 7z, for a locked
+/// one) gives them back.
+fn archive_contents(a: &Path) -> std::collections::BTreeMap<String, String> {
+    let all = crate::archive::list(a).unwrap_or_else(|e| panic!("{}: {e}", a.display()));
+    let x = a.with_file_name(format!("x-{}", a.file_name().unwrap().to_string_lossy()));
+    let _ = std::fs::remove_dir_all(&x);
+    crate::archive::extract(a, &[], &x).unwrap_or_else(|e| panic!("{}: {e}", a.display()));
+    let m = all.iter().map(|i| (i.path.display().to_string(), if i.is_dir { "/".to_string() } else { std::fs::read_to_string(x.join(&i.path)).unwrap_or_else(|e| format!("unreadable: {e}")) })).collect();
+    let _ = std::fs::remove_dir_all(&x);
+    m
+}
+
+/// Compressing as a job, through the real bsdtar and 7z: every format at each level
+/// (the smallest smaller than the fastest, on text that compresses), sources from two
+/// folders in one archive, a locked one; and a long one watched as it goes: its bytes
+/// count up between the ends, Pause holds them still (the tool is stopped), and Cancel
+/// ends it with nothing left behind, not even an error.
+#[test]
+fn compress_jobs_report_progress_and_cancel() {
+    use crate::archwrite::Level;
+    use std::sync::atomic::Ordering;
+    if !crate::archive::available() {
+        return;
+    }
+    let ctx = egui::Context::default();
+    let d = tmpdir("compressjob");
+    // Text as text goes: words picked at random from a small vocabulary.
+    let vocab = ["the", "archive", "keeps", "every", "file", "under", "one", "name", "and", "a", "smaller", "size", "when", "its", "words", "repeat", "often", "enough"];
+    let mut x = 0x2545_F491u64;
+    let words: String = (0..400_000)
+        .map(|i| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            format!("{}{}", vocab[(x >> 33) as usize % vocab.len()], if i % 13 == 12 { "\n" } else { " " })
+        })
+        .collect();
+    touch(&d.join("a/log.txt"), &words);
+    touch(&d.join("b/deep/other.txt"), "from another folder");
+    let run = |srcs: Vec<PathBuf>, out: &Path, level: Level, pw: Option<&str>| {
+        let j = ops::spawn(1, OpKind::Compress { srcs, out: out.to_path_buf(), password: pw.map(|p| crate::archive::Secret(p.into())), level }, ctx.clone());
+        let start = Instant::now();
+        while !j.progress.lock().unwrap().finished {
+            assert!(start.elapsed() < Duration::from_secs(60), "compress timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let p = j.progress.lock().unwrap();
+        assert!(p.errors.is_empty(), "{}: {:?}", out.display(), p.errors);
+        assert!(p.total_bytes > 0 && p.done_bytes == p.total_bytes, "{}: {} of {}", out.display(), p.done_bytes, p.total_bytes);
+    };
+    for ext in ["zip", "tar.gz", "tar.xz", "7z"] {
+        let (fast, small) = (d.join(format!("fast.{ext}")), d.join(format!("small.{ext}")));
+        run(vec![d.join("a/log.txt")], &fast, Level::Fast, None);
+        run(vec![d.join("a/log.txt")], &small, Level::Smallest, None);
+        let (f, s) = (std::fs::metadata(&fast).unwrap().len(), std::fs::metadata(&small).unwrap().len());
+        assert!(s < f, "{ext}: smallest {s} not below fast {f}");
+        assert_eq!(archive_contents(&small).get("log.txt").map(String::as_str), Some(words.as_str()), "{ext}");
+        // Two folders, one archive: each item at its top.
+        let two = d.join(format!("two.{ext}"));
+        run(vec![d.join("a/log.txt"), d.join("b/deep")], &two, Level::Normal, None);
+        let c = archive_contents(&two);
+        assert_eq!(c.get("deep/other.txt").map(String::as_str), Some("from another folder"), "{ext}: {:?}", c.keys().collect::<Vec<_>>());
+        assert!(c.contains_key("log.txt"), "{ext}");
+    }
+    // Locked, from two folders: a 7z gathers them for the 7z command.
+    if crate::archive::can_lock_7z() {
+        let l = d.join("locked.7z");
+        run(vec![d.join("a/log.txt"), d.join("b/deep")], &l, Level::Fast, Some("pa ss"));
+        crate::archive::forget_password(&l);
+        assert_eq!(crate::archive::list(&l).err().as_deref(), Some(crate::archive::NEEDS_PASSWORD));
+        crate::archive::set_password(&l, "pa ss".into());
+        assert_eq!(archive_contents(&l).get("deep/other.txt").map(String::as_str), Some("from another folder"));
+    }
+    assert!(std::fs::read_dir(&d).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with('.')), "no part or gathering folder left");
+    // A long one: 48 MB that won't compress, at xz's smallest.
+    let mut noise = vec![0u8; 48 << 20];
+    let mut x = 0x2545_F491_4F6C_DD1Du64;
+    for b in noise.iter_mut() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *b = x as u8;
+    }
+    std::fs::write(d.join("noise.bin"), &noise).unwrap();
+    let out = d.join("noise.tar.xz");
+    let j = ops::spawn(2, OpKind::Compress { srcs: vec![d.join("noise.bin")], out: out.clone(), password: None, level: Level::Smallest }, ctx.clone());
+    let done = || j.progress.lock().unwrap().done_bytes;
+    let start = Instant::now();
+    while done() < 4 << 20 {
+        assert!(start.elapsed() < Duration::from_secs(60) && !j.progress.lock().unwrap().finished, "no progress seen");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let total = j.progress.lock().unwrap().total_bytes;
+    assert_eq!(total, 48 << 20);
+    j.pause.store(true, Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(300));
+    let held = done();
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(done(), held, "paused: the tool is stopped");
+    assert!(held > 0 && held < total, "between the ends: {held} of {total}");
+    j.pause.store(false, Ordering::Relaxed);
+    let start = Instant::now();
+    while done() <= held {
+        assert!(start.elapsed() < Duration::from_secs(30), "resumed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    j.cancel.store(true, Ordering::Relaxed);
+    wait_job(&j);
+    assert!(j.progress.lock().unwrap().errors.is_empty(), "a cancel is not an error");
+    assert!(!out.exists(), "nothing made");
+    assert!(std::fs::read_dir(&d).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with('.')), "no part file left");
+    let _ = std::fs::remove_dir_all(&d);
+}

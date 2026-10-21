@@ -2925,40 +2925,20 @@ impl App {
                     crate::convert::start(self, to);
                 }
             }
-            Cmd::CompressLocked => {
+            Cmd::CompressLocked | Cmd::CompressZip | Cmd::CompressTarGz | Cmd::CompressTarXz | Cmd::Compress7z => {
                 let t = self.tab();
                 let srcs = t.targets();
                 if t.archive.is_some() || tab::is_computer(&t.path) || srcs.is_empty() {
                     self.toast("Select what to compress");
                     return;
                 }
-                self.popup = Popup::Lock(crate::popups::LockState::new(srcs, t.path.clone()));
-            }
-            Cmd::CompressZip | Cmd::CompressTarGz | Cmd::CompressTarXz | Cmd::Compress7z => {
-                let t = self.tab();
-                if t.archive.is_some() || tab::is_computer(&t.path) {
-                    return;
-                }
-                let srcs = t.targets();
-                if srcs.is_empty() {
-                    return;
-                }
-                let ext = match cmd {
-                    Cmd::CompressTarGz => "tar.gz",
-                    Cmd::CompressTarXz => "tar.xz",
-                    Cmd::Compress7z => "7z",
-                    _ => "zip",
+                let format = match cmd {
+                    Cmd::CompressTarGz => crate::archwrite::Format::TarGz,
+                    Cmd::CompressTarXz => crate::archwrite::Format::TarXz,
+                    Cmd::Compress7z => crate::archwrite::Format::SevenZ,
+                    _ => crate::archwrite::Format::Zip,
                 };
-                // One item is named after itself ("photo.png" -> "photo.zip"); several, "Archive".
-                let base = match srcs.as_slice() {
-                    [one] => {
-                        let n = one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        if one.is_dir() { n } else { std::path::Path::new(&n).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or(n) }
-                    }
-                    _ => "Archive".to_string(),
-                };
-                let out = fsx::unique_dest(&t.path, &format!("{base}.{ext}"));
-                self.actions.push(Action::StartJob(OpKind::Compress { srcs, out, password: None }));
+                self.popup = Popup::Compress(crate::popups::CompressState::new(srcs, t.path.clone(), format, cmd == Cmd::CompressLocked));
             }
             Cmd::CreateLink => {
                 let paths = self.tab().targets();

@@ -223,8 +223,8 @@ pub enum Popup {
     DropMenu { paths: Vec<PathBuf>, dest: PathBuf, pos: Pos2 },
     Connect(ConnectState),
     ArchivePassword(PasswordState),
-    /// Compress With Password: the format and the password, typed twice.
-    Lock(LockState),
+    /// Compress: the archive's name, format, level, and a password if wanted.
+    Compress(CompressState),
     /// The passphrase of an encrypted drive being opened.
     Unlock(UnlockState),
     Meaning(MeaningState),
@@ -353,35 +353,79 @@ impl UnlockState {
     }
 }
 
-/// What Compress With Password asks before it packs.
-pub struct LockState {
+/// What Compress asks before it packs: the name (the format follows its extension, and
+/// the other way round), how hard to work, and a password for a zip or a 7z.
+pub struct CompressState {
     pub srcs: Vec<PathBuf>,
     pub dir: PathBuf,
-    /// 7-Zip rather than zip.
-    pub seven: bool,
+    pub name: String,
+    pub format: crate::archwrite::Format,
+    pub level: crate::archwrite::Level,
     pub password: String,
     pub again: String,
-    focus: bool,
+    /// The field to focus on the next frame: the name, or (Compress With Password) the
+    /// password.
+    focus: Option<bool>,
+    /// The name last looked for in the folder, and whether something has it.
+    taken: Option<(String, bool)>,
 }
 
-impl LockState {
-    pub fn new(srcs: Vec<PathBuf>, dir: PathBuf) -> LockState {
-        LockState { srcs, dir, seven: false, password: String::new(), again: String::new(), focus: true }
+impl CompressState {
+    pub fn new(srcs: Vec<PathBuf>, dir: PathBuf, format: crate::archwrite::Format, locked: bool) -> CompressState {
+        // One item is named after itself ("photo.png" -> "photo.zip"); several, "Archive".
+        let base = match srcs.as_slice() {
+            [one] => {
+                let n = one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if one.is_dir() { n } else { Path::new(&n).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or(n) }
+            }
+            _ => "Archive".to_string(),
+        };
+        let name = fsx::unique_dest(&dir, &format!("{base}{}", format.ext())).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        CompressState { srcs, dir, name, format, level: crate::archwrite::last_level(), password: String::new(), again: String::new(), focus: Some(locked), taken: None }
     }
 
-    /// Why Compress can't run yet, if it can't.
-    pub fn problem(&self) -> Option<&'static str> {
-        if self.password.is_empty() {
-            Some("")
-        } else if self.password.contains(['\n', '\r']) {
-            Some("A password on one line")
-        } else if self.again.is_empty() {
-            Some("Type it again to be sure")
-        } else if self.again != self.password {
-            Some("The two passwords differ")
-        } else {
-            None
+    /// The name without the extension the format adds.
+    fn stem(&self) -> &str {
+        match crate::archwrite::Format::of(&self.name) {
+            Some(f) => &self.name[..self.name.len() - f.ext().len()],
+            None => self.name.trim_end_matches('.'),
         }
+    }
+
+    /// The file it makes: the name, with the format's extension when it lacks one.
+    pub fn out(&self) -> PathBuf {
+        let n = self.name.trim();
+        if crate::archwrite::Format::of(n) == Some(self.format) { self.dir.join(n) } else { self.dir.join(format!("{}{}", self.stem().trim(), self.format.ext())) }
+    }
+
+    /// Whether the format takes the password: zip always, 7z with the 7z command.
+    pub fn lockable(&self) -> bool {
+        self.format.lockable() && (self.format != crate::archwrite::Format::SevenZ || crate::archive::can_lock_7z())
+    }
+
+    /// Why Compress can't run yet, if it can't ("" when there is nothing to say).
+    pub fn problem(&self) -> Option<String> {
+        let n = self.name.trim();
+        if self.stem().trim().is_empty() || n.contains('/') {
+            return Some(String::new());
+        }
+        let names: Vec<String> = self.srcs.iter().filter_map(|s| s.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
+        if let Some(d) = names.iter().enumerate().find(|(i, n)| names[..*i].contains(n)).map(|x| x.1) {
+            return Some(format!("Two of these are called “{d}”"));
+        }
+        if self.taken.as_ref().is_some_and(|t| t.1) {
+            return Some(format!("There is a “{}” here already", self.out().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+        }
+        if !self.password.is_empty() && self.lockable() {
+            if self.password.contains(['\n', '\r']) {
+                return Some("A password on one line".into());
+            } else if self.again.is_empty() {
+                return Some(String::new());
+            } else if self.again != self.password {
+                return Some("The two passwords differ".into());
+            }
+        }
+        None
     }
 }
 
@@ -422,7 +466,7 @@ impl Popup {
             Popup::RunExec { .. } => "RunExec",
             Popup::Connect(..) => "Connect",
             Popup::ArchivePassword(..) => "ArchivePassword",
-            Popup::Lock(..) => "Lock",
+            Popup::Compress(..) => "Compress",
             Popup::Unlock(..) => "Unlock",
             Popup::Meaning(..) => "Meaning",
             Popup::Themes => "Themes",
@@ -999,7 +1043,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::RunExec { path } => run_exec(app, ctx, path),
         Popup::Connect(st) => connect(app, ctx, st),
         Popup::ArchivePassword(st) => archive_password(app, ctx, st),
-        Popup::Lock(st) => lock(app, ctx, st),
+        Popup::Compress(st) => compress(app, ctx, st),
         Popup::Unlock(st) => unlock_drive(app, ctx, st),
         Popup::Meaning(st) => meaning(app, ctx, st),
         Popup::Themes => themes(app, ctx),
@@ -3812,76 +3856,123 @@ fn unlock_drive(app: &mut App, ctx: &egui::Context, st: &mut UnlockState) -> boo
     !cancel
 }
 
-/// Compress With Password: zip or 7z, the password twice (hidden as typed), then the
-/// usual compress job with the password handed to it.
-fn lock(app: &mut App, ctx: &egui::Context, st: &mut LockState) -> bool {
+/// Compress: the name (prefilled, as the menu used to name it), the format and the
+/// level as chips, and a password, typed twice, for a zip or a 7z. Enter compresses.
+fn compress(app: &mut App, ctx: &egui::Context, st: &mut CompressState) -> bool {
+    use crate::archwrite::{Format, Level};
     let pal = app.pal;
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
         return false;
     }
-    let ok = st.problem().is_none();
+    // Looked for once per name typed, not on every frame.
+    let out = st.out();
+    if st.taken.as_ref().is_none_or(|t| t.0 != st.name) {
+        st.taken = Some((st.name.clone(), std::fs::symlink_metadata(&out).is_ok()));
+    }
+    let problem = st.problem();
     // Taken either way: Enter with the passwords not yet agreeing leaves the cursor where
     // it was rather than send it out of the field.
-    let mut go = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) && ok;
+    let mut go = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) && problem.is_none();
     let mut cancel = false;
-    let seven_ok = crate::archive::can_lock_7z();
-    let n = st.srcs.len();
     let what = match st.srcs.as_slice() {
         [one] => format!("“{}”", one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
-        _ => format!("{n} items"),
+        v => format!("{} items", v.len()),
     };
-    centered(ctx, "lock archive", 420.0, &pal, |ui| {
-        dialog_title(ui, &format!("Compress {what} with a password"), None, &pal);
+    let lockable = st.lockable();
+    centered(ctx, "compress", 420.0, &pal, |ui| {
+        dialog_title(ui, &format!("Compress {what}"), None, &pal);
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if crate::devtools::chip(ui, "Zip", !st.seven, "lock zip", "A .zip locked with AES-256; the names inside stay readable", &pal, false) {
-                st.seven = false;
+        ui.label(egui::RichText::new("Name").small().color(pal.text_dim));
+        let r = ui.add(egui::TextEdit::singleline(&mut st.name).desired_width(f32::INFINITY));
+        crate::ui::note_control(ui, r.rect, "compress name");
+        if st.focus == Some(false) {
+            r.request_focus();
+            st.focus = None;
+        }
+        // An extension typed picks the format.
+        if r.changed() {
+            if let Some(f) = Format::of(&st.name) {
+                st.format = f;
             }
-            if seven_ok && crate::devtools::chip(ui, "7-Zip", st.seven, "lock 7z", "A .7z whose names are locked too", &pal, false) {
-                st.seven = true;
+        }
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            for f in Format::ALL {
+                let what = match f {
+                    Format::Zip => "compress zip",
+                    Format::TarGz => "compress tar.gz",
+                    Format::TarXz => "compress tar.xz",
+                    Format::SevenZ => "compress 7z",
+                };
+                let tip = match f {
+                    Format::Zip => "Opens anywhere; a password locks it with AES-256",
+                    Format::TarGz => "Keeps Linux permissions and links; quick",
+                    Format::TarXz => "Keeps Linux permissions and links; smaller, slower",
+                    Format::SevenZ => "Small; a password locks the names too",
+                };
+                if crate::devtools::chip(ui, f.label(), st.format == f, what, tip, &pal, false) && st.format != f {
+                    st.name = format!("{}{}", st.stem(), f.ext());
+                    st.format = f;
+                }
+            }
+        });
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            for l in Level::ALL {
+                let (what, tip) = match l {
+                    Level::Fast => ("compress fast", "Quickest, a bigger archive"),
+                    Level::Normal => ("compress normal", "The tools' usual balance"),
+                    Level::Smallest => ("compress smallest", "Slowest, the smallest archive"),
+                };
+                if crate::devtools::chip(ui, l.label(), st.level == l, what, tip, &pal, false) {
+                    st.level = l;
+                }
             }
         });
         ui.add_space(8.0);
         ui.label(egui::RichText::new("Password").small().color(pal.text_dim));
-        let r = ui.add(egui::TextEdit::singleline(&mut st.password).password(true).desired_width(f32::INFINITY));
-        crate::ui::note_control(ui, r.rect, "lock password");
-        if st.focus {
+        let hint = if lockable {
+            "None"
+        } else if st.format.lockable() {
+            "A locked 7z needs the 7z command"
+        } else {
+            "Only zip and 7-Zip take one"
+        };
+        let r = ui.add_enabled(lockable, egui::TextEdit::singleline(&mut st.password).password(true).hint_text(hint).desired_width(f32::INFINITY));
+        crate::ui::note_control(ui, r.rect, "compress password");
+        if st.focus == Some(true) {
             r.request_focus();
-            st.focus = false;
+            st.focus = None;
         }
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new("Again").small().color(pal.text_dim));
-        let r = ui.add(egui::TextEdit::singleline(&mut st.again).password(true).desired_width(f32::INFINITY));
-        crate::ui::note_control(ui, r.rect, "lock again");
-        match st.problem() {
-            Some(why) if !why.is_empty() && !st.again.is_empty() => {
+        if lockable && !st.password.is_empty() {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("Again").small().color(pal.text_dim));
+            let r = ui.add(egui::TextEdit::singleline(&mut st.again).password(true).desired_width(f32::INFINITY));
+            crate::ui::note_control(ui, r.rect, "compress again");
+        }
+        match &problem {
+            // The passwords are said to differ only once the second is being typed.
+            Some(why) if !why.is_empty() && (!why.contains("passwords") || !st.again.is_empty()) => {
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new(why).small().color(pal.danger));
+                ui.label(egui::RichText::new(why.as_str()).small().color(pal.danger));
             }
             _ => {}
         }
         dialog_buttons(ui, |ui| {
-            let b = primary_button(ui, "Compress", ok, &pal);
-            crate::ui::note_control(ui, b.rect, "lock compress");
-            go |= b.clicked() && ok;
+            let b = primary_button(ui, "Compress", problem.is_none(), &pal);
+            crate::ui::note_control(ui, b.rect, "compress button");
+            go |= b.clicked() && problem.is_none();
             if plain_button(ui, "Cancel", &pal).clicked() {
                 cancel = true;
             }
         });
     });
     if go {
-        let ext = if st.seven && seven_ok { "7z" } else { "zip" };
-        let base = match st.srcs.as_slice() {
-            [one] => {
-                let n = one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                if one.is_dir() { n } else { Path::new(&n).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or(n) }
-            }
-            _ => "Archive".to_string(),
-        };
-        let out = fsx::unique_dest(&st.dir, &format!("{base}.{ext}"));
-        let password = Some(crate::archive::Secret(std::mem::take(&mut st.password)));
+        *crate::archwrite::LAST_LEVEL.lock().unwrap_or_else(|e| e.into_inner()) = st.level;
+        let password = (st.lockable() && !st.password.is_empty()).then(|| crate::archive::Secret(std::mem::take(&mut st.password)));
         st.again.clear();
-        app.actions.push(Action::StartJob(crate::ops::OpKind::Compress { srcs: std::mem::take(&mut st.srcs), out, password }));
+        let out = st.out();
+        app.actions.push(Action::StartJob(crate::ops::OpKind::Compress { srcs: std::mem::take(&mut st.srcs), out, password, level: st.level }));
         return false;
     }
     !cancel

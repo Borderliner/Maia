@@ -32,9 +32,9 @@ pub enum OpKind {
     /// Paths inside `archive` (none: all of it, into its own folder when it holds
     /// several things) extracted into `dest`.
     Extract { archive: PathBuf, members: Vec<PathBuf>, dest: PathBuf },
-    /// `srcs` (all in one folder) packed into the archive `out`, locked with a password
-    /// when there is one.
-    Compress { srcs: Vec<PathBuf>, out: PathBuf, password: Option<crate::archive::Secret> },
+    /// `srcs` packed into the archive `out` at `level`, locked with a password when there
+    /// is one.
+    Compress { srcs: Vec<PathBuf>, out: PathBuf, password: Option<crate::archive::Secret>, level: crate::archwrite::Level },
     /// One command run as administrator (through pkexec).
     Admin { task: crate::admin::Task, tools: crate::drives::Tools },
     /// Files converted to another format beside them (all into `out`, when one file is
@@ -441,24 +441,19 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
         OpKind::Convert { srcs, to, out, tools } => crate::convert::run(srcs, *to, out.as_deref(), tools, p, cancel, ctx),
         OpKind::Extract { archive, members, dest } => {
             p.lock().unwrap().current = name_of(archive);
-            extract(archive, members, dest, p);
+            extract(archive, members, dest, p, cancel, ctx);
         }
-        OpKind::Compress { srcs, out, password } => {
+        OpKind::Compress { srcs, out, password, level } => {
             p.lock().unwrap().total_items = srcs.len();
             p.lock().unwrap().current = name_of(out);
-            let names: Vec<std::ffi::OsString> = srcs.iter().filter_map(|s| s.file_name().map(|n| n.to_os_string())).collect();
-            let made = out.parent().map(|parent| match password {
-                Some(pw) => crate::archive::create_locked(out, parent, &names, &pw.0),
-                None => crate::archive::create(out, parent, &names),
-            });
-            match made {
-                Some(Ok(())) => {
+            match crate::archwrite::compress(out, srcs, *level, password.as_ref().map(|pw| pw.0.as_str()), p, cancel, ctx) {
+                Ok(()) => {
                     let mut g = p.lock().unwrap();
                     g.produced.push((out.clone(), out.clone()));
                     g.done_items = srcs.len();
                 }
-                Some(Err(e)) => p.lock().unwrap().errors.push(format!("{}: {e}", name_of(out))),
-                None => {}
+                Err(_) if cancel.cancelled() => {}
+                Err(e) => p.lock().unwrap().errors.push(format!("{}: {e}", name_of(out))),
             }
         }
         OpKind::Delete { paths } => {
@@ -690,7 +685,7 @@ fn record_move(p: &Mutex<Progress>, s: &Path, r: std::io::Result<()>, landed: &P
 
 /// Extract into a hidden staging folder beside the results, then move each top-level
 /// result into place (renamed if the name is taken), so a failure leaves nothing half done.
-fn extract(archive: &Path, members: &[PathBuf], dest: &Path, p: &Mutex<Progress>) {
+fn extract(archive: &Path, members: &[PathBuf], dest: &Path, p: &Mutex<Progress>, gate: &Gate, ctx: &egui::Context) {
     let fail = |e: String| {
         let mut g = p.lock().unwrap_or_else(|e| e.into_inner());
         if crate::archive::wants_password(&e) {
@@ -724,10 +719,13 @@ fn extract(archive: &Path, members: &[PathBuf], dest: &Path, p: &Mutex<Progress>
     };
     p.lock().unwrap_or_else(|e| e.into_inner()).total_items = members.len();
     let stage = dest.join(format!(".maia-extract-{}", std::process::id()));
-    if let Err(e) = crate::archive::extract(archive, &members, &stage) {
+    if let Err(e) = crate::archwrite::extract(archive, &members, &stage, p, gate, ctx) {
         let _ = fs::remove_dir_all(&stage);
         if let Some(d) = made {
             let _ = fs::remove_dir(d);
+        }
+        if gate.cancelled() {
+            return;
         }
         return fail(e);
     }

@@ -7,6 +7,7 @@ mod appearance;
 mod checksum;
 mod codesearch;
 mod archive;
+mod archwrite;
 mod blame;
 mod books;
 mod avatars;
