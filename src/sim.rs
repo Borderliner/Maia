@@ -1102,7 +1102,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(173) {
+    match rng.below(174) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2674,6 +2674,21 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             }
             s.act(rng.pick(&["key Enter", "key Enter", "key Escape"]));
             s.settle();
+        }
+        173 => {
+            // Select Matching…: from the palette or by name, a pattern, then Enter or Esc.
+            if rng.below(2) == 0 {
+                s.act("key ctrl+shift+p");
+                s.act("text Select Matching");
+                s.act("key Enter");
+            } else {
+                s.cmd(Cmd::SelectMatching);
+            }
+            if !matches!(s.app.popup, Popup::Prompt { .. }) {
+                return;
+            }
+            s.act(&format!("text {}", rng.pick(&["*.png", "*.{md,txt}", "IMG*", "*", "[a-f]*", "*/*.rs", "{", "?", "résumé*", " "])));
+            s.act(rng.pick(&["key Enter", "key Enter", "key Escape"]));
         }
         _ => {
             s.note("idle".into());
@@ -15949,5 +15964,98 @@ mod journeys {
         look(&mut s, "landed");
         s.shot("copyto-landed");
         report("copy to", &s);
+    }
+
+    /// Select Matching… from the palette, a pattern typed into its prompt and Enter.
+    fn select_matching(s: &mut Sim, pattern: &str) {
+        s.act("key ctrl+shift+p");
+        s.act("text Select Matching");
+        s.act("key Enter");
+        if !matches!(&s.app.popup, Popup::Prompt { title, .. } if title == "Select matching") {
+            s.fail("the pattern is asked for");
+        }
+        s.act(&format!("text {pattern}"));
+        s.act("key Enter");
+        assert!(!s.popup_open(), "Enter applies it");
+    }
+
+    /// The names the view shows that end in one of `exts`, and whether the selection is
+    /// exactly those.
+    fn selected_exactly(s: &Sim, exts: &[&str]) -> (usize, bool) {
+        let t = s.tab();
+        let want: std::collections::HashSet<u32> = t.view.iter().copied().filter(|&i| exts.iter().any(|x| t.entries[i as usize].name.to_lowercase().ends_with(x))).collect();
+        (want.len(), want == t.selected)
+    }
+
+    /// Select Matching… in every view, the Columns view and a narrow window included:
+    /// what the pattern names is selected among what is shown, added to what was, inside
+    /// a filter and a flattened folder too, with a word of how many.
+    #[test]
+    fn select_matching_in_every_view() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("selmatch");
+        let mut s = Sim::new(&home.join("Big"), vec2(1280.0, 800.0));
+        for v in [ViewDetails, ViewTree, ViewList, ViewMedium, ViewLarge, ViewXL, ViewColumns] {
+            s.cmd(v);
+            s.cmd(SelectNone);
+            s.settle();
+            select_matching(&mut s, "*.png");
+            let (n, exact) = selected_exactly(&s, &[".png"]);
+            assert!(n == 100 && exact, "{v:?}: the 100 pictures, only them");
+            assert!(toast_is(&s, "100 items match *.png"), "{v:?}: says how many");
+            select_matching(&mut s, "FILE00?0.{MD,json}");
+            // file0010.json, file0040.json and file0070.json.
+            assert_eq!(s.tab().selected.len(), 100 + 3, "{v:?}: added to the selection, case ignored");
+            let c = s.tab().cursor.unwrap_or_else(|| s.fail("a cursor"));
+            assert!(s.tab().selected.contains(&c), "{v:?}: the cursor on what was chosen");
+            look(&mut s, &format!("selected by pattern in {v:?}"));
+        }
+        s.cmd(ViewDetails);
+        s.cmd(SelectNone);
+        s.act("key ctrl+shift+p");
+        s.act("text Select Matching");
+        s.act("key Enter");
+        s.act("text *.{png,md}");
+        look(&mut s, "the pattern prompt");
+        s.shot("select-prompt");
+        s.act("key Enter");
+        assert_eq!(selected_exactly(&s, &[".png", ".md"]), (200, true));
+        s.settle();
+        s.act("move -50 -50");
+        s.idle(2);
+        s.shot("select-result");
+        // Inside a filter: only what it lets through.
+        s.cmd(SelectNone);
+        s.act("key ctrl+f");
+        s.act("text file01");
+        wait_until(&mut s, "filtered", 5, |s| s.tab().filter == "file01" && !s.tab().is_loading() && s.tab().view.len() < 600);
+        s.settle();
+        select_matching(&mut s, "*.png");
+        let (n, exact) = selected_exactly(&s, &[".png"]);
+        assert!(n > 0 && n < 100 && exact, "only the filtered pictures: {n}");
+        // Nothing matching: said, nothing selected.
+        s.cmd(SelectNone);
+        select_matching(&mut s, "*.gif");
+        assert!(s.tab().selected.is_empty() && toast_is(&s, "Nothing here matches *.gif"));
+        // A flattened folder: names anywhere below, or a path below it.
+        go(&mut s, &home.join("Code"));
+        s.cmd(ToggleFlatten);
+        s.settle();
+        select_matching(&mut s, "*.rs");
+        assert_eq!(s.tab().selected.len(), 2, "main.rs and lib.rs, deep in the tree");
+        s.cmd(SelectNone);
+        select_matching(&mut s, "maia/*.toml");
+        assert_eq!(s.tab().target_entries().iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["Cargo.toml"]);
+        // Narrow, in Columns.
+        go(&mut s, &home.join("Pictures/Trip"));
+        s.cmd(ViewColumns);
+        s.resize(520.0, 340.0);
+        s.settle();
+        select_matching(&mut s, "img0[0-4].png");
+        assert_eq!(s.tab().selected.len(), 5);
+        look(&mut s, "narrow columns");
+        report("select matching", &s);
     }
 }

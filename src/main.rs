@@ -84,6 +84,7 @@ mod marks;
 mod query;
 mod rename;
 mod runner;
+mod selmatch;
 mod semantic;
 mod sendto;
 mod share;

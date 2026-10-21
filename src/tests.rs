@@ -11683,3 +11683,82 @@ fn copy_to_remembers_a_few_destinations() {
     assert_eq!(km.lookup(&commands::parse_binding("Shift+F5").unwrap()).0, Some(Cmd::CopyTo));
     assert_eq!(km.lookup(&commands::parse_binding("Shift+F6").unwrap()).0, Some(Cmd::MoveTo));
 }
+
+/// Select Matching… on a real folder: globs with `*`, `?`, classes and `{a,b}`, case
+/// ignored, added to what is selected; only what the view shows (hidden files and the
+/// filter respected); paths below the folder in a flattened listing.
+#[test]
+fn select_matching_adds_what_the_pattern_names() {
+    use crate::selmatch::{Pattern, select};
+    let d = tmpdir("selmatch");
+    for f in ["IMG_0001.JPG", "img_0002.jpg", "IMG_0003.png", "holiday.jpeg", "notes.txt", "a.b.tar.gz", ".hidden.jpg", "raw/IMG_0004.jpg", "src/main.rs", "src/deep/lib.rs"] {
+        touch(&d.join(f), "x");
+    }
+    let stats = HashMap::new();
+    let mut t = Tab::new(1, d.clone(), ViewSettings::default(), egui::Context::default());
+    pump(&mut t, &stats);
+    let selected = |t: &Tab| {
+        let mut v: Vec<String> = t.selected.iter().map(|&i| t.entries[i as usize].name.clone()).collect();
+        v.sort();
+        v
+    };
+    let pat = |s: &str| Pattern::new(s).unwrap();
+    assert_eq!(select(&mut t, &pat("*.jpg")), 2);
+    assert_eq!(selected(&t), ["IMG_0001.JPG", "img_0002.jpg"], "case ignored, the hidden one not shown so not chosen");
+    assert!(t.cursor.is_some_and(|c| t.selected.contains(&c)), "the cursor on a match");
+    // Added to, not replaced.
+    assert_eq!(select(&mut t, &pat("*.{png,jpeg}")), 2);
+    assert_eq!(selected(&t), ["IMG_0001.JPG", "IMG_0003.png", "holiday.jpeg", "img_0002.jpg"]);
+    t.selected.clear();
+    assert_eq!(select(&mut t, &pat("img_000[13].*")), 2);
+    assert_eq!(selected(&t), ["IMG_0001.JPG", "IMG_0003.png"]);
+    t.selected.clear();
+    assert_eq!(select(&mut t, &pat("  ?????.txt ")), 1, "spaces around are trimmed");
+    assert_eq!(select(&mut t, &pat("*.tar.gz")), 1);
+    assert_eq!(select(&mut t, &pat("raw")), 1, "a folder matches by its name");
+    assert_eq!(select(&mut t, &pat("{a,b}")), 0, "a whole name or nothing");
+    assert_eq!(select(&mut t, &pat("{notes}.txt")), 0, "a brace with no comma is a character");
+    assert!(Pattern::new("   ").is_none());
+    // The filter narrows what can be chosen.
+    t.selected.clear();
+    t.filter = "IMG".into();
+    pump(&mut t, &stats);
+    assert_eq!(select(&mut t, &pat("*")), 3);
+    assert_eq!(selected(&t), ["IMG_0001.JPG", "IMG_0003.png", "img_0002.jpg"]);
+    // Flattened: names anywhere below, or a path below the folder.
+    t.filter.clear();
+    t.selected.clear();
+    t.set_flatten(true);
+    pump(&mut t, &stats);
+    assert_eq!(select(&mut t, &pat("img_*.jpg")), 3, "raw/IMG_0004.jpg too");
+    t.selected.clear();
+    assert_eq!(select(&mut t, &pat("src/*.rs")), 2, "`*` crosses folders as the picker's globs do");
+    assert_eq!(selected(&t), ["lib.rs", "main.rs"]);
+    t.selected.clear();
+    assert_eq!(select(&mut t, &pat("src/main.rs")), 1);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Through the prompt: what it says, and the selection of the active tab.
+#[test]
+fn select_matching_prompt_says_how_many() {
+    let ctx = egui::Context::default();
+    let d = tmpdir("selprompt");
+    for f in ["a.jpg", "b.JPG", "c.png"] {
+        touch(&d.join(f), "x");
+    }
+    let mut app = crate::app::App::new(&ctx, vec![d.clone()]);
+    pick_entry(&mut app, &ctx, "c.png");
+    app.run(Cmd::SelectMatching);
+    assert!(matches!(app.popup, crate::popups::Popup::Prompt { .. }));
+    app_frame(&mut app, &ctx);
+    app_input(&mut app, &ctx, vec![egui::Event::Text("*.jpg".into())]);
+    app_input(&mut app, &ctx, vec![press(egui::Key::Enter)]);
+    assert!(matches!(app.popup, crate::popups::Popup::None));
+    assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("2 items match *.jpg"));
+    let names: HashSet<String> = app.tab().target_entries().iter().map(|e| e.name.clone()).collect();
+    assert_eq!(names, ["a.jpg", "b.JPG", "c.png"].map(String::from).into(), "added to the one selected");
+    crate::selmatch::run(&mut app, "*.gif");
+    assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("Nothing here matches *.gif"));
+    let _ = std::fs::remove_dir_all(&d);
+}

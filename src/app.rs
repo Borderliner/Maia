@@ -3029,6 +3029,7 @@ impl App {
                 let all: HashSet<u32> = t.view.iter().copied().collect();
                 t.selected = all.difference(&t.selected).copied().collect();
             }
+            Cmd::SelectMatching => self.popup = Popup::prompt("Select matching", String::new(), Box::new(|app: &mut App, text: String| crate::selmatch::run(app, &text))),
             Cmd::ToggleSelection => {
                 let t = self.tab();
                 if let Some(c) = t.cursor {

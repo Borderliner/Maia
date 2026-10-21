@@ -357,6 +357,7 @@ commands! {
     SelectNone, "select_none", Selection, "Select None", "Clear the selection.", ["Ctrl+Shift+A"];
     InvertSelection, "invert_selection", Selection, "Invert Selection", "Select what isn't selected and vice versa.", [];
     ToggleSelection, "toggle_selection", Selection, "Toggle Selection", "Select or unselect the item under the cursor.", ["Ctrl+Space"];
+    SelectMatching, "select_matching", Selection, "Select Matching…", "Add what is shown whose name matches a pattern to the selection, ignoring case: *.jpg, IMG_*, *.{png,jpg}, or src/*.rs in a flattened folder.", [];
 
     SaveLayout, "save_layout", Layouts, "Save Layout As…", "Save panels, tabs and window size under a name.", [];
     LoadLayout, "load_layout", Layouts, "Load Layout…", "Switch to a saved layout.", [];
