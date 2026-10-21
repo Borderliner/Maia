@@ -174,6 +174,9 @@ pub fn kind(archive: &Path) -> Result<Kind, String> {
     if TARS.iter().any(|e| l.ends_with(e)) {
         return Ok(Kind::Tar);
     }
+    if archive::single(archive) {
+        return Err(format!("“{name}” is one compressed file: extract it to change it"));
+    }
     let ext = l.rsplit_once('.').map(|x| x.1.to_uppercase()).unwrap_or_default();
     Err(format!("{ext} archives can only be read here: extract it to change it"))
 }

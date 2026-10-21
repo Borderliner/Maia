@@ -11898,7 +11898,7 @@ fn archives_change_in_place() {
     }
     crate::archive::NO_SEVEN.with(|n| n.set(false));
     // What can only be read says so.
-    for (n, why) in [("x.rar", "RAR archives can only be read here"), ("x.iso", "ISO archives"), ("x.deb", "DEB archives"), ("x.tar.lz", "LZ archives")] {
+    for (n, why) in [("x.rar", "RAR archives can only be read here"), ("x.iso", "ISO archives"), ("x.deb", "DEB archives"), ("notes.txt.gz", "one compressed file"), ("x.tar.lz", "LZ archives")] {
         assert!(crate::archwrite::kind(Path::new(n)).is_err_and(|e| e.contains(why)), "{n}");
     }
     assert!(crate::archwrite::kind(Path::new("x.tar.zst")).is_ok() && crate::archwrite::kind(Path::new("X.ZIP")).is_ok());
@@ -12076,6 +12076,87 @@ fn compress_jobs_report_progress_and_cancel() {
     assert!(j.progress.lock().unwrap().errors.is_empty(), "a cancel is not an error");
     assert!(!out.exists(), "nothing made");
     assert!(std::fs::read_dir(&d).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with('.')), "no part file left");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A lone compressed file (gzip, bzip2, xz, zstd, each written by bsdtar's raw format) is
+/// an archive of the one file its name says, sized and read whole; a .deb (an ar
+/// archive, as bsdtar writes one) and an .rpm (an empty signature and header over a cpio
+/// payload, the layout libarchive reads) list and extract as archives. Extract Here on
+/// the .gz gives the file, through the job.
+#[test]
+fn lone_compressed_files_and_packages_open_as_archives() {
+    use crate::archive::{entries, extract, extract_for_open, is_archive, read_member, single, stem};
+    if !crate::archive::available() {
+        return;
+    }
+    let d = tmpdir("lonepack");
+    let text: String = (0..5000).map(|i| format!("{i} – é\n")).collect();
+    touch(&d.join("src/server.log"), &text);
+    let bsdtar = |args: &[&str]| assert!(std::process::Command::new("bsdtar").env("LC_ALL", "C.UTF-8").args(args).current_dir(&d).status().unwrap().success(), "{args:?}");
+    for (ext, filter) in [("gz", "-z"), ("bz2", "-j"), ("xz", "-J"), ("zst", "--zstd")] {
+        let a = d.join(format!("server.log.{ext}"));
+        bsdtar(&["-cf", a.to_str().unwrap(), "--format", "raw", filter, "-C", "src", "server.log"]);
+        assert!(is_archive(&format!("server.log.{ext}")) && single(&a) && stem(&format!("server.log.{ext}")) == "server.log", "{ext}");
+        let e = entries(&a, Path::new("")).unwrap_or_else(|e| panic!("{ext}: {e}"));
+        assert_eq!(e.len(), 1, "{ext}");
+        assert_eq!((e[0].name.as_str(), e[0].size, e[0].is_dir), ("server.log", text.len() as u64, false), "{ext}");
+        assert_eq!(e[0].path, a.join("server.log"));
+        assert_eq!(read_member(&a, Path::new("server.log"), 1 << 20).unwrap(), text.as_bytes(), "{ext}");
+        let f = extract_for_open(&a, Path::new("server.log")).unwrap_or_else(|e| panic!("{ext}: {e}"));
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), text, "{ext}");
+        let x = d.join(format!("x-{ext}"));
+        extract(&a, &[], &x).unwrap();
+        assert_eq!(std::fs::read_to_string(x.join("server.log")).unwrap(), text, "{ext}");
+        let _ = std::fs::remove_dir_all(crate::archive::open_cache(&a));
+    }
+    // Not a tarball's: those stay tarballs.
+    assert!(!single(Path::new("x.tar.gz")) && !single(Path::new("x.tar.zst")) && single(Path::new("x.json.zst")));
+    // Extract Here on one: the file beside it, counted against the archive's size.
+    let ctx = egui::Context::default();
+    let out = d.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let j = ops::spawn(1, OpKind::Extract { archive: d.join("server.log.xz"), members: vec![], dest: out.clone() }, ctx.clone());
+    wait_job(&j);
+    assert!(j.progress.lock().unwrap().errors.is_empty(), "{:?}", j.progress.lock().unwrap().errors);
+    assert_eq!(std::fs::read_to_string(out.join("server.log")).unwrap(), text);
+    assert!(j.progress.lock().unwrap().done_bytes == std::fs::metadata(d.join("server.log.xz")).unwrap().len());
+    // A .deb: debian-binary, control and data, as dpkg lays them out.
+    touch(&d.join("pkg/data/usr/share/doc/hello/README"), "hello from the package");
+    touch(&d.join("pkg/control/control"), "Package: hello\nVersion: 1.0\n");
+    touch(&d.join("pkg/deb/debian-binary"), "2.0\n");
+    bsdtar(&["-czf", "pkg/deb/control.tar.gz", "-C", "pkg/control", "control"]);
+    bsdtar(&["-cJf", "pkg/deb/data.tar.xz", "-C", "pkg/data", "usr"]);
+    bsdtar(&["-cf", "hello_1.0_all.deb", "--format", "ar", "-C", "pkg/deb", "debian-binary", "control.tar.gz", "data.tar.xz"]);
+    let deb = d.join("hello_1.0_all.deb");
+    assert!(is_archive("hello_1.0_all.deb"));
+    let mut names: Vec<String> = entries(&deb, Path::new("")).unwrap().iter().map(|e| e.name.clone()).collect();
+    names.sort();
+    assert_eq!(names, ["control.tar.gz", "data.tar.xz", "debian-binary"]);
+    let f = extract_for_open(&deb, Path::new("debian-binary")).unwrap();
+    assert_eq!(std::fs::read_to_string(f).unwrap(), "2.0\n");
+    // An .rpm: the lead, two empty headers, a gzipped cpio of the files.
+    bsdtar(&["-czf", "payload.cpio.gz", "--format", "newc", "-C", "pkg/data", "./usr"]);
+    let mut rpm = vec![0xed, 0xab, 0xee, 0xdb, 3, 0, 0, 0, 0, 1];
+    rpm.extend(b"hello-1.0-1".iter().copied().chain(std::iter::repeat(0)).take(66));
+    rpm.extend([0, 1, 0, 5]);
+    rpm.extend([0u8; 16]);
+    for _ in 0..2 {
+        rpm.extend([0x8e, 0xad, 0xe8, 0x01, 0, 0, 0, 0]);
+        rpm.extend([0u8; 8]);
+    }
+    rpm.extend(std::fs::read(d.join("payload.cpio.gz")).unwrap());
+    let r = d.join("hello-1.0-1.noarch.rpm");
+    std::fs::write(&r, rpm).unwrap();
+    assert!(is_archive("hello-1.0-1.noarch.rpm"));
+    let doc = entries(&r, Path::new("usr/share/doc/hello")).unwrap_or_else(|e| panic!("rpm: {e}"));
+    assert_eq!(doc.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["README"]);
+    let x = d.join("x-rpm");
+    extract(&r, &[PathBuf::from("usr/share/doc/hello/README")], &x).unwrap();
+    assert_eq!(std::fs::read_to_string(x.join("usr/share/doc/hello/README")).unwrap(), "hello from the package");
+    for c in [&deb, &r] {
+        let _ = std::fs::remove_dir_all(crate::archive::open_cache(c));
+    }
     let _ = std::fs::remove_dir_all(&d);
 }
 

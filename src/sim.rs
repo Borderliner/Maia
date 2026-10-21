@@ -5673,6 +5673,64 @@ mod journeys {
         report("compress dialog", &s);
     }
 
+    /// New kinds of archive: a .deb (control and data inside, as bsdtar writes one), a
+    /// log compressed on its own (one file, previewed as text in the inspector), opened
+    /// with Enter like a folder, and Extract Here giving the file back.
+    #[test]
+    fn packages_and_lone_compressed_files() {
+        if !sandboxed() || !crate::archive::available() {
+            return;
+        }
+        let home = fixture("lonefiles");
+        let d = home.join("Downloads");
+        let pkg = root().join("debsrc");
+        let _ = std::fs::remove_dir_all(&pkg);
+        std::fs::create_dir_all(pkg.join("data/usr/share/doc/hello")).unwrap();
+        std::fs::write(pkg.join("data/usr/share/doc/hello/README"), "hello").unwrap();
+        std::fs::write(pkg.join("control"), "Package: hello\n").unwrap();
+        std::fs::write(pkg.join("debian-binary"), "2.0\n").unwrap();
+        let tar = |args: &[&str]| assert!(std::process::Command::new("bsdtar").env("LC_ALL", "C.UTF-8").args(args).current_dir(&pkg).status().unwrap().success(), "{args:?}");
+        tar(&["-czf", "control.tar.gz", "control"]);
+        tar(&["-cJf", "data.tar.xz", "-C", "data", "usr"]);
+        let deb = d.join("hello_1.0_all.deb");
+        tar(&["-cf", deb.to_str().unwrap(), "--format", "ar", "debian-binary", "control.tar.gz", "data.tar.xz"]);
+        let log: String = (0..300).map(|i| format!("{i}: the service said hello\n")).collect();
+        std::fs::write(pkg.join("service.log"), &log).unwrap();
+        let gz = d.join("service.log.gz");
+        tar(&["-czf", gz.to_str().unwrap(), "--format", "raw", "service.log"]);
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.cmd(ViewDetails);
+        s.settle();
+        select_path(&mut s, &deb);
+        s.act("key Enter");
+        wait_until(&mut s, "inside the deb", 10, |s| s.tab().path == deb && names_here(s) == ["control.tar.gz", "data.tar.xz", "debian-binary"]);
+        look(&mut s, "a deb");
+        s.shot("deb-browsed");
+        s.act("key Backspace");
+        wait_until(&mut s, "back out", 10, |s| s.tab().path == d && s.tab().entries.iter().any(|e| e.path == gz));
+        // The lone .gz previews as the log inside it.
+        s.cmd(ToggleInspector);
+        select_path(&mut s, &gz);
+        wait_until(&mut s, "the log previewed", 10, |s| s.texts.iter().any(|(_, t)| t.contains("the service said hello")));
+        look(&mut s, "a .gz previewed");
+        s.cmd(ToggleInspector);
+        s.act("key Enter");
+        wait_until(&mut s, "inside the gz", 10, |s| s.tab().path == gz && names_here(s) == ["service.log"]);
+        assert_eq!(s.tab().entries[0].size, log.len() as u64, "its size, from the gzip trailer");
+        look(&mut s, "inside a .gz");
+        // Changing it is not offered: one compressed file.
+        s.act("key Delete");
+        s.idle(2);
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0.contains("one compressed file")));
+        s.act("key Backspace");
+        wait_until(&mut s, "out again", 10, |s| s.tab().path == d && s.tab().entries.iter().any(|e| e.path == gz));
+        select_path(&mut s, &gz);
+        s.cmd(ExtractHere);
+        wait_until(&mut s, "extracted", 10, |_| d.join("service.log").exists());
+        assert_eq!(std::fs::read_to_string(d.join("service.log")).unwrap(), log);
+        report("packages and lone files", &s);
+    }
+
     /// Password-protected archives: Extract Here asks for the password (a wrong one is
     /// said to be wrong), a 7z whose names are hidden asks on the way in, a file opened
     /// from an AES zip asks before it opens, and Cancel leaves everything as it was.

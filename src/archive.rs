@@ -1,7 +1,8 @@
 //! Archives as folders, through `bsdtar` (libarchive: zip, tar and its compressions, 7z,
-//! rar, iso, cpio). A path inside an archive is the archive's path joined with the path
-//! inside it, so tabs, breadcrumbs and history need nothing special. What is inside is
-//! extracted to be opened or copied out; changes are `archwrite`'s.
+//! rar, iso, cpio, deb, rpm). A path inside an archive is the archive's path joined with
+//! the path inside it, so tabs, breadcrumbs and history need nothing special. What is
+//! inside is extracted to be opened or copied out; changes are `archwrite`'s. A lone
+//! compressed file (notes.txt.gz) is an archive of one file, decompressed by `bsdcat`.
 //!
 //! Passwords: libarchive decrypts zip but not 7z, so encrypted 7z goes to the `7z`
 //! command when it is installed. Both tools run without a terminal and read the password
@@ -14,7 +15,80 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-const EXTS: &[&str] = &[".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tbz", ".tar.xz", ".txz", ".tar.zst", ".tzst", ".tar.lz", ".tar.lzma", ".7z", ".rar", ".iso", ".cpio", ".jar", ".apk", ".cbz", ".cbr", ".xpi"];
+const EXTS: &[&str] = &[".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tbz", ".tar.xz", ".txz", ".tar.zst", ".tzst", ".tar.lz", ".tar.lzma", ".7z", ".rar", ".iso", ".cpio", ".jar", ".apk", ".cbz", ".cbr", ".xpi", ".deb", ".rpm", ".gz", ".bz2", ".xz", ".zst"];
+
+/// Compressions of one file, without a tar inside: (extension, the tool that undoes it
+/// when bsdcat is missing).
+const SINGLE: [(&str, &str); 4] = [(".gz", "gzip"), (".bz2", "bzip2"), (".xz", "xz"), (".zst", "zstd")];
+
+/// A lone compressed file ("notes.txt.gz"), which holds one file named by its stem.
+pub fn single(archive: &Path) -> bool {
+    let n = archive.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    SINGLE.iter().any(|(e, _)| n.ends_with(e)) && !n.contains(".tar.")
+}
+
+/// A command that writes `archive`'s one file, decompressed, to its output.
+fn cat(archive: &Path) -> Result<Command, String> {
+    if crate::media::have("bsdcat") {
+        let mut c = tool("bsdcat");
+        c.arg("--").arg(archive);
+        return Ok(c);
+    }
+    let n = archive.to_string_lossy().to_lowercase();
+    let t = SINGLE.iter().find(|(e, _)| n.ends_with(e)).map(|x| x.1).filter(|t| crate::media::have(t)).ok_or("bsdcat isn't installed")?;
+    let mut c = tool(t);
+    c.args(["-dc", "--"]).arg(archive);
+    Ok(c)
+}
+
+/// The listing of a lone compressed file: its one file, sized from gzip's trailer or by
+/// decompressing it (bzip2, xz and zstd keep no size that is always there).
+fn list_single(archive: &Path) -> Result<Vec<Item>, String> {
+    let name = archive.file_name().map(|n| stem(&n.to_string_lossy()).to_string()).unwrap_or_default();
+    let meta = std::fs::metadata(archive).map_err(|e| e.to_string())?;
+    let gz = archive.to_string_lossy().to_lowercase().ends_with(".gz");
+    let size = if gz && meta.len() >= 18 {
+        use std::os::unix::fs::FileExt;
+        let mut b = [0u8; 4];
+        std::fs::File::open(archive).and_then(|f| f.read_exact_at(&mut b, meta.len() - 4)).map_err(|e| e.to_string())?;
+        u32::from_le_bytes(b) as u64
+    } else {
+        let mut c = cat(archive)?;
+        c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child = c.spawn().map_err(|e| e.to_string())?;
+        let mut n = 0u64;
+        if let Some(mut o) = child.stdout.take() {
+            let mut buf = vec![0u8; 1 << 16];
+            let t0 = std::time::Instant::now();
+            while let Ok(k) = std::io::Read::read(&mut o, &mut buf) {
+                if k == 0 || t0.elapsed() > Duration::from_secs(60) {
+                    break;
+                }
+                n += k as u64;
+            }
+        }
+        let _ = child.kill();
+        if !child.wait().is_ok_and(|s| s.success()) && n == 0 {
+            return Err("Not a compressed file".into());
+        }
+        n
+    };
+    Ok(vec![Item { path: PathBuf::from(name), is_dir: false, link: false, size, modified: meta.modified().ok(), dot: false }])
+}
+
+/// Decompress a lone compressed file's one file into `dir`.
+fn extract_single(archive: &Path, dir: &Path) -> Result<(), String> {
+    let name = archive.file_name().map(|n| stem(&n.to_string_lossy()).to_string()).unwrap_or_default();
+    let out = std::fs::File::create(dir.join(&name)).map_err(|e| e.to_string())?;
+    let mut c = cat(archive)?;
+    c.stdin(Stdio::null()).stdout(out).stderr(Stdio::piped());
+    let o = c.output().map_err(|e| e.to_string())?;
+    if o.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or("Couldn't decompress it").trim_start_matches("bsdcat: ").to_string())
+    }
+}
 
 pub fn is_archive(name: &str) -> bool {
     let n = name.to_lowercase();
@@ -278,6 +352,11 @@ pub fn list(archive: &Path) -> Result<Listing, String> {
     if let Some(hit) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|c| c.0 == archive && c.1 == mtime) {
         return Ok(hit.2.clone());
     }
+    if single(archive) {
+        let items: Listing = Arc::new(list_single(archive)?);
+        remember(archive, mtime, items.clone());
+        return Ok(items);
+    }
     let pw = password(archive);
     let mut c = tool("bsdtar");
     if pw.is_none() {
@@ -365,6 +444,10 @@ pub fn list_async(path: PathBuf, archive: PathBuf, inner: PathBuf, ctx: egui::Co
 /// On failure `dir` may hold partial or zero-filled files: callers extract into a
 /// staging folder and keep it only on success.
 pub fn extract(archive: &Path, members: &[PathBuf], dir: &Path) -> Result<(), String> {
+    if single(archive) {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        return extract_single(archive, dir);
+    }
     extract_with(archive, members, dir, false, &mut |c, pw| run(c, Duration::from_secs(3600), pw).map(|_| ()))
 }
 
@@ -372,6 +455,12 @@ pub fn extract(archive: &Path, members: &[PathBuf], dir: &Path) -> Result<(), St
 /// `verbose` has bsdtar name each member as it writes it.
 pub(crate) fn extract_with(archive: &Path, members: &[PathBuf], dir: &Path, verbose: bool, go: &mut dyn FnMut(Command, Option<&str>) -> Result<(), String>) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    if single(archive) {
+        let name = archive.file_name().map(|n| stem(&n.to_string_lossy()).to_string()).unwrap_or_default();
+        let mut c = cat(archive)?;
+        c.stdout(std::fs::File::create(dir.join(name)).map_err(|e| e.to_string())?);
+        return go(c, None);
+    }
     let all = list(archive)?;
     let pw = password(archive);
     if pw.is_some() && seven_kind(archive) && seven().is_ok() {
@@ -401,6 +490,9 @@ pub fn read_member(archive: &Path, inner: &Path, cap: usize) -> Result<Vec<u8>, 
     let dot = all.iter().find(|i| i.path == inner).is_some_and(|i| i.dot);
     if all.iter().find(|i| i.path == inner).is_some_and(|i| i.size as usize > cap) {
         return Err("Too big to read here".into());
+    }
+    if single(archive) {
+        return run(cat(archive)?, Duration::from_secs(60), None).and_then(|b| if b.len() > cap { Err("Too big to read here".into()) } else { Ok(b) });
     }
     let pw = password(archive);
     let mut c = tool("bsdtar");

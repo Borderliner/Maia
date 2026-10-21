@@ -712,6 +712,21 @@ impl Inspector {
                 return;
             }
         }
+        // A lone compressed file (notes.txt.gz) previews as the file in it.
+        if !e.is_dir && e.size <= 16 << 20 && crate::archive::is_archive(&e.name) && crate::archive::single(&e.path) {
+            self.set(Content::Other);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (archive, ctx) = (e.path.clone(), ctx.clone());
+            let mut inner = e.clone();
+            inner.name = crate::archive::stem(&e.name).to_string();
+            let name = inner.name.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::archive::extract_for_open(&archive, Path::new(&name)));
+                ctx.request_repaint();
+            });
+            self.extracting = Some((rx, inner));
+            return;
+        }
         if e.special {
             // Sockets, FIFOs and device nodes: opening or reading them can block forever.
             self.set(Content::Other);
