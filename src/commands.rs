@@ -283,6 +283,8 @@ commands! {
     Copy, "copy", Files, "Copy", "Copy the selection to the clipboard.", ["Ctrl+C", "Ctrl+Insert"];
     Cut, "cut", Files, "Cut", "Cut the selection to move it on paste.", ["Ctrl+X"];
     Paste, "paste", Files, "Paste", "Paste files here (or into the single selected folder).", ["Ctrl+V", "Shift+Insert"];
+    CopyTo, "copy_to", Files, "Copy To…", "Copy the selection into a folder picked as in Go To, the folders copied and moved to last first.", ["Shift+F5"];
+    MoveTo, "move_to", Files, "Move To…", "Move the selection into a folder picked as in Go To, the folders copied and moved to last first.", ["Shift+F6"];
     CopyPath, "copy_path", Files, "Copy As Path", "Copy full paths, quoted when needed; the folder if nothing is selected.", ["Ctrl+Shift+C"];
     CopyPathRaw, "copy_path_raw", Files, "Copy As Path (Raw)", "Copy full paths without any quoting.", [];
     CopyName, "copy_name", Files, "Copy Name", "Copy just the file names.", [];

@@ -31,6 +31,7 @@ mod exif;
 mod facts;
 mod extpic;
 mod config;
+mod copyto;
 mod convert;
 mod devtools;
 mod drives;

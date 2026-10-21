@@ -2291,6 +2291,7 @@ impl App {
                     self.begin_transfer(srcs, dest, cmd == Cmd::MoveToOther);
                 }
             }
+            Cmd::CopyTo | Cmd::MoveTo => crate::copyto::open(self, cmd == Cmd::MoveTo),
             Cmd::ToggleFlatten => {
                 let t = self.tab();
                 if t.tree_active() {

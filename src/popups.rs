@@ -47,6 +47,8 @@ pub struct GoToState {
     fwd: Vec<String>,
     /// Entry to highlight after the item list is rebuilt (after Back / Up).
     highlight: Option<PathBuf>,
+    /// Picking where Copy To… or Move To… sends the selection, not where to go.
+    pub dest: Option<crate::copyto::Dest>,
 }
 
 pub struct Capture {
@@ -465,7 +467,15 @@ impl Popup {
         }
     }
     pub fn goto(input: String) -> Popup {
-        Popup::GoTo(GoToState { input, last: None, sel: 0, items: vec![], focus: true, dir_cache: None, dir_job: None, snap_gen: 0, back: vec![], fwd: vec![], highlight: None })
+        Popup::GoTo(GoToState { input, last: None, sel: 0, items: vec![], focus: true, dir_cache: None, dir_job: None, snap_gen: 0, back: vec![], fwd: vec![], highlight: None, dest: None })
+    }
+    /// Go To picking a folder for Copy To… or Move To….
+    pub fn goto_dest(dest: crate::copyto::Dest) -> Popup {
+        let mut p = Popup::goto(String::new());
+        if let Popup::GoTo(st) = &mut p {
+            st.dest = Some(dest);
+        }
+        p
     }
     pub fn palette() -> Popup {
         Popup::Palette(PaletteState { query: String::new(), sel: 0, capture: None, conflict: None, focus: true, cat: None, scroll: false, top: true })
@@ -1080,6 +1090,18 @@ fn goto_items(app: &App, st: &mut GoToState, known: &crate::sidebar::Known, ctx:
     let header = |items: &mut Vec<GoItem>, s: &str| items.push(GoItem { label: s.into(), sub: String::new(), path: PathBuf::new(), is_dir: false, header: true, usage: None });
     if input.trim().is_empty() {
         let collapsed = |g: &str| app.ud.collapsed_groups.iter().any(|x| x == &format!("goto:{g}"));
+        // Picking a destination: where things were sent last come first.
+        if st.dest.is_some() && !app.ud.destinations.is_empty() {
+            header(&mut items, "Recent destinations");
+            if !collapsed("Recent destinations") {
+                for p in &app.ud.destinations {
+                    push(&mut items, p);
+                    if let Some(it) = items.last_mut() {
+                        it.is_dir = true;
+                    }
+                }
+            }
+        }
         // Same groups, order and icons as the sidebar.
         let recents: Vec<PathBuf> = known.recents.iter().take(10).cloned().collect();
         if !recents.is_empty() {
@@ -1158,6 +1180,10 @@ fn goto_items(app: &App, st: &mut GoToState, known: &crate::sidebar::Known, ctx:
         if lp.is_empty() {
             scored.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| tab::natural_cmp(&a.1.to_lowercase(), &b.1.to_lowercase())));
         }
+        // A destination typed down to its folder ("~/Photos/") is that folder: first.
+        if st.dest.is_some() && input.ends_with('/') && st.dir_cache.as_ref().is_some_and(|(d, _)| *d == dir) {
+            items.push(GoItem { label: label_of(&dir), sub: dir.parent().map(|p| format!("› {}", p.display())).unwrap_or_default(), path: dir.clone(), is_dir: true, header: false, usage: None });
+        }
         for (_, n, d) in scored.into_iter().take(300) {
             let p = dir.join(n);
             items.push(GoItem { label: n.clone(), sub: format!("› {}", dir.display()), path: p, is_dir: d, header: false, usage: None });
@@ -1172,6 +1198,10 @@ fn goto_items(app: &App, st: &mut GoToState, known: &crate::sidebar::Known, ctx:
                 cands.push((p, bonus));
             }
         };
+        let dests: std::collections::HashSet<&PathBuf> = if st.dest.is_some() { app.ud.destinations.iter().collect() } else { Default::default() };
+        for (i, r) in app.ud.destinations.iter().enumerate().filter(|_| st.dest.is_some()) {
+            add(r.clone(), 60 - i as i32, &mut cands);
+        }
         for (i, r) in app.ud.recents.iter().enumerate() {
             add(r.clone(), 40 - (i as i32).min(40), &mut cands);
         }
@@ -1209,13 +1239,24 @@ fn goto_items(app: &App, st: &mut GoToState, known: &crate::sidebar::Known, ctx:
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0));
         // Only folders known to exist (from the background snapshot or open tabs): no stat calls here.
-        for (_, p) in scored.into_iter().filter(|(_, p)| tab::is_computer(p) || known.dirs.contains(p) || tab_dirs.contains(p)).take(200) {
+        for (_, p) in scored.into_iter().filter(|(_, p)| tab::is_computer(p) || known.dirs.contains(p) || tab_dirs.contains(p) || dests.contains(p)).take(200) {
             push(&mut items, &p);
             // A folder seen only in an open tab is still a folder (it had a file's icon).
             if let Some(it) = items.last_mut() {
                 it.is_dir = true;
             }
         }
+    }
+    if st.dest.is_some() {
+        // Only folders take things; a group left empty goes too, unless it is folded.
+        items.retain(|it| it.header || (it.is_dir && crate::copyto::offered(&it.path)));
+        let folded = |it: &GoItem| app.ud.collapsed_groups.iter().any(|g| *g == format!("goto:{}", it.label));
+        let mut keep = vec![true; items.len()];
+        for i in 0..items.len() {
+            keep[i] = !items[i].header || folded(&items[i]) || items.get(i + 1).is_some_and(|n| !n.header);
+        }
+        let mut k = keep.into_iter();
+        items.retain(|_| k.next().unwrap_or(true));
     }
     st.items = items;
 }
@@ -1231,6 +1272,11 @@ fn goto(app: &mut App, ctx: &egui::Context, st: &mut GoToState) -> bool {
         }
     }
     let same_input = st.last.as_deref() == Some(st.input.as_str());
+    if !same_input {
+        if let Some(d) = &mut st.dest {
+            d.refused = None;
+        }
+    }
     if !same_input || landed || crate::sidebar::generation() != st.snap_gen {
         // Background data changed under an unchanged query: keep the highlighted row.
         let keep = same_input.then(|| st.items.get(st.sel).filter(|i| !i.header).map(|i| i.path.clone())).flatten();
@@ -1253,7 +1299,7 @@ fn goto(app: &mut App, ctx: &egui::Context, st: &mut GoToState) -> bool {
         return false;
     }
     // A network address connects (and opens) the place.
-    if (k.enter || k.ctrl_enter) && crate::network::is_uri(&st.input) {
+    if (k.enter || k.ctrl_enter) && st.dest.is_none() && crate::network::is_uri(&st.input) {
         let panel = app.active;
         app.connect(crate::network::normalize(&st.input), crate::network::Login { user: String::new(), password: String::new(), anonymous: false }, Some((panel, k.ctrl_enter)));
         return false;
@@ -1262,6 +1308,8 @@ fn goto(app: &mut App, ctx: &egui::Context, st: &mut GoToState) -> bool {
     if k.enter || k.ctrl_enter {
         match &cur {
             Some((p, d)) => go = Some((p.clone(), *d, k.ctrl_enter)),
+            // A destination typed in full is checked when it is used.
+            None if st.dest.is_some() => go = Some((fsx::expand_path(&st.input), true, false)),
             None => {
                 let p = fsx::expand_path(&st.input);
                 if p.exists() {
@@ -1287,12 +1335,21 @@ fn goto(app: &mut App, ctx: &egui::Context, st: &mut GoToState) -> bool {
         }
     }
     let (_, rect) = centered(ctx, "goto", 620.0, &pal, |ui| {
+        if let Some(d) = &st.dest {
+            dialog_title(ui, &d.title(), None, &pal);
+            ui.add_space(4.0);
+        }
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(20.0, 22.0), Sense::hover());
             let g = if !is_pathlike(&st.input) { Glyph::Search } else if fsx::mounts().iter().any(|m| m.path == fsx::expand_path(st.input.trim_end_matches('/'))) || st.input == "/" { Glyph::Drive } else { Glyph::Folder };
             paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(14.0)), g, pal.text_dim);
             let w = ui.available_width() - 4.0 * 28.0;
-            let resp = ui.add(egui::TextEdit::singleline(&mut st.input).hint_text(egui::RichText::new("Open or expand a folder…").color(pal.text_dim)).frame(false).desired_width(w).font(FontId::proportional(15.0)));
+            let hint = match &st.dest {
+                Some(d) if d.mv => "Folder to move into…",
+                Some(_) => "Folder to copy into…",
+                None => "Open or expand a folder…",
+            };
+            let resp = ui.add(egui::TextEdit::singleline(&mut st.input).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(false).desired_width(w).font(FontId::proportional(15.0)));
             if st.focus {
                 resp.request_focus();
                 if let Some(mut s) = egui::TextEdit::load_state(ui.ctx(), resp.id) {
@@ -1347,6 +1404,7 @@ fn goto(app: &mut App, ctx: &egui::Context, st: &mut GoToState) -> bool {
                     let hc = if resp.hovered() { pal.text } else { pal.text_dim };
                     let g = match it.label.as_str() {
                         "Recents" => Glyph::Clock,
+                        "Recent destinations" => Glyph::Forward,
                         "Bookmarks" => Glyph::Bookmark,
                         "Storage" => Glyph::Drive,
                         _ => Glyph::Folder,
@@ -1416,12 +1474,27 @@ fn goto(app: &mut App, ctx: &egui::Context, st: &mut GoToState) -> bool {
         if st.items.is_empty() {
             ui.label(egui::RichText::new(if is_pathlike(&st.input) { "No matching entries" } else { "No matches" }).color(pal.text_dim));
         }
-        if is_pathlike(&st.input) {
+        if let Some(d) = &st.dest {
+            if let Some(why) = &d.refused {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(why).color(pal.danger));
+            }
+            hints(ui, &[("↑↓", "navigate"), ("Enter", if d.mv { "move here" } else { "copy here" }), ("Tab", "expand"), ("Esc", "cancel")], &pal);
+        } else if is_pathlike(&st.input) {
             hints(ui, &[("↑↓", "navigate"), ("Enter", "use"), ("Tab", "expand"), ("Ctrl+Enter", "open in new tab"), ("Esc", "dismiss")], &pal);
         } else {
             hints(ui, &[("↑↓", "navigate"), ("Enter", "use"), ("Tab", "expand"), ("Esc", "dismiss")], &pal);
         }
     });
+    if let (Some((p, ..)), Some(d)) = (&go, &mut st.dest) {
+        match crate::copyto::send(app, d, p.clone()) {
+            Ok(()) => return false,
+            Err(why) => {
+                d.refused = Some(why);
+                go = None;
+            }
+        }
+    }
     if let Some((p, is_dir, new_tab)) = go {
         let id = app.active;
         if new_tab {
@@ -1460,6 +1533,8 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::EditTags => t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()) && crate::musictags::applies(&t.target_entries().iter().map(|e| (e.ext(), e.is_dir)).collect::<Vec<_>>()),
         Cmd::CompressLocked => crate::archive::available() && t.archive.is_none() && !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),
         Cmd::BatchRename => t.archive.is_none() && !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),
+        Cmd::CopyTo => !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),
+        Cmd::MoveTo => !tab::is_computer(&t.path) && t.archive.is_none() && !t.targets_idx().is_empty(),
         Cmd::Rename | Cmd::Copy | Cmd::Cut | Cmd::Trash | Cmd::DeletePermanent | Cmd::Duplicate | Cmd::CreateLink => !t.targets_idx().is_empty(),
         Cmd::LoadLayout | Cmd::DeleteLayout => !app.ud.layouts.is_empty(),
         Cmd::SortFullAsc | Cmd::SortFullDesc => tab::is_computer(&t.path) && !(t.settings.sort == crate::config::SortKey::Usage && t.settings.desc == (c == Cmd::SortFullDesc)),

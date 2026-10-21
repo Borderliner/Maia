@@ -603,6 +603,8 @@ pub struct UserData {
     pub seen_version: String,
     /// Tags and colour labels known to be on some file, for the sidebar.
     pub tags: Vec<String>,
+    /// Folders Copy To… and Move To… sent things into, newest first.
+    pub destinations: Vec<PathBuf>,
 }
 
 impl UserData {

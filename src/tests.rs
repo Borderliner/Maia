@@ -11523,3 +11523,163 @@ fn columns_stay_through_a_saved_view() {
     assert_eq!(km.lookup(&commands::parse_binding("Ctrl+Shift+7").unwrap()).0, Some(Cmd::ViewColumns));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// One frame with these input events (keys, typed text).
+fn app_input(app: &mut crate::app::App, ctx: &egui::Context, events: Vec<egui::Event>) {
+    let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))), events, focused: true, ..Default::default() };
+    let _ = ctx.run(raw, |c| app.frame(c));
+}
+
+fn press(key: egui::Key) -> egui::Event {
+    egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }
+}
+
+/// The Go To picker of Copy To… / Move To…, and what it holds.
+fn dest_picker(app: &crate::app::App) -> Option<&crate::popups::GoToState> {
+    match &app.popup {
+        crate::popups::Popup::GoTo(st) if st.dest.is_some() => Some(st),
+        _ => None,
+    }
+}
+
+/// The cursor on `name` and nothing else selected, once the folder is listed.
+fn pick_entry(app: &mut crate::app::App, ctx: &egui::Context, name: &str) {
+    app_until(app, ctx, "the listing", |a| a.panels[&a.active].tab().entries.iter().any(|e| e.name == name));
+    let t = app.tab();
+    let i = t.entries.iter().position(|e| e.name == name).unwrap() as u32;
+    t.select_only(i);
+}
+
+/// Copy To… and Move To… through the picker as it is typed into: a path typed down to
+/// its folder lands there, the folder is remembered and comes first next time, Enter
+/// on it moves, and Undo takes each back. Real files, real jobs.
+#[test]
+fn copy_to_and_move_to_through_the_picker() {
+    let ctx = egui::Context::default();
+    let d = tmpdir("copyto");
+    touch(&d.join("a.txt"), "a");
+    touch(&d.join("b.txt"), "b");
+    touch(&d.join("box/old.txt"), "old");
+    let mut app = crate::app::App::new(&ctx, vec![d.clone()]);
+    app.ud.destinations.clear();
+    pick_entry(&mut app, &ctx, "a.txt");
+    app.run(Cmd::CopyTo);
+    app_frame(&mut app, &ctx);
+    let st = dest_picker(&app).expect("Go To opens to pick the destination");
+    assert_eq!(st.dest.as_ref().unwrap().title(), "Copy “a.txt” to…");
+    assert!(st.items.iter().all(|i| i.header || i.is_dir), "only folders are offered");
+    assert!(!st.items.iter().any(|i| i.header && i.label == "Recent destinations"), "nothing sent anywhere yet");
+    // Typed down to the folder: the folder itself is the first row.
+    app_input(&mut app, &ctx, vec![egui::Event::Text(format!("{}/box/", d.display()))]);
+    app_until(&mut app, &ctx, "the folder read", |a| dest_picker(a).is_some_and(|st| st.items.first().is_some_and(|i| i.path == d.join("box"))));
+    app_input(&mut app, &ctx, vec![press(egui::Key::Enter)]);
+    assert!(dest_picker(&app).is_none(), "Enter starts it and closes the picker");
+    app_until(&mut app, &ctx, "the copy", |a| d.join("box/a.txt").exists() && a.jobs.iter().all(|j| j.finished_at.is_some()) && !a.undo.is_empty());
+    assert!(d.join("a.txt").exists(), "a copy leaves the original");
+    assert_eq!(app.ud.destinations, vec![d.join("box")], "remembered");
+    // Move To…: the folder used last heads the list, already highlighted.
+    pick_entry(&mut app, &ctx, "b.txt");
+    app.run(Cmd::MoveTo);
+    app_frame(&mut app, &ctx);
+    app_frame(&mut app, &ctx);
+    let st = dest_picker(&app).unwrap();
+    assert_eq!(st.dest.as_ref().unwrap().title(), "Move “b.txt” to…");
+    assert!(st.items[0].header && st.items[0].label == "Recent destinations", "recent destinations first");
+    assert_eq!(st.items[1].path, d.join("box"));
+    assert_eq!(st.sel, 1, "the newest one highlighted");
+    app_input(&mut app, &ctx, vec![press(egui::Key::Enter)]);
+    app_until(&mut app, &ctx, "the move", |a| d.join("box/b.txt").exists() && !d.join("b.txt").exists() && a.jobs.iter().all(|j| j.finished_at.is_some()));
+    assert!(app.undo_last());
+    app_until(&mut app, &ctx, "the move undone", |_| d.join("b.txt").exists() && !d.join("box/b.txt").exists());
+    // Esc leaves everything as it was.
+    pick_entry(&mut app, &ctx, "b.txt");
+    app.run(Cmd::MoveTo);
+    app_frame(&mut app, &ctx);
+    app_input(&mut app, &ctx, vec![press(egui::Key::Escape)]);
+    assert!(dest_picker(&app).is_none());
+    for _ in 0..5 {
+        app_frame(&mut app, &ctx);
+    }
+    assert!(d.join("b.txt").exists() && !d.join("box/b.txt").exists(), "cancelled");
+    purge_trashed_under(&d);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// What the picker refuses, each with its reason, and the picker stays open to choose
+/// again: a folder into itself or below it, the trash, inside an archive, a folder that
+/// isn't there, a move to where things already are. A link to a folder may go into
+/// the folder it points at; a copy beside the original is a duplicate.
+#[test]
+fn copy_to_refuses_what_makes_no_sense() {
+    use crate::copyto::refusal;
+    let d = tmpdir("copytoref");
+    touch(&d.join("box/inner/x.txt"), "x");
+    touch(&d.join("f.txt"), "f");
+    touch(&d.join("bundle.zip"), "PK");
+    std::os::unix::fs::symlink(d.join("box"), d.join("box-link")).unwrap();
+    let boxed = vec![d.join("box")];
+    assert_eq!(refusal(&boxed, &d.join("box"), false).as_deref(), Some("A folder can't go inside itself"));
+    assert_eq!(refusal(&boxed, &d.join("box/inner"), true).as_deref(), Some("A folder can't go inside itself"));
+    assert_eq!(refusal(&boxed, &d.join("box-link/inner"), false).as_deref(), Some("A folder can't go inside itself"), "through a link too");
+    assert_eq!(refusal(&[d.join("box-link")], &d.join("box"), true), None, "the link moves, not the folder");
+    assert!(refusal(&boxed, &d.join("bundle.zip/docs"), false).is_some_and(|w| w.starts_with("Archives are read-only")));
+    assert!(refusal(&boxed, &d.join("nowhere"), false).is_some_and(|w| w.starts_with("No folder at ")));
+    assert!(refusal(&boxed, &d.join("f.txt"), false).is_some_and(|w| w.starts_with("No folder at ")), "a file is no folder");
+    let trash = crate::sidebar::trash_dir();
+    assert!(refusal(&[d.join("f.txt")], &trash, true).is_some_and(|w| w.contains("Move To Trash")));
+    assert!(refusal(&[d.join("f.txt")], trash.parent().unwrap(), false).is_some());
+    assert!(crate::copyto::in_trash(Path::new("/run/media/stick/.Trash-1000/files")));
+    assert!(!crate::copyto::in_trash(&d));
+    assert!(refusal(&[d.join("f.txt")], Path::new(&format!("{}:computer", "maia")), false).is_some());
+    assert_eq!(refusal(&[d.join("f.txt")], &d, true).as_deref(), Some("Already in that folder"));
+    assert_eq!(refusal(&[d.join("f.txt"), d.join("box/inner/x.txt")], &d, true), None, "one of them still has to move");
+    assert_eq!(refusal(&[d.join("f.txt")], &d, false), None, "a copy beside it is a duplicate");
+    assert_eq!(refusal(&[d.join("f.txt")], &d.join("box"), false), None);
+    // In the picker: refused, said, still open, nothing copied.
+    let ctx = egui::Context::default();
+    let mut app = crate::app::App::new(&ctx, vec![d.clone()]);
+    pick_entry(&mut app, &ctx, "box");
+    app.run(Cmd::CopyTo);
+    app_frame(&mut app, &ctx);
+    app_input(&mut app, &ctx, vec![egui::Event::Text(format!("{}/box/inner/", d.display()))]);
+    app_until(&mut app, &ctx, "the folder read", |a| dest_picker(a).is_some_and(|st| st.items.first().is_some_and(|i| i.path == d.join("box/inner"))));
+    app_input(&mut app, &ctx, vec![press(egui::Key::Enter)]);
+    let st = dest_picker(&app).expect("the picker stays to choose again");
+    assert_eq!(st.dest.as_ref().unwrap().refused.as_deref(), Some("A folder can't go inside itself"));
+    // Typing again takes the reason away.
+    app_input(&mut app, &ctx, vec![press(egui::Key::Backspace)]);
+    app_frame(&mut app, &ctx);
+    assert_eq!(dest_picker(&app).unwrap().dest.as_ref().unwrap().refused, None);
+    app_input(&mut app, &ctx, vec![press(egui::Key::Escape)]);
+    assert!(!d.join("box/inner/box").exists());
+    // Nothing to move inside an archive, and nothing picked without a selection.
+    app.tab().selected.clear();
+    app.tab().cursor = None;
+    app.run(Cmd::CopyTo);
+    assert!(dest_picker(&app).is_none() && app.toast.as_ref().is_some_and(|t| t.0 == "Select what to copy"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The remembered destinations: newest first, each once, at most `KEEP`; written with
+/// the user data and read back (an older file without them reads as none).
+#[test]
+fn copy_to_remembers_a_few_destinations() {
+    let mut ud = crate::config::UserData::default();
+    for i in 0..12 {
+        crate::copyto::remember(&mut ud, Path::new(&format!("/d/{i}")));
+    }
+    crate::copyto::remember(&mut ud, Path::new("/d/5"));
+    assert_eq!(ud.destinations.len(), crate::copyto::KEEP);
+    assert_eq!(ud.destinations[0], PathBuf::from("/d/5"));
+    assert_eq!(ud.destinations[1], PathBuf::from("/d/11"));
+    assert_eq!(ud.destinations.iter().filter(|p| **p == Path::new("/d/5")).count(), 1);
+    let json = serde_json::to_string(&ud).unwrap();
+    let back: crate::config::UserData = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.destinations, ud.destinations);
+    let old: crate::config::UserData = serde_json::from_str(r#"{"bookmarks":["/x"]}"#).unwrap();
+    assert!(old.destinations.is_empty());
+    // Their default keys, beside F5 and F6.
+    let km = Keymap::build(&Default::default());
+    assert_eq!(km.lookup(&commands::parse_binding("Shift+F5").unwrap()).0, Some(Cmd::CopyTo));
+    assert_eq!(km.lookup(&commands::parse_binding("Shift+F6").unwrap()).0, Some(Cmd::MoveTo));
+}

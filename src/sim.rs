@@ -1102,7 +1102,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(171) {
+    match rng.below(173) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -2637,6 +2637,43 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             if matches!(s.app.popup, Popup::Confirm { .. }) {
                 s.act(rng.pick(&["key Enter", "key Escape"]));
             }
+        }
+        171..=172 => {
+            // Copy To… or Move To…: by its key or from a context menu, a place typed,
+            // expanded or picked, then Enter, Esc or a click.
+            if rng.below(2) == 0 {
+                s.act(rng.pick(&["key shift+F5", "key shift+F6"]));
+            } else {
+                let (x, y) = p(rng);
+                s.act(&format!("click {x:.0} {y:.0} right"));
+                s.idle(2);
+                if let Some(r) = s.text_rect_any(&[*rng.pick(&["Copy To…", "Move To…"])]) {
+                    s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+                }
+            }
+            if !matches!(&s.app.popup, Popup::GoTo(st) if st.dest.is_some()) {
+                return;
+            }
+            for _ in 0..rng.below(5) {
+                match rng.below(6) {
+                    0 => s.act(&format!("text {}", rng.pick(&["Code/", "doc", "Empty", "zzz", "/", "~/", "/proc/"]))),
+                    1 => {
+                        let up = s.tab().path.parent().map(|p| format!("{}/", p.display())).unwrap_or_else(|| "/".into());
+                        s.act("key ctrl+a");
+                        s.act(&format!("text {up}"));
+                    }
+                    2 => s.act("key Tab"),
+                    3 => s.act("key ArrowDown"),
+                    4 => s.act("key Backspace"),
+                    _ => {
+                        let (x, y) = p(rng);
+                        s.act(&format!("click {x:.0} {y:.0}"));
+                    }
+                }
+                s.idle(2);
+            }
+            s.act(rng.pick(&["key Enter", "key Enter", "key Escape"]));
+            s.settle();
         }
         _ => {
             s.note("idle".into());
@@ -15792,5 +15829,125 @@ mod journeys {
         s.settle();
         assert!(!s.tab().settings.column_view && s.tab().strip.is_none(), "Details leaves Columns and its listings");
         report("columns", &s);
+    }
+
+    fn dest_picker(s: &Sim) -> Option<&crate::popups::GoToState> {
+        match &s.app.popup {
+            Popup::GoTo(st) if st.dest.is_some() => Some(st),
+            _ => None,
+        }
+    }
+
+    /// Typed into the destination picker, until the folder typed down to is its first row.
+    fn type_dest(s: &mut Sim, dir: &Path) {
+        s.act(&format!("text {}/", dir.display()));
+        wait_until(s, "the folder read", 10, |s| dest_picker(s).is_some_and(|st| st.items.first().is_some_and(|i| i.path == dir)));
+        s.idle(2);
+    }
+
+    /// Copy To… and Move To…: by their keys and from the context menu, a path typed with
+    /// Tab expanding it, a recent destination clicked, a copy landing and a move undone;
+    /// what makes no sense refused in the picker; in the Columns view and a flattened
+    /// folder too, at a narrow window.
+    #[test]
+    fn copy_to_and_move_to_pick_a_folder() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("copyto");
+        let docs = home.join("Documents");
+        let maia = home.join("Code/maia");
+        let mut s = Sim::new(&docs, vec2(1280.0, 800.0));
+        cursor_to(&mut s, "report.md");
+        s.act("key shift+F5");
+        assert!(dest_picker(&s).is_some(), "Shift+F5 opens the picker");
+        s.text_rect("Copy “report.md” to…");
+        look(&mut s, "destination picker, empty");
+        s.shot("copyto-empty");
+        // ".../Code/" typed, "ma" and Tab into the folder, then Enter.
+        s.act(&format!("text {}/Code/", home.display()));
+        wait_until(&mut s, "Code listed", 10, |s| dest_picker(s).is_some_and(|st| st.items.iter().any(|i| i.path == maia)));
+        s.act("text ma");
+        s.idle(2);
+        s.act("key Tab");
+        wait_until(&mut s, "into maia", 10, |s| dest_picker(s).is_some_and(|st| st.items.first().is_some_and(|i| i.path == maia)));
+        assert!(dest_picker(&s).unwrap().items.iter().all(|i| i.is_dir), "folders only");
+        look(&mut s, "destination picker in a folder");
+        s.shot("copyto-picker");
+        s.act("key Enter");
+        assert!(dest_picker(&s).is_none(), "Enter starts the copy");
+        wait_until(&mut s, "the copy", 10, |s| maia.join("report.md").exists() && s.app.jobs.iter().all(|j| j.finished_at.is_some()));
+        assert!(docs.join("report.md").exists());
+        assert_eq!(s.app.ud.destinations.first(), Some(&maia));
+        // Move To… from the context menu; the folder used last is offered first, clicked.
+        let r = list_text(&s, "notes.txt");
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(2);
+        s.click_text("Move To…");
+        assert!(dest_picker(&s).is_some_and(|st| st.dest.as_ref().is_some_and(|d| d.mv)));
+        s.text_rect("Move “notes.txt” to…");
+        s.text_rect("Recent destinations");
+        look(&mut s, "recent destinations");
+        s.shot("moveto-recent");
+        let row = s.texts.iter().filter(|(_, t)| t == "maia").map(|x| x.0).min_by(|a, b| a.top().total_cmp(&b.top())).unwrap_or_else(|| s.fail("maia offered"));
+        s.act(&format!("click {:.0} {:.0}", row.center().x, row.center().y));
+        wait_until(&mut s, "the move", 10, |s| maia.join("notes.txt").exists() && !docs.join("notes.txt").exists() && s.app.jobs.iter().all(|j| j.finished_at.is_some()));
+        s.settle();
+        assert!(!lists(s.tab(), &docs.join("notes.txt")), "gone from the folder it left");
+        s.act("key ctrl+z");
+        wait_until(&mut s, "the move undone", 10, |_| docs.join("notes.txt").exists() && !maia.join("notes.txt").exists());
+        // A folder into itself: refused in the picker, which stays.
+        s.settle();
+        cursor_to(&mut s, "Taxes");
+        s.act("key shift+F6");
+        type_dest(&mut s, &docs.join("Taxes/2025"));
+        s.act("key Enter");
+        assert!(dest_picker(&s).is_some(), "still open");
+        s.text_rect("A folder can't go inside itself");
+        look(&mut s, "refused");
+        s.shot("moveto-refused");
+        // Nor into the trash, nor where it already is.
+        s.act("key ctrl+a");
+        s.act(&format!("text {}", crate::sidebar::trash_dir().display()));
+        s.act("key Enter");
+        s.text_rect("Not into the trash: Move To Trash puts things there");
+        s.act("key ctrl+a");
+        s.act(&format!("text {}", docs.display()));
+        s.idle(2);
+        s.act("key ctrl+a");
+        s.act(&format!("text {}/", docs.display()));
+        wait_until(&mut s, "Documents read", 10, |s| dest_picker(s).is_some_and(|st| st.items.first().is_some_and(|i| i.path == docs)));
+        s.act("key Enter");
+        s.text_rect("Already in that folder");
+        s.act("key Escape");
+        assert!(!s.popup_open() && docs.join("Taxes/2025/receipt.pdf").exists());
+        // In the Columns view, at a narrow window.
+        s.cmd(ViewColumns);
+        s.resize(640.0, 480.0);
+        s.settle();
+        cursor_to(&mut s, "budget 2026.csv");
+        s.act("key shift+F5");
+        type_dest(&mut s, &home.join("Empty"));
+        look(&mut s, "picker, narrow");
+        s.act("key Enter");
+        wait_until(&mut s, "the copy from Columns", 10, |s| home.join("Empty/budget 2026.csv").exists() && s.app.jobs.iter().all(|j| j.finished_at.is_some()));
+        // Out of a flattened folder: a file from deep down.
+        s.cmd(ViewDetails);
+        s.resize(1280.0, 800.0);
+        go(&mut s, &home.join("Code/deep"));
+        s.cmd(ToggleFlatten);
+        s.settle();
+        select_name(&mut s, "leaf.txt");
+        s.cmd(MoveTo);
+        type_dest(&mut s, &home.join("Empty"));
+        s.act("key Enter");
+        wait_until(&mut s, "the move out of the flattened folder", 10, |s| home.join("Empty/leaf.txt").exists() && s.app.jobs.iter().all(|j| j.finished_at.is_some()));
+        assert_eq!(s.app.ud.destinations[..2], [home.join("Empty"), maia.clone()], "newest first, each once");
+        s.settle();
+        s.act("move -50 -50");
+        go(&mut s, &home.join("Empty"));
+        look(&mut s, "landed");
+        s.shot("copyto-landed");
+        report("copy to", &s);
     }
 }

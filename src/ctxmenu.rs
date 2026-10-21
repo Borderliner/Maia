@@ -259,6 +259,7 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         // Inside an archive: open, copy out, extract.
         items.push(Item::labeled(Cmd::Activate, "Open"));
         items.push(Item::cmd(Cmd::Copy));
+        items.push(Item::cmd(Cmd::CopyTo));
         items.push(Item::cmd(Cmd::ExtractHere));
     } else if computer {
         let drives: Vec<crate::drives::Drive> = ents.iter().filter_map(|e| app.drive_at(&e.0)).collect();
@@ -349,6 +350,8 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         if single && all_dirs {
             items.push(Item::labeled(Cmd::Paste, "Paste Into Folder"));
         }
+        items.push(Item::cmd(Cmd::CopyTo));
+        items.push(Item::cmd(Cmd::MoveTo));
         let mut copy = vec![Item::cmd(Cmd::CopyPath), Item::cmd(Cmd::CopyPathRaw), Item::cmd(Cmd::CopyName), Item::cmd(Cmd::CopyPathRelative)];
         // path:line, for the file a search showed a line of.
         if p.line_hint.as_ref().is_some_and(|h| ents.iter().any(|e| e.0 == h.0)) {
