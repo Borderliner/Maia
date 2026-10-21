@@ -13478,7 +13478,7 @@ mod journeys {
         s.idle(3);
         assert!(tour(&s).kind == crate::tour::Kind::News && tour(&s).auto, "What's New after an update");
         film_on(&mut s);
-        assert!(some_text(&s, &format!("New in Maia {}", crate::tour::NEWS_VERSION)) && some_text(&s, "Find in any preview") && some_text(&s, "Find in Preview"));
+        assert!(some_text(&s, &format!("New in Maia {}", crate::tour::NEWS_VERSION)) && some_text(&s, "Maia picks your files") && some_text(&s, "Options"));
         let n = crate::tour::NEWS.len();
         for _ in 1..n {
             s.act("key ArrowRight");
@@ -13930,102 +13930,77 @@ mod journeys {
             f.shot(&mut s, 2400, "");
             f.finish(&s);
         }
-        if want("find") && crate::media::have("git") {
-            let src = h.join("Code/weather/src");
-            let mut s = film_window(&src, fonts);
-            select_path(&mut s, &src.join("forecast.rs"));
-            let mut f = Film::new(&s, "find");
-            s.act("key Space");
+        if want("picker") {
+            // An app asking for photos to upload: Maia is the dialog.
+            use crate::portal::{Filter, Pick};
+            let images = Filter { name: "Images".into(), rules: vec![(0, "*.jpg".into()), (0, "*.png".into())] };
+            let mut s = film_window(&pics, fonts);
+            s.app.picker = Some(Box::new(crate::picker::Picker::new(Pick { title: "Upload photos".into(), accept_label: "Upload".into(), multiple: true, filters: vec![images], current_filter: Some(0), ..Default::default() })));
             s.settle();
-            let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("the preview"));
-            s.act(&format!("click {:.0} {:.0}", ir.center().x, ir.center().y));
-            s.act("key ctrl+f");
-            s.act("text forecast");
-            wait_until(&mut s, "found", 5, |s| inspector(s).find.as_ref().is_some_and(|f| f.hits.len() == 3));
-            f.shot(&mut s, 2100, "Space Ctrl F");
-            s.act("key Enter");
-            s.act("key Enter");
-            f.shot(&mut s, 1900, "Enter Enter");
+            let names: Vec<String> = s.tab().view.iter().map(|&i| s.tab().entries[i as usize].name.clone()).filter(|n| n.starts_with("IMG_")).collect();
+            let mut f = Film::new(&s, "picker");
+            f.shot(&mut s, 1400, "");
+            let picked: Vec<&str> = [0, 2, 5].iter().filter_map(|&i| names.get(i).map(String::as_str)).collect();
+            select_names(&mut s, &picked);
+            f.shot(&mut s, 2200, "Ctrl click");
+            f.finish(&s);
+            s.app.picker = None;
+        }
+        if want("columns") {
+            let mut s = film_window(&h, fonts);
+            select_name(&mut s, "Pictures");
+            let mut f = Film::new(&s, "columns");
+            s.act("key ctrl+shift+7");
+            wait_until(&mut s, "the columns", 10, |s| s.tab().strip.as_ref().is_some_and(|st| st.get(&h.join("Pictures")).is_some()));
+            f.shot(&mut s, 1500, "Ctrl Shift 7");
+            s.act("key ArrowRight");
+            wait_until(&mut s, "into Pictures", 10, |s| s.tab().path == h.join("Pictures") && s.tab().strip.as_ref().is_some_and(|st| st.get(&pics).is_some()));
+            f.shot(&mut s, 2200, "→");
             f.finish(&s);
         }
-        if want("edit") {
+        if want("filter") {
             let mut s = film_window(&docs, fonts);
-            select_path(&mut s, &docs.join("Reading list.md"));
-            s.act("key Space");
-            s.settle();
-            let mut f = Film::new(&s, "edit");
-            s.act("key shift+F4");
-            wait_until(&mut s, "editing", 5, |s| inspector(s).edit.as_ref().is_some_and(|e| e.focused));
-            f.shot(&mut s, 1400, "Shift F4");
-            s.act("key ctrl+End");
-            s.act("text 4. Klara and the Sun");
-            s.act("key ctrl+s");
-            wait_until(&mut s, "saved", 5, |_| std::fs::read_to_string(docs.join("Reading list.md")).is_ok_and(|t| t.contains("Klara")));
-            f.shot(&mut s, 2000, "Ctrl S");
+            s.act("key ctrl+e");
+            wait_until(&mut s, "every file below", 10, |s| s.tab().entries.iter().any(|e| e.name == "Lemon cake.md"));
+            let mut f = Film::new(&s, "filter");
+            f.shot(&mut s, 1200, "Ctrl E");
+            s.act("key ctrl+f");
+            s.act("text pdf | ext:md -recipes");
+            wait_until(&mut s, "narrowed", 10, |s| s.tab().view.len() == 6);
+            f.shot(&mut s, 2600, "Ctrl F");
             f.finish(&s);
         }
-        if want("terminal") && crate::media::have("git") {
-            // A plain prompt: the films show nothing of the machine they were made on.
-            // SAFETY: one test at a time, before the shell starts.
-            unsafe {
-                std::env::set_var("SHELL", "/bin/sh");
-                std::env::set_var("PS1", "$ ");
-            }
+        if want("gitsearch") && crate::media::have("git") {
             let p = h.join("Code/weather");
             let mut s = film_window(&p, fonts);
-            let mut f = Film::new(&s, "terminal");
-            s.act("key ctrl+Backtick");
-            wait_until(&mut s, "the prompt", 10, |s| s.app.terminal.pty().is_some_and(|t| t.idle()) && s.app.terminal.text().contains('$'));
-            f.shot(&mut s, 1500, "Ctrl `");
-            s.act("text git log --oneline");
-            s.act("key enter");
-            wait_until(&mut s, "the log", 10, |s| s.app.terminal.text().contains("Start with today"));
-            wait_until(&mut s, "the prompt again", 10, |s| s.app.terminal.pty().is_some_and(|t| t.idle()));
-            f.shot(&mut s, 2300, "Enter");
-            s.act("key ctrl+Backtick");
-            f.finish(&s);
-            // SAFETY: as above.
-            unsafe { std::env::remove_var("PS1") };
-        }
-        if want("sync") {
-            let mut s = film_window(&docs, fonts);
-            s.cmd(SplitRight);
-            s.settle();
-            go(&mut s, &h.join("Downloads/Backup"));
-            s.act("key Tab");
-            s.settle();
-            let mut f = Film::new(&s, "sync");
-            s.act("key ctrl+shift+p");
-            s.act("text sync to");
-            s.act("key Enter");
-            wait_until(&mut s, "the plan", 10, |s| matches!(&s.app.popup, Popup::Sync(st) if st.plan.is_some()));
-            f.shot(&mut s, 2300, "Ctrl Shift P");
-            s.act("key Enter");
-            wait_until(&mut s, "synced", 10, |_| h.join("Downloads/Backup/Garden plan.md").exists());
-            f.shot(&mut s, 1800, "Enter");
+            wait_until(&mut s, "the branch", 10, |s| branch_now(s) == "main");
+            s.cmd(GitHistory);
+            wait_until(&mut s, "the history", 10, |s| some_text(s, "Convert to Fahrenheit"));
+            let mut f = Film::new(&s, "gitsearch");
+            f.shot(&mut s, 1300, "");
+            s.act("key ctrl+f");
+            s.act("text city");
+            wait_until(&mut s, "found", 10, |s| probe(s).narrowed && listed(s) == ["Read the city from the command line"]);
+            f.shot(&mut s, 2200, "Ctrl F");
             f.finish(&s);
         }
-        if want("unlock") {
-            let d = film_drives();
-            fake_encrypted_drive(&d);
-            let mut s = film_window(&h, fonts);
-            s.cmd(Computer);
-            wait_until(&mut s, "the locked drive", 10, |s| s.tab().entries.iter().any(|e| e.name == "Encrypted 500 GB"));
-            select_name(&mut s, "Encrypted 500 GB");
-            let mut f = Film::new(&s, "unlock");
-            f.shot(&mut s, 1100, "");
-            s.act("key Enter");
-            s.act("text correct horse");
-            f.shot(&mut s, 1600, "Enter");
-            s.act("key Enter");
-            wait_until(&mut s, "unlocked", 10, |s| s.tab().entries.iter().any(|e| e.name == "readme.txt"));
-            // Back in Computer: the drive inside is shown by its name, where it is opened
-            // from (a made-up mount point would show the sandbox's folders).
-            s.act("key alt+ArrowLeft");
-            wait_until(&mut s, "the drive unlocked", 10, |s| s.tab().entries.iter().any(|e| e.name == "Vault"));
-            f.shot(&mut s, 2000, "Enter Alt ←");
+        if want("sorting") {
+            let mut s = film_window(&pics, fonts);
+            let first = s.tab().view.iter().map(|&i| s.tab().entries[i as usize].path.clone()).find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("IMG_")));
+            let Some(first) = first else { s.fail("no pictures") };
+            select_path(&mut s, &first);
+            let mut f = Film::new(&s, "sorting");
+            s.cmd(ViewPictures);
+            wait_until(&mut s, "the viewer", 10, |s| matches!(s.app.popup, Popup::Viewer(_)));
+            f.shot(&mut s, 1200, "F3");
+            s.act("key ctrl+1");
+            f.shot(&mut s, 1300, "Ctrl 1");
+            s.act("key c");
+            s.act("key ArrowRight");
+            f.shot(&mut s, 2000, "C →");
+            s.act("key Escape");
+            s.act("key Escape");
             f.finish(&s);
-            crate::drives::FAKE.with(|fk| *fk.borrow_mut() = Some(film_drives()));
         }
         crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
     }
