@@ -356,6 +356,24 @@ fn quick_edit_through_a_symlink_keeps_the_link() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// A link pointed at another file after it was opened: saving asks first, as for a file
+/// changed on disk, and neither file is written until it is told to go ahead.
+#[test]
+fn quick_edit_through_a_moved_symlink_asks_first() {
+    let d = tmpdir("qe-relink");
+    let (a, b, link) = (d.join("a.txt"), d.join("b.txt"), d.join("link.txt"));
+    std::fs::write(&a, "a\n").unwrap();
+    std::fs::write(&b, "b\n").unwrap();
+    std::os::unix::fs::symlink("a.txt", &link).unwrap();
+    let mut e = crate::quickedit::Edit::open(&link).unwrap();
+    e.text = "edited\n".into();
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink("b.txt", &link).unwrap();
+    assert!(matches!(e.save(false), Err(crate::quickedit::SaveError::Changed)), "saved through a link that moved");
+    assert_eq!((std::fs::read_to_string(&a).unwrap(), std::fs::read_to_string(&b).unwrap()), ("a\n".into(), "b\n".into()));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// A finished move takes what it moved out of every listing that showed it, whichever
 /// tab it is in: a plain listing and a tree are read again, a flattened one drops the
 /// rows at once, the destination shows them, and a listing it did not touch stays put.

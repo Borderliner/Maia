@@ -5010,6 +5010,7 @@ fn sync(app: &mut App, ctx: &egui::Context, st: &mut crate::compare::SyncState) 
             .iter()
             .map(|(_, d)| ("New", pal.accent, rel(d)))
             .chain(plan.update.iter().map(|(_, d)| ("Newer", crate::gitstatus::GREEN, rel(d))))
+            .chain(plan.unread.iter().map(|d| ("Unread", pal.danger, rel(d))))
             .chain(plan.extra.iter().filter(|_| st.mirror).map(|d| ("Trash", pal.danger, rel(d))))
             .collect();
         group_label(ui, &format!("In “{}”", name(&st.to)), &pal);

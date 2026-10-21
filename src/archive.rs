@@ -214,7 +214,8 @@ pub fn parse_list(text: &str, now: SystemTime) -> Vec<Item> {
         let dot = name.starts_with("./");
         let name = name.trim_start_matches("./").trim_end_matches('/');
         // A rooted name ("/home/u/x") would become that path on this computer once joined
-        // to the archive's: refused like "../", as bsdtar refuses both when extracting.
+        // to the archive's, so it is left out like "../" (bsdtar itself would strip the
+        // slash and extract it inside the folder).
         if name.is_empty() || name == "." || name.starts_with('/') || name.split('/').any(|c| c == "..") {
             continue;
         }

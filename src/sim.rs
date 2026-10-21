@@ -8241,6 +8241,21 @@ mod journeys {
         assert!(s.texts.iter().any(|(r, t)| t == "only-b.txt" && popup.contains_rect(*r)), "mirroring lists what goes");
         s.shot("sync-preview");
         look(&mut s, "sync preview");
+        // Folders that couldn't be read (made up here: the sandbox may read anything) are
+        // counted and each listed, so it is clear what the sync leaves alone.
+        let unread = |s: &mut Sim, v: Vec<PathBuf>| {
+            if let Popup::Sync(st) = &mut s.app.popup
+                && let Some(p) = st.plan.as_mut()
+            {
+                p.unread = v;
+            }
+            s.idle(3);
+        };
+        unread(&mut s, vec![b.join("both"), a.join("folder-a")]);
+        assert!(some_text_at(&s, "2 folders couldn't be read, so nothing in them changes"), "counted");
+        assert!(s.texts.iter().filter(|(r, t)| t == "Unread" && popup.contains_rect(*r)).count() == 2 && some_text_at(&s, "both"), "each listed");
+        look(&mut s, "sync preview with unread folders");
+        unread(&mut s, vec![]);
         s.act("key Enter");
         wait_until(&mut s, "synced", 10, |_| b.join("only-a.txt").exists() && b.join("folder-a").is_dir() && b.join("kind").is_file() && b.join("both/deep/inner.txt").exists() && !b.join("only-b.txt").exists());
         assert_eq!(std::fs::read_to_string(b.join("newer.txt")).unwrap(), "new");

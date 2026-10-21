@@ -71,8 +71,6 @@ impl Accept {
     }
 }
 
-/// `*`, `?` and `[abc]` / `[a-z]` / `[!a]` classes, as shell globs and the portal's
-/// filters (`*.[pP][nN][gG]`) use them.
 /// Where the files an app asks to save land: each name's last part in `dir`. The names
 /// come from the app, which may be sandboxed: "/home/u/.bashrc" or "../../x" must not
 /// reach past the folder the user chose. Names with nothing left ("..", "/") are dropped.
@@ -80,6 +78,8 @@ pub fn save_targets(dir: &Path, names: &[String]) -> Vec<PathBuf> {
     names.iter().filter_map(|n| Path::new(n).file_name()).map(|n| dir.join(n)).collect()
 }
 
+/// `*`, `?` and `[abc]` / `[a-z]` / `[!a]` classes, as shell globs and the portal's
+/// filters (`*.[pP][nN][gG]`) use them.
 pub fn glob(pat: &[char], name: &[char]) -> bool {
     // One class at p: (matches c, length of the class), or None when it isn't one.
     fn class(pat: &[char], p: usize, c: char) -> Option<(bool, usize)> {

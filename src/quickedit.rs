@@ -74,7 +74,10 @@ impl Edit {
     /// permissions and tags. Returns whether the original went to the trash this time.
     pub fn save(&mut self, force: bool) -> Result<bool, SaveError> {
         let m = std::fs::metadata(&self.file).ok();
-        if !force && m.as_ref().map(|m| (m.modified().ok(), m.len())) != Some(self.stamp) {
+        // A link pointed somewhere else since it was opened counts as a change too: the
+        // file shown is no longer the one this text came from.
+        let moved = std::fs::canonicalize(&self.path).ok().as_ref() != Some(&self.file);
+        if !force && (moved || m.as_ref().map(|m| (m.modified().ok(), m.len())) != Some(self.stamp)) {
             return Err(SaveError::Changed);
         }
         let dir = self.file.parent().ok_or_else(|| SaveError::Failed("No folder".into()))?;
