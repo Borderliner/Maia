@@ -2907,6 +2907,10 @@ impl App {
             }
             Cmd::ConnectServer => self.popup = Popup::connect(String::new(), None),
             Cmd::ExtractHere => {
+                if !crate::archive::available() {
+                    self.toast(crate::archive::EXTRACT_NEEDS);
+                    return;
+                }
                 let t = self.tab();
                 let targets = t.targets();
                 if let Some(archive) = t.archive.clone() {
@@ -2931,6 +2935,10 @@ impl App {
                 }
             }
             Cmd::CompressLocked | Cmd::CompressZip | Cmd::CompressTarGz | Cmd::CompressTarXz | Cmd::Compress7z => {
+                if !crate::archive::available() {
+                    self.toast(crate::archive::COMPRESS_NEEDS);
+                    return;
+                }
                 let t = self.tab();
                 let srcs = t.targets();
                 if t.archive.is_some() || tab::is_computer(&t.path) || srcs.is_empty() {

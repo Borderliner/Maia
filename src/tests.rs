@@ -12463,3 +12463,36 @@ fn seven_zip_renames_names_with_wildcards() {
     assert_eq!(paths, ["draft1.txt", "renamed.txt"]);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Without bsdtar, Compress and Extract Here say what to install instead of doing nothing;
+/// with it, Compress asks its questions as before.
+#[test]
+fn compress_and_extract_say_what_they_need() {
+    let ctx = egui::Context::default();
+    let d = tmpdir("needs-bsdtar");
+    touch(&d.join("notes.txt"), "n");
+    touch(&d.join("pack.zip"), "not really a zip");
+    let mut app = crate::app::App::new(&ctx, vec![d.clone()]);
+    app_until(&mut app, &ctx, "the listing", |a| a.panels.get(&a.active).is_some_and(|p| p.tabs[p.active].entries.len() == 2));
+    let pick = |app: &mut crate::app::App, name: &str| {
+        let t = app.tab();
+        t.selected = t.view.iter().copied().filter(|&i| t.entries[i as usize].name == name).collect();
+        t.cursor = t.selected.iter().next().copied();
+    };
+    crate::archive::GONE.with(|g| g.set(true));
+    pick(&mut app, "notes.txt");
+    app.run(Cmd::CompressZip);
+    assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some(crate::archive::COMPRESS_NEEDS));
+    assert!(matches!(app.popup, crate::popups::Popup::None), "no dialog that could only fail");
+    pick(&mut app, "pack.zip");
+    app.run(Cmd::ExtractHere);
+    assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some(crate::archive::EXTRACT_NEEDS));
+    assert!(app.actions.is_empty(), "no extract job started");
+    crate::archive::GONE.with(|g| g.set(false));
+    if crate::archive::available() {
+        pick(&mut app, "notes.txt");
+        app.run(Cmd::CompressZip);
+        assert!(matches!(app.popup, crate::popups::Popup::Compress(_)), "with bsdtar, the dialog");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

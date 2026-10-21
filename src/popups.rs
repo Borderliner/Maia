@@ -1575,7 +1575,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::Redo => app.undo.can_redo(),
         Cmd::ReopenTab => !app.closed_tabs.is_empty(),
         Cmd::EditTags => t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()) && crate::musictags::applies(&t.target_entries().iter().map(|e| (e.ext(), e.is_dir)).collect::<Vec<_>>()),
-        Cmd::CompressLocked => crate::archive::available() && t.archive.is_none() && !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),
+        Cmd::CompressLocked => t.archive.is_none() && !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),
         Cmd::BatchRename => t.archive.is_none() && !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),
         Cmd::CopyTo => !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),
         Cmd::MoveTo => !tab::is_computer(&t.path) && t.archive.is_none() && !t.targets_idx().is_empty(),

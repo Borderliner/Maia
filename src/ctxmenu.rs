@@ -411,12 +411,11 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
                 items.push(Item::cmd(Cmd::ViewPictures));
             }
         }
-        if crate::archive::available() {
-            if ents.iter().any(|e| !e.1 && crate::archive::is_archive(&e.0.to_string_lossy())) {
-                items.push(Item::cmd(Cmd::ExtractHere));
-            }
-            items.push(Item::sub("compress", "Compress", vec![Item::labeled(Cmd::CompressZip, "Zip (.zip)"), Item::labeled(Cmd::CompressTarGz, "Tar.gz (.tar.gz)"), Item::labeled(Cmd::CompressTarXz, "Tar.xz (.tar.xz)"), Item::labeled(Cmd::Compress7z, "7-Zip (.7z)"), Item::labeled(Cmd::CompressLocked, "With a password…")]));
+        // Shown without bsdtar too: chosen, they say what to install.
+        if ents.iter().any(|e| !e.1 && crate::archive::is_archive(&e.0.to_string_lossy())) {
+            items.push(Item::cmd(Cmd::ExtractHere));
         }
+        items.push(Item::sub("compress", "Compress", vec![Item::labeled(Cmd::CompressZip, "Zip (.zip)"), Item::labeled(Cmd::CompressTarGz, "Tar.gz (.tar.gz)"), Item::labeled(Cmd::CompressTarXz, "Tar.xz (.tar.xz)"), Item::labeled(Cmd::Compress7z, "7-Zip (.7z)"), Item::labeled(Cmd::CompressLocked, "With a password…")]));
         if !in_trash && t.archive.is_none() && crate::musictags::applies(&ents.iter().map(|e| (e.3.as_str(), e.1)).collect::<Vec<_>>()) {
             items.push(Item::labeled(Cmd::EditTags, "Edit Tags…"));
         }

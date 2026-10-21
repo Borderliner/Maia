@@ -16427,4 +16427,34 @@ mod journeys {
         look(&mut s, "narrow columns");
         report("select matching", &s);
     }
+
+    /// Without bsdtar the right-click menu still offers Compress, and choosing a format
+    /// says what to install instead of the menu going without it.
+    #[test]
+    fn compress_without_bsdtar_says_what_to_install() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("nobsdtar");
+        crate::archive::GONE.with(|g| g.set(true));
+        let mut s = Sim::new(&home.join("Documents"), vec2(1280.0, 800.0));
+        select_name(&mut s, "notes.txt");
+        let r = list_text(&s, "notes.txt");
+        s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+        s.idle(20);
+        assert!(some_text(&s, "Compress"), "Compress in the menu without bsdtar");
+        if !some_text(&s, "Zip (.zip)") {
+            s.click_text("Compress");
+            s.idle(10);
+        }
+        look(&mut s, "compress menu without bsdtar");
+        s.click_text("Zip (.zip)");
+        s.idle(5);
+        assert!(!matches!(s.app.popup, Popup::Compress(_)), "no dialog that could only fail");
+        assert!(some_text(&s, crate::archive::COMPRESS_NEEDS), "says what to install");
+        s.shot("compress-without-bsdtar");
+        look(&mut s, "compress without bsdtar");
+        crate::archive::GONE.with(|g| g.set(false));
+        report("nobsdtar", &s);
+    }
 }

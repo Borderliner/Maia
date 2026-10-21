@@ -102,8 +102,23 @@ pub fn stem(name: &str) -> &str {
 }
 
 pub fn available() -> bool {
+    #[cfg(test)]
+    if GONE.with(|g| g.get()) {
+        return false;
+    }
     crate::media::have("bsdtar")
 }
+
+#[cfg(test)]
+thread_local! {
+    /// As if bsdtar were not installed, for this thread's app.
+    pub static GONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// What Compress and Extract Here say when bsdtar is missing. They stay in the menus
+/// so it is clear the feature exists and what it takes.
+pub const COMPRESS_NEEDS: &str = "Compressing needs bsdtar (libarchive-tools or bsdtar)";
+pub const EXTRACT_NEEDS: &str = "Extracting needs bsdtar (libarchive-tools or bsdtar)";
 
 /// Errors that a password can fix: asking for one, and one that was refused.
 pub const NEEDS_PASSWORD: &str = "Password-protected";
