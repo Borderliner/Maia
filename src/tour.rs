@@ -151,6 +151,7 @@ pub const ALSO: &[(&str, &[(&str, &str)])] = &[
         &[
             ("Copy To and Move To", "Shift+F5 and Shift+F6 pick the folder in Go To, the recent ones first."),
             ("Select Matching", "A pattern such as *.jpg or IMG_*.{png,jpg} selects what it names."),
+            ("Packages and lone files", ".deb and .rpm packages, and a lone .gz, .xz, .bz2 or .zst file, open like folders."),
         ],
     ),
     (
