@@ -3323,7 +3323,7 @@ mod journeys {
         assert!(s.popup_open(), "conflict dialog shown");
         s.click_text("Keep both");
         s.settle();
-        assert!(dst_dir.join("report (1).md").exists(), "kept both");
+        wait_until(&mut s, "kept both", 10, |_| dst_dir.join("report (1).md").exists());
         assert_eq!(std::fs::read_to_string(dst_dir.join("report.md")).unwrap(), "older report");
         // Again: Replace.
         select_path(&mut s, &src);
@@ -3331,12 +3331,13 @@ mod journeys {
         s.settle();
         s.click_text("Replace");
         s.settle();
-        assert_eq!(std::fs::read_to_string(dst_dir.join("report.md")).unwrap(), std::fs::read_to_string(&src).unwrap(), "replaced");
+        let same = |a: &Path, b: &Path| std::fs::read(a).ok().is_some_and(|x| std::fs::read(b).ok() == Some(x));
+        wait_until(&mut s, "replaced", 10, |_| same(&dst_dir.join("report.md"), &src));
         // The one replaced is in the trash; Undo brings it back in its place.
         wait_until(&mut s, "the copy's undo", 10, |s| s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Copied(..))));
         s.act("key ctrl+z");
         s.settle();
-        assert_eq!(std::fs::read_to_string(dst_dir.join("report.md")).unwrap(), "older report", "the replaced one back");
+        wait_until(&mut s, "the replaced one back", 10, |_| std::fs::read_to_string(dst_dir.join("report.md")).ok().as_deref() == Some("older report"));
         select_path(&mut s, &src);
         s.act("key F5");
         s.settle();
@@ -3346,7 +3347,7 @@ mod journeys {
         // By its key this time.
         s.act("key R");
         s.settle();
-        assert_eq!(std::fs::read_to_string(dst_dir.join("report.md")).unwrap(), std::fs::read_to_string(&src).unwrap(), "replaced again");
+        wait_until(&mut s, "replaced again", 10, |_| same(&dst_dir.join("report.md"), &src));
         // F6 (move) into a conflict: Skip leaves the source where it is.
         select_path(&mut s, &src);
         s.act("key F6");
@@ -3359,10 +3360,11 @@ mod journeys {
         select_path(&mut s, &notes);
         s.act("key F6");
         s.settle();
-        assert!(!notes.exists() && dst_dir.join("notes.txt").exists(), "moved");
+        wait_until(&mut s, "moved", 10, |_| !notes.exists() && dst_dir.join("notes.txt").exists());
+        wait_until(&mut s, "the move's undo", 10, |s| s.app.undo.last().is_some_and(|u| matches!(u.kind, crate::app::UndoKind::Move(..))));
         s.act("key ctrl+z");
         s.settle();
-        assert!(notes.exists() && !dst_dir.join("notes.txt").exists(), "undo moved it back");
+        wait_until(&mut s, "undo moved it back", 10, |_| notes.exists() && !dst_dir.join("notes.txt").exists());
         // Duplicate in place.
         select_path(&mut s, &src);
         s.cmd(Duplicate);
