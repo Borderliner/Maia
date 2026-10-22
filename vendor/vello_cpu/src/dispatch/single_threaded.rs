@@ -216,7 +216,8 @@ impl SingleThreadedDispatcher {
         // parents. Subsequent sibling filter layers also get added after the previous layer they
         // are composited into. Therefore, iterating in reverse order is enough to ensure that all
         // dependencies have been rendered before they are invoked.
-        for id in self.recorder.filter_layers.iter().rev().copied() {
+        let layers = if cfg!(feature = "full_paint") { &self.recorder.filter_layers[..] } else { &[] };
+        for id in layers.iter().rev().copied() {
             let RecordedLayerKind::Filter {
                 filter_data: filter_plan,
                 placement,

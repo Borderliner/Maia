@@ -769,7 +769,7 @@ impl<S: Simd, T: FineKernel<S>> Fine<S, T> {
         let source = &mut source[range.clone()];
         let target = &mut target[range];
 
-        if attrs.blend_mode == BlendMode::default() {
+        if !cfg!(feature = "full_paint") || attrs.blend_mode == BlendMode::default() {
             T::alpha_composite_buffer(self.simd, target, source, alphas);
         } else {
             T::blend(
@@ -800,8 +800,13 @@ impl<S: Simd, T: FineKernel<S>> Fine<S, T> {
             Paint::Solid(color) => {
                 self.solid_fill(span, *color, attrs, alphas);
             }
+            #[cfg(feature = "full_paint")]
             Paint::Indexed(index) => {
                 self.indexed_fill(span, index.index(), attrs, resources, alphas);
+            }
+            #[cfg(not(feature = "full_paint"))]
+            Paint::Indexed(_) => {
+                let _ = resources;
             }
         }
     }
@@ -813,7 +818,9 @@ impl<S: Simd, T: FineKernel<S>> Fine<S, T> {
         attrs: &PaintFillAttrs,
         alphas: Option<&[u8]>,
     ) {
-        if attrs.blend_mode == BlendMode::default() && attrs.mask.is_none() {
+        if !cfg!(feature = "full_paint")
+            || attrs.blend_mode == BlendMode::default() && attrs.mask.is_none()
+        {
             let scratch = self.blend_buffers.last_mut().unwrap();
             T::fill_solid(
                 self.simd,
@@ -845,6 +852,7 @@ impl<S: Simd, T: FineKernel<S>> Fine<S, T> {
         );
     }
 
+    #[cfg_attr(not(feature = "full_paint"), allow(dead_code))]
     fn indexed_fill(
         &mut self,
         span: Span,
