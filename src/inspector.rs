@@ -1859,7 +1859,7 @@ fn text_body(ui: &mut Ui, body: Rect, ins: &mut Inspector, e: &Entry, env: &mut 
         ui.painter().galley(pos2(bar.right() - 8.0 - cg.size().x, bar.center().y - cg.size().y / 2.0), cg, pal.text_dim);
         if field.width() > 30.0 {
             let mut fui = ui.new_child(UiBuilder::new().max_rect(field).layout(egui::Layout::left_to_right(egui::Align::Center)));
-            let te = egui::TextEdit::singleline(&mut ins.filter).id_salt(("log-filter", id)).hint_text(egui::RichText::new("Filter lines").color(pal.text_dim)).frame(false).desired_width(field.width()).font(FontId::proportional(12.5));
+            let te = egui::TextEdit::singleline(&mut ins.filter).id_salt(("log-filter", id)).hint_text(egui::RichText::new("Filter lines").color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(field.width()).font(FontId::proportional(12.5));
             let r = fui.add(te);
             crate::ui::note_control(ui, r.rect, "line filter");
         }
@@ -2132,7 +2132,7 @@ fn hex_view(ui: &mut Ui, body: Rect, v: &mut crate::bigfile::Pager, size: f32, s
     let sid = inner.make_persistent_id("insp_hex");
     let mut area = egui::ScrollArea::both().id_salt("insp_hex").auto_shrink([false, false]);
     if let Some(off) = target {
-        let at = egui::scroll_area::State::load(ui.ctx(), sid).map_or(0.0, |s| s.offset.y);
+        let at = egui::scroll_area::State::load(ui.ctx(), sid).map_or(0.0, |s| s.offset().y);
         let y = (off / v.bpr) as f32 * row_h;
         if y < at || y + row_h > at + inner.max_rect().height() {
             area = area.vertical_scroll_offset((y - inner.max_rect().height() / 3.0).max(0.0));
@@ -2860,7 +2860,7 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
     }
     if let Some((line, byte)) = opts.reveal {
         // Only when out of view: stepping through matches on screen shouldn't jump.
-        let at = egui::scroll_area::State::load(ui.ctx(), inner.make_persistent_id("insp_text")).map_or(Vec2::ZERO, |s| s.offset);
+        let at = egui::scroll_area::State::load(ui.ctx(), inner.make_persistent_id("insp_text")).map_or(Vec2::ZERO, |s| s.offset());
         let view = inner.max_rect().size();
         // Wrapped: the last row starting at or before the byte.
         let row = rows.map_or(line, |r| r.partition_point(|x| (x.0 as usize, x.1 as usize) <= (line, byte)).saturating_sub(1));

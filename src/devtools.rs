@@ -377,7 +377,7 @@ pub fn code_search_popup(app: &mut App, ctx: &egui::Context, st: &mut CodeState)
             let w = ui.available_width() - 3.0 * 32.0 - 6.0;
             let hint = if st.q.todo { "Narrow the TODOs…" } else { "Search code…" };
             let id = Id::new("code query");
-            let r = ui.add(egui::TextEdit::singleline(&mut st.q.text).id(id).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(false).desired_width(w.max(40.0)).font(FontId::proportional(15.0)));
+            let r = ui.add(egui::TextEdit::singleline(&mut st.q.text).id(id).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(w.max(40.0)).font(FontId::proportional(15.0)));
             crate::ui::note_control(ui, r.rect, "code query");
             if st.focus_query {
                 r.request_focus();

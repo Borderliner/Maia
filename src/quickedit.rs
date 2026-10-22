@@ -183,7 +183,7 @@ pub fn view(ui: &mut Ui, body: Rect, ed: &mut Edit, find: Option<&mut Finder>, n
             let te = egui::TextEdit::multiline(&mut ed.text)
                 .id(eid)
                 .code_editor()
-                .frame(false)
+                .frame(crate::ui::bare_edit())
                 .margin(egui::Margin::ZERO)
                 .desired_width(if wrap { ui.available_width() } else { f32::INFINITY })
                 .desired_rows(1)

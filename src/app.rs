@@ -1694,7 +1694,7 @@ impl App {
             crate::terminal::keys(self, ctx, &events);
             return;
         }
-        let text_focus = ctx.wants_keyboard_input();
+        let text_focus = ctx.egui_wants_keyboard_input();
         let filter_focus = self.panels.get(&self.active).map(|p| p.filter_has_focus).unwrap_or(false);
         // The preview's editor has the keyboard: its own keys, and only a few of Maia's.
         // (Asked of the editor: egui lets go of the focus on Escape before this runs.)

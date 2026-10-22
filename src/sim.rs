@@ -518,6 +518,8 @@ pub struct Sim {
     pub ppp: f32,
     time: f64,
     pointer: Pos2,
+    /// The modifier keys held as of the last frame (egui hears of a change as an event).
+    mods: egui::Modifiers,
     /// CPU time of every frame (ms): app update + tessellation.
     pub frame_ms: Vec<f32>,
     /// What happened, for failure reports.
@@ -550,7 +552,8 @@ struct Shots {
 
 impl Shots {
     fn take(&mut self, delta: &egui::TexturesDelta) {
-        for (id, d) in &delta.set {
+        for (id, ds) in &delta.set {
+            for d in ds {
             let egui::ImageData::Color(img) = &d.image;
             match d.pos {
                 None => {
@@ -567,6 +570,7 @@ impl Shots {
                         }
                     }
                 }
+            }
             }
         }
     }
@@ -644,7 +648,7 @@ impl Sim {
         let ctx = egui::Context::default();
         let app = App::new(&ctx, vec![path.to_path_buf()]);
         let shots = std::env::var_os("MAIA_SIM_SHOTS").map(|d| Box::new(Shots { dir: PathBuf::from(d), textures: Default::default(), prims: vec![] }));
-        let mut s = Sim { ctx, app, size, ppp: 1.6, time: 0.0, pointer: pos2(-10.0, -10.0), frame_ms: vec![], log: VecDeque::new(), check_overlap: false, slow: vec![], popup_checks: Default::default(), texts: vec![], text_colors: vec![], shots, repaint: std::time::Duration::MAX, copied: vec![] };
+        let mut s = Sim { ctx, app, size, ppp: 1.6, time: 0.0, pointer: pos2(-10.0, -10.0), mods: egui::Modifiers::NONE, frame_ms: vec![], log: VecDeque::new(), check_overlap: false, slow: vec![], popup_checks: Default::default(), texts: vec![], text_colors: vec![], shots, repaint: std::time::Duration::MAX, copied: vec![] };
         // MAIA_SIM_LOOK=FONT,SPACING runs a session at another font size and Spacing.
         if let Some((f, sp)) = std::env::var("MAIA_SIM_LOOK").ok().and_then(|v| v.split_once(',').and_then(|(f, sp)| Some((f.trim().parse().ok()?, sp.trim().parse().ok()?)))) {
             s.app.cfg.font_size = f;
@@ -685,14 +689,19 @@ impl Sim {
                 self.pointer = *p;
             }
         }
-        let mut raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)), time: Some(self.time), modifiers: mods, events, focused: true, ..Default::default() };
+        // egui hears of the modifier keys changing as an event of its own.
+        if mods != self.mods {
+            events.insert(0, Event::ModifiersChanged(mods));
+            self.mods = mods;
+        }
+        let mut raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)), time: Some(self.time), events, focused: true, ..Default::default() };
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(self.ppp);
         PROF.with(|p| p.borrow_mut().clear());
         crate::ui::CONTROLS.with(|c| c.borrow_mut().clear());
         crate::ui::POPUPS.with(|c| c.borrow_mut().clear());
         let t0 = Instant::now();
         let app = &mut self.app;
-        let out = self.ctx.run(raw, |ctx| app.frame(ctx));
+        let mut out = self.ctx.run_pass(raw, |ctx| app.frame(ctx));
         let prims = self.ctx.tessellate(out.shapes.clone(), out.pixels_per_point);
         for c in &out.platform_output.commands {
             if let egui::OutputCommand::CopyText(t) = c {
@@ -708,6 +717,8 @@ impl Sim {
                 sh.textures.remove(id);
             }
         }
+        // A simulation has no GPU to hand the textures to.
+        out.textures_delta.clear();
         self.frame_ms.push(ms);
         if ms > SLOW_MS && self.frame_ms.len() > 3 {
             let traced = self.slow.iter().any(|x| x.0 > 1000.0);
@@ -2767,7 +2778,7 @@ fn columns_step(s: &mut Sim, rng: &mut Rng) {
             let (x, y) = (rng.f(list.left(), list.right()), rng.f(list.top(), list.bottom()));
             s.note(format!("wheel along the strip at {x:.0} {y:.0}"));
             s.frame(vec![Event::PointerMoved(pos2(x, y))]);
-            s.frame(vec![Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: vec2(rng.f(-6.0, 6.0), 0.0), modifiers: egui::Modifiers::NONE }]);
+            s.frame(vec![Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: vec2(rng.f(-6.0, 6.0), 0.0), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel, modifiers: egui::Modifiers::NONE }]);
             s.idle(rng.below(12));
         }
     }
@@ -3824,7 +3835,7 @@ mod journeys {
             s.act("key ArrowDown");
             s.act("key Escape");
             s.act("key Escape");
-            assert!(s.tab().filter.is_empty() && !s.ctx.wants_keyboard_input(), "{v:?}: Escape twice clears and leaves the filter");
+            assert!(s.tab().filter.is_empty() && !s.ctx.egui_wants_keyboard_input(), "{v:?}: Escape twice clears and leaves the filter");
         }
         report("keys", &s);
     }

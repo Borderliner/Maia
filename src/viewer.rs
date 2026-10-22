@@ -890,7 +890,7 @@ fn tag_field(ui: &mut egui::Ui, text: &mut String, r: Rect, bottom: f32, fs: f32
     let fr = Rect::from_center_size(pos2(r.center().x, bottom - h / 2.0), vec2(260.0f32.min(r.width() - 40.0), h));
     ui.painter().rect_filled(fr, CornerRadius::same((h / 2.0) as u8), Color32::from_black_alpha(170));
     let mut fui = ui.new_child(egui::UiBuilder::new().max_rect(fr.shrink2(vec2(14.0, 3.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-    let te = egui::TextEdit::singleline(text).id(Id::new("viewer new tag")).hint_text(egui::RichText::new("New tag").color(Color32::from_gray(150))).text_color(Color32::WHITE).frame(false).desired_width(fr.width() - 28.0).font(FontId::proportional(fs));
+    let te = egui::TextEdit::singleline(text).id(Id::new("viewer new tag")).hint_text(egui::RichText::new("New tag").color(Color32::from_gray(150))).text_color(Color32::WHITE).frame(crate::ui::bare_edit()).desired_width(fr.width() - 28.0).font(FontId::proportional(fs));
     let resp = fui.add(te);
     crate::ui::note_control(ui, fr, "viewer new tag");
     let _ = pal;

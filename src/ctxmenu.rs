@@ -684,7 +684,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
     // The menu's height as drawn: rows and separators each with the Spacing gap after
     // them, the search row and the margins. Short of it, a menu opened low ran off the
     // bottom of the window.
-    let gap = ctx.style().spacing.item_spacing.y;
+    let gap = ctx.global_style().spacing.item_spacing.y;
     let seps = rows.iter().filter(|r| is_sep(&r.1)).count();
     let est_h = ((n - seps) as f32 * (row_h + gap) + seps as f32 * (7.0 + gap) + 44.0 + 3.0 * gap).min(screen.height() - 20.0);
     let x = st.pos.x.min(screen.right() - w - 6.0).max(4.0);
@@ -703,7 +703,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                     let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
                     paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(13.0)), Glyph::Search, pal.text_dim);
                     let before = st.query.clone();
-                    let te = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text(egui::RichText::new("Select a command…").color(pal.text_dim)).frame(false).desired_width(ui.available_width() - 26.0));
+                    let te = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text(egui::RichText::new("Select a command…").color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(ui.available_width() - 26.0));
                     let (cr, cresp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
                     if cresp.hovered() {
                         ui.painter().rect_filled(cr, CornerRadius::same(4), pal.hover);

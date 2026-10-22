@@ -250,7 +250,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         paint_glyph(ui.painter(), Rect::from_center_size(pos2(r.left() + 10.0, r.center().y), Vec2::splat(13.0)), Glyph::Search, if filter.is_empty() { pal.text_dim } else { pal.accent });
         let er = Rect::from_min_max(pos2(r.left() + 24.0, r.top() + 2.0), pos2(r.right() - 6.0, r.bottom() - 2.0));
         let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(er).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        let resp = cu.add(egui::TextEdit::singleline(&mut filter).hint_text(egui::RichText::new("Filter sidebar…").color(pal.text_dim)).frame(false).desired_width(er.width()));
+        let resp = cu.add(egui::TextEdit::singleline(&mut filter).hint_text(egui::RichText::new("Filter sidebar…").color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(er.width()));
         if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             filter.clear();
         }
@@ -274,7 +274,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             // another row. Its left edge is the places' icons'.
             let fs = (app.cfg.font_size - 1.5).max(10.0);
             let (r, resp) = ui.allocate_exact_size(vec2(width, (fs + 18.0).round()), Sense::click());
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, title));
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::DisclosureTriangle, true, title));
             let col = if resp.hovered() { pal.text } else { pal.text_dim };
             let text_y = r.bottom() - 6.0 - fs * 0.6;
             ui.painter().text(pos2(r.left() + 28.0, text_y), Align2::LEFT_CENTER, title, FontId::proportional(fs), col);

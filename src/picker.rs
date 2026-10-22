@@ -832,7 +832,7 @@ fn name_field(app: &mut App, ui: &mut Ui, r: Rect, fs: f32, pal: &crate::theme::
     let Some(p) = app.picker.as_mut() else { return };
     ui.painter().rect(r, CornerRadius::same(6), pal.bg, Stroke::new(1.0f32, pal.card_line()), StrokeKind::Inside);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink2(vec2(8.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-    let te = egui::TextEdit::singleline(&mut p.name).id(id).frame(false).font(FontId::proportional(fs)).desired_width(r.width() - 16.0).hint_text(egui::RichText::new("Name").color(pal.text_dim));
+    let te = egui::TextEdit::singleline(&mut p.name).id(id).frame(crate::ui::bare_edit()).font(FontId::proportional(fs)).desired_width(r.width() - 16.0).hint_text(egui::RichText::new("Name").color(pal.text_dim));
     let resp = child.add(te);
     crate::ui::note_control(ui, r, "picker name");
     if std::mem::take(&mut p.focus_name) {

@@ -925,7 +925,7 @@ pub(crate) fn search_field(ui: &mut Ui, text: &mut String, hint: &str, focus: &m
         .horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(20.0, 22.0), Sense::hover());
             paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(14.0)), glyph, pal.text_dim);
-            ui.add(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(false).desired_width(ui.available_width() - 8.0).font(FontId::proportional(15.0)))
+            ui.add(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(ui.available_width() - 8.0).font(FontId::proportional(15.0)))
         })
         .inner;
     if *focus {
@@ -1467,7 +1467,7 @@ fn goto(app: &mut App, ctx: &egui::Context, st: &mut GoToState) -> bool {
                 Some(_) => "Folder to copy into…",
                 None => "Open or expand a folder…",
             };
-            let resp = ui.add(egui::TextEdit::singleline(&mut st.input).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(false).desired_width(w).font(FontId::proportional(15.0)));
+            let resp = ui.add(egui::TextEdit::singleline(&mut st.input).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(w).font(FontId::proportional(15.0)));
             if st.focus {
                 resp.request_focus();
                 if let Some(mut s) = egui::TextEdit::load_state(ui.ctx(), resp.id) {
@@ -3378,7 +3378,7 @@ fn types(app: &mut App, ctx: &egui::Context, panel: u64, query: &mut String) -> 
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(20.0, 22.0), Sense::hover());
             paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(12.0)), Glyph::Search, pal.text_dim);
-            let te = ui.add(egui::TextEdit::singleline(query).hint_text(egui::RichText::new(format!("Filter {} types…", counts.len())).color(pal.text_dim)).frame(false).desired_width(ui.available_width() - 84.0));
+            let te = ui.add(egui::TextEdit::singleline(query).hint_text(egui::RichText::new(format!("Filter {} types…", counts.len())).color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(ui.available_width() - 84.0));
             if !te.has_focus() && query.is_empty() {
                 te.request_focus();
             }
@@ -5859,7 +5859,7 @@ fn path_dropdown(app: &mut App, ctx: &egui::Context, st: &mut PathDropState) -> 
             let (r, _) = ui.allocate_exact_size(vec2(20.0, 22.0), Sense::hover());
             paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(12.0)), Glyph::Search, pal.text_dim);
             let hint = format!("Filter {} {}…", n_items, if n_items == 1 { "item" } else { "items" });
-            let r = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(false).desired_width(ui.available_width() - 24.0));
+            let r = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(ui.available_width() - 24.0));
             if st.focus {
                 r.request_focus();
                 st.focus = false;

@@ -1065,7 +1065,7 @@ pub fn pane(app: &mut App, ui: &mut Ui, full: Rect, above: f32) {
                 }
                 job.text.push(ch);
                 if let Some(sec) = job.sections.last_mut() {
-                    sec.byte_range.end = job.text.len();
+                    sec.byte_range.end = egui::epaint::text::ByteIndex(job.text.len());
                 }
                 laid += if ch.is_ascii() { cw } else { f.glyph_width(&font, ch) };
                 want += w;

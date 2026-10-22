@@ -1417,7 +1417,7 @@ impl Writer<'_, '_> {
                     }
                     at += 1;
                 }
-                if row.row.ends_with_newline {
+                if row.ends_with_newline {
                     at += 1;
                 }
             }
@@ -1692,7 +1692,7 @@ fn hit(pieces: &[Piece], q: Pos2) -> crate::textsel::At {
         if q.y >= r.top() && q.y <= r.bottom() {
             let dx = if q.x < r.left() { r.left() - q.x } else { (q.x - r.right()).max(0.0) };
             if best.is_none_or(|b| dx < b.0) {
-                best = Some((dx, (k, g.cursor_from_pos(q - pos).index)));
+                best = Some((dx, (k, g.cursor_from_pos(q - pos).index.0)));
             }
         } else if r.bottom() < q.y {
             above = Some((k, g.text().chars().count()));
@@ -1707,16 +1707,16 @@ fn paint_sel(p: &egui::Painter, at: Pos2, g: &Galley, a: usize, b: usize, on: bo
     let mut c = 0;
     let last = g.rows.len().saturating_sub(1);
     for (i, row) in g.rows.iter().enumerate() {
-        let n = row.char_count_excluding_newline();
+        let n = row.char_count_excluding_newline().0;
         let (x, y) = (a.max(c), b.min(c + n));
         let tail = (b > c + n || on && b >= c + n) && (row.ends_with_newline || i == last);
         if x < y || tail && x <= c + n {
             let rr = row.rect().translate(at.to_vec2());
-            let x0 = at.x + row.pos.x + row.x_offset(x - c);
-            let x1 = at.x + row.pos.x + row.x_offset(y.max(x) - c) + if tail { 4.0 } else { 0.0 };
+            let x0 = at.x + row.pos.x + row.x_offset(egui::epaint::text::CharIndex(x - c));
+            let x1 = at.x + row.pos.x + row.x_offset(egui::epaint::text::CharIndex(y.max(x) - c)) + if tail { 4.0 } else { 0.0 };
             crate::textsel::paint(p, Rect::from_min_max(pos2(x0, rr.top()), pos2(x1, rr.bottom())), pal);
         }
-        c += row.char_count_including_newline();
+        c += row.char_count_including_newline().0;
     }
 }
 
@@ -1851,7 +1851,7 @@ pub fn view(ui: &mut Ui, body: Rect, v: &mut View, size: f32, pal: &Palette, spa
                     if let (Some(h), false) = (hover, links.is_empty()) {
                         if pr.contains(h) {
                             let cc = g.cursor_from_pos(h - at);
-                            let byte = g.text().char_indices().nth(cc.index).map_or(g.text().len(), |(b, _)| b);
+                            let byte = g.text().char_indices().nth(cc.index.0).map_or(g.text().len(), |(b, _)| b);
                             // The cursor lands between characters: the one after it, or
                             // before it at a row's end.
                             if let Some((_, l)) = links.iter().find(|(rg, _)| rg.contains(&byte) || (byte > 0 && rg.contains(&(byte - 1)) && rg.end == byte)) {

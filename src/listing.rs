@@ -402,7 +402,7 @@ pub fn listing(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         }
     }
     // External drops (files from other apps).
-    let dropped: Vec<PathBuf> = ui.ctx().input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+    let dropped: Vec<PathBuf> = ui.ctx().input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
     if !dropped.is_empty() {
         let pp = ui.ctx().pointer_hover_pos();
         let mine = match pp {
@@ -920,7 +920,7 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                     let e = t.entries[idx as usize].clone();
                     let selected = t.selected.contains(&idx);
                     // For a screen reader (only asked while one listens): the name, picked or not.
-                    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &e.name));
+                    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, &e.name));
                     let is_cursor = t.cursor == Some(idx);
                     if is_cursor {
                         cursor_row = Some(rr);
@@ -1078,8 +1078,8 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
     });
     t.rows = rows;
     t.group_labels = group_labels;
-    t.current_scroll = out.state.offset.y;
-    t.hscroll = out.state.offset.x;
+    t.current_scroll = out.state.offset().y;
+    t.hscroll = out.state.offset().x;
     // Header (scrolls horizontally with the body).
     let header = Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + header_h));
     let painter = ui.painter().with_clip_rect(header.intersect(ui.clip_rect()));
@@ -1292,7 +1292,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
             let e = t.entries[idx as usize].clone();
             let resp = ui.interact(r, Id::new(("cell", t.id, idx)), Sense::click_and_drag());
             let selected = t.selected.contains(&idx);
-            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &e.name));
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, &e.name));
             let is_cursor = t.cursor == Some(idx);
             if is_cursor {
                 cursor_rect = Some(r);
@@ -1421,7 +1421,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
             }
         }
     });
-    t.current_scroll = if horizontal { 0.0 } else { out.state.offset.y };
+    t.current_scroll = if horizontal { 0.0 } else { out.state.offset().y };
 }
 
 // ------------------------------------------------------------------ columns
@@ -1615,7 +1615,7 @@ fn own_column(ui: &mut Ui, cr: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Quer
             // double-click lands on the row the first one made the tab's.
             let resp = ui.interact(r, Id::new(("colrow", env.panel_id, &e.path)), Sense::click_and_drag());
             let selected = t.selected.contains(&idx);
-            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &e.name));
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, &e.name));
             let is_cursor = t.cursor == Some(idx);
             if is_cursor {
                 t.cursor_screen_pos = Some(pos2(r.left() + 40.0, r.bottom()));
@@ -1637,7 +1637,7 @@ fn own_column(ui: &mut Ui, cr: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Quer
             }
         }
     });
-    t.current_scroll = out.state.offset.y;
+    t.current_scroll = out.state.offset().y;
 }
 
 /// A column beside the tab's: an ancestor with the way on highlighted, or the folder
@@ -1675,7 +1675,7 @@ fn side_column(ui: &mut Ui, cr: Rect, col: &mut Tab, child: Option<u32>, env: &m
             let r = Rect::from_min_size(origin + vec2(0.0, i as f32 * row_h), vec2(body.width(), row_h));
             let resp = ui.interact(r, Id::new(("colrow", panel, &e.path)), Sense::click_and_drag());
             let on = child == Some(idx);
-            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, &e.name));
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, &e.name));
             let drop = drop_target(ui, r, e, env);
             // The way down is marked quieter than a selection: the picking happens in the
             // tab's own column.

@@ -93,11 +93,27 @@ pub fn draw(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env) {
     listing::background_clicks(ui, &bg, t, env);
 
     // The wheel, either way, flips one item per notch; a touchpad's glide adds up to items.
-    // The raw delta, not the smoothed one: the row eases already, and easing twice lags.
+    // From the wheel's own events, not the smoothed scroll: the row eases already, and
+    // easing twice lags.
     if ui.rect_contains_pointer(rect) && !ui.input(|i| i.modifiers.ctrl) {
-        let d = ui.input(|i| i.raw_scroll_delta);
         let notch = ctx.options(|o| o.input_options.line_scroll_speed).max(1.0);
-        t.stack_acc -= (d.y + d.x) / notch;
+        let d: f32 = ui.input(|i| {
+            i.events
+                .iter()
+                .map(|e| match e {
+                    egui::Event::MouseWheel { unit, delta, .. } => {
+                        let s = delta.x + delta.y;
+                        match unit {
+                            egui::MouseWheelUnit::Line => s,
+                            egui::MouseWheelUnit::Page => s * 10.0,
+                            egui::MouseWheelUnit::Point => s / notch,
+                        }
+                    }
+                    _ => 0.0,
+                })
+                .sum()
+        });
+        t.stack_acc -= d;
         let whole = t.stack_acc.trunc();
         if whole != 0.0 {
             t.stack_acc -= whole;

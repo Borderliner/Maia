@@ -18,6 +18,12 @@ pub const TAB_H: f32 = 30.0;
 pub const HEADER_H: f32 = 34.0;
 pub const FOOTER_H: f32 = 30.0;
 
+/// A text field drawn without a frame of its own, keeping the padding it had when that
+/// was a switch: 4 by 2.
+pub fn bare_edit() -> egui::Frame {
+    egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2))
+}
+
 /// Small square button with a painted glyph.
 /// Test builds: every toolbar/status control drawn this frame, so the user simulations can
 /// catch two controls drawn on top of each other. Compiles to nothing otherwise.
@@ -335,45 +341,53 @@ impl App {
         // ------------------------------------------------ the picker's bar (Open and Save)
         // The window's whole width, under the sidebar too: a dialog's row of answers.
         if self.picker.is_some() {
-            egui::TopBottomPanel::bottom("picker")
-                .exact_height(crate::picker::height(self))
-                .show_separator_line(false)
-                .frame(egui::Frame::NONE.fill(pal.chrome))
-                .show(&ctx, |ui| crate::picker::bar(self, ui));
+            ctx.root_ui(|root| {
+                egui::Panel::bottom("picker")
+                    .exact_size(crate::picker::height(self))
+                    .show_separator_line(false)
+                    .frame(egui::Frame::NONE.fill(pal.chrome))
+                    .show(root, |ui| crate::picker::bar(self, ui))
+            });
         }
         // ------------------------------------------------ sidebar (full height)
         if self.sidebar {
             // A narrow window keeps room beside it for the title bar's window buttons and
             // tab list; a wide sidebar left them on top of each other.
             let most = 420f32.min(ctx.content_rect().width() - 230.0).max(150.0);
-            let r = egui::SidePanel::left("sidebar")
-                .resizable(true)
-                .show_separator_line(false)
-                .default_width(self.sidebar_width)
-                .width_range(150.0..=most)
-                .frame(egui::Frame::NONE.fill(pal.sidebar))
-                .show(&ctx, |ui| crate::sidebar::sidebar(self, ui));
+            let r = ctx.root_ui(|root| {
+                egui::Panel::left("sidebar")
+                    .resizable(true)
+                    .show_separator_line(false)
+                    .default_size(self.sidebar_width)
+                    .size_range(150.0..=most)
+                    .frame(egui::Frame::NONE.fill(pal.sidebar))
+                    .show(root, |ui| crate::sidebar::sidebar(self, ui))
+            });
             self.sidebar_width = r.response.rect.width();
         }
         // ------------------------------------------------ title bar
-        egui::TopBottomPanel::top("title")
-            .exact_height(TITLE_H)
-            .show_separator_line(false)
-            .frame(egui::Frame::NONE.fill(pal.chrome))
-            .show(&ctx, |ui| self.title_bar(ui));
+        ctx.root_ui(|root| {
+            egui::Panel::top("title")
+                .exact_size(TITLE_H)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE.fill(pal.chrome))
+                .show(root, |ui| self.title_bar(ui))
+        });
         // ------------------------------------------------ shelf (only while it holds something)
         let full = !self.shelf.items.is_empty();
         let open = if self.cfg.animations { ctx.animate_bool_with_time(Id::new("shelf open"), full, 0.13) } else if full { 1.0 } else { 0.0 };
         self.shelf.shown_h = (crate::shelf::height(self) * open).round();
         if self.shelf.shown_h >= 1.0 {
-            egui::TopBottomPanel::bottom("shelf")
-                .exact_height(self.shelf.shown_h)
-                .show_separator_line(false)
-                .frame(egui::Frame::NONE.fill(pal.chrome))
-                .show(&ctx, |ui| crate::shelf::strip(self, ui));
+            ctx.root_ui(|root| {
+                egui::Panel::bottom("shelf")
+                    .exact_size(self.shelf.shown_h)
+                    .show_separator_line(false)
+                    .frame(egui::Frame::NONE.fill(pal.chrome))
+                    .show(root, |ui| crate::shelf::strip(self, ui))
+            });
         }
         // ------------------------------------------------ panels
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(pal.bg)).show(&ctx, |ui| {
+        ctx.root_ui(|root| egui::CentralPanel::default().frame(egui::Frame::NONE.fill(pal.bg)).show(root, |ui| {
             let full = ui.max_rect();
             let mut leaves = vec![];
             let mut dividers = vec![];
@@ -463,7 +477,7 @@ impl App {
             crate::terminal::pane(self, ui, full, above);
             // Tab drag: dock compass over the hovered panel.
             self.drag_overlay(ui, &leaves);
-        });
+        }));
         // ------------------------------------------------ overlays
         self.jobs_overlay(&ctx);
         crate::shelf::drop_spot(self, &ctx);
@@ -1423,7 +1437,7 @@ impl App {
             let job = crate::query::job(buf.as_str(), egui::TextStyle::Body.resolve(ui.style()), text, accent, danger);
             ui.fonts_mut(|f| f.layout_job(job))
         };
-        let mut edit = egui::TextEdit::singleline(&mut t.filter).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(false).margin(egui::Margin::symmetric(4, 0)).desired_width(edit_rect.width()).font(egui::TextStyle::Body);
+        let mut edit = egui::TextEdit::singleline(&mut t.filter).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 0))).desired_width(edit_rect.width()).font(egui::TextStyle::Body);
         if crate::query::marked(&before) {
             edit = edit.layouter(&mut conds);
         }

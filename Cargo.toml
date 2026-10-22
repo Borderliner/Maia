@@ -10,9 +10,9 @@ license = "GPL-3.0-or-later"
 ab_glyph = "=0.2.32"
 dirs = "7.0.0"
 fdeflate = "=0.3.7"
-egui = { version = "=0.33.3", default-features = false }
-egui-winit = { version = "=0.33.3", default-features = false, features = ["wayland", "x11"] }
-egui_glow = { version = "=0.33.3", default-features = false, features = ["winit", "wayland", "x11"] }
+egui = { version = "=0.37.0", default-features = false }
+egui-winit = { version = "=0.37.0", default-features = false, features = ["wayland", "x11"] }
+egui_glow = { version = "=0.37.0", default-features = false, features = ["winit", "wayland", "x11"] }
 gif = "=0.13.3"
 glutin = { version = "0.32.3", default-features = false, features = ["egl", "glx", "x11", "wayland"] }
 glutin-winit = { version = "0.5.0", default-features = false, features = ["egl", "glx", "x11", "wayland"] }

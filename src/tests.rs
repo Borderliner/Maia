@@ -1758,7 +1758,7 @@ Regular|GeistMono Nerd Font Mono|/usr/share/fonts/OTF/GeistMonoNerdFontMono-Regu
     let ctx = egui::Context::default();
     let cfg = crate::config::Config::default();
     crate::theme::install_fonts(&ctx, &cfg.font_family, &cfg.inspector_font);
-    let _ = ctx.run(egui::RawInput::default(), |_| {});
+    ctx.run_pass(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
     let font = egui::FontId::monospace(13.0);
     // The powerline branch, a house, a folder and a clock, as prompts draw them.
     for c in ['\u{e0a0}', '\u{f015}', '\u{f07b}', '\u{f017}'] {
@@ -1773,7 +1773,7 @@ fn drag_picture_is_a_clean_premultiplied_card() {
     crate::theme::install_fonts(&ctx, &cfg.font_family, &cfg.inspector_font);
     let mut raw = egui::RawInput::default();
     raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(1.6);
-    let _ = ctx.run(raw, |_| {});
+    ctx.run_pass(raw, |_| {}).drop_without_applying_deltas();
     let pal = crate::theme::palette(crate::theme::ThemeName::default());
     let dir = std::env::temp_dir();
     let long = PathBuf::from("/x/a very long file name that keeps going and going well past what fits.txt");
@@ -7326,9 +7326,9 @@ fn viewer_pictures_decode_upright_off_the_frame() {
     let mtime = std::fs::metadata(&jpg).unwrap().modified().ok();
     let t0 = Instant::now();
     let dims = loop {
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        ctx.run_pass(egui::RawInput::default(), |ctx| {
             thumbs.pump(ctx);
-        });
+        }).drop_without_applying_deltas();
         if let Some(l) = thumbs.get(&jpg, mtime, 1600.0) {
             break (l.dims, l.tex.size());
         }
@@ -8859,14 +8859,18 @@ fn find_bar_stays_inside_its_body() {
     let mut run = |body: Option<egui::Rect>| {
         let mut f = Finder::new("main".into());
         let mut rest = egui::Rect::NOTHING;
-        let out = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                if let Some(body) = body {
-                    rest = bar(ui, body, &mut f, "1 of 2", true, 7, false, &pal).1;
-                }
+        let out = ctx.run_pass(egui::RawInput::default(), |ctx| {
+            ctx.root_ui(|root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    if let Some(body) = body {
+                        rest = bar(ui, body, &mut f, "1 of 2", true, 7, false, &pal).1;
+                    }
+                });
             });
         });
-        (rest, out.shapes.len())
+        let n = out.shapes.len();
+        out.drop_without_applying_deltas();
+        (rest, n)
     };
     let (_, empty) = run(None);
     let tall = egui::Rect::from_min_size(egui::pos2(0.0, 100.0), egui::vec2(400.0, 200.0));
@@ -9662,9 +9666,9 @@ fn play_for(p: &mut crate::anim::Player, ctx: &egui::Context, t: &mut f64, secs:
     let end = *t + secs;
     while *t < end {
         *t += 1.0 / 60.0;
-        let _ = ctx.run(egui::RawInput { time: Some(*t), ..Default::default() }, |_| {
+        ctx.run_pass(egui::RawInput { time: Some(*t), ..Default::default() }, |_| {
             p.frame(true);
-        });
+        }).drop_without_applying_deltas();
         let (_, n, _, _, c) = p.state();
         *held = (*held).max(n);
         if let Some(c) = c.filter(|c| seen.last() != Some(c)) {
@@ -9879,7 +9883,7 @@ fn purge_trashed_under(dir: &Path) {
 
 fn app_frame(app: &mut crate::app::App, ctx: &egui::Context) {
     let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))), ..Default::default() };
-    let _ = ctx.run(raw, |c| app.frame(c));
+    ctx.run_pass(raw, |c| app.frame(c)).drop_without_applying_deltas();
 }
 
 fn app_until(app: &mut crate::app::App, ctx: &egui::Context, what: &str, ok: impl Fn(&crate::app::App) -> bool) {
@@ -10802,7 +10806,7 @@ fn picker_answers_each_mode() {
     let ctx = egui::Context::default();
     let frame = |app: &mut crate::app::App, events: Vec<egui::Event>| {
         let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 640.0))), events, ..Default::default() };
-        let _ = ctx.run(raw, |c| app.frame(c));
+        ctx.run_pass(raw, |c| app.frame(c)).drop_without_applying_deltas();
     };
     let open = |pick: Pick| -> crate::app::App {
         let mut app = crate::app::App::new(&ctx, vec![d.clone()]);
@@ -11665,7 +11669,7 @@ fn columns_stay_through_a_saved_view() {
 /// One frame with these input events (keys, typed text).
 fn app_input(app: &mut crate::app::App, ctx: &egui::Context, events: Vec<egui::Event>) {
     let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))), events, focused: true, ..Default::default() };
-    let _ = ctx.run(raw, |c| app.frame(c));
+    ctx.run_pass(raw, |c| app.frame(c)).drop_without_applying_deltas();
 }
 
 fn press(key: egui::Key) -> egui::Event {

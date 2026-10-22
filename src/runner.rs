@@ -168,14 +168,23 @@ impl Runner {
         let shot = match self.tk.as_mut() {
             Some(tk) => {
                 input.events.extend(tk.take());
-                if crate::testkit::held().any() {
-                    input.modifiers = crate::testkit::held();
-                }
-                if let Some(m) = input.events.iter().rev().find_map(|e| match e {
-                    egui::Event::PointerButton { modifiers, .. } | egui::Event::Key { modifiers, .. } => Some(*modifiers),
-                    _ => None,
-                }) {
-                    input.modifiers = m;
+                // egui hears of the modifier keys as an event of its own, sent when they
+                // change (their release too).
+                static LAST: std::sync::Mutex<egui::Modifiers> = std::sync::Mutex::new(egui::Modifiers::NONE);
+                let held = crate::testkit::held();
+                let m = input
+                    .events
+                    .iter()
+                    .rev()
+                    .find_map(|e| match e {
+                        egui::Event::PointerButton { modifiers, .. } | egui::Event::Key { modifiers, .. } => Some(*modifiers),
+                        _ => None,
+                    })
+                    .unwrap_or(held);
+                let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+                if *last != m {
+                    input.events.insert(0, egui::Event::ModifiersChanged(m));
+                    *last = m;
                 }
                 if tk.pending() {
                     window.request_redraw();
@@ -184,14 +193,14 @@ impl Runner {
             }
             None => None,
         };
-        let out = self.ctx.run(input, |ctx| app.frame(ctx));
+        let mut out = self.ctx.run_pass(input, |ctx| app.frame(ctx));
         for (_, vo) in out.viewport_output {
             let mut actions = Default::default();
             egui_winit::process_viewport_commands(&self.ctx, &mut self.viewport, vo.commands, window, &mut actions);
         }
         for cmd in &out.platform_output.commands {
             if let egui::OutputCommand::CopyText(t) = cmd {
-                crate::clipboard::set_text(t);
+                crate::clipboard::set_text(&t);
             }
         }
         state.handle_platform_output(window, out.platform_output);
@@ -204,8 +213,10 @@ impl Runner {
             gl.glow.clear_color(bg.r() as f32 / 255.0, bg.g() as f32 / 255.0, bg.b() as f32 / 255.0, 1.0);
             gl.glow.clear(egui_glow::glow::COLOR_BUFFER_BIT);
         }
-        for (id, delta) in &out.textures_delta.set {
-            painter.set_texture(*id, delta);
+        for (id, deltas) in &out.textures_delta.set {
+            for delta in deltas {
+                painter.set_texture(*id, delta);
+            }
         }
         let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
         let size: [u32; 2] = window.inner_size().into();
@@ -213,6 +224,7 @@ impl Runner {
         for id in &out.textures_delta.free {
             painter.free_texture(*id);
         }
+        out.textures_delta.clear();
         #[cfg(feature = "testkit")]
         if let Some(path) = shot {
             crate::testkit::save_frame(&gl.glow, size, &path);

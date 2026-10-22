@@ -2591,6 +2591,11 @@ pub fn apply(ctx: &egui::Context, p: &Palette, font_size: f32, spacing: f32, ani
     v.widgets.active.weak_bg_fill = p.selected;
     v.widgets.active.bg_fill = p.selected;
     v.widgets.open.weak_bg_fill = p.hover;
+    // Glyphs on whole pixels and unhinted, as text was drawn before egui 0.37: the same
+    // look, and each glyph rasterised once rather than at four offsets through the hinting
+    // interpreter. Left at their defaults, a dialog's first frame took 50 ms and more.
+    v.text_options.subpixel_binning = false;
+    v.text_options.font_hinting = false;
     ctx.set_visuals(v);
     ctx.all_styles_mut(|s| {
         use egui::{FontId, TextStyle};
