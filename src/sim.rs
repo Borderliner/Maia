@@ -13446,6 +13446,12 @@ mod journeys {
         s.idle(40);
         look(&mut s, "stack, split");
         s.shot("stack-split");
+        // The row eases toward the cursor, so for some frames after the list shrinks it
+        // still stands past its end: from the last of 44 items, a filter that keeps one.
+        s.act("text notes");
+        s.idle(30);
+        assert_eq!(s.tab().view.len(), 1, "the filter keeps notes.txt alone");
+        look(&mut s, "stack, the list shrunk under the row");
         report("stack", &s);
     }
 

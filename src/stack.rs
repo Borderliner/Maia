@@ -164,7 +164,9 @@ pub fn draw(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env) {
         let c = card(anchor0 + offset(i as f32 - pos, side), side);
         (c.bounds().intersects(stage) && depth_fade(i as f32 - pos) < 0.995).then_some(c)
     };
-    let base = pos.round() as isize;
+    // The row eases toward the cursor, so just after the list shrinks it can still stand
+    // past the end: the cards start from the last one there is.
+    let base = (pos.round() as isize).clamp(0, n as isize - 1);
     let mut last = base;
     while last + 1 < n as isize && last - base < 200 && in_sight(last + 1).is_some() {
         last += 1;
