@@ -1100,7 +1100,7 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
         painter.line_segment([pos2(cell.right() - 0.5, cell.top() + 6.0), pos2(cell.right() - 0.5, cell.bottom() - 6.0)], Stroke::new(1.0, pal.border));
         let label = c.title();
         let col = if active_sort { pal.text } else { pal.text_dim };
-        let g = elided(ui, label, small.clone(), w - 26.0, col);
+        let g = elided(ui, label, theme::semibold(small.size), w - 26.0, col);
         let boxes = env.cfg.selection_boxes && !tab::is_computer(&t.path);
         let gx = if c.right_aligned() { cell.right() - 8.0 - g.size().x - if active_sort { 12.0 } else { 0.0 } } else if *c == Column::Name && boxes { cell.left() + 29.0 } else { cell.left() + 6.0 };
         if *c == Column::Name && boxes {

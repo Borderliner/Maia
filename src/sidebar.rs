@@ -277,7 +277,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::DisclosureTriangle, true, title));
             let col = if resp.hovered() { pal.text } else { pal.text_dim };
             let text_y = r.bottom() - 6.0 - fs * 0.6;
-            ui.painter().text(pos2(r.left() + 28.0, text_y), Align2::LEFT_CENTER, title, FontId::proportional(fs), col);
+            ui.painter().text(pos2(r.left() + 28.0, text_y), Align2::LEFT_CENTER, title, crate::theme::semibold(fs), col);
             // The chevron shows the section can fold: always when folded, else when pointed at.
             if collapsed || resp.hovered() {
                 let c = Rect::from_center_size(pos2(r.right() - 16.0, text_y), Vec2::splat(11.0));

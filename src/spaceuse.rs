@@ -523,7 +523,7 @@ fn ring(ui: &mut egui::Ui, r: Rect, st: &mut State, goals: &[(u32, f32)], other:
         }
     };
     let lg = crate::listing::elided(ui, &label, FontId::proportional(fs - 1.0), room, pal.text_dim);
-    let vg = ui.painter().layout_no_wrap(value, FontId::proportional((r0 * 0.2).clamp(fs * 1.85, fs * 3.0).round()), pal.text);
+    let vg = ui.painter().layout_no_wrap(value, crate::theme::semibold((r0 * 0.2).clamp(fs * 1.85, fs * 3.0).round()), pal.text);
     let sg = ui.painter().layout_no_wrap(sub, FontId::proportional(fs - 1.0), pal.text_dim);
     let gap = 2.0;
     let mut h = lg.size().y + gap + vg.size().y;

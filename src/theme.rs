@@ -2663,6 +2663,9 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
         list.push(name.into());
     };
     let custom = if family.trim().is_empty() { None } else { fc_match(family.trim()) };
+    // The family the font came by, for its semibold below: the one asked for, else the
+    // desktop's.
+    let named = if custom.is_some() { Some(family.trim().to_string()) } else { desktop_font_family().or(Some("system-ui".into())) };
     // Follow the desktop's UI font: the GTK font setting, then
     // fontconfig's system-ui alias, then a list of common sans families.
     let desktop = desktop_font_family().and_then(|f| fc_match(&f)).or_else(|| fc_match("system-ui"));
@@ -2682,6 +2685,20 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
     if let Some(b) = ui {
         add(&mut fonts, "ui", b, &mut prop);
     }
+    // A heavier weight of the same font, for titles, headers and labels: a variable font's
+    // own weight axis set to 600 (one file holds every weight), else the family's semibold
+    // file, else none and they stay regular. Never another family's: a title in a second
+    // typeface beside the desktop's would look like a mistake.
+    let semibold = ui.and_then(|b| {
+        if let Some((lo, hi)) = weight_axis(b) {
+            let mut d = FontData::from_static(b);
+            d.tweak.coords = egui::epaint::text::VariationCoords::new([(b"wght", 600f32.clamp(lo, hi))]);
+            return Some(d);
+        }
+        let from = if custom.is_some() || desktop.is_some() { named.as_deref() } else { None }?;
+        let s = fc_match(&format!("{from}:weight=semibold"))?;
+        (s.as_ptr() != b.as_ptr()).then(|| FontData::from_static(s))
+    });
     // Symbols (arrows, stars, blocks) from the system when available.
     if let Some(b) = first(&["/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]) {
         add(&mut fonts, "symbols", b, &mut prop);
@@ -2718,9 +2735,31 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
     prop.extend(["fb-sans", "fb-symbols", "fb-mono"].map(String::from));
     mono.push("fb-mono".into());
     mono.extend(prop.iter().filter(|n| *n != "mono").cloned());
+    // The semibold family falls back as the regular one does, for what its font lacks.
+    let mut semi: Vec<String> = prop.iter().filter(|n| *n != "ui").cloned().collect();
+    match semibold {
+        Some(d) => {
+            fonts.font_data.insert("ui-semibold".into(), d.into());
+            semi.insert(0, "ui-semibold".into());
+        }
+        None => semi.insert(0, "ui".into()),
+    }
+    fonts.families.insert(FontFamily::Name("semibold".into()), semi);
     fonts.families.insert(FontFamily::Proportional, prop);
     fonts.families.insert(FontFamily::Monospace, mono);
     ctx.set_fonts(fonts);
+}
+
+/// The interface font a weight heavier (`install_fonts`), for titles, headers and labels.
+pub fn semibold(size: f32) -> egui::FontId {
+    egui::FontId::new(size, FontFamily::Name("semibold".into()))
+}
+
+/// A variable font's weight axis, its lowest and highest values.
+fn weight_axis(b: &[u8]) -> Option<(f32, f32)> {
+    use ab_glyph::VariableFont;
+    let f = ab_glyph::FontRef::try_from_slice(b).ok()?;
+    f.variations().into_iter().find(|a| &a.tag == b"wght").map(|a| (a.min_value, a.max_value))
 }
 
 // ---------------------------------------------------------------- icons

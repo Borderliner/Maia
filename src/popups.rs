@@ -740,7 +740,7 @@ pub(crate) fn home_short(p: &Path) -> String {
 /// A dialog's title, with an optional dim line under it.
 pub(crate) fn dialog_title(ui: &mut Ui, title: &str, sub: Option<&str>, pal: &Palette) {
     let fs = ui.style().text_styles.get(&egui::TextStyle::Body).map_or(13.0, |f| f.size);
-    ui.add(egui::Label::new(egui::RichText::new(title).strong().size(fs + 1.5).color(pal.text)).wrap());
+    ui.add(egui::Label::new(egui::RichText::new(title).font(crate::theme::semibold(fs + 1.5)).color(pal.text)).wrap());
     if let Some(sub) = sub {
         ui.add(egui::Label::new(egui::RichText::new(sub).color(pal.text_dim)).wrap());
     }
@@ -750,7 +750,7 @@ pub(crate) fn dialog_title(ui: &mut Ui, title: &str, sub: Option<&str>, pal: &Pa
 fn group_label(ui: &mut Ui, text: &str, pal: &Palette) {
     ui.add_space(8.0);
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
-    ui.painter().text(pos2(r.left() + 4.0, r.center().y - 1.0), Align2::LEFT_CENTER, text, FontId::proportional(11.5), pal.text_dim);
+    ui.painter().text(pos2(r.left() + 4.0, r.center().y - 1.0), Align2::LEFT_CENTER, text, crate::theme::semibold(11.5), pal.text_dim);
 }
 
 /// A quiet card holding a group of rows inside a dialog.

@@ -142,7 +142,7 @@ pub fn draw(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env) {
 
     // Name and details over the row, the scrubber under it, the row between.
     let edge = (16.0 * env.cfg.spacing.max(0.7)).round();
-    let title_font = FontId::proportional((fs * 1.55).round());
+    let title_font = crate::theme::semibold((fs * 1.55).round());
     let meta_font = FontId::proportional(fs - 1.0);
     let title_h = ui.fonts_mut(|f| f.row_height(&title_font));
     let meta_h = ui.fonts_mut(|f| f.row_height(&meta_font));
