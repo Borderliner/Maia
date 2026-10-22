@@ -792,7 +792,7 @@ pub(crate) fn plain_button(ui: &mut Ui, label: &str, pal: &Palette) -> egui::Res
 
 /// Top-centered popup. Returns (inner, rect).
 /// How far below the window's top a centred popup opens: less in a short window.
-fn popup_top(screen: Rect) -> f32 {
+pub(crate) fn popup_top(screen: Rect) -> f32 {
     (screen.height() * 0.09).clamp(12.0, 70.0).round()
 }
 
@@ -804,9 +804,13 @@ pub(crate) fn fit_list(ctx: &egui::Context, max: f32, chrome: f32) -> f32 {
 }
 
 pub(crate) fn centered<R>(ctx: &egui::Context, id: &str, width: f32, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
+    centered_top(ctx, id, width, popup_top(ctx.content_rect()), pal, add)
+}
+
+/// `centered`, `top` below the window's top: a dialog that grows to fill the window.
+pub(crate) fn centered_top<R>(ctx: &egui::Context, id: &str, width: f32, top: f32, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
     let screen = ctx.content_rect();
     let w = width.min(screen.width() - 24.0);
-    let top = popup_top(screen);
     // A dialog taller than the window scrolls instead of losing its buttons off the
     // bottom; the scroll area claims its height (see `anchored`).
     let room = (screen.height() - top - 12.0 - 16.0).max(60.0);
@@ -884,6 +888,11 @@ pub(crate) fn hints(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette) {
     let y = ui.cursor().top();
     ui.painter().line_segment([pos2(ui.min_rect().left(), y), pos2(ui.min_rect().right(), y)], Stroke::new(1.0, pal.border));
     ui.add_space(4.0);
+    hint_chips(ui, items, pal);
+}
+
+/// `hints` without the rule above them, for a footer that draws its own.
+pub(crate) fn hint_chips(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         for (k, label) in items {
@@ -891,15 +900,23 @@ pub(crate) fn hints(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette) {
                 ui.label(egui::RichText::new(*label).size(11.0).color(pal.text_dim));
                 continue;
             }
+            // A key and its label wrap together, as one block measured first: wrapped apart, a
+            // label began the next line on its own, away from its key.
             let g = ui.painter().layout_no_wrap(k.to_string(), FontId::proportional(10.5), pal.text_dim);
-            let (r, _) = ui.allocate_exact_size(g.size() + vec2(10.0, 6.0), Sense::hover());
+            let lg = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(11.0), pal.text_dim);
+            let chip = g.size() + vec2(10.0, 6.0);
+            // A key that shares the next one's label ("Up" "Down" to navigate) has none of
+            // its own; an empty label threw off the wrapped row and the chips overlapped.
+            let lw = if label.is_empty() { 0.0 } else { 4.0 + lg.size().x };
+            let (whole, _) = ui.allocate_exact_size(vec2(chip.x + lw, chip.y.max(lg.size().y)), Sense::hover());
+            let r = Rect::from_min_size(pos2(whole.left(), whole.center().y - chip.y / 2.0), chip);
             ui.painter().rect(r, CornerRadius::same(4), pal.bg, Stroke::new(1.0, pal.border), StrokeKind::Inside);
             ui.painter().galley(r.min + vec2(5.0, 3.0), g, pal.text_dim);
             crate::ui::note_control(ui, r, "key hint");
-            // A key that shares the next one's label ("Up" "Down" to navigate) has none of
-            // its own; an empty label threw off the wrapped row and the chips overlapped.
             if !label.is_empty() {
-                ui.label(egui::RichText::new(*label).size(11.0).color(pal.text_dim));
+                ui.painter().galley(pos2(r.right() + 4.0, whole.center().y - lg.size().y / 2.0), lg, pal.text_dim);
+            }
+            if !label.is_empty() {
                 ui.add_space(6.0);
             }
         }

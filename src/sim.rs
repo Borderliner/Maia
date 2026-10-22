@@ -13288,13 +13288,21 @@ mod journeys {
         s.idle(3);
         assert_eq!(space_names(&s), ["Big", "movie.mkv", "Small", "big-link", "Empty"]);
         assert!(some_text(&s, "488 KB") && some_text(&s, "391 KB") && some_text(&s, "10 B"), "each size beside its bar");
-        assert!(s.texts.iter().any(|(_, t)| t.ends_with("Disk · 879 KB")), "where, and how much in all");
+        assert!(s.texts.iter().any(|(_, t)| t.ends_with("Disk") || t.contains("Disk · ")), "where");
+        assert!(some_text(&s, "879 KB"), "how much in all, in the ring");
         look(&mut s, "space used");
         s.shot("space-used-graphite");
         s.app.cfg.theme = crate::theme::ThemeName::Paper;
         look(&mut s, "space used, light");
         s.shot("space-used-paper");
         s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        // Filling the window and back.
+        s.act("key f");
+        s.idle(30);
+        look(&mut s, "space used, full window");
+        s.shot("space-used-full");
+        s.act("key f");
+        s.idle(30);
         // Into Big, and back with the cursor on it.
         s.act("key Enter");
         wait_until(&mut s, "Big read", 10, |s| space(s).dir == d.join("Big") && !space(s).counting());
