@@ -1368,7 +1368,7 @@ fn strip(ui: &mut Ui, hdr: Rect, body: Rect, pane: &mut Pane, pal: &Palette, rad
             p.rect_filled(r.shrink2(vec2(2.0, 3.0)), CornerRadius::same(rad.min(6)), pal.hover);
         }
         let ic = Rect::from_center_size(pos2(r.left() + 14.0, r.center().y), Vec2::splat(13.0));
-        crate::theme::paint_lucide(p, ic, "square-terminal", pal.text_dim);
+        crate::theme::paint_symbol(p, ic, "square-terminal", pal.text_dim);
         let close_w = if (hovered || active) && r.width() >= 52.0 { 18.0 } else { 0.0 };
         let text = Rect::from_min_max(pos2(r.left() + 26.0, r.top()), pos2(r.right() - 6.0 - close_w, r.bottom()));
         let g = crate::listing::elided(ui, &s.short, FontId::proportional(12.0), text.width(), if active { pal.text } else { pal.text_dim });

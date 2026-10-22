@@ -719,11 +719,11 @@ pub fn page(ui: &mut Ui, body: Rect, c: &mut Changes, wrap: bool, env: &mut Env)
                     if row_button(ui, b1, id, "Stage (Space)", "stage file", &pal, plus) {
                         act = Some(Act::Op(stage_op(f, false)));
                     }
-                    let (tip, glyph) = if f.status == b'?' { ("Move to the trash (Delete)", "trash-2") } else { ("Discard changes (Delete)", "rotate-ccw") };
+                    let (tip, glyph) = if f.status == b'?' { ("Move to the trash (Delete)", "trash-2") } else { ("Discard changes (Delete)", "undo") };
                     // A file in conflict is settled, not discarded.
                     if f.status != b'U'
                         && row_button(ui, b2, id, tip, "discard file", &pal, |p, r, c| {
-                            crate::theme::paint_lucide(p, r, glyph, c);
+                            crate::theme::paint_symbol(p, r, glyph, c);
                         })
                     {
                         act = Some(Act::Discard(f.clone()));

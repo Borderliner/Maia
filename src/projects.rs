@@ -470,7 +470,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                     x -= bg.size().x;
                     ui.painter().galley(pos2(x, r.center().y - bg.size().y / 2.0), bg, dc);
                     let ic = Rect::from_center_size(pos2(x - 10.0, r.center().y), Vec2::splat(small));
-                    crate::theme::paint_lucide(ui.painter(), ic, "git-branch", dc);
+                    crate::theme::paint_symbol(ui.painter(), ic, "git-branch", dc);
                     x = ic.left() - 8.0;
                     // Opens as it was left: its tabs and panels.
                     if let Some(w) = kept.get(&p.root) {

@@ -1294,7 +1294,7 @@ impl App {
             }
             let count = |v: usize, t: usize| if v == t { fmt_count(t) } else { format!("{}/{}", fmt_count(v), fmt_count(t)) };
             let file_icon = move |p: &egui::Painter, r: Rect| {
-                crate::theme::paint_lucide(p, r.expand(1.0), "file", pal.text_dim);
+                crate::theme::paint_symbol(p, r.expand(1.0), "file", pal.text_dim);
             };
             let fr = chip(ui, Some(&file_icon), &count(vfi, tfi), if show_files { pal.text_dim } else { pal.text_dim.gamma_multiply(0.45) }, !show_files, &format!("{vfi} of {tfi} files shown{} · click to {} files", if tfi > vfi { " (hidden, system or filtered items excluded)" } else { "" }, if show_files { "hide" } else { "show" }));
             if fr.clicked() {
@@ -1302,7 +1302,7 @@ impl App {
             }
             if !flat_only {
                 let dir_icon = move |p: &egui::Painter, r: Rect| {
-                    crate::theme::paint_lucide(p, r.expand(1.0), "folder", pal.text_dim);
+                    crate::theme::paint_symbol(p, r.expand(1.0), "folder", pal.text_dim);
                 };
                 let dr = chip(ui, Some(&dir_icon), &count(vf, tf), if show_folders { pal.text_dim } else { pal.text_dim.gamma_multiply(0.45) }, !show_folders, &format!("{vf} of {tf} folders shown · click to {} folders", if show_folders { "hide" } else { "show" }));
                 if dr.clicked() {
@@ -1328,7 +1328,7 @@ impl App {
                         ui.painter().rect_filled(r, CornerRadius::same(5), if history { pal.accent.gamma_multiply(0.2) } else { pal.hover });
                     }
                     let p = ui.painter();
-                    crate::theme::paint_lucide(p, Rect::from_center_size(pos2(r.left() + 12.0, r.center().y), Vec2::splat(13.0)), "git-branch", pal.text_dim);
+                    crate::theme::paint_symbol(p, Rect::from_center_size(pos2(r.left() + 12.0, r.center().y), Vec2::splat(13.0)), "git-branch", pal.text_dim);
                     let mut x = r.left() + 22.0;
                     p.galley(pos2(x, r.center().y - name.size().y / 2.0), name.clone(), pal.text_dim);
                     x += name.size().x + 6.0;
@@ -1472,7 +1472,7 @@ impl App {
             if cresp.hovered() || on {
                 ui.painter().rect_filled(cr, CornerRadius::same(4), if on { pal.accent.gamma_multiply(0.35) } else { pal.hover });
             }
-            crate::theme::paint_lucide(ui.painter(), cr.shrink(3.0), "text-search", if on { pal.accent } else { pal.text_dim });
+            crate::theme::paint_symbol(ui.painter(), cr.shrink(3.0), "text-search", if on { pal.accent } else { pal.text_dim });
             if cresp.clicked() {
                 t.content.on = !on;
                 t.dirty = true;
@@ -1863,13 +1863,5 @@ fn glyph_button_col(ui: &mut Ui, g: Glyph, tip: &str, col: Color32, pal: &Palett
 
 /// Bookmark ribbon: outlined, or solid when the folder is bookmarked.
 pub fn paint_bookmark(p: &egui::Painter, r: Rect, filled: bool, col: Color32) {
-    if !filled {
-        crate::theme::paint_lucide(p, r, "bookmark", col);
-        return;
-    }
-    let (l, t, rr, b) = (r.left() + r.width() * 0.22, r.top() + r.height() * 0.12, r.right() - r.width() * 0.22, r.bottom() - r.height() * 0.1);
-    let (c, n) = (r.center().x, b - (rr - l) * 0.38);
-    // Two convex halves meeting at the notch.
-    p.add(egui::Shape::convex_polygon(vec![pos2(l, t), pos2(c, t), pos2(c, n), pos2(l, b)], col, Stroke::NONE));
-    p.add(egui::Shape::convex_polygon(vec![pos2(c, t), pos2(rr, t), pos2(rr, b), pos2(c, n)], col, Stroke::NONE));
+    crate::theme::paint_symbol(p, r, if filled { "bookmark@bold" } else { "bookmark" }, col);
 }

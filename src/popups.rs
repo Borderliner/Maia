@@ -2393,7 +2393,7 @@ impl Section {
             Section::Preview => paint_glyph(p, r, Glyph::Eye, col),
             Section::Search => paint_glyph(p, r, Glyph::Search, col),
             Section::Git => {
-                theme::paint_lucide(p, r, "git-branch", col);
+                theme::paint_symbol(p, r, "git-branch", col);
             }
             Section::System => paint_glyph(p, r, Glyph::Monitor, col),
         }

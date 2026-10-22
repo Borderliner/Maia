@@ -113,7 +113,9 @@ tools/window.sh      # a real window driven through a pipe, for checking by eye
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE). The bundled fonts and icons keep their own
-licenses, in `assets/`, and so do the Rust crates Maia is built from:
+GPL-3.0-or-later. See [LICENSE](LICENSE). The interface icons are the
+[Solar](https://github.com/saoudi-h/solar-icons) set by 480 Design, under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The bundled fonts and icons keep
+their own licenses, in `assets/`, and so do the Rust crates Maia is built from:
 [assets/THIRD-PARTY-NOTICES.txt](assets/THIRD-PARTY-NOTICES.txt) lists each with its
 license text (`tools/notices.py` writes it).

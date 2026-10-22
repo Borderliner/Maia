@@ -26,7 +26,7 @@
 /tools/**
 !/tools/sim.sh
 !/tools/window.sh
-!/tools/lucide_subset.py
+!/tools/solar_icons.py
 !/tools/notices.py
 !/tools/tour-media.sh
 !/tools/package.sh

@@ -2695,10 +2695,6 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
             break;
         }
     }
-    // Interface glyphs: a Lucide subset (ISC), drawn as text in its own family.
-    const ICONS: &[u8] = include_bytes!("../assets/lucide-subset.ttf");
-    fonts.font_data.insert("lucide".into(), FontData::from_static(ICONS).into());
-    fonts.families.insert(FontFamily::Name("icons".into()), vec!["lucide".into()]);
     for (name, bytes) in [("fb-sans", SANS), ("fb-mono", MONO), ("fb-symbols", SYMBOLS)] {
         fonts.font_data.insert(name.into(), FontData::from_static(bytes).into());
     }
@@ -2956,19 +2952,13 @@ pub enum Glyph {
     Copy,
 }
 
-/// Draw a Lucide icon by name, centered in `rect` (the icon's stroke box roughly fills it).
-pub fn paint_lucide(painter: &Painter, rect: Rect, name: &str, col: Color32) -> bool {
-    let Some(&(_, ch)) = crate::lucide_map::LUCIDE.iter().find(|(n, _)| *n == name) else { return false };
-    let s = rect.width().min(rect.height());
-    // Lucide draws inside a 24-unit box with 2 units of padding: scale so the strokes span `s`.
-    let size = (s * 24.0 / 20.0).round().max(6.0);
-    let g = painter.layout_no_wrap(ch.to_string(), egui::FontId::new(size, FontFamily::Name("icons".into())), col);
-    let pos = rect.center() - g.rect.size() / 2.0;
-    painter.galley(pos2(pos.x.round(), pos.y.round()), g, col);
-    true
+/// Draw an interface icon by name (symbols.rs), centred in `rect` and spanning its shorter
+/// side. False when there is no such icon.
+pub fn paint_symbol(painter: &Painter, rect: Rect, name: &str, col: Color32) -> bool {
+    crate::symbols::paint(painter, rect, name, col)
 }
 
-/// Lucide name for each interface glyph.
+/// The icon for each interface glyph.
 fn glyph_name(g: Glyph) -> &'static str {
     match g {
         Glyph::Home => "house",
@@ -2986,10 +2976,11 @@ fn glyph_name(g: Glyph) -> &'static str {
         Glyph::Forward => "arrow-right",
         Glyph::ChevronRight => "chevron-right",
         Glyph::ChevronDown => "chevron-down",
+        Glyph::ChevronUp => "chevron-up",
         Glyph::Lock => "lock",
         Glyph::LockOpen => "lock-open",
         Glyph::Up => "arrow-up",
-        Glyph::Refresh => "rotate-ccw",
+        Glyph::Refresh => "refresh",
         Glyph::Split => "columns-2",
         Glyph::Search => "search",
         Glyph::Eye => "scan-eye",
@@ -2998,244 +2989,36 @@ fn glyph_name(g: Glyph) -> &'static str {
         Glyph::Clock => "clock",
         Glyph::Bookmark => "bookmark",
         Glyph::Folder => "folder",
-        Glyph::Monitor => "monitor",
+        Glyph::Monitor => "computer",
         Glyph::CollapseLeft => "panel-left-close",
         Glyph::Menu => "menu",
         Glyph::Usb => "usb",
+        Glyph::Eject => "eject",
         Glyph::Globe => "globe",
         Glyph::Phone => "smartphone",
+        Glyph::Wrap => "wrap",
+        Glyph::Tag => "tag",
+        Glyph::Cloud => "cloud",
+        Glyph::List => "list",
+        Glyph::ListTree => "list-tree",
         Glyph::Maximize => "maximize-2",
-        Glyph::Table => "grid-3x3",
-        Glyph::Eject | Glyph::Wrap | Glyph::Tag | Glyph::Cloud | Glyph::ChevronUp | Glyph::List | Glyph::ListTree | Glyph::Code | Glyph::Blame | Glyph::Follow | Glyph::Copy => "", // drawn below
+        Glyph::Code => "code",
+        Glyph::Table => "table",
+        Glyph::Blame => "blame",
+        Glyph::Follow => "follow",
+        Glyph::Copy => "copy",
     }
 }
 
 pub fn paint_glyph(painter: &Painter, rect: Rect, g: Glyph, col: Color32) {
-    if paint_lucide(painter, rect, glyph_name(g), col) {
-        return;
-    }
-    let s = rect.width().min(rect.height());
-    let c = rect.center();
-    let st = Stroke::new((s / 11.0).max(1.2), col);
-    let p = |x: f32, y: f32| -> Pos2 { c + vec2(x * s, y * s) };
-    let line = |a: Pos2, b: Pos2| painter.line_segment([a, b], st);
-    match g {
-        Glyph::Home => {
-            painter.add(Shape::line(vec![p(-0.35, 0.0), p(0.0, -0.32), p(0.35, 0.0)], st));
-            painter.add(Shape::line(vec![p(-0.25, -0.08), p(-0.25, 0.32), p(0.25, 0.32), p(0.25, -0.08)], st));
-        }
-        Glyph::Desktop => {
-            painter.rect_stroke(Rect::from_min_max(p(-0.38, -0.3), p(0.38, 0.18)), CornerRadius::same(2), st, StrokeKind::Middle);
-            line(p(0.0, 0.18), p(0.0, 0.32));
-            line(p(-0.18, 0.32), p(0.18, 0.32));
-        }
-        Glyph::Docs => {
-            painter.rect_stroke(Rect::from_min_max(p(-0.28, -0.36), p(0.28, 0.36)), CornerRadius::same(2), st, StrokeKind::Middle);
-            for y in [-0.15, 0.0, 0.15] {
-                line(p(-0.15, y), p(0.15, y));
-            }
-        }
-        Glyph::Down => {
-            line(p(0.0, -0.36), p(0.0, 0.16));
-            painter.add(Shape::line(vec![p(-0.2, -0.04), p(0.0, 0.16), p(0.2, -0.04)], st));
-            line(p(-0.32, 0.34), p(0.32, 0.34));
-        }
-        Glyph::Pics => {
-            painter.rect_stroke(Rect::from_min_max(p(-0.38, -0.3), p(0.38, 0.3)), CornerRadius::same(2), st, StrokeKind::Middle);
-            painter.add(Shape::line(vec![p(-0.38, 0.22), p(-0.1, -0.04), p(0.1, 0.14), p(0.2, 0.04), p(0.38, 0.2)], st));
-            painter.circle_stroke(p(0.15, -0.14), s * 0.06, st);
-        }
-        Glyph::Music => {
-            line(p(-0.12, 0.24), p(-0.12, -0.3));
-            line(p(-0.12, -0.3), p(0.28, -0.36));
-            line(p(0.28, -0.36), p(0.28, 0.18));
-            painter.circle_filled(p(-0.2, 0.26), s * 0.1, col);
-            painter.circle_filled(p(0.2, 0.2), s * 0.1, col);
-        }
-        Glyph::Video => {
-            painter.rect_stroke(Rect::from_min_max(p(-0.38, -0.24), p(0.16, 0.24)), CornerRadius::same(2), st, StrokeKind::Middle);
-            painter.add(Shape::line(vec![p(0.16, -0.06), p(0.38, -0.2), p(0.38, 0.2), p(0.16, 0.06)], st));
-        }
-        Glyph::Drive => {
-            painter.rect_stroke(Rect::from_min_max(p(-0.38, -0.18), p(0.38, 0.22)), CornerRadius::same(3), st, StrokeKind::Middle);
-            painter.circle_filled(p(0.22, 0.02), s * 0.05, col);
-            line(p(-0.24, 0.02), p(0.06, 0.02));
-        }
-        Glyph::Trash => {
-            line(p(-0.34, -0.24), p(0.34, -0.24));
-            line(p(-0.1, -0.34), p(0.1, -0.34));
-            painter.add(Shape::line(vec![p(-0.26, -0.24), p(-0.2, 0.36), p(0.2, 0.36), p(0.26, -0.24)], st));
-        }
-        Glyph::Pin => {
-            painter.circle_stroke(p(0.0, -0.14), s * 0.18, st);
-            line(p(0.0, 0.04), p(0.0, 0.38));
-        }
-        Glyph::Root => {
-            line(p(-0.3, -0.3), p(0.3, 0.3));
-        }
-        Glyph::Back => {
-            painter.add(Shape::line(vec![p(0.12, -0.3), p(-0.18, 0.0), p(0.12, 0.3)], st));
-        }
-        Glyph::Forward => {
-            painter.add(Shape::line(vec![p(-0.12, -0.3), p(0.18, 0.0), p(-0.12, 0.3)], st));
-        }
-        Glyph::Up => {
-            painter.add(Shape::line(vec![p(-0.3, 0.12), p(0.0, -0.18), p(0.3, 0.12)], st));
-        }
-        Glyph::Refresh => {
-            let pts: Vec<Pos2> = (0..=20)
-                .map(|i| {
-                    let a = 0.6 + i as f32 / 20.0 * 5.0;
-                    c + vec2(a.cos(), a.sin()) * s * 0.3
-                })
-                .collect();
-            let end = *pts.last().unwrap();
-            painter.add(Shape::line(pts, st));
-            painter.add(Shape::line(vec![end + vec2(-s * 0.16, -s * 0.02), end, end + vec2(-s * 0.02, s * 0.16)], st));
-        }
-        Glyph::Split => {
-            painter.rect_stroke(Rect::from_min_max(p(-0.38, -0.3), p(0.38, 0.3)), CornerRadius::same(2), st, StrokeKind::Middle);
-            line(p(0.0, -0.3), p(0.0, 0.3));
-        }
-        Glyph::Search => {
-            painter.circle_stroke(p(-0.06, -0.06), s * 0.24, st);
-            line(p(0.12, 0.12), p(0.34, 0.34));
-        }
-        Glyph::Eye => {
-            let top: Vec<Pos2> = (0..=16).map(|i| { let t = i as f32 / 16.0; p(-0.4 + 0.8 * t, -0.24 * (std::f32::consts::PI * t).sin()) }).collect();
-            let bot: Vec<Pos2> = (0..=16).map(|i| { let t = i as f32 / 16.0; p(-0.4 + 0.8 * t, 0.24 * (std::f32::consts::PI * t).sin()) }).collect();
-            painter.add(Shape::line(top, st));
-            painter.add(Shape::line(bot, st));
-            painter.circle_filled(c, s * 0.1, col);
-        }
-        Glyph::Plus => {
-            line(p(-0.3, 0.0), p(0.3, 0.0));
-            line(p(0.0, -0.3), p(0.0, 0.3));
-        }
-        Glyph::Close => {
-            line(p(-0.25, -0.25), p(0.25, 0.25));
-            line(p(-0.25, 0.25), p(0.25, -0.25));
-        }
-        Glyph::Bookmark => {
-            painter.add(Shape::closed_line(vec![p(-0.24, -0.36), p(0.24, -0.36), p(0.24, 0.38), p(0.0, 0.16), p(-0.24, 0.38)], st));
-        }
-        Glyph::Folder => {
-            painter.add(Shape::closed_line(vec![p(-0.38, -0.26), p(-0.1, -0.26), p(0.0, -0.16), p(0.38, -0.16), p(0.38, 0.3), p(-0.38, 0.3)], st));
-        }
-        Glyph::Monitor => {
-            painter.rect_stroke(Rect::from_min_max(p(-0.4, -0.3), p(0.4, 0.18)), CornerRadius::same(2), st, StrokeKind::Middle);
-            line(p(-0.16, 0.34), p(0.16, 0.34));
-            line(p(0.0, 0.18), p(0.0, 0.34));
-        }
-        Glyph::CollapseLeft => {
-            line(p(-0.34, -0.32), p(-0.34, 0.32));
-            line(p(0.34, 0.0), p(-0.16, 0.0));
-            painter.add(Shape::line(vec![p(0.0, -0.16), p(-0.16, 0.0), p(0.0, 0.16)], st));
-        }
-        Glyph::ChevronRight | Glyph::ChevronDown | Glyph::Lock | Glyph::LockOpen | Glyph::Usb | Glyph::Globe | Glyph::Phone | Glyph::Maximize | Glyph::Table => {}
-        // On Lucide's 24-unit grid, so they sit with the font's icons.
-        Glyph::Wrap => {
-            let m = |x: f32, y: f32| p((x - 12.0) * 0.036, (y - 12.0) * 0.036);
-            line(m(3.0, 6.0), m(21.0, 6.0));
-            line(m(3.0, 18.0), m(10.0, 18.0));
-            // Out along the middle row, round the end and back under it.
-            let mut pts = vec![m(3.0, 12.0)];
-            pts.extend((0..=12).map(|k| {
-                let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * k as f32 / 12.0;
-                m(18.0 + 3.0 * a.cos(), 15.0 + 3.0 * a.sin())
-            }));
-            pts.push(m(14.0, 18.0));
-            painter.add(Shape::line(pts, st));
-            painter.add(Shape::line(vec![m(16.0, 16.0), m(14.0, 18.0), m(16.0, 20.0)], st));
-        }
-        Glyph::Cloud => {
-            // Lucide's cloud: a large arc round the left and top, a small one at the right.
-            let m = |x: f32, y: f32| p((x - 12.0) * 0.036, (y - 12.0) * 0.036);
-            let arc = |cx: f32, cy: f32, r: f32, a0: f32, a1: f32, pts: &mut Vec<Pos2>| {
-                for k in 0..=14 {
-                    let a = (a0 + (a1 - a0) * k as f32 / 14.0).to_radians();
-                    pts.push(m(cx + r * a.cos(), cy + r * a.sin()));
-                }
-            };
-            let mut pts = vec![m(17.5, 19.0)];
-            arc(9.0, 12.0, 7.0, 90.0, 343.4, &mut pts);
-            arc(17.5, 14.5, 4.5, 270.0, 450.0, &mut pts);
-            painter.add(Shape::Path(egui::epaint::PathShape { points: pts, closed: true, fill: Color32::TRANSPARENT, stroke: st.into() }));
-        }
-        Glyph::Tag => {
-            let m = |x: f32, y: f32| p((x - 12.0) * 0.036, (y - 12.0) * 0.036);
-            let outline = vec![m(2.5, 2.5), m(11.2, 2.5), m(21.0, 12.3), m(12.3, 21.0), m(2.5, 11.2)];
-            painter.add(Shape::Path(egui::epaint::PathShape { points: outline, closed: true, fill: Color32::TRANSPARENT, stroke: st.into() }));
-            painter.circle_filled(m(7.5, 7.5), st.width * 0.9, col);
-        }
-        Glyph::Eject => {
-            // Rounded triangle over a bar, in Lucide's stroke style.
-            let tri = vec![p(0.0, -0.34), p(0.34, 0.06), p(-0.34, 0.06)];
-            painter.add(Shape::Path(egui::epaint::PathShape { points: tri, closed: true, fill: Color32::TRANSPARENT, stroke: st.into() }));
-            painter.rect_stroke(Rect::from_min_max(p(-0.34, 0.2), p(0.34, 0.32)), CornerRadius::same(1), st, StrokeKind::Middle);
-        }
-        Glyph::Menu => {
-            for y in [-0.24, 0.0, 0.24] {
-                line(p(-0.32, y), p(0.32, y));
-            }
-        }
-        Glyph::ChevronUp => {
-            // Lucide's chevron-up on the same scale as the font's chevron-down.
-            let m = |x: f32, y: f32| p((x - 12.0) / 20.0, (y - 12.0) / 20.0);
-            let st = Stroke::new(s / 10.0, col);
-            painter.add(Shape::line(vec![m(6.0, 15.0), m(12.0, 9.0), m(18.0, 15.0)], st));
-        }
-        Glyph::Code | Glyph::Blame | Glyph::Follow | Glyph::Copy => {
-            // On Lucide's 24-unit grid: angle brackets with a slash; a column of short
-            // marks beside lines; an arrow down onto a line; two overlapping sheets.
-            let m = |x: f32, y: f32| p((x - 12.0) / 20.0, (y - 12.0) / 20.0);
-            let st = Stroke::new(s / 10.0, col);
-            match g {
-                Glyph::Code => {
-                    painter.add(Shape::line(vec![m(18.0, 16.0), m(22.0, 12.0), m(18.0, 8.0)], st));
-                    painter.add(Shape::line(vec![m(6.0, 8.0), m(2.0, 12.0), m(6.0, 16.0)], st));
-                    painter.line_segment([m(14.5, 4.0), m(9.5, 20.0)], st);
-                }
-                Glyph::Blame => {
-                    // The gutter's strip, a name where a run begins, its lines beside it.
-                    painter.line_segment([m(3.0, 3.0), m(3.0, 21.0)], st);
-                    painter.circle_stroke(m(8.5, 7.0), s * 0.11, st);
-                    painter.line_segment([m(14.0, 7.0), m(21.0, 7.0)], st);
-                    painter.line_segment([m(14.0, 13.0), m(21.0, 13.0)], st);
-                    painter.line_segment([m(8.0, 19.0), m(21.0, 19.0)], st);
-                }
-                Glyph::Follow => {
-                    painter.line_segment([m(12.0, 3.0), m(12.0, 17.0)], st);
-                    painter.add(Shape::line(vec![m(6.0, 11.0), m(12.0, 17.0), m(18.0, 11.0)], st));
-                    painter.line_segment([m(5.0, 21.0), m(19.0, 21.0)], st);
-                }
-                _ => {
-                    painter.rect_stroke(Rect::from_min_max(m(8.0, 8.0), m(22.0, 22.0)), CornerRadius::same((s / 10.0).round() as u8), st, StrokeKind::Middle);
-                    painter.add(Shape::line(vec![m(4.0, 16.0), m(2.0, 14.0), m(2.0, 4.0), m(4.0, 2.0), m(14.0, 2.0), m(16.0, 4.0)], st));
-                }
-            }
-        }
-        Glyph::List | Glyph::ListTree => {
-            // Lucide's list (dots before three lines) and list-tree (lines branching off a stem).
-            let m = |x: f32, y: f32| p((x - 12.0) / 20.0, (y - 12.0) / 20.0);
-            let st = Stroke::new(s / 10.0, col);
-            if g == Glyph::List {
-                for y in [6.0, 12.0, 18.0] {
-                    painter.circle_filled(m(3.5, y), s / 18.0, col);
-                    painter.line_segment([m(8.0, y), m(21.0, y)], st);
-                }
-            } else {
-                painter.line_segment([m(8.0, 6.0), m(21.0, 6.0)], st);
-                painter.line_segment([m(13.0, 12.0), m(21.0, 12.0)], st);
-                painter.line_segment([m(13.0, 18.0), m(21.0, 18.0)], st);
-                painter.add(Shape::line(vec![m(4.0, 6.0), m(4.0, 17.0), m(5.0, 18.0), m(8.0, 18.0)], st));
-                painter.line_segment([m(4.0, 12.0), m(8.0, 12.0)], st);
-            }
-        }
-        Glyph::Clock => {
-            painter.circle_stroke(c, s * 0.34, st);
-            painter.add(Shape::line(vec![p(0.0, -0.2), p(0.0, 0.0), p(0.14, 0.1)], st));
-        }
+    paint_symbol(painter, rect, glyph_name(g), col);
+}
+
+/// A glyph large, as an empty state shows one: the two-tone drawing where the set has one.
+pub fn paint_glyph_large(painter: &Painter, rect: Rect, g: Glyph, col: Color32) {
+    let name = glyph_name(g);
+    if !paint_symbol(painter, rect, &format!("{name}@duo"), col) {
+        paint_symbol(painter, rect, name, col);
     }
 }
 

@@ -121,51 +121,15 @@ pub fn view_name(z: f32) -> &'static str {
 
 /// Small glyph for a view mode (footer chip, zoom popup, menus).
 pub fn paint_view_glyph(p: &egui::Painter, r: Rect, mode: Mode, col: Color32) {
-    let st = Stroke::new(1.2, col);
-    let (l, t, w) = (r.left(), r.top(), r.width());
-    match mode {
-        Mode::Details => {
-            for k in 0..3 {
-                let y = t + 2.5 + k as f32 * (r.height() - 5.0) / 2.0;
-                p.circle_filled(pos2(l + 1.5, y), 1.0, col);
-                p.line_segment([pos2(l + 4.5, y), pos2(r.right() - 0.5, y)], st);
-            }
-        }
-        Mode::Tree => {
-            let ys = [t + 2.5, t + r.height() / 2.0, r.bottom() - 2.5];
-            p.line_segment([pos2(l + 1.0, ys[0]), pos2(r.right() - 0.5, ys[0])], st);
-            p.line_segment([pos2(l + 2.5, ys[0]), pos2(l + 2.5, ys[2])], st);
-            for y in &ys[1..] {
-                p.line_segment([pos2(l + 2.5, *y), pos2(l + 5.0, *y)], st);
-                p.line_segment([pos2(l + 6.5, *y), pos2(r.right() - 0.5, *y)], st);
-            }
-        }
-        Mode::List => {
-            for k in 0..3 {
-                let y = t + 2.5 + k as f32 * (r.height() - 5.0) / 2.0;
-                p.line_segment([pos2(l + 0.5, y), pos2(l + w * 0.42, y)], st);
-                p.line_segment([pos2(l + w * 0.58, y), pos2(r.right() - 0.5, y)], st);
-            }
-        }
-        Mode::Icons(_) => theme::paint_glyph(p, r, theme::Glyph::Pics, col),
-        Mode::Stack => {
-            // A card at the front, the tops and sides of two more behind it.
-            let f = Rect::from_min_max(pos2(l + 0.5, t + 4.5), pos2(r.right() - 4.5, r.bottom() - 0.5));
-            for k in [2.0, 1.0] {
-                let d = vec2(2.0 * k, -2.0 * k);
-                p.add(egui::Shape::line(vec![f.left_top() + d, f.right_top() + d, f.right_bottom() + d], st));
-            }
-            p.rect_stroke(f, CornerRadius::same(1), st, StrokeKind::Middle);
-        }
-        Mode::Columns => {
-            // Three panes side by side.
-            p.rect_stroke(r.shrink(0.5), CornerRadius::same(1), st, StrokeKind::Inside);
-            for f in [0.36, 0.7] {
-                let x = (l + w * f).round() + 0.5;
-                p.line_segment([pos2(x, t + 0.5), pos2(x, r.bottom() - 0.5)], st);
-            }
-        }
-    }
+    let name = match mode {
+        Mode::Details => "view-list",
+        Mode::Tree => "list-tree",
+        Mode::List => "list",
+        Mode::Icons(_) => "view-icons",
+        Mode::Columns => "view-columns",
+        Mode::Stack => "view-stack",
+    };
+    theme::paint_symbol(p, r, name, col);
 }
 
 /// Single-line galley elided with "…" to `width`.
@@ -418,7 +382,7 @@ pub fn listing(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         let top = rect.center().y - g.size().y / 2.0 + if tall { side * 0.6 } else { 0.0 };
         if tall {
             let gr = Rect::from_center_size(pos2(rect.center().x, top - side * 0.75), Vec2::splat(side));
-            theme::paint_glyph(ui.painter(), gr, glyph, env.pal.text_dim.gamma_multiply(0.55));
+            theme::paint_glyph_large(ui.painter(), gr, glyph, env.pal.text_dim.gamma_multiply(0.55));
         }
         ui.painter().galley(pos2(rect.center().x - g.size().x / 2.0, top), g, env.pal.text_dim);
     } else if t.view.is_empty() && (t.flatten || t.content.busy()) {

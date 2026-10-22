@@ -373,7 +373,7 @@ pub fn code_search_popup(app: &mut App, ctx: &egui::Context, st: &mut CodeState)
         // The query, with case, word and expression switches at its end.
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(20.0, 22.0), Sense::hover());
-            theme::paint_lucide(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(14.0)), "text-search", pal.text_dim);
+            theme::paint_symbol(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(14.0)), "text-search", pal.text_dim);
             let w = ui.available_width() - 3.0 * 32.0 - 6.0;
             let hint = if st.q.todo { "Narrow the TODOs…" } else { "Search code…" };
             let id = Id::new("code query");

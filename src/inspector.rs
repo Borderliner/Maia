@@ -1253,7 +1253,7 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                 seg_frame(&mut hui, &pal, |ui| {
                     let (tip, icon) = if a.playing { ("Pause", "pause") } else { ("Play", "play") };
                     if seg_button(ui, false, tip, &pal, |p, r, c| {
-                        theme::paint_lucide(p, r, icon, c);
+                        theme::paint_symbol(p, r, icon, c);
                     }) {
                         a.toggle();
                     }
@@ -1264,13 +1264,13 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                     let on = ins.fit == f && ins.zoom == 1.0;
                     let clicked = seg_button(ui, on, tip, &pal, |p, r, c| match f {
                         Fit::Fit => {
-                            theme::paint_lucide(p, r, "minimize-2", c);
+                            theme::paint_symbol(p, r, "minimize-2", c);
                         }
                         Fit::Actual => {
                             p.text(r.center(), Align2::CENTER_CENTER, "1:1", FontId::proportional(10.5), c);
                         }
                         Fit::Fill => {
-                            theme::paint_lucide(p, r, "maximize-2", c);
+                            theme::paint_symbol(p, r, "maximize-2", c);
                         }
                     });
                     if clicked {
@@ -1281,12 +1281,12 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                 }
             });
             if seg_button(&mut hui, ins.pixel_grid, "Pixel grid at high zoom", &pal, |p, r, c| {
-                theme::paint_lucide(p, r, "grid-3x3", c);
+                theme::paint_symbol(p, r, "grid-3x3", c);
             }) {
                 ins.pixel_grid = !ins.pixel_grid;
             }
             if seg_button(&mut hui, ins.minimap, "Minimap while zoomed", &pal, |p, r, c| {
-                theme::paint_lucide(p, r, "diamond", c);
+                theme::paint_symbol(p, r, "diamond", c);
             }) {
                 ins.minimap = !ins.minimap;
             }
@@ -1296,13 +1296,13 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             let mut go = None;
             seg_frame(&mut hui, &pal, |ui| {
                 if seg_button(ui, false, "Previous page", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "chevron-left", c);
+                    theme::paint_symbol(p, r, "chevron-left", c);
                 }) && page > 1
                 {
                     go = Some(page - 1);
                 }
                 if seg_button(ui, false, "Next page", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "chevron-right", c);
+                    theme::paint_symbol(p, r, "chevron-right", c);
                 }) && page < pages
                 {
                     go = Some(page + 1);
@@ -1343,7 +1343,7 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             let as_text = !book && (kind.is_none() || source || matches!(rich.as_deref(), Some(Rich::Broken(_))));
             seg_frame(&mut hui, &pal, |ui| {
                 if as_text && seg_button(ui, ins.line_numbers, "Line numbers", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "list-ordered", c);
+                    theme::paint_symbol(p, r, "list-ordered", c);
                 }) {
                     ins.line_numbers = !ins.line_numbers;
                 }
@@ -1353,12 +1353,12 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                     ins.toggle_wrap();
                 }
                 if seg_button(ui, false, "Smaller text", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "a-arrow-down", c);
+                    theme::paint_symbol(p, r, "a-arrow-down", c);
                 }) {
                     ins.text_size = (ins.text_size - 1.0).max(-6.0);
                 }
                 if seg_button(ui, false, "Larger text", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "a-arrow-up", c);
+                    theme::paint_symbol(p, r, "a-arrow-up", c);
                 }) {
                     ins.text_size = (ins.text_size + 1.0).min(16.0);
                 }
@@ -1368,7 +1368,7 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             }
             let editable = !book && target.as_ref().is_some_and(|e| !e.is_dir && e.size <= crate::quickedit::MAX && e.path.exists());
             if editable && seg_button(&mut hui, false, "Edit (Shift+F4)", &pal, |p, r, c| {
-                theme::paint_lucide(p, r, "pencil", c);
+                theme::paint_symbol(p, r, "pencil", c);
             }) {
                 env.actions.push(crate::app::Action::Cmd(crate::commands::Cmd::EditInPreview));
             }
@@ -1383,17 +1383,17 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             let hex = v.hex;
             seg_frame(&mut hui, &pal, |ui| {
                 if !hex && seg_button(ui, ins.line_numbers, "Line numbers", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "list-ordered", c);
+                    theme::paint_symbol(p, r, "list-ordered", c);
                 }) {
                     ins.line_numbers = !ins.line_numbers;
                 }
                 if seg_button(ui, false, "Smaller text", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "a-arrow-down", c);
+                    theme::paint_symbol(p, r, "a-arrow-down", c);
                 }) {
                     ins.text_size = (ins.text_size - 1.0).max(-6.0);
                 }
                 if seg_button(ui, false, "Larger text", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "a-arrow-up", c);
+                    theme::paint_symbol(p, r, "a-arrow-up", c);
                 }) {
                     ins.text_size = (ins.text_size + 1.0).min(16.0);
                 }
@@ -1402,12 +1402,12 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
         Content::Sqlite(_) => {
             seg_frame(&mut hui, &pal, |ui| {
                 if seg_button(ui, false, "Smaller text", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "a-arrow-down", c);
+                    theme::paint_symbol(p, r, "a-arrow-down", c);
                 }) {
                     ins.text_size = (ins.text_size - 1.0).max(-6.0);
                 }
                 if seg_button(ui, false, "Larger text", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "a-arrow-up", c);
+                    theme::paint_symbol(p, r, "a-arrow-up", c);
                 }) {
                     ins.text_size = (ins.text_size + 1.0).min(16.0);
                 }
@@ -1584,7 +1584,7 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                         } else if resp.hovered() {
                             ui.painter().rect_filled(r, CornerRadius::same(4), pal.hover);
                         }
-                        theme::paint_lucide(ui.painter(), r.shrink(3.0), "info", if ins.extra_meta { Color32::WHITE } else { pal.text_dim });
+                        theme::paint_symbol(ui.painter(), r.shrink(3.0), "info", if ins.extra_meta { Color32::WHITE } else { pal.text_dim });
                         if resp.on_hover_text("Toggle extra details").clicked() {
                             toggle_extra = true;
                         }
@@ -1927,13 +1927,13 @@ fn edit_view(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
     let dirty = ed.dirty();
     seg_frame(&mut hui, &pal, |ui| {
         if seg_button(ui, true, "Stop editing (Esc)", &pal, |p, r, c| {
-            theme::paint_lucide(p, r, "pencil", c);
+            theme::paint_symbol(p, r, "pencil", c);
         }) {
             env.actions.push(Action::Run(Box::new(move |app| app.leave_edit(id, false))));
         }
         // Lit while there is something to save.
         if seg_button(ui, dirty, "Save (Ctrl+S)", &pal, |p, r, c| {
-            theme::paint_lucide(p, r, "save", c);
+            theme::paint_symbol(p, r, "save", c);
         }) {
             env.actions.push(Action::Run(Box::new(move |app| {
                 app.save_edit(id, false);
@@ -1942,7 +1942,7 @@ fn edit_view(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
     });
     seg_frame(&mut hui, &pal, |ui| {
         if seg_button(ui, ins.line_numbers, "Line numbers", &pal, |p, r, c| {
-            theme::paint_lucide(p, r, "list-ordered", c);
+            theme::paint_symbol(p, r, "list-ordered", c);
         }) {
             ins.line_numbers = !ins.line_numbers;
         }
@@ -1950,12 +1950,12 @@ fn edit_view(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             ins.wrap_code = !ins.wrap_code;
         }
         if seg_button(ui, false, "Smaller text", &pal, |p, r, c| {
-            theme::paint_lucide(p, r, "a-arrow-down", c);
+            theme::paint_symbol(p, r, "a-arrow-down", c);
         }) {
             ins.text_size = (ins.text_size - 1.0).max(-6.0);
         }
         if seg_button(ui, false, "Larger text", &pal, |p, r, c| {
-            theme::paint_lucide(p, r, "a-arrow-up", c);
+            theme::paint_symbol(p, r, "a-arrow-up", c);
         }) {
             ins.text_size = (ins.text_size + 1.0).min(16.0);
         }
@@ -2632,7 +2632,7 @@ fn media_view(ui: &mut Ui, body: Rect, e: &Entry, v: &mut MediaView, env: &mut E
             }
             None => {
                 ui.painter().rect_filled(cover.shrink(side * 0.2), CornerRadius::same(12), pal.raised);
-                theme::paint_lucide(ui.painter(), Rect::from_center_size(cover.center(), Vec2::splat(side * 0.3)), "music", pal.text_dim);
+                theme::paint_symbol(ui.painter(), Rect::from_center_size(cover.center(), Vec2::splat(side * 0.3)), "music", pal.text_dim);
             }
         }
         let mut y = cover.bottom() + 14.0;
@@ -2660,7 +2660,7 @@ fn media_view(ui: &mut Ui, body: Rect, e: &Entry, v: &mut MediaView, env: &mut E
         if resp.hovered() {
             ui.painter().rect_filled(r, CornerRadius::same(6), pal.hover);
         }
-        theme::paint_lucide(ui.painter(), r.shrink(5.0), icon, pal.text);
+        theme::paint_symbol(ui.painter(), r.shrink(5.0), icon, pal.text);
         resp.on_hover_text(tip).clicked()
     };
     let play_r = Rect::from_min_size(pos2(bar.left() + 4.0, bar.center().y - 14.0), vec2(28.0, 28.0));

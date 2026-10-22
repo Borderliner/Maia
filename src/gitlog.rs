@@ -1883,7 +1883,7 @@ pub fn view(ui: &mut Ui, rect: Rect, h: &mut History, wrap: &mut bool, env: &mut
         let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + iw + 20.0, 22.0), if hash.is_some() { Sense::click() } else { Sense::hover() });
         let lit = hash.is_some() && resp.hovered();
         ui.painter().rect_filled(r, CornerRadius::same(11), pal.accent.gamma_multiply(if lit { 0.36 } else { 0.22 }));
-        crate::theme::paint_lucide(ui.painter(), Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), Vec2::splat(12.0)), icon, pal.text);
+        crate::theme::paint_symbol(ui.painter(), Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), Vec2::splat(12.0)), icon, pal.text);
         ui.painter().galley(pos2(r.left() + 10.0 + iw, r.center().y - g.size().y / 2.0), g, pal.text);
         if let Some(full) = hash {
             crate::ui::note_control(ui, r, "copy hash");
@@ -1976,7 +1976,7 @@ fn graph(ui: &mut Ui, body: Rect, h: &mut History, env: &mut Env) {
         let p = ui.painter();
         p.rect_filled(bar, CornerRadius::ZERO, pal.alt);
         p.line_segment([bar.left_bottom(), bar.right_bottom()], Stroke::new(1.0, pal.border));
-        crate::theme::paint_lucide(p, Rect::from_center_size(pos2(bar.left() + 16.0, bar.center().y), Vec2::splat(12.0)), "file-text", pal.text_dim);
+        crate::theme::paint_symbol(p, Rect::from_center_size(pos2(bar.left() + 16.0, bar.center().y), Vec2::splat(12.0)), "file-text", pal.text_dim);
         let (dir, name) = path.rsplit_once('/').unwrap_or(("", &path));
         let end = bar.right() - 38.0;
         let g = crate::listing::elided(ui, name, FontId::proportional(fs - 0.5), end - bar.left() - 30.0, pal.text);

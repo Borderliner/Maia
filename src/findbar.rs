@@ -198,7 +198,7 @@ pub fn bar(ui: &mut Ui, body: Rect, f: &mut Finder, count: &str, any: bool, id: 
         rui.set_opacity(ease);
         rui.spacing_mut().item_spacing.x = 6.0;
         let (gr, _) = rui.allocate_exact_size(vec2(16.0, 20.0), Sense::hover());
-        theme::paint_lucide(rui.painter(), Rect::from_center_size(gr.center(), Vec2::splat(13.0)), "replace", pal.text_dim);
+        theme::paint_symbol(rui.painter(), Rect::from_center_size(gr.center(), Vec2::splat(13.0)), "replace", pal.text_dim);
         let w = (rui.available_width() - 150.0).max(40.0);
         let r = rui.add(egui::TextEdit::singleline(rep).id_salt(("insp-replace", id)).hint_text(egui::RichText::new("Replace").color(pal.text_dim)).frame(false).desired_width(w).font(FontId::proportional(12.5)));
         crate::ui::note_control(&rui, r.rect, "replace field");

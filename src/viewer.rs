@@ -493,8 +493,8 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                 enabled && b.clicked()
             };
             let glyph = |g: Glyph| move |p: &egui::Painter, r: Rect, c: Color32| crate::theme::paint_glyph(p, r, g, c);
-            let lucide = |name: &'static str| move |p: &egui::Painter, r: Rect, c: Color32| {
-                crate::theme::paint_lucide(p, r, name, c);
+            let symbol = |name: &'static str| move |p: &egui::Painter, r: Rect, c: Color32| {
+                crate::theme::paint_symbol(p, r, name, c);
             };
             let corner = |k: f32| Rect::from_center_size(pos2(r.right() - 30.0 - k * 42.0, r.top() + 30.0), Vec2::splat(34.0));
             if button(corner(0.0), "viewer close", "", true, false, &glyph(Glyph::Close)) {
@@ -503,11 +503,13 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
             // Only where they fit beside the close button and clear of the arrows.
             if r.width() > 420.0 {
                 let tools: [(&'static str, &str, bool, Do, &dyn Fn(&egui::Painter, Rect, Color32)); 5] = [
-                    ("viewer trash", "Move to the trash (Delete)", false, Do::Trash, &lucide("trash-2")),
-                    ("viewer rotate right", "Turn right (R)", false, Do::Turn(true), &|p: &egui::Painter, r: Rect, c: Color32| mirrored_lucide(p, r, "rotate-ccw", c)),
-                    ("viewer rotate left", "Turn left (L)", false, Do::Turn(false), &lucide("rotate-ccw")),
-                    ("viewer tags", "Tags (T)", st.strip.is_some(), Do::Strip, &lucide("tag")),
-                    ("viewer compare", "Compare beside this one (C)", st.pin.is_some(), Do::Pin, &lucide("columns-2")),
+                    ("viewer trash", "Move to the trash (Delete)", false, Do::Trash, &symbol("trash-2")),
+                    ("viewer rotate right", "Turn right (R)", false, Do::Turn(true), &symbol("turn")),
+                    ("viewer rotate left", "Turn left (L)", false, Do::Turn(false), &|p: &egui::Painter, r: Rect, c: Color32| {
+                        crate::symbols::paint_mirrored(p, r, "turn", c);
+                    }),
+                    ("viewer tags", "Tags (T)", st.strip.is_some(), Do::Strip, &symbol("tag")),
+                    ("viewer compare", "Compare beside this one (C)", st.pin.is_some(), Do::Pin, &symbol("columns-2")),
                 ];
                 for (k, (what, tip, on, d, icon)) in tools.into_iter().enumerate() {
                     if button(corner(k as f32 + 1.0), what, tip, true, on, icon) {
@@ -906,29 +908,6 @@ fn tag_field(ui: &mut egui::Ui, text: &mut String, r: Rect, bottom: f32, fs: f32
     (out, h + 8.0)
 }
 
-/// A Lucide icon drawn mirrored: the left turn's arrow, turned to the right.
-fn mirrored_lucide(p: &egui::Painter, rect: Rect, name: &str, col: Color32) {
-    let Some(&(_, ch)) = crate::lucide_map::LUCIDE.iter().find(|(n, _)| *n == name) else { return };
-    let s = rect.width().min(rect.height());
-    let size = (s * 24.0 / 20.0).round().max(6.0);
-    let g = p.layout_no_wrap(ch.to_string(), FontId::new(size, egui::FontFamily::Name("icons".into())), col);
-    let at = rect.center() - g.rect.size() / 2.0;
-    let tex = p.ctx().fonts(|f| f.font_image_size());
-    let (tw, th) = (tex[0].max(1) as f32, tex[1].max(1) as f32);
-    let cx = rect.center().x;
-    let mut mesh = egui::Mesh::default();
-    for row in &g.rows {
-        let m = &row.row.visuals.mesh;
-        let base = mesh.vertices.len() as u32;
-        let off = at.to_vec2() + row.pos.to_vec2();
-        mesh.vertices.extend(m.vertices.iter().map(|v| {
-            let q = v.pos + off;
-            egui::epaint::Vertex { pos: pos2(2.0 * cx - q.x, q.y), uv: pos2(v.uv.x / tw, v.uv.y / th), color: v.color }
-        }));
-        mesh.indices.extend(m.indices.iter().map(|i| i + base));
-    }
-    p.add(egui::Shape::mesh(mesh));
-}
 
 /// Test views of the viewer's state.
 #[cfg(test)]

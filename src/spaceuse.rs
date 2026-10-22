@@ -665,7 +665,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         if b.hovered() {
             ui.painter().rect_filled(br, CornerRadius::same(5), pal.row_hover);
         }
-        crate::theme::paint_lucide(ui.painter(), Rect::from_center_size(br.center(), Vec2::splat(15.0)), if full { "minimize-2" } else { "maximize-2" }, if b.hovered() { pal.text } else { pal.text_dim });
+        crate::theme::paint_symbol(ui.painter(), Rect::from_center_size(br.center(), Vec2::splat(15.0)), if full { "minimize-2" } else { "maximize-2" }, if b.hovered() { pal.text } else { pal.text_dim });
         flip_full |= b.on_hover_text(if full { "Back to a dialog (F)" } else { "Fill the window (F)" }).clicked();
         ui.add_space(lerp(18.0, 24.0).round());
         // Ring and list are centred on each other: whichever is shorter stands in the

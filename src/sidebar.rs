@@ -465,7 +465,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                     ui.painter().rect_filled(r2, CornerRadius::same(5), pal.row_hover);
                 }
                 let ic = Rect::from_center_size(pos2(r.left() + 36.0, r.center().y), Vec2::splat(15.0));
-                crate::theme::paint_lucide(ui.painter(), ic, "file-search", pal.text_dim);
+                crate::theme::paint_symbol(ui.painter(), ic, "file-search", pal.text_dim);
                 let g = crate::listing::elided(ui, &name, font.clone(), r.width() - 62.0, pal.text);
                 ui.painter().galley(pos2(r.left() + 52.0, r.center().y - g.size().y / 2.0), g, pal.text);
                 // What it looks for, put in words only while the pointer is on it.

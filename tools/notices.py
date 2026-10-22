@@ -17,6 +17,8 @@ OUT = os.path.join(ROOT, "assets", "THIRD-PARTY-NOTICES.txt")
 NAMES = ("license", "licence", "copying", "notice", "unlicense", "copyright")
 # Crates offering several licences that are taken under one: (its file, the licence,
 # where to find the crate).
+# What is built in besides the crates, with its licence beside this script's output.
+ASSETS = ("OFL.txt", "SOLAR-LICENSE.txt", "SMITHAY-CLIPBOARD-LICENSE.txt")
 CHOSEN = {"nohash-hasher": ("LICENSE-APACHE", "Apache-2.0", "https://crates.io/crates/nohash-hasher")}
 
 
@@ -96,14 +98,22 @@ def main():
     with open(OUT, "w", encoding="utf-8") as f:
         f.write("Maia is free software under the GNU General Public License, version 3 (LICENSE).\n")
         f.write("It is built with the crates below; each keeps its own licence, and their texts follow.\n")
-        f.write("The bundled fonts and icons are covered by OFL.txt, LUCIDE-LICENSE.txt and\n")
-        f.write("SMITHAY-CLIPBOARD-LICENSE.txt beside this file.\n\n")
+        f.write("The bundled fonts, the interface icons (Solar, by 480 Design, CC BY 4.0) and the\n")
+        f.write("clipboard code taken from smithay-clipboard keep their own licences; their texts\n")
+        f.write("close this file.\n\n")
         f.write("\n".join(listing) + "\n")
         for key in order:
             body, users = groups[key]
             f.write("\n" + "=" * 78 + "\n")
             f.write("Used by: " + ", ".join(users) + "\n\n")
             f.write(body + "\n")
+        # The files in assets/ for what is built in besides crates: the packages install this
+        # file alone, so the texts go in it.
+        for name in ASSETS:
+            with open(os.path.join(ROOT, "assets", name), encoding="utf-8") as src:
+                f.write("\n" + "=" * 78 + "\n")
+                f.write(f"Built in: {name}\n\n")
+                f.write(src.read().rstrip() + "\n")
     print(f"{OUT}: {len(listing)} crates, {len(order)} distinct texts")
     if missing:
         print("under Apache-2.0, shipping no licence file: " + ", ".join(p["name"] for p in missing))
