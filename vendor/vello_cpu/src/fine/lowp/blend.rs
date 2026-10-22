@@ -261,7 +261,7 @@ mod tests {
         out[..4].try_into().unwrap()
     }
 
-    fn highp_first_pixel_for_mix(mix: Mix, src: [u8; 4], bg: [u8; 4]) -> [u8; 4] {
+    fn f32_first_pixel_for_mix(mix: Mix, src: [u8; 4], bg: [u8; 4]) -> [u8; 4] {
         let simd = Fallback::new();
         let to_f32 = |pixel: [u8; 4]| {
             let pixel = pixel.map(|component| component as f32 * (1.0 / 255.0));
@@ -282,7 +282,7 @@ mod tests {
         const MAX_DELTA: u8 = 2;
 
         let lowp = lowp_first_pixel_for_mix(mix, src, bg);
-        let highp = highp_first_pixel_for_mix(mix, src, bg);
+        let highp = f32_first_pixel_for_mix(mix, src, bg);
 
         let lowp_alpha = lowp[3];
         assert_eq!(lowp_alpha, src[3]);
