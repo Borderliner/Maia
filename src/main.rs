@@ -59,6 +59,7 @@ mod install;
 mod listing;
 mod markdown;
 mod media;
+mod memory;
 mod mime;
 mod musictags;
 mod namefind;
@@ -152,6 +153,7 @@ Options:
 ";
 
 fn main() {
+    memory::tune();
     let mut paths: Vec<PathBuf> = vec![];
     let mut new_window = false;
     let mut args = std::env::args().skip(1);

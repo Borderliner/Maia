@@ -269,7 +269,11 @@ impl Runner {
     fn schedule(&mut self, el: &ActiveEventLoop) {
         el.set_control_flow(match self.repaint_at {
             Some(t) => ControlFlow::WaitUntil(t),
-            None => ControlFlow::Wait,
+            None => {
+                // Nothing due: a moment to hand freed memory back.
+                crate::memory::idle();
+                ControlFlow::Wait
+            }
         });
     }
 }

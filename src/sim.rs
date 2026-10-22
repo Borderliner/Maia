@@ -643,6 +643,7 @@ pub const SLOW_MS: f32 = 50.0;
 impl Sim {
     pub fn new(path: &Path, size: Vec2) -> Sim {
         root();
+        crate::memory::tune();
         // A session that failed while holding a modifier doesn't leave it held for the next.
         crate::testkit::parse("hold none");
         let ctx = egui::Context::default();
@@ -709,6 +710,10 @@ impl Sim {
             }
         }
         self.repaint = out.viewport_output.get(&egui::ViewportId::ROOT).map_or(std::time::Duration::MAX, |v| v.repaint_delay);
+        // As the runner does when nothing is due.
+        if self.repaint == std::time::Duration::MAX {
+            crate::memory::idle();
+        }
         let ms = t0.elapsed().as_secs_f32() * 1000.0;
         if let Some(sh) = &mut self.shots {
             sh.take(&out.textures_delta);
@@ -2973,7 +2978,8 @@ mod journeys {
 
     fn report(name: &str, s: &Sim) {
         let (p50, p95, max) = s.timing();
-        eprintln!("sim {name}: {} frames, frame ms p50 {p50:.1} p95 {p95:.1} max {max:.1}", s.frame_ms.len());
+        let (rss, peak) = crate::memory::resident_kb();
+        eprintln!("sim {name}: {} frames, frame ms p50 {p50:.1} p95 {p95:.1} max {max:.1}, resident {} MB, peak {} MB", s.frame_ms.len(), rss / 1024, peak / 1024);
     }
 
     #[test]
@@ -3238,7 +3244,8 @@ mod journeys {
         s.settle();
         let n = s.tab().entries.len();
         let (p50, p95, max) = s.timing();
-        eprintln!("sim flatten /usr: {n} files in {:.1}s, {} frames while streaming, p50 {p50:.1} p95 {p95:.1} max {max:.1} ms", t0.elapsed().as_secs_f32(), s.frame_ms.len());
+        let (rss, peak) = crate::memory::resident_kb();
+        eprintln!("sim flatten /usr: {n} files in {:.1}s, {} frames while streaming, p50 {p50:.1} p95 {p95:.1} max {max:.1} ms, resident {} MB, peak {} MB", t0.elapsed().as_secs_f32(), s.frame_ms.len(), rss / 1024, peak / 1024);
         let streaming = std::mem::take(&mut s.frame_ms);
         for (what, line) in [("filter", "text lib"), ("scroll", "scroll 600 400 -10"), ("end", "key End"), ("sort", "key ctrl+alt+2"), ("clear", "key Escape")] {
             let i = s.frame_ms.len();
@@ -13261,6 +13268,71 @@ mod journeys {
         assert!(versions_page(&s).is_none(), "gone with another file under the cursor");
         crate::versions::FAKE.with(|f| *f.borrow_mut() = None);
         report("versions", &s);
+    }
+
+    /// Memory through a picture-heavy session: camera-sized pictures thumbnailed in the
+    /// largest icons and opened in the viewer, then left. Prints resident and peak memory.
+    #[test]
+    fn memory_through_many_pictures() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("memory");
+        let d = home.join("Photos");
+        std::fs::create_dir_all(&d).unwrap();
+        let (w, h) = (2400u32, 1600u32);
+        for k in 0..60u32 {
+            let mut out = vec![];
+            let mut e = png::Encoder::new(&mut out, w, h);
+            e.set_color(png::ColorType::Rgb);
+            e.set_depth(png::BitDepth::Eight);
+            e.set_compression(png::Compression::Fast);
+            let row: Vec<u8> = (0..w).flat_map(|x| [(x / 9 + k * 40) as u8, (k * 13) as u8, (x / 7) as u8]).collect();
+            let px: Vec<u8> = (0..h).flat_map(|y| row.iter().map(move |c| c.wrapping_add((y / 6) as u8))).collect();
+            e.write_header().unwrap().write_image_data(&px).unwrap();
+            std::fs::write(d.join(format!("photo {k:02}.png")), out).unwrap();
+        }
+        let kb = |what: &str| {
+            let (rss, peak) = crate::memory::resident_kb();
+            eprintln!("memory {what}: resident {} MB, peak {} MB", rss / 1024, peak / 1024);
+            rss as i64 / 1024
+        };
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.idle(3);
+        // Measured from here, so journeys that ran before in this process don't count.
+        let base = kb("open");
+        s.cmd(Cmd::ViewXL);
+        for _ in 0..14 {
+            s.act("key PageDown");
+            for _ in 0..8 {
+                s.idle(4);
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+        }
+        // Sixty decoded photos' buffers are freed by now: with glibc left as it is, they
+        // stayed in the workers' arenas (about 100 MB more than at the start); handed back,
+        // a few MB more.
+        let mb = kb("thumbnailed") - base;
+        assert!(mb < 32, "the decoded pictures' memory is handed back: {mb} MB more resident");
+        s.act("key Home");
+        s.act("key Enter");
+        for _ in 0..6 {
+            s.act("key Right");
+            for _ in 0..4 {
+                s.idle(3);
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+        }
+        kb("viewer");
+        s.act("key Escape");
+        s.cmd(Cmd::Up);
+        for _ in 0..10 {
+            s.idle(3);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let mb = kb("left") - base;
+        assert!(mb < 32, "and stays handed back after the folder is left: {mb} MB more");
+        report("memory", &s);
     }
 
     /// A picture for the Stack view's cards: a two-colour sweep with a disc, each seed its own.
