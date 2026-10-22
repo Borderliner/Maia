@@ -31,6 +31,12 @@
 !/tools/tour-media.sh
 !/tools/package.sh
 
+# Crates carried with a change of ours, patched in from Cargo.toml (each says why).
+!/vendor/
+/vendor/**
+!/vendor/vello_cpu/
+!/vendor/vello_cpu/**
+
 # What the packages install besides the program.
 !/packaging/
 /packaging/**

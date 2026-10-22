@@ -60,3 +60,7 @@ inherits = "dev"
 opt-level = 3
 overflow-checks = true
 debug = 1
+
+# vello_cpu with its unused f32 pipeline compiled out (see vendor/vello_cpu/Cargo.toml).
+[patch.crates-io]
+vello_cpu = { path = "vendor/vello_cpu" }
