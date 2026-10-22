@@ -5,9 +5,10 @@
 //! per core) and, after a large block is freed, raises the size it serves from `mmap` to
 //! that block's, up to 32 MB. A decoded photo's buffer then comes from a worker's arena,
 //! and once freed stays in it: a few such arenas held hundreds of megabytes that nothing
-//! used. Here the arenas are few, blocks of 256 KB and more always come from `mmap` (and go
-//! straight back when freed), and what is freed in the arenas is handed back when Maia goes
-//! idle.
+//! used. Here blocks of 256 KB and more always come from `mmap` (and go straight back when
+//! freed), and what is freed in the arenas is handed back when Maia goes idle. The arenas
+//! are left as many as glibc makes: capped at two or four, the frame's thread waited on
+//! busy workers for the shared one, and the slowest frames took 2 to 4 ms longer.
 
 /// Whether `tune` ran; `MAIA_MALLOC_DEFAULT` leaves glibc as it comes, to compare against.
 static TUNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -18,11 +19,8 @@ pub fn tune() {
         return;
     }
     TUNED.store(true, std::sync::atomic::Ordering::Relaxed);
-    unsafe {
-        libc::mallopt(libc::M_ARENA_MAX, 2);
-        // A fixed threshold also stops glibc from raising it.
-        libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024);
-    }
+    // A fixed threshold also stops glibc from raising it.
+    unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024) };
 }
 
 /// Free bytes in the arenas at the last trim.

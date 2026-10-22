@@ -710,11 +710,11 @@ impl Sim {
             }
         }
         self.repaint = out.viewport_output.get(&egui::ViewportId::ROOT).map_or(std::time::Duration::MAX, |v| v.repaint_delay);
-        // As the runner does when nothing is due.
+        let ms = t0.elapsed().as_secs_f32() * 1000.0;
+        // As the runner does when nothing is due: after the frame, outside its time.
         if self.repaint == std::time::Duration::MAX {
             crate::memory::idle();
         }
-        let ms = t0.elapsed().as_secs_f32() * 1000.0;
         if let Some(sh) = &mut self.shots {
             sh.take(&out.textures_delta);
             sh.prims = prims.clone();
@@ -3272,6 +3272,12 @@ mod journeys {
         let budget = 200.0 * (n as f32 / 200_000.0).max(1.0);
         let worst = s.frame_ms.iter().cloned().fold(0.0f32, f32::max);
         assert!(worst < budget, "slowest interaction frame {worst:.1} ms of {budget:.0} for {n} files");
+        // Leaving the walk frees its entries, hundreds of thousands of small blocks.
+        s.cmd(Cmd::Up);
+        s.settle();
+        s.idle(5);
+        let (rss, _) = crate::memory::resident_kb();
+        eprintln!("sim flatten /usr: resident after leaving {} MB", rss / 1024);
     }
 
     /// Tree view, "expand all" over thousands of folders: drawing stays smooth while the
@@ -13310,8 +13316,7 @@ mod journeys {
             }
         }
         // Sixty decoded photos' buffers are freed by now: with glibc left as it is, they
-        // stayed in the workers' arenas (about 100 MB more than at the start); handed back,
-        // a few MB more.
+        // stayed in the workers' arenas (84 MB more than at the start); handed back, a few.
         let mb = kb("thumbnailed") - base;
         assert!(mb < 32, "the decoded pictures' memory is handed back: {mb} MB more resident");
         s.act("key Home");
