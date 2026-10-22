@@ -2647,6 +2647,9 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
     const SANS: &[u8] = include_bytes!("../assets/fallback-sans.ttf");
     const MONO: &[u8] = include_bytes!("../assets/fallback-mono.ttf");
     const SYMBOLS: &[u8] = include_bytes!("../assets/fallback-symbols.ttf");
+    // The Nerd Font search (below) reads every font's character set: it runs meanwhile.
+    let nerd_list = || std::process::Command::new("fc-list").args(["--format=%{style[0]}|%{family[0]}|%{file}\n", NERD_CHARS]).output().ok();
+    let nerd = std::thread::Builder::new().spawn(nerd_list).ok();
     // System fonts are memory-mapped, not read: egui then uses the bytes in place (no
     // copy) and the kernel only pages in the glyph tables actually used, sharing them
     // with every other app (the CJK fallback alone is ~20 MB).
@@ -2665,10 +2668,11 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
     let custom = if family.trim().is_empty() { None } else { fc_match(family.trim()) };
     // The family the font came by, for its semibold below: the one asked for, else the
     // desktop's.
-    let named = if custom.is_some() { Some(family.trim().to_string()) } else { desktop_font_family().or(Some("system-ui".into())) };
+    let desktop_family = desktop_font_family();
+    let named = if custom.is_some() { Some(family.trim().to_string()) } else { desktop_family.clone().or(Some("system-ui".into())) };
     // Follow the desktop's UI font: the GTK font setting, then
     // fontconfig's system-ui alias, then a list of common sans families.
-    let desktop = desktop_font_family().and_then(|f| fc_match(&f)).or_else(|| fc_match("system-ui"));
+    let desktop = desktop_family.and_then(|f| fc_match(&f)).or_else(|| fc_match("system-ui"));
     let ui = custom.or(desktop).or_else(|| first(&[
         "/usr/share/fonts/inter/InterVariable.ttf",
         "/usr/share/fonts/inter/Inter-Regular.ttf",
@@ -2719,7 +2723,10 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
     }
     // Shell prompts and system summaries draw icons from the Nerd Fonts' private-use
     // range, which no ordinary font fills: a Nerd Font on the system does, in the terminal.
-    let nerd = std::process::Command::new("fc-list").args(["--format=%{style[0]}|%{family[0]}|%{file}\n", NERD_CHARS]).output().ok();
+    let nerd = match nerd {
+        Some(t) => t.join().ok().flatten(),
+        None => nerd_list(),
+    };
     if let Some(b) = nerd.and_then(|o| pick_nerd_font(&String::from_utf8_lossy(&o.stdout)).and_then(|f| map_font(std::path::Path::new(f)))) {
         add(&mut fonts, "nerd", b, &mut mono);
     }
