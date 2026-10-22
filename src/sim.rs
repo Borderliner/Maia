@@ -13252,6 +13252,115 @@ mod journeys {
         report("versions", &s);
     }
 
+    /// A picture for the Stack view's cards: a two-colour sweep with a disc, each seed its own.
+    fn cover_png(seed: u32) -> Vec<u8> {
+        let (w, h) = (240u32, 180u32);
+        let hue = |k: u32| -> [f32; 3] {
+            let a = (seed * 47 + k * 113) % 360;
+            let f = |n: f32| {
+                let k = (n + a as f32 / 30.0) % 12.0;
+                0.62 - 0.38 * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
+            };
+            [f(0.0), f(8.0), f(4.0)]
+        };
+        let (c0, c1) = (hue(0), hue(1));
+        let (cx, cy, rr) = (60.0 + (seed % 5) as f32 * 30.0, 50.0 + (seed % 3) as f32 * 40.0, 34.0 + (seed % 4) as f32 * 9.0);
+        let mut out = vec![];
+        let mut e = png::Encoder::new(&mut out, w, h);
+        e.set_color(png::ColorType::Rgba);
+        e.set_depth(png::BitDepth::Eight);
+        let px: Vec<u8> = (0..h)
+            .flat_map(|y| {
+                (0..w).flat_map(move |x| {
+                    let t = (x + y) as f32 / (w + h) as f32;
+                    let inside = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt() < rr;
+                    let c: Vec<u8> = (0..3).map(|i| (255.0 * if inside { 0.95 - c0[i] * 0.4 } else { c0[i] + (c1[i] - c0[i]) * t }) as u8).collect();
+                    [c[0], c[1], c[2], 255]
+                })
+            })
+            .collect();
+        e.write_header().unwrap().write_image_data(&px).unwrap();
+        out
+    }
+
+    /// The Stack view: pictures as covers, folders and other files by their icons, the
+    /// cursor's item out of the row with its name over it, flipped through by keys.
+    #[test]
+    fn stack_view() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("stack");
+        let d = home.join("Shelf");
+        std::fs::create_dir_all(&d).unwrap();
+        for k in 0..36 {
+            std::fs::write(d.join(format!("photo {:02}.png", k + 1)), cover_png(k)).unwrap();
+        }
+        for f in ["Albums", "Projects", "Scans"] {
+            std::fs::create_dir_all(d.join(f)).unwrap();
+        }
+        // Covers: one kept for the folder, four of five pictures in a square, one of two alone.
+        std::fs::write(d.join("Albums/cover.png"), cover_png(40)).unwrap();
+        std::fs::write(d.join("Albums/b.png"), cover_png(41)).unwrap();
+        for k in 0..5 {
+            std::fs::write(d.join(format!("Projects/shot {k}.png")), cover_png(50 + k)).unwrap();
+        }
+        for k in 0..2 {
+            std::fs::write(d.join(format!("Scans/page {k}.png")), cover_png(60 + k)).unwrap();
+        }
+        for (f, body) in [("notes.txt", "notes\n"), ("main.rs", "fn main() {}\n"), ("song.mp3", "ID3"), ("report.pdf", "%PDF-1.4"), ("archive.zip", "PK")] {
+            std::fs::write(d.join(f), body).unwrap();
+        }
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        s.cmd(Cmd::ViewStack);
+        s.act("key Down");
+        for _ in 0..6 {
+            s.act("key Right");
+            s.idle(2);
+        }
+        s.idle(40);
+        // Thumbnails fade in on the clock, not the frame count.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        look(&mut s, "stack");
+        s.shot("stack-graphite");
+        s.act("key Home");
+        s.idle(40);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        look(&mut s, "stack, first");
+        s.shot("stack-first");
+        s.act("key Right");
+        s.idle(40);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        s.idle(4);
+        look(&mut s, "stack, a folder of pictures");
+        s.shot("stack-mosaic");
+        // Pointing at the scrubber shows what is there.
+        let list = s.app.panels[&s.app.active].list_rect;
+        let y = list.bottom() - (16.0 * s.app.cfg.spacing.max(0.7)).round() - 24.0;
+        s.act(&format!("move {:.0} {y:.0}", list.center().x + 60.0));
+        s.idle(6);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        s.idle(3);
+        s.shot("stack-peek");
+        s.act("key End");
+        s.idle(40);
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        look(&mut s, "stack, light");
+        s.shot("stack-paper");
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        // Beside another panel, narrow.
+        s.cmd(Cmd::SplitRight);
+        s.idle(4);
+        s.cmd(Cmd::ViewStack);
+        s.act("key End");
+        s.idle(40);
+        look(&mut s, "stack, split");
+        s.shot("stack-split");
+        report("stack", &s);
+    }
+
     fn space(s: &Sim) -> &crate::spaceuse::State {
         match &s.app.popup {
             Popup::SpaceUsed(st) => st,

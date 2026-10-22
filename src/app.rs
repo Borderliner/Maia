@@ -2451,7 +2451,7 @@ impl App {
             }
             Cmd::ToggleSidebar => self.sidebar = !self.sidebar,
             // Columns sits beside the zoom axis: there is nothing in it to grow.
-            Cmd::ZoomIn | Cmd::ZoomOut if self.tab().settings.column_view => {}
+            Cmd::ZoomIn | Cmd::ZoomOut if self.tab().settings.column_view || self.tab().settings.stack_view => {}
             Cmd::ZoomIn | Cmd::ZoomOut => {
                 let t = self.tab();
                 t.settings.zoom = crate::listing::zoom_step(t.settings.zoom, if cmd == Cmd::ZoomIn { 1 } else { -1 });
@@ -2469,12 +2469,20 @@ impl App {
                 let t = self.tab();
                 t.settings.zoom = z;
                 // (Groups come back with the other views.)
-                t.dirty |= std::mem::take(&mut t.settings.column_view);
+                t.dirty |= std::mem::take(&mut t.settings.column_view) | std::mem::take(&mut t.settings.stack_view);
                 t.scroll_to_cursor = true;
             }
             Cmd::ViewColumns => {
                 let t = self.tab();
                 t.settings.column_view = true;
+                t.settings.stack_view = false;
+                t.dirty = true;
+                t.scroll_to_cursor = true;
+            }
+            Cmd::ViewStack => {
+                let t = self.tab();
+                t.settings.stack_view = true;
+                t.settings.column_view = false;
                 t.dirty = true;
                 t.scroll_to_cursor = true;
             }

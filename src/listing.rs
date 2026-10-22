@@ -44,6 +44,7 @@ pub enum Mode {
     List,
     Icons(f32),
     Columns,
+    Stack,
 }
 
 /// Zoom stops of the named views: the slider runs Details 0%, Tree 10%, List 20%,
@@ -85,17 +86,30 @@ pub fn mode_for(z: f32) -> Mode {
 
 /// The view a tab shows: Columns, or the one its zoom names.
 pub fn mode_of(s: &crate::config::ViewSettings) -> Mode {
-    if s.column_view { Mode::Columns } else { mode_for(s.zoom) }
+    if s.column_view {
+        Mode::Columns
+    } else if s.stack_view {
+        Mode::Stack
+    } else {
+        mode_for(s.zoom)
+    }
 }
 
 /// The name of the view a tab shows (footer chip, View popup).
 pub fn view_label(s: &crate::config::ViewSettings) -> &'static str {
-    if s.column_view { "Columns" } else { view_name(s.zoom) }
+    if s.column_view {
+        "Columns"
+    } else if s.stack_view {
+        "Stack"
+    } else {
+        view_name(s.zoom)
+    }
 }
 
 pub fn view_name(z: f32) -> &'static str {
     match mode_for(z) {
         Mode::Columns => "Columns",
+        Mode::Stack => "Stack",
         Mode::Details => "Details",
         Mode::Tree => "Tree",
         Mode::List => "List",
@@ -134,6 +148,15 @@ pub fn paint_view_glyph(p: &egui::Painter, r: Rect, mode: Mode, col: Color32) {
             }
         }
         Mode::Icons(_) => theme::paint_glyph(p, r, theme::Glyph::Pics, col),
+        Mode::Stack => {
+            // A card at the front, the tops and sides of two more behind it.
+            let f = Rect::from_min_max(pos2(l + 0.5, t + 4.5), pos2(r.right() - 4.5, r.bottom() - 0.5));
+            for k in [2.0, 1.0] {
+                let d = vec2(2.0 * k, -2.0 * k);
+                p.add(egui::Shape::line(vec![f.left_top() + d, f.right_top() + d, f.right_bottom() + d], st));
+            }
+            p.rect_stroke(f, CornerRadius::same(1), st, StrokeKind::Middle);
+        }
         Mode::Columns => {
             // Three panes side by side.
             p.rect_stroke(r.shrink(0.5), CornerRadius::same(1), st, StrokeKind::Inside);
@@ -312,7 +335,7 @@ pub fn listing(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
     // into whole notches).
     let hover = ui.ctx().pointer_hover_pos().map(|p| rect.contains(p)).unwrap_or(false);
     // (Columns has no zoom: its rows follow the font size.)
-    if hover && !t.settings.column_view {
+    if hover && !t.settings.column_view && !t.settings.stack_view {
         let zd = ui.input(|i| i.zoom_delta());
         if (zd - 1.0).abs() > 0.0001 {
             // egui turns a wheel notch into `line_scroll_speed` points and zooms by
@@ -350,13 +373,16 @@ pub fn listing(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
     let mut er = rect;
     if t.settings.column_view {
         er = columns(&mut ui, rect, t, env, &q);
+    } else if t.settings.stack_view {
+        t.strip = None;
+        crate::stack::draw(&mut ui, rect, t, env);
     } else {
         t.strip = None;
         match mode_for(t.shown_zoom) {
             Mode::Details | Mode::Tree => details(&mut ui, rect, t, env, &q),
             Mode::List => grid(&mut ui, rect, t, env, &q, Mode::List),
             m @ Mode::Icons(_) => grid(&mut ui, rect, t, env, &q, m),
-            Mode::Columns => {}
+            Mode::Columns | Mode::Stack => {}
         }
     }
     // Empty states (in the Columns view, in the tab's own column).
@@ -432,7 +458,7 @@ pub fn listing(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
 // ------------------------------------------------------------------ shared item logic
 
 /// A Computer view row for a drive that isn't mounted (drawn dimmed).
-fn unmounted(t: &Tab, e: &Entry) -> bool {
+pub(crate) fn unmounted(t: &Tab, e: &Entry) -> bool {
     t.vols.get(&e.path).is_some_and(|v| !v.mounted)
 }
 
@@ -448,7 +474,7 @@ fn paint_drive(ui: &Ui, r: Rect, t: &Tab, e: &Entry, col: Color32) {
     crate::ui::paint_drive(ui.painter(), r, v.is_some_and(|v| v.removable), v.map_or(&crate::drives::Crypt::Plain, |v| &v.crypt), col, ui.visuals().extreme_bg_color);
 }
 
-fn entry_size_text(e: &Entry, t: &Tab, env: &Env) -> String {
+pub(crate) fn entry_size_text(e: &Entry, t: &Tab, env: &Env) -> String {
     if tab::is_computer(&t.path) {
         if let Some(v) = t.vols.get(&e.path) {
             if !v.mounted {
@@ -470,7 +496,7 @@ fn entry_size_text(e: &Entry, t: &Tab, env: &Env) -> String {
     }
 }
 
-fn type_text(e: &Entry, t: &Tab) -> String {
+pub(crate) fn type_text(e: &Entry, t: &Tab) -> String {
     if let Some(v) = t.vols.get(&e.path) {
         return if v.fstype == "crypto_LUKS" { "Encrypted (LUKS)".into() } else { v.fstype.clone() };
     }
@@ -489,7 +515,7 @@ fn type_text(e: &Entry, t: &Tab) -> String {
     if c.is_empty() { e.kind() } else { c }
 }
 
-fn fmt_date(t: Option<std::time::SystemTime>, cfg: &Config) -> String {
+pub(crate) fn fmt_date(t: Option<std::time::SystemTime>, cfg: &Config) -> String {
     t.map(|t| crate::timefmt::format(t, &cfg.date_format)).unwrap_or_default()
 }
 
@@ -510,7 +536,7 @@ fn abbrev(n: u64) -> String {
 static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Selection / activation / context menu / drag for one item.
-fn handle_item(ui: &Ui, resp: &Response, idx: u32, t: &mut Tab, env: &mut Env) {
+pub(crate) fn handle_item(ui: &Ui, resp: &Response, idx: u32, t: &mut Tab, env: &mut Env) {
     let mods = ui.input(|i| i.modifiers);
     let e = &t.entries[idx as usize];
     let (is_dir, path) = (e.is_dir, e.path.clone());
@@ -632,7 +658,7 @@ fn tree_chevron(ui: &Ui, r: Rect, id: Id, expanded: bool, pal: &Palette) -> bool
 }
 
 /// Drop-target behaviour for an item while files are being dragged. Returns true if highlighted.
-fn drop_target(ui: &Ui, rect: Rect, e: &Entry, env: &mut Env) -> bool {
+pub(crate) fn drop_target(ui: &Ui, rect: Rect, e: &Entry, env: &mut Env) -> bool {
     let Some(Drag::Files { paths, .. }) = env.drag.as_ref() else { return false };
     let Some(pp) = ui.ctx().pointer_hover_pos() else { return false };
     // An unmounted drive has no folder to drop into yet.
@@ -690,7 +716,7 @@ fn rename_focus(ui: &Ui, r: Rect, idx: u32, t: &Tab, env: &Env) -> bool {
 }
 
 /// Inline rename editor. Returns true if drawn.
-fn rename_field(ui: &mut Ui, rect: Rect, idx: u32, t: &mut Tab, env: &mut Env, font: &FontId) -> bool {
+pub(crate) fn rename_field(ui: &mut Ui, rect: Rect, idx: u32, t: &mut Tab, env: &mut Env, font: &FontId) -> bool {
     let Some(r) = t.rename.as_mut() else { return false };
     let Some(fi) = r.fields.iter().position(|f| f.idx == idx) else { return false };
     let conflicts = r.conflicts();
@@ -796,7 +822,7 @@ fn rubber_band(ui: &mut Ui, bg: &Response, origin: Pos2, viewport_screen: Rect, 
     }
 }
 
-fn background_clicks(ui: &Ui, bg: &Response, t: &mut Tab, env: &mut Env) {
+pub(crate) fn background_clicks(ui: &Ui, bg: &Response, t: &mut Tab, env: &mut Env) {
     let mods = ui.input(|i| i.modifiers);
     if bg.clicked() || bg.secondary_clicked() {
         if t.rename.is_some() {
@@ -1222,7 +1248,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
             let cols = ((body.width() / cw).floor() as usize).max(1);
             (vec2(cw, s + text_h + 16.0), cols, 0, false)
         }
-        Mode::Details | Mode::Tree | Mode::Columns => unreachable!(),
+        Mode::Details | Mode::Tree | Mode::Columns | Mode::Stack => unreachable!(),
     };
     // Spread leftover width between icon cells (items keep their size).
     let gap = if let Mode::Icons(_) = mode { ((body.width() - cols as f32 * cell.x) / cols as f32).max(0.0) } else { 0.0 };
@@ -1416,7 +1442,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                     }
                     item_checkbox(ui, Rect::from_min_size(r.min + vec2(7.0, 7.0), Vec2::splat(15.0)), idx, ui.rect_contains_pointer(r), t, env);
                 }
-                Mode::Details | Mode::Tree | Mode::Columns => {}
+                Mode::Details | Mode::Tree | Mode::Columns | Mode::Stack => {}
             }
         }
         if t.scroll_to_cursor {

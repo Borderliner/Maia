@@ -142,6 +142,16 @@ pub struct Tab {
     pub pending_rename: Option<PathBuf>,
     pub rubber: Option<Rubber>,
     pub shown_zoom: f32,
+    /// The Stack view: where the row stands (an index into `view`, easing towards the
+    /// cursor's), and wheel movement short of a whole item.
+    pub stack_pos: f32,
+    pub stack_acc: f32,
+    /// The glow behind the card at the cursor, easing to its picture's colour (RGB, and
+    /// how much of it shows).
+    pub stack_glow: [f32; 4],
+    /// The scrubber's marks for the listing and sort they were made for: where each
+    /// letter, month, size or kind begins.
+    pub stack_marks: Option<(u64, std::rc::Rc<Vec<(usize, String)>>)>,
     /// Partial wheel notches toward the next zoom step.
     pub zoom_acc: f32,
     /// Where the Type column's filter button was last drawn (the Types popup opens there).
@@ -242,6 +252,10 @@ impl Tab {
             pending_rename: None,
             rubber: None,
             shown_zoom: -1.0,
+            stack_pos: -1.0,
+            stack_acc: 0.0,
+            stack_glow: [0.0; 4],
+            stack_marks: None,
             zoom_acc: 0.0,
             funnel_at: None,
             shown_tab_w: 0.0,
@@ -706,6 +720,8 @@ impl Tab {
         self.selected.clear();
         self.cursor = None;
         self.anchor = None;
+        // Another folder's row starts where its cursor is, not flipping over from the last.
+        self.stack_pos = -1.0;
         self.collapsed_groups.clear();
         self.expanded.clear();
         self.tree_loads.clear();
@@ -719,6 +735,7 @@ impl Tab {
                 // Browsing in Columns stays in Columns: a folder's saved view lends it
                 // its sort, not a view that would take the columns away.
                 self.settings.column_view |= before.column_view;
+                self.settings.stack_view = (self.settings.stack_view || before.stack_view) && !self.settings.column_view;
                 self.free_view.get_or_insert(before);
                 self.saved_scope = scope;
             }
@@ -1386,7 +1403,7 @@ impl Tab {
         // month and reads by day.
         let timeline = self.smart.as_ref().is_some_and(|s| s.id == crate::smart::TIMELINE);
         // Columns lists each folder in one run, as its other columns do.
-        if self.settings.group == GroupBy::None || self.settings.column_view || (self.flatten && !timeline) {
+        if self.settings.group == GroupBy::None || self.settings.column_view || self.settings.stack_view || (self.flatten && !timeline) {
             ordered.push((None, top));
         } else {
             let mut order: Vec<String> = vec![];

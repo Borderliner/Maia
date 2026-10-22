@@ -496,6 +496,9 @@ pub struct ViewSettings {
     /// The Columns view: one column per folder level. It sits beside the zoom axis and
     /// leaves `zoom` as it was.
     pub column_view: bool,
+    /// The Stack view: the items standing in a row, the one at the cursor facing you.
+    /// Like Columns it sits beside the zoom axis; the two are never on together.
+    pub stack_view: bool,
 }
 
 impl Default for ViewSettings {
@@ -513,6 +516,7 @@ impl Default for ViewSettings {
             show_folders: true,
             show_files: true,
             column_view: false,
+            stack_view: false,
         }
     }
 }

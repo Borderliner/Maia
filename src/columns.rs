@@ -89,7 +89,7 @@ pub fn chain(root: &Path, path: &Path) -> Vec<PathBuf> {
 /// A column's view: the tab's sort and hidden files, never grouped or narrowed to types,
 /// and always with its folders (the way on is through them).
 fn side_settings(s: &ViewSettings) -> ViewSettings {
-    ViewSettings { group: GroupBy::None, only_types: vec![], show_folders: true, column_view: true, columns: vec![], ..s.clone() }
+    ViewSettings { group: GroupBy::None, only_types: vec![], show_folders: true, column_view: true, stack_view: false, columns: vec![], ..s.clone() }
 }
 
 impl Strip {

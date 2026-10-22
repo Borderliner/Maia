@@ -1256,7 +1256,7 @@ impl App {
             };
             // Zoom chip with a fill bar proportional to the zoom (none in Columns, which has
             // no zoom).
-            let zr = if view_mode == listing::Mode::Columns { ui.allocate_exact_size(Vec2::ZERO, Sense::hover()).1 } else { chip(ui, None, &format!("{}%", (zoom * 100.0 + 1e-3).floor() as i32), pal.text_dim, false, "View size (Ctrl+wheel)") };
+            let zr = if matches!(view_mode, listing::Mode::Columns | listing::Mode::Stack) { ui.allocate_exact_size(Vec2::ZERO, Sense::hover()).1 } else { chip(ui, None, &format!("{}%", (zoom * 100.0 + 1e-3).floor() as i32), pal.text_dim, false, "View size (Ctrl+wheel)") };
             if zr.rect.width() > 10.0 {
                 let bar = Rect::from_min_max(pos2(zr.rect.left() + 5.0, zr.rect.bottom() - 4.0), pos2(zr.rect.right() - 5.0, zr.rect.bottom() - 2.5));
                 ui.painter().rect_filled(bar, CornerRadius::same(1), pal.border);
