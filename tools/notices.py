@@ -40,6 +40,14 @@ def crates():
             if any(k["kind"] is None for k in d["dep_kinds"]):
                 todo.append(d["pkg"])
     seen.discard(root)
+    # The metadata's graph also holds optional crates that another's feature names with
+    # `dep?/feature` (egui-winit's `arboard?/wayland-data-control`), though nothing turns
+    # them on; cargo tree lists what is built, so only those are kept.
+    tree = subprocess.run(
+        ["cargo", "tree", "--offline", "-e", "normal", "--target", "x86_64-unknown-linux-gnu", "--prefix", "none", "--format", "{p}"],
+        cwd=ROOT, check=True, capture_output=True, text=True).stdout
+    built = {tuple(line.split()[:2]) for line in tree.splitlines() if line.strip()}
+    seen = {i for i in seen if (packages[i]["name"], "v" + packages[i]["version"]) in built}
     return sorted((packages[i] for i in seen), key=lambda p: (p["name"], p["version"]))
 
 
