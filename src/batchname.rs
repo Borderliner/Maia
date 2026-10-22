@@ -338,8 +338,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
             Ok(_) => (format!("{} to rename", plan.len()), pal.text_dim),
         };
         ui.label(egui::RichText::new(status).size(small).color(col));
-        pp::hints(ui, &[("Enter", "rename"), ("Esc", "close")], &pal);
-        pp::dialog_buttons(ui, |ui| {
+        pp::footer(ui, &[("Enter", "rename"), ("Esc", "close")], &pal, |ui| {
             let b = pp::primary_button(ui, "Rename", ok, &pal);
             crate::ui::note_control(ui, b.rect, "rename apply");
             go |= b.clicked() && ok;

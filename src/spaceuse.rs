@@ -615,10 +615,10 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
     let top = lerp(pp::popup_top(screen), 12.0).round();
     let width = lerp(780.0, screen.width() - 24.0).round();
     // As `centered` lets it grow before it scrolls.
-    let room = (screen.height() - top - 28.0).max(60.0);
+    let room = (screen.height() - top - 12.0 - 2.0 * pp::DIALOG_PAD).max(60.0);
     // The list's height when the dialog fills the window: all the window leaves it.
-    // Room round everything inside the frame's own margin, more when filling the window.
-    let pad = lerp(12.0, 22.0).round();
+    // Filling the window, ten points more round everything than a dialog's own padding.
+    let pad = lerp(0.0, 10.0).round();
     let full_h = (room - st.chrome_h - 2.0 * pad - 4.0).max(list_max);
     let list_cap = lerp(list_max, full_h);
     let list_natural = n as f32 * row_h;

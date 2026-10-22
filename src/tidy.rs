@@ -223,8 +223,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
             Some(Ok(_)) => (format!("{n} {} into {folders} {}", if n == 1 { "file" } else { "files" }, if folders == 1 { "folder" } else { "folders" }), pal.text_dim),
         };
         ui.label(egui::RichText::new(status).size(small).color(col));
-        pp::hints(ui, &[("Enter", "tidy"), ("Esc", "close")], &pal);
-        pp::dialog_buttons(ui, |ui| {
+        pp::footer(ui, &[("Enter", "tidy"), ("Esc", "close")], &pal, |ui| {
             let b = pp::primary_button(ui, "Tidy", ok, &pal);
             crate::ui::note_control(ui, b.rect, "tidy apply");
             go |= b.clicked() && ok;

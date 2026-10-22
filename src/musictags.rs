@@ -313,8 +313,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
             }
         }
         ui.add_space(6.0);
-        pp::hints(ui, &[("Enter", "save"), ("Esc", "close")], &pal);
-        pp::dialog_buttons(ui, |ui| {
+        pp::footer(ui, &[("Enter", "save"), ("Esc", "close")], &pal, |ui| {
             let b = pp::primary_button(ui, "Save", ok, &pal);
             crate::ui::note_control(ui, b.rect, "tags save");
             go |= b.clicked() && ok;

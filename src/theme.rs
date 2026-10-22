@@ -596,6 +596,18 @@ pub struct Palette {
 }
 
 impl Palette {
+    /// Text on the accent (a dialog's main button): white on a deep accent, near black on
+    /// a light one, where white all but disappears.
+    pub fn on_accent(&self) -> Color32 {
+        let lin = |c: u8| {
+            let c = c as f32 / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        let a = self.accent;
+        let lum = 0.2126 * lin(a.r()) + 0.7152 * lin(a.g()) + 0.0722 * lin(a.b());
+        if lum < 0.4 { Color32::WHITE } else { Color32::from_gray(24) }
+    }
+
     /// Text on a selected row: white on a deep selection colour, the theme's own text on
     /// a pale one (white there all but disappears).
     pub fn on_sel(&self) -> Color32 {

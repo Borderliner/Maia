@@ -703,13 +703,29 @@ pub(crate) fn step(sel: &mut usize, n: usize, k: &Keys, skip: impl Fn(usize) -> 
     *sel = s;
 }
 
+/// The space inside a dialog's edge, and its corners: one measure for every dialog, so
+/// titles, lists and buttons line up the same way in each.
+pub(crate) const DIALOG_PAD: f32 = 20.0;
+pub(crate) const DIALOG_RADIUS: u8 = 12;
+
+/// A menu's or the palette's frame. Its shadow is lighter on a light theme, where the
+/// dark one's weight read as a smudge.
 pub(crate) fn popup_frame(pal: &Palette) -> egui::Frame {
     egui::Frame::NONE
         .fill(pal.raised)
         .stroke(Stroke::new(1.0, pal.border))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(egui::Margin::same(8))
-        .shadow(egui::epaint::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(90) })
+        .shadow(egui::epaint::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(if pal.dark { 90 } else { 34 }) })
+}
+
+/// A dialog's frame: `DIALOG_PAD` inside, rounder corners and a deeper, softer shadow
+/// than a menu's, as it stands further off the window.
+pub(crate) fn dialog_frame(pal: &Palette) -> egui::Frame {
+    popup_frame(pal)
+        .corner_radius(CornerRadius::same(DIALOG_RADIUS))
+        .inner_margin(egui::Margin::same(DIALOG_PAD as i8))
+        .shadow(egui::epaint::Shadow { offset: [0, 12], blur: 36, spread: 0, color: Color32::from_black_alpha(if pal.dark { 110 } else { 40 }) })
 }
 
 /// A path with the home folder written as ~.
@@ -766,9 +782,48 @@ fn field_row(ui: &mut Ui, key_w: f32, key: &str, pal: &Palette, value: impl FnOn
     });
 }
 
+/// A dialog's footer: a rule across it, then its keys on the left and its buttons on the
+/// right, the two centred on each other; where the keys would be squeezed beside the
+/// buttons, above them. The buttons as for `dialog_buttons`, the first the rightmost.
+///
+/// Laid out with the buttons' width from the frame before. When that width changes (the
+/// dialog opening, a label growing) the frame is drawn again before it is shown, so the
+/// footer never shows a frame laid out for the old width.
+pub(crate) fn footer(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette, add: impl FnOnce(&mut Ui)) {
+    let id = ui.id().with("footer");
+    let known = ui.ctx().data(|d| d.get_temp::<f32>(id));
+    let bw = known.unwrap_or(0.0);
+    ui.add_space(14.0);
+    let (left, avail) = (ui.cursor().left(), ui.available_width());
+    let y = ui.cursor().top();
+    ui.painter().line_segment([pos2(left, y), pos2(left + avail, y)], Stroke::new(1.0, pal.border));
+    ui.add_space(15.0);
+    let top = ui.cursor().top();
+    let side = !items.is_empty() && avail - bw - 24.0 >= 240.0;
+    let keys_w = if side { avail - bw - 24.0 } else { avail };
+    let mut kh = 0.0;
+    if !items.is_empty() {
+        let mut keys = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(left, top), vec2(keys_w, 4000.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+        hint_chips(&mut keys, items, pal);
+        kh = keys.min_rect().height();
+    }
+    let s = ui.spacing();
+    let bh = (ui.text_style_height(&egui::TextStyle::Button) + 2.0 * s.button_padding.y).max(s.interact_size.y);
+    let (bt, band) = if side || items.is_empty() { (top, kh.max(bh)) } else { (top + kh + 12.0, bh) };
+    let mut b = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(left, bt), vec2(avail, band))).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    b.spacing_mut().item_spacing.x = 8.0;
+    add(&mut b);
+    let w = b.min_rect().width();
+    ui.allocate_exact_size(vec2(avail, bt + band - top), Sense::hover());
+    if known.is_none_or(|k| (k - w).abs() > 0.5) {
+        ui.ctx().data_mut(|d| d.insert_temp(id, w));
+        ui.ctx().request_discard("dialog footer width");
+    }
+}
+
 /// A dialog's buttons, on the right; the first given is the rightmost (the main one).
 pub(crate) fn dialog_buttons(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    ui.add_space(12.0);
+    ui.add_space(16.0);
     // In a row of its own first: laid out right to left straight in the dialog, the
     // buttons would centre on all the height left below them.
     ui.horizontal(|ui| {
@@ -781,13 +836,13 @@ pub(crate) fn dialog_buttons(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 
 /// The main button of a dialog, in the accent.
 pub(crate) fn primary_button(ui: &mut Ui, label: &str, enabled: bool, pal: &Palette) -> egui::Response {
-    ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(label).color(Color32::WHITE)).fill(pal.accent).min_size(vec2(72.0, 0.0)))
+    ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(label).color(pal.on_accent())).fill(pal.accent).min_size(vec2(80.0, 0.0)))
 }
 
 /// A dialog's other buttons: a quiet fill and outline, so they read as buttons and not
 /// as text beside the accent one.
 pub(crate) fn plain_button(ui: &mut Ui, label: &str, pal: &Palette) -> egui::Response {
-    ui.add(egui::Button::new(label).fill(pal.card()).stroke(Stroke::new(1.0, pal.card_line())).min_size(vec2(72.0, 0.0)))
+    ui.add(egui::Button::new(label).fill(pal.card()).stroke(Stroke::new(1.0, pal.card_line())).min_size(vec2(80.0, 0.0)))
 }
 
 /// Top-centered popup. Returns (inner, rect).
@@ -800,7 +855,8 @@ pub(crate) fn popup_top(screen: Rect) -> f32 {
 /// margins) room in the window: in a short one the list shrank off the bottom.
 pub(crate) fn fit_list(ctx: &egui::Context, max: f32, chrome: f32) -> f32 {
     let s = ctx.content_rect();
-    max.min(s.height() - popup_top(s) - 12.0 - chrome).max(96.0)
+    // The dialog's padding beyond the frame's old eight points comes out of the list.
+    max.min(s.height() - popup_top(s) - 12.0 - chrome - 2.0 * (DIALOG_PAD - 8.0)).max(96.0)
 }
 
 pub(crate) fn centered<R>(ctx: &egui::Context, id: &str, width: f32, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
@@ -813,17 +869,18 @@ pub(crate) fn centered_top<R>(ctx: &egui::Context, id: &str, width: f32, top: f3
     let w = width.min(screen.width() - 24.0);
     // A dialog taller than the window scrolls instead of losing its buttons off the
     // bottom; the scroll area claims its height (see `anchored`).
-    let room = (screen.height() - top - 12.0 - 16.0).max(60.0);
+    let inner = w - 2.0 * DIALOG_PAD;
+    let room = (screen.height() - top - 12.0 - 2.0 * DIALOG_PAD).max(60.0);
     note_layer(Id::new(id));
     let r = egui::Area::new(Id::new(id))
         .order(egui::Order::Foreground)
         .fixed_pos(pos2((screen.center().x - w / 2.0).round(), screen.top() + top))
         .show(ctx, |ui| {
-            popup_frame(pal)
+            dialog_frame(pal)
                 .show(ui, |ui| {
-                    ui.set_width(w - 16.0);
+                    ui.set_width(inner);
                     egui::ScrollArea::vertical().id_salt("dialog").max_height(room).min_scrolled_height(room).auto_shrink([false, true]).show(ui, |ui| {
-                        ui.set_width(w - 16.0);
+                        ui.set_width(inner);
                         add(ui)
                     }).inner
                 })
@@ -3158,8 +3215,8 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
     let pos = pos2((screen.center().x - w / 2.0).round(), (screen.top() + ((screen.height() - h) / 2.0).clamp(12.0, 70.0)).round());
     note_layer(Id::new("options"));
     let area = egui::Area::new(Id::new("options")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
-        popup_frame(&pal).show(ui, |ui| {
-            let (_, inner) = ui.allocate_space(vec2(w - 16.0, h - 16.0));
+        dialog_frame(&pal).show(ui, |ui| {
+            let (_, inner) = ui.allocate_space(vec2(w - 2.0 * DIALOG_PAD, h - 2.0 * DIALOG_PAD));
             let top_down = egui::Layout::top_down(egui::Align::Min);
             let mut head = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(top_down));
             // The buttons first, from the right edge; the search takes what is left.
@@ -4459,8 +4516,8 @@ fn themes(app: &mut App, ctx: &egui::Context) -> bool {
     let pos = pos2((screen.center().x - w / 2.0).round(), (screen.top() + ((screen.height() - h) / 2.0).clamp(12.0, 70.0)).round());
     note_layer(Id::new("themes"));
     let area = egui::Area::new(Id::new("themes")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
-        popup_frame(&pal).show(ui, |ui| {
-            let (_, inner) = ui.allocate_space(vec2(w - 16.0, h - 16.0));
+        dialog_frame(&pal).show(ui, |ui| {
+            let (_, inner) = ui.allocate_space(vec2(w - 2.0 * DIALOG_PAD, h - 2.0 * DIALOG_PAD));
             let top_down = egui::Layout::top_down(egui::Align::Min);
             // Header: the close button and the filter from the right; the search takes
             // what is left.
@@ -5069,8 +5126,7 @@ fn sync(app: &mut App, ctx: &egui::Context, st: &mut crate::compare::SyncState) 
         }
         keys.push(("Esc", "cancel"));
         ui.add_space(4.0);
-        hints(ui, &keys, &pal);
-        dialog_buttons(ui, |ui| {
+        footer(ui, &keys, &pal, |ui| {
             if primary_button(ui, "Sync", job.is_some(), &pal).clicked() {
                 start = true;
             }

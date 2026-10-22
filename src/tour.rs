@@ -442,8 +442,8 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
     pp::note_layer(Id::new("tour"));
     let mut replay = false;
     let area = egui::Area::new(Id::new("tour")).order(egui::Order::Foreground).fixed_pos(at).show(ctx, |ui| {
-        pp::popup_frame(&pal).show(ui, |ui| {
-            let (_, inner) = ui.allocate_space(vec2(w - 16.0, h - 16.0));
+        pp::dialog_frame(&pal).show(ui, |ui| {
+            let (_, inner) = ui.allocate_space(vec2(w - 2.0 * pp::DIALOG_PAD, h - 2.0 * pp::DIALOG_PAD));
             // The head: what this is, and a close button.
             let head = Rect::from_min_size(inner.min, vec2(inner.width(), 24.0));
             // What's New says which version; the tour's first title says the rest.

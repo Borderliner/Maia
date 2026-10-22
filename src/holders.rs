@@ -572,8 +572,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                 if let Some(s) = &st.said {
                     ui.label(egui::RichText::new(s).size(small).color(pal.text_dim));
                 }
-                pp::hints(ui, &[("Enter", "stop"), ("Ctrl+R", "refresh"), ("Esc", "close")], &pal);
-                pp::dialog_buttons(ui, |ui| {
+                pp::footer(ui, &[("Enter", "stop"), ("Ctrl+R", "refresh"), ("Esc", "close")], &pal, |ui| {
                     let c = pp::plain_button(ui, "Close", &pal);
                     crate::ui::note_control(ui, c.rect, "holder close");
                     close = c.clicked();
