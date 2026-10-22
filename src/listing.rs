@@ -932,7 +932,7 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                     }
                     // The item being renamed drops its highlight; the others fade back.
                     let editing = rename_focus(ui, rr, idx, t, env);
-                    paint_item_bg(ui.painter(), rr.shrink2(vec2(3.0, 0.5)), selected && !editing, is_cursor && !editing, resp.hovered() && !editing, drop, env, 4);
+                    paint_item_bg(ui.painter(), rr.shrink2(vec2(3.0, 0.5)), selected && !editing, is_cursor && !editing, resp.hovered() && !editing, drop, env, 6);
                     crate::compare::paint(ui.painter(), rr, &e.path, &pal);
                     handle_item(ui, &resp, idx, t, env);
                     // Cut items, tree context rows that only lead to filter matches, and
@@ -1305,7 +1305,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
             match mode {
                 Mode::List => {
                     let editing = rename_focus(ui, r, idx, t, env);
-                    paint_item_bg(ui.painter(), r.shrink2(vec2(2.0, 0.5)), selected && !editing, is_cursor && !editing, resp.hovered() && !editing, drop, env, 4);
+                    paint_item_bg(ui.painter(), r.shrink2(vec2(2.0, 0.5)), selected && !editing, is_cursor && !editing, resp.hovered() && !editing, drop, env, 6);
                     crate::compare::paint(ui.painter(), r, &e.path, &pal);
                     handle_item(ui, &resp, idx, t, env);
                     let ic = Rect::from_min_size(pos2(r.left() + 6.0, r.center().y - 8.0), Vec2::splat(16.0));
@@ -1623,7 +1623,7 @@ fn own_column(ui: &mut Ui, cr: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Quer
             let drop = drop_target(ui, r, &e, env);
             let faded = env.cut.contains(&e.path) || unmounted(t, &e) || dim_ignored && crate::gitstatus::ignored(git.as_deref(), &e.path, &t.path);
             let editing = rename_focus(ui, r, idx, t, env);
-            paint_item_bg(ui.painter(), r.shrink2(vec2(2.0, 0.5)), selected && !editing, is_cursor && !editing, resp.hovered() && !editing, drop, env, 4);
+            paint_item_bg(ui.painter(), r.shrink2(vec2(2.0, 0.5)), selected && !editing, is_cursor && !editing, resp.hovered() && !editing, drop, env, 6);
             crate::compare::paint(ui.painter(), r, &e.path, &pal);
             handle_item(ui, &resp, idx, t, env);
             let ic = Rect::from_min_size(pos2(r.left() + 6.0, r.center().y - 8.0), Vec2::splat(16.0));
@@ -1682,7 +1682,7 @@ fn side_column(ui: &mut Ui, cr: Rect, col: &mut Tab, child: Option<u32>, env: &m
             if on {
                 ui.painter().rect_filled(r.shrink2(vec2(2.0, 0.5)), CornerRadius::same(4), env.pal.panel.lerp_to_gamma(env.pal.selected, 0.6));
             }
-            paint_item_bg(ui.painter(), r.shrink2(vec2(2.0, 0.5)), false, false, resp.hovered() && !on, drop, env, 4);
+            paint_item_bg(ui.painter(), r.shrink2(vec2(2.0, 0.5)), false, false, resp.hovered() && !on, drop, env, 6);
             let ic = Rect::from_min_size(pos2(r.left() + 6.0, r.center().y - 8.0), Vec2::splat(16.0));
             let faded = env.cut.contains(&e.path);
             column_cells(ui, r, ic, e, env, &none, false, faded, true, git.as_deref());

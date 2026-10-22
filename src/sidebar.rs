@@ -268,19 +268,20 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded).show(ui, |ui| {
         let width = ui.available_width();
-        let section = |ui: &mut Ui, app: &mut App, key: &str, title: &str, glyph: Glyph| -> bool {
+        let section = |ui: &mut Ui, app: &mut App, key: &str, title: &str, _glyph: Glyph| -> bool {
             let collapsed = app.ud.sidebar_collapsed.iter().any(|s| s == key) && fq.is_empty();
-            let (r, resp) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
+            // A small dim label over its places, a step of air above it: a header, not
+            // another row. Its left edge is the places' icons'.
+            let fs = (app.cfg.font_size - 1.5).max(10.0);
+            let (r, resp) = ui.allocate_exact_size(vec2(width, (fs + 18.0).round()), Sense::click());
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, title));
-            // Section headers stay quiet: dim icon, label and chevron (brighter on hover).
             let col = if resp.hovered() { pal.text } else { pal.text_dim };
-            paint_glyph(ui.painter(), Rect::from_center_size(pos2(r.left() + 18.0, r.center().y), Vec2::splat(14.0)), glyph, col);
-            ui.painter().text(pos2(r.left() + 34.0, r.center().y), Align2::LEFT_CENTER, title, FontId::proportional(app.cfg.font_size), col);
-            let c = pos2(r.right() - 14.0, r.center().y);
-            if collapsed {
-                paint_glyph(ui.painter(), Rect::from_center_size(c, Vec2::splat(10.0)), Glyph::ChevronRight, col);
-            } else {
-                ui.painter().add(egui::Shape::line(vec![c + vec2(-3.5, -1.5), c + vec2(0.0, 2.0), c + vec2(3.5, -1.5)], Stroke::new(1.3, col)));
+            let text_y = r.bottom() - 6.0 - fs * 0.6;
+            ui.painter().text(pos2(r.left() + 28.0, text_y), Align2::LEFT_CENTER, title, FontId::proportional(fs), col);
+            // The chevron shows the section can fold: always when folded, else when pointed at.
+            if collapsed || resp.hovered() {
+                let c = Rect::from_center_size(pos2(r.right() - 16.0, text_y), Vec2::splat(11.0));
+                paint_glyph(ui.painter(), c, if collapsed { Glyph::ChevronRight } else { Glyph::ChevronDown }, col);
             }
             if resp.clicked() {
                 if app.ud.sidebar_collapsed.iter().any(|s| s == key) {
@@ -301,18 +302,20 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         let item = |ui: &mut Ui, label: &str, glyph: Option<Glyph>, path: &Path, dim: bool, link: bool| -> egui::Response {
             let (r, resp) = ui.allocate_exact_size(vec2(width, row_h), Sense::click_and_drag());
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-            // Items sit indented under their section header; the current folder is not
-            // highlighted (only hover is): the path bar already says where you are.
-            let _ = &current;
+            // The place you are in wears a quiet pill, a step off the sidebar, so it is found
+            // at a glance without competing with the list's selection.
+            let here = path == current.as_path();
             let r2 = r.shrink2(vec2(6.0, 1.0));
             if ctx_target.as_deref() == Some(path) {
-                ui.painter().rect_filled(r2, CornerRadius::same(5), pal.selected);
+                ui.painter().rect_filled(r2, CornerRadius::same(6), pal.selected);
             } else if resp.hovered() {
-                ui.painter().rect_filled(r2, CornerRadius::same(5), pal.row_hover);
+                ui.painter().rect_filled(r2, CornerRadius::same(6), pal.row_hover);
+            } else if here {
+                ui.painter().rect_filled(r2, CornerRadius::same(6), pal.sidebar.lerp_to_gamma(pal.text, if pal.dark { 0.08 } else { 0.06 }));
             }
             let ic = Rect::from_center_size(pos2(r.left() + 36.0, r.center().y), Vec2::splat(15.0));
             match glyph {
-                Some(g) => paint_glyph(ui.painter(), ic, g, pal.text_dim),
+                Some(g) => paint_glyph(ui.painter(), ic, g, if here { pal.text } else { pal.text_dim }),
                 None => {
                     if !crate::icons::dir(ui.painter(), ic, path) {
                         crate::theme::paint_icon(ui.painter(), ic, crate::theme::FileCat::Folder, "", link);
@@ -557,14 +560,14 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 if sel {
                     ui.painter().rect_filled(r2, CornerRadius::same(6), pal.selected);
                 } else if row_hover || ctx_target.as_deref() == Some(p.as_path()) {
-                    ui.painter().rect_filled(r2, CornerRadius::same(6), pal.hover);
+                    ui.painter().rect_filled(r2, CornerRadius::same(6), pal.row_hover);
                 }
                 // A drive that is not mounted has a second line: the name moves up a little
                 // so the two lines don't touch.
                 let ic = Rect::from_center_size(pos2(r.left() + 36.0, r.top() + row_h / 2.0 + if mounted { 1.0 } else { -1.0 }), Vec2::splat(15.0));
                 let crypt = drive.map_or(&crate::drives::Crypt::Plain, |d| &d.crypt);
                 let icol = if sel { pal.on_sel() } else if mounted { pal.text_dim } else { pal.text_dim.gamma_multiply(0.6) };
-                let ring = if sel { pal.selected } else if row_hover || ctx_target.as_deref() == Some(p.as_path()) { pal.hover } else { pal.sidebar };
+                let ring = if sel { pal.selected } else if row_hover || ctx_target.as_deref() == Some(p.as_path()) { pal.row_hover } else { pal.sidebar };
                 crate::ui::paint_drive(ui.painter(), ic, drive.is_some_and(|d| d.removable), crypt, icol, ring);
                 // Room on the right for the eject button (or the spinner while busy).
                 let btn = Rect::from_center_size(pos2(r.right() - 20.0, ic.center().y), Vec2::splat(20.0));
@@ -576,13 +579,20 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                     let state = if *crypt == crate::drives::Crypt::Locked { "Locked" } else { "Not mounted" };
                     let sub = crate::listing::elided(ui, &format!("{} · {state}", fsx::fmt_size(*total)), FontId::proportional(app.cfg.font_size - 3.0), r.width() - 60.0 - reserve, pal.text_dim);
                     ui.painter().galley(pos2(r.left() + 52.0, r.bottom() - 3.0 - sub.size().y), sub, pal.text_dim);
+                } else if *total > 0 && row_hover {
+                    // Pointed at, the bar says it in words.
+                    let words = format!("{} free of {}", fsx::fmt_size(*free), fsx::fmt_size(*total));
+                    let sub = crate::listing::elided(ui, &words, FontId::proportional(app.cfg.font_size - 3.0), r.width() - 60.0 - reserve, pal.text_dim);
+                    ui.painter().galley(pos2(r.left() + 52.0, r.bottom() - 4.0 - sub.size().y), sub, pal.text_dim);
                 } else if *total > 0 {
                     let frac = (total - free) as f32 / *total as f32;
-                    // Every drive's bar the same length, eject button or not.
-                    let bar = Rect::from_min_size(pos2(r.left() + 52.0, r.bottom() - 8.0), vec2((r.width() - 96.0).clamp(0.0, 110.0), 4.0));
-                    ui.painter().rect_filled(bar, CornerRadius::same(2), pal.raised);
+                    // Every drive's bar the same length, eject button or not; a thin line, the
+                    // name above it the thing read first.
+                    let bar = Rect::from_min_size(pos2(r.left() + 52.0, r.bottom() - 7.5), vec2((r.width() - 96.0).clamp(0.0, 110.0), 3.0));
+                    let track = if sel { pal.on_sel().gamma_multiply(0.25) } else { pal.sidebar.lerp_to_gamma(pal.text, if pal.dark { 0.12 } else { 0.1 }) };
+                    ui.painter().rect_filled(bar, CornerRadius::same(2), track);
                     let col = if frac > 0.9 { pal.danger } else if frac > 0.75 { Color32::from_rgb(0xe8, 0xa3, 0x3d) } else { pal.accent };
-                    ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * frac, 4.0)), CornerRadius::same(2), col);
+                    ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * frac, 3.0)), CornerRadius::same(2), col);
                 }
                 if busy {
                     crate::ui::spinner(ui.painter(), btn.center(), 5.5, pal.accent, ui.input(|i| i.time));
