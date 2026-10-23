@@ -2695,6 +2695,19 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
             break;
         }
     }
+    let arabic_font = fc_match("Noto Sans Arabic UI")
+        .or_else(|| fc_match("Noto Sans Arabic"))
+        .or_else(|| fc_match(":lang=fa"))
+        .or_else(|| first(&[
+            "/usr/share/fonts/noto/NotoSansArabicUI-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansArabic-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansArabicUI-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        ]));
+    if let Some(b) = arabic_font {
+        add(&mut fonts, "arabic", b, &mut prop);
+    }
     // Interface glyphs: a Lucide subset (ISC), drawn as text in its own family.
     const ICONS: &[u8] = include_bytes!("../assets/lucide-subset.ttf");
     fonts.font_data.insert("lucide".into(), FontData::from_static(ICONS).into());
