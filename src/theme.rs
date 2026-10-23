@@ -2695,9 +2695,22 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
             break;
         }
     }
-    let arabic_font = fc_match("Noto Sans Arabic UI")
-        .or_else(|| fc_match("Noto Sans Arabic"))
+    let fc_match_exact = |pattern: &str, expected: &str| -> Option<&'static [u8]> {
+        let out = std::process::Command::new("fc-match").args(["--format=%{file}|%{family}", pattern]).output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut parts = text.trim().splitn(2, '|');
+        let file = parts.next()?;
+        let family = parts.next().unwrap_or_default();
+        if family.to_lowercase().contains(&expected.to_lowercase()) {
+            map_font(std::path::Path::new(file))
+        } else {
+            None
+        }
+    };
+    let arabic_font = fc_match_exact("Noto Sans Arabic UI", "Noto Sans Arabic UI")
+        .or_else(|| fc_match_exact("Noto Sans Arabic", "Noto Sans Arabic"))
         .or_else(|| fc_match(":lang=fa"))
+        .or_else(|| fc_match(":lang=ar"))
         .or_else(|| first(&[
             "/usr/share/fonts/noto/NotoSansArabicUI-Regular.ttf",
             "/usr/share/fonts/noto/NotoSansArabic-Regular.ttf",
