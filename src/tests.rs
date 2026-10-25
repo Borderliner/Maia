@@ -3988,8 +3988,8 @@ fn updates_check_compare_and_install() {
     assert!(newer("0.5.0", "v0.5.0+fork.1") && newer("0.5.0+fork.1", "v0.5.0+fork.2") && newer("0.5.0+fork.9", "v0.5.1"));
     assert!(!newer("0.5.0+fork.2", "v0.5.0+fork.2") && !newer("0.5.0+fork.1", "v0.5.0") && !newer("0.5.1", "v0.5.0+fork.9"));
     let json = |tag: &str, host: &str| format!(r#"{{"tag_name":"{tag}","body":"Faster search.\n\nNew themes.","assets":[
-        {{"name":"maia-linux-x86_64","browser_download_url":"{host}/yappologistic/Maia/releases/download/{tag}/maia-linux-x86_64"}},
-        {{"name":"maia-linux-x86_64.sha256","browser_download_url":"{host}/yappologistic/Maia/releases/download/{tag}/maia-linux-x86_64.sha256"}}]}}"#);
+        {{"name":"maia-linux-x86_64","browser_download_url":"{host}/Borderliner/Maia/releases/download/{tag}/maia-linux-x86_64"}},
+        {{"name":"maia-linux-x86_64.sha256","browser_download_url":"{host}/Borderliner/Maia/releases/download/{tag}/maia-linux-x86_64.sha256"}}]}}"#);
     let r = parse_release(json("v9.9.9", "https://github.com").as_bytes()).expect("a release");
     assert_eq!((r.version.as_str(), r.notes.starts_with("Faster search.")), ("v9.9.9", true));
     assert!(parse_release(json("v9.9.9", "https://evil.example").as_bytes()).is_none(), "downloads only from the project's releases");
@@ -4071,7 +4071,7 @@ fn updates_through_packages() {
     let (deb, rpm, app) = (Installed::Deb.package("v9.9.9").unwrap(), Installed::Rpm.package("v9.9.9").unwrap(), Installed::AppImage(PathBuf::new()).package("v9.9.9").unwrap());
     assert!(deb.starts_with("maia_9.9.9_") && deb.ends_with(".deb") && rpm.starts_with("maia-9.9.9-1.") && app.starts_with("Maia-9.9.9-"));
     let names = [crate::update::ASSET.to_string(), crate::update::SUMS.to_string(), deb.clone(), rpm.clone(), app.clone(), "SHA256SUMS".into()];
-    let json = format!(r#"{{"tag_name":"v9.9.9","body":"","assets":[{}]}}"#, names.iter().map(|n| format!(r#"{{"name":"{n}","browser_download_url":"https://github.com/yappologistic/Maia/releases/download/v9.9.9/{n}"}}"#)).collect::<Vec<_>>().join(","));
+    let json = format!(r#"{{"tag_name":"v9.9.9","body":"","assets":[{}]}}"#, names.iter().map(|n| format!(r#"{{"name":"{n}","browser_download_url":"https://github.com/Borderliner/Maia/releases/download/v9.9.9/{n}"}}"#)).collect::<Vec<_>>().join(","));
     let r = parse_release(json.as_bytes()).expect("a release");
     assert_eq!(r.assets.len(), 6, "every download kept");
     let build = b"\x7fELF the new build".to_vec();

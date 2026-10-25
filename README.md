@@ -4,6 +4,11 @@ A fast, keyboard-first file manager for Linux, written in Rust with egui. One bi
 of under 5 MB, drawn on the GPU, with split panels, tabs, live filtering, previews and
 background file operations.
 
+This is a fork of [yappologistic/Maia](https://github.com/yappologistic/Maia) with
+fixes not released there yet, such as Persian, Arabic and Hebrew file names. Its
+releases are numbered by the version they build on and a count of their own, as
+`0.5.0+fork.1`, and Update in Options fetches them from here.
+
 ![Maia: a project's source files beside its git history](docs/maia.webp)
 
 <p align="center">
@@ -16,7 +21,7 @@ background file operations.
 
 You need a Wayland or X11 desktop with OpenGL and glibc 2.35 or newer (Ubuntu 22.04,
 Debian 12, Fedora 36 and later). The
-[latest release](https://github.com/yappologistic/Maia/releases/latest) has each of
+[latest release](https://github.com/Borderliner/Maia/releases/latest) has each of
 these for x86_64 and ARM64:
 
 | Package | For |
@@ -30,7 +35,7 @@ these for x86_64 and ARM64:
 To build it yourself you need Rust 1.88 or newer:
 
 ```bash
-git clone https://github.com/yappologistic/Maia.git
+git clone https://github.com/Borderliner/Maia.git
 cd Maia
 cargo build --release
 ./target/release/maia --install

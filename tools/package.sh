@@ -83,14 +83,14 @@ if command -v dpkg-deb >/dev/null; then
 Package: maia
 Version: $V
 Architecture: $DEB
-Maintainer: yappologistic <yappologistic@users.noreply.github.com>
+Maintainer: Borderliner <2098879+Borderliner@users.noreply.github.com>
 Installed-Size: $KB
 Depends: libc6 (>= 2.35), libegl1, libxkbcommon0
 Recommends: libwayland-client0, libx11-6, xdg-utils, libarchive-tools, git
 Suggests: ffmpeg, poppler-utils, imagemagick, 7zip | p7zip-full, udisks2, gvfs, libreoffice-core
 Section: utils
 Priority: optional
-Homepage: https://github.com/yappologistic/Maia
+Homepage: https://github.com/Borderliner/Maia
 Description: Fast, keyboard-first file manager
  A file manager drawn on the GPU, with split panels, tabs, live filtering,
  previews, git history and staging, and background file operations.
@@ -119,7 +119,7 @@ Version: $V
 Release: 1
 Summary: Fast, keyboard-first file manager
 License: GPL-3.0-or-later
-URL: https://github.com/yappologistic/Maia
+URL: https://github.com/Borderliner/Maia
 AutoReqProv: no
 Requires: libc.so.6$L, libEGL.so.1$L, libxkbcommon.so.0$L
 Recommends: /usr/bin/xdg-open, /usr/bin/bsdtar, /usr/bin/git

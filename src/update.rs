@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Where the releases are.
-pub const REPO: &str = "yappologistic/Maia";
+pub const REPO: &str = "Borderliner/Maia";
 /// A release's files for this machine's processor: the program, and its SHA-256 as
 /// `sha256sum` writes it ("maia-linux-x86_64", "maia-linux-aarch64").
 #[cfg(target_arch = "aarch64")]

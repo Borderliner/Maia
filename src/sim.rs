@@ -6220,7 +6220,7 @@ mod journeys {
             let sum = sum.clone();
             std::sync::Arc::new(move |url: &str, to: Option<&Path>| {
                 let body = if url.contains("api.github.com") {
-                    br#"{"tag_name":"v9.9.9","body":"New themes.","assets":[{"name":"maia-linux-x86_64","browser_download_url":"https://github.com/yappologistic/Maia/releases/download/v9.9.9/maia-linux-x86_64"},{"name":"maia-linux-x86_64.sha256","browser_download_url":"https://github.com/yappologistic/Maia/releases/download/v9.9.9/maia-linux-x86_64.sha256"}]}"#.to_vec()
+                    br#"{"tag_name":"v9.9.9","body":"New themes.","assets":[{"name":"maia-linux-x86_64","browser_download_url":"https://github.com/Borderliner/Maia/releases/download/v9.9.9/maia-linux-x86_64"},{"name":"maia-linux-x86_64.sha256","browser_download_url":"https://github.com/Borderliner/Maia/releases/download/v9.9.9/maia-linux-x86_64.sha256"}]}"#.to_vec()
                 } else if url.ends_with(".sha256") {
                     format!("{sum}  maia-linux-x86_64").into_bytes()
                 } else {
@@ -6287,7 +6287,7 @@ mod journeys {
             std::sync::Arc::new(move |url: &str, to: Option<&Path>| {
                 let name = url.rsplit('/').next().unwrap_or("").to_string();
                 let body = if url.contains("api.github.com") {
-                    let assets: Vec<String> = ["maia-linux-x86_64", "maia-linux-x86_64.sha256", &deb, &app, "SHA256SUMS"].iter().map(|n| format!(r#"{{"name":"{n}","browser_download_url":"https://github.com/yappologistic/Maia/releases/download/v9.9.9/{n}"}}"#)).collect();
+                    let assets: Vec<String> = ["maia-linux-x86_64", "maia-linux-x86_64.sha256", &deb, &app, "SHA256SUMS"].iter().map(|n| format!(r#"{{"name":"{n}","browser_download_url":"https://github.com/Borderliner/Maia/releases/download/v9.9.9/{n}"}}"#)).collect();
                     format!(r#"{{"tag_name":"v9.9.9","body":"New themes.","assets":[{}]}}"#, assets.join(",")).into_bytes()
                 } else if name == "SHA256SUMS" {
                     sums.clone().into_bytes()

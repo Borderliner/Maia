@@ -11,8 +11,8 @@
     staging, and background file operations that Undo takes back.</p>
   </description>
   <launchable type="desktop-id">io.github.yappologistic.Maia.desktop</launchable>
-  <url type="homepage">https://github.com/yappologistic/Maia</url>
-  <url type="bugtracker">https://github.com/yappologistic/Maia/issues</url>
+  <url type="homepage">https://github.com/Borderliner/Maia</url>
+  <url type="bugtracker">https://github.com/Borderliner/Maia/issues</url>
   <developer id="io.github.yappologistic">
     <name>yappologistic</name>
   </developer>
