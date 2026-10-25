@@ -27,6 +27,7 @@
 !/tools/sim.sh
 !/tools/window.sh
 !/tools/lucide_subset.py
+!/tools/arabic_forms.py
 !/tools/notices.py
 !/tools/tour-media.sh
 !/tools/package.sh

@@ -12496,3 +12496,15 @@ fn compress_and_extract_say_what_they_need() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Names no one would type still draw: marks with no letter, a lone lam, joiners, controls.
+/// A ZWJ (as in a family emoji) before a lam-alef once threw ar-reshaper's indexes off,
+/// out of bounds, and a panic quits Maia.
+#[test]
+fn rtl_shaping_survives_odd_names() {
+    use crate::rtl::fix_rtl as display;
+    assert!(display("👨\u{200d}👩 لا").contains('\u{fefb}'));
+    for s in ["\u{64e}", "\u{64e}ب", "\u{640}\u{640}", "ل", "لا\u{64e}", "\u{200d}ب", "ب\u{200d}", "ا\u{202b}ب\u{202c}", "x\ty\nز", "ً", "\u{fefb}"] {
+        assert!(!display(s).is_empty(), "{s:?}");
+    }
+}
