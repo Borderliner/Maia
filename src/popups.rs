@@ -5195,7 +5195,10 @@ fn properties(app: &mut App, ctx: &egui::Context, st: &mut PropState) -> bool {
                 let kv = |ui: &mut Ui, k: &str, v: String| field_row(ui, key_w, k, &pal, |ui| {
                     ui.add(egui::Label::new(v).wrap());
                 });
-                kv(ui, "Location", p.parent().map(|x| x.display().to_string()).unwrap_or_default());
+                match p.parent() {
+                    Some(dir) => location_row(ui, key_w, dir, &pal),
+                    None => kv(ui, "Location", String::new()),
+                }
                 if e.is_dir {
                     match app.stats.map.get(&p) {
                         Some(s) => kv(ui, "Size", format!("{} ({} bytes)\n{} file{}, {} folder{}", fsx::fmt_size(s.size), s.size, s.files, if s.files == 1 { "" } else { "s" }, s.folders, if s.folders == 1 { "" } else { "s" })),
@@ -5264,9 +5267,7 @@ fn properties(app: &mut App, ctx: &egui::Context, st: &mut PropState) -> bool {
                     ui.label(format!("{}{}", fsx::fmt_size(total), if pending { " (calculating…)" } else { "" }));
                 });
                 if let Some(parent) = st.paths[0].parent() {
-                    field_row(ui, key_w, "Location", &pal, |ui| {
-                        ui.add(egui::Label::new(parent.display().to_string()).wrap());
-                    });
+                    location_row(ui, key_w, parent, &pal);
                 }
             });
             group_label(ui, "Permissions", &pal);
@@ -5284,6 +5285,30 @@ fn properties(app: &mut App, ctx: &egui::Context, st: &mut PropState) -> bool {
         st.snap = snap;
     }
     !(close || clicked_outside(ctx, rect))
+}
+
+/// Properties' Location: the folder's path to select, and Copy for all of it. A path with
+/// right-to-left names is drawn reordered (see `rtl`), which a selection would copy, so
+/// there only Copy copies.
+fn location_row(ui: &mut Ui, key_w: f32, dir: &Path, pal: &Palette) {
+    let path = dir.display().to_string();
+    field_row(ui, key_w, "Location", pal, |ui| {
+        ui.horizontal_top(|ui| {
+            let room = (ui.available_width() - 52.0).max(40.0);
+            ui.allocate_ui(vec2(room, 0.0), |ui| {
+                if crate::rtl::has_rtl(&path) {
+                    ui.add(egui::Label::new(crate::rtl::display_path(&path).into_owned()).wrap());
+                } else {
+                    ui.add(egui::Label::new(path.as_str()).wrap().selectable(true));
+                }
+            });
+            let b = ui.small_button("Copy");
+            crate::ui::note_control(ui, b.rect, "copy location");
+            if b.clicked() {
+                ui.ctx().copy_text(path.clone());
+            }
+        });
+    });
 }
 
 /// Who may read, write and run the items, in columns under their names, with the special

@@ -16486,6 +16486,36 @@ mod journeys {
         s.idle(20);
         look(&mut s, "rtl properties");
         s.shot("rtl-properties");
+        // Drawn reordered, the folder is still copied as it is.
+        s.click_text("Copy");
+        assert_eq!(last_copy(&s), d.display().to_string());
         report("rtl", &s);
+    }
+
+    /// Properties' Location: a triple-click selects the folder's path and Ctrl+C copies
+    /// it; Copy copies it whole.
+    #[test]
+    fn properties_location_selects_and_copies() {
+        if !sandboxed() {
+            return;
+        }
+        let docs = fixture("location").join("Documents");
+        let mut s = Sim::new(&docs, vec2(1100.0, 700.0));
+        select_name(&mut s, "notes.txt");
+        s.app.run(Cmd::Properties);
+        s.idle(20);
+        let want = docs.display().to_string();
+        let at = s.texts.iter().find(|(_, t)| *t == want).map(|x| x.0.left_top() + vec2(20.0, 8.0)).unwrap_or_else(|| s.fail("the location shown"));
+        s.idle(40);
+        s.act(&format!("dclick {:.1} {:.1}", at.x, at.y));
+        s.act(&format!("click {:.1} {:.1}", at.x, at.y));
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), want, "the selected path");
+        assert!(matches!(s.app.popup, Popup::Properties(_)), "Properties stays open");
+        s.copied.clear();
+        s.click_text("Copy");
+        assert_eq!(last_copy(&s), want, "Copy");
+        look(&mut s, "location copied");
+        report("location", &s);
     }
 }
