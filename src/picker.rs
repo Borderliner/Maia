@@ -832,8 +832,9 @@ fn name_field(app: &mut App, ui: &mut Ui, r: Rect, fs: f32, pal: &crate::theme::
     let Some(p) = app.picker.as_mut() else { return };
     ui.painter().rect(r, CornerRadius::same(6), pal.bg, Stroke::new(1.0f32, pal.card_line()), StrokeKind::Inside);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink2(vec2(8.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-    let te = egui::TextEdit::singleline(&mut p.name).id(id).frame(false).font(FontId::proportional(fs)).desired_width(r.width() - 16.0).hint_text(egui::RichText::new("Name").color(pal.text_dim));
-    let resp = child.add(te);
+    let (width, hint) = (r.width() - 16.0, egui::RichText::new("Name").color(pal.text_dim));
+    // Persian, Arabic or Hebrew names are drawn joined and in display order.
+    let resp = crate::rtl::line_edit(&mut child, id, &mut p.name, FontId::proportional(fs), |te| te.frame(false).desired_width(width).hint_text(hint)).response;
     crate::ui::note_control(ui, r, "picker name");
     if std::mem::take(&mut p.focus_name) {
         resp.request_focus();

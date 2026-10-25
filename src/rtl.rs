@@ -12,8 +12,9 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
-use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{Color32, FontId, Galley, Ui};
+use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
+use egui::text_edit::TextEditOutput;
+use egui::{Color32, Event, FontId, Galley, Id, Key, Rect, TextEdit, Ui, pos2};
 use unicode_bidi::{BidiClass, ParagraphBidiInfo, bidi_class};
 
 use crate::arabic_forms::{FORMS, JOIN_CAUSING, LAM_ALEF, TRANSPARENT};
@@ -161,6 +162,223 @@ pub fn wrapped(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) ->
     let span = Span { text, leading_space: 0.0, format: TextFormat::simple(font, color), hits: None };
     let job = layout_job(ui, &[span], TextWrapping { max_width: width, ..Default::default() });
     ui.fonts_mut(|f| f.layout_job(job))
+}
+
+/// A one-line text field for text that may hold right-to-left letters. egui's field
+/// types, pastes, composes and undoes, drawn invisibly; this draws the text as `display`
+/// does, the caret and selection where those characters are on screen, and puts clicks,
+/// drags and Left and Right where they land on screen. Text with no right-to-left
+/// letters is egui's field as it is.
+pub fn line_edit(ui: &mut Ui, id: Id, text: &mut String, font: FontId, build: impl for<'a> FnOnce(TextEdit<'a>) -> TextEdit<'a>) -> TextEditOutput {
+    let ctx = ui.ctx().clone();
+    let color = ui.visuals().override_text_color.unwrap_or_else(|| ui.visuals().widgets.inactive.text_color());
+    let rtl = has_rtl(text);
+    // Left and Right move along the screen, through either direction's text alike.
+    if rtl && ctx.memory(|m| m.has_focus(id)) {
+        let moves: Vec<(f32, bool)> = ui.input_mut(|i| {
+            let mut moves = vec![];
+            i.events.retain(|e| match e {
+                Event::Key { key: k @ (Key::ArrowLeft | Key::ArrowRight), pressed, modifiers: m, .. } if !m.ctrl && !m.alt && !m.command && !m.mac_cmd => {
+                    if *pressed {
+                        moves.push((if *k == Key::ArrowLeft { -1.0 } else { 1.0 }, m.shift));
+                    }
+                    false
+                }
+                _ => true,
+            });
+            moves
+        });
+        if !moves.is_empty() {
+            let carets = place(ui, text, &font, color).carets;
+            let mut st = TextEdit::load_state(&ctx, id).unwrap_or_default();
+            let mut r = st.cursor.char_range().unwrap_or_default();
+            for (toward, shift) in moves {
+                let (caret, anchor) = (r.primary.index.min(carets.len() - 1), r.secondary.index.min(carets.len() - 1));
+                let to = if !shift && caret != anchor {
+                    // A selection collapses to its end on that side.
+                    if (carets[caret] - carets[anchor]) * toward >= 0.0 { caret } else { anchor }
+                } else {
+                    step(&carets, caret, toward)
+                };
+                r = CCursorRange::two(CCursor::new(if shift { anchor } else { to }), CCursor::new(to));
+            }
+            st.cursor.set_char_range(Some(r));
+            st.store(&ctx, id);
+        }
+    }
+    let out = ui
+        .scope(|ui| {
+            if rtl {
+                let v = ui.visuals_mut();
+                v.selection.bg_fill = Color32::TRANSPARENT;
+                v.selection.stroke.color = Color32::TRANSPARENT;
+                v.text_cursor.stroke.color = Color32::TRANSPARENT;
+            }
+            let edit = build(TextEdit::singleline(&mut *text).id(id).font(font.clone()));
+            if rtl { edit.text_color(Color32::TRANSPARENT) } else { edit }.show(ui)
+        })
+        .inner;
+    if !rtl || !has_rtl(text) {
+        return out;
+    }
+    let placed = place(ui, text, &font, color);
+    let resp = &out.response;
+    let mut st = TextEdit::load_state(&ctx, id).unwrap_or_default();
+    let mut range = st.cursor.char_range();
+    let scroll_id = id.with("rtl scroll");
+    let mut scroll: f32 = ctx.data(|d| d.get_temp(scroll_id)).unwrap_or(0.0);
+    let left = out.text_clip_rect.left();
+    // A press puts the caret at the nearest place between characters, Shift keeping the
+    // other end; a drag stretches from the press; a double click takes the word there
+    // and a triple click everything.
+    if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.is_pointer_button_down_on() || resp.clicked()) {
+        let at = nearest(&placed.carets, p.x - left + scroll);
+        let anchor_id = id.with("rtl anchor");
+        let (pressed, shift) = ui.input(|i| (i.pointer.any_pressed(), i.modifiers.shift));
+        let anchor = match (pressed, shift) {
+            (true, false) => at,
+            (true, true) => range.map_or(at, |r| r.secondary.index),
+            _ => ctx.data(|d| d.get_temp(anchor_id)).unwrap_or(at),
+        };
+        if pressed {
+            ctx.data_mut(|d| d.insert_temp(anchor_id, anchor));
+        }
+        let mut r = CCursorRange::two(CCursor::new(anchor), CCursor::new(at));
+        if resp.triple_clicked() {
+            r = CCursorRange::two(CCursor::new(0), CCursor::new(placed.carets.len() - 1));
+        } else if resp.double_clicked() {
+            let chars: Vec<char> = text.chars().collect();
+            let (mut a, mut b) = (at, at);
+            while a > 0 && chars[a - 1].is_alphanumeric() {
+                a -= 1;
+            }
+            while b < chars.len() && chars[b].is_alphanumeric() {
+                b += 1;
+            }
+            r = CCursorRange::two(CCursor::new(a), CCursor::new(b));
+        }
+        range = Some(r);
+        st.cursor.set_char_range(range);
+        st.store(&ctx, id);
+    }
+    // Scrolled to keep the caret in view when the text is wider than the field.
+    let width = out.text_clip_rect.width();
+    let caret = range.map_or(0, |r| r.primary.index).min(placed.carets.len() - 1);
+    let cx = placed.carets[caret];
+    let full = placed.galley.size().x;
+    if full <= width {
+        scroll = 0.0;
+    } else {
+        scroll = scroll.max(cx + 1.0 - width).min(cx).clamp(0.0, full - width + 1.0);
+    }
+    ctx.data_mut(|d| d.insert_temp(scroll_id, scroll));
+    let painter = ui.painter_at(out.text_clip_rect.expand2(egui::vec2(1.0, 0.0)));
+    let (x0, top, h) = (left - scroll, out.galley_pos.y, placed.galley.size().y);
+    let focused = resp.has_focus();
+    let mut galley = placed.galley.clone();
+    if let Some(r) = range.filter(|r| focused && r.primary != r.secondary) {
+        // The selected characters' places, merged where they touch.
+        let mut spans: Vec<(f32, f32)> = r.as_sorted_char_range().filter_map(|i| placed.spans.get(i).copied()).filter(|(a, b)| b > a).collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut merged: Vec<(f32, f32)> = vec![];
+        for (a, b) in spans {
+            match merged.last_mut() {
+                Some(m) if a <= m.1 + 0.5 => m.1 = m.1.max(b),
+                _ => merged.push((a, b)),
+            }
+        }
+        for (a, b) in merged {
+            painter.rect_filled(Rect::from_min_max(pos2(x0 + a, top), pos2(x0 + b, top + h)), 0.0, ui.visuals().selection.bg_fill);
+        }
+        // The selected letters in the selection's text colour, as egui's fields show them.
+        let selected = r.as_sorted_char_range();
+        let mut job = LayoutJob::default();
+        for (c, &i) in placed.galley.text().chars().zip(&placed.logical) {
+            let col = if selected.contains(&i) { ui.visuals().selection.stroke.color } else { color };
+            job.append(c.encode_utf8(&mut [0; 4]), 0.0, TextFormat::simple(font.clone(), col));
+        }
+        galley = ui.fonts_mut(|f| f.layout_job(job));
+    }
+    painter.galley(pos2(x0, top), galley, color);
+    if focused {
+        let x = (x0 + cx).round() + 0.5;
+        let caret_rect = Rect::from_min_max(pos2(x - 0.5, top), pos2(x + 0.5, top + h));
+        painter.line_segment([caret_rect.center_top(), caret_rect.center_bottom()], ui.visuals().text_cursor.stroke);
+        // The input method's window beside the caret as drawn.
+        let to_global = ctx.layer_transform_to_global(ui.layer_id()).unwrap_or_default();
+        ctx.output_mut(|o| {
+            if let Some(ime) = o.ime.as_mut() {
+                ime.cursor_rect = to_global * caret_rect;
+            }
+        });
+    }
+    out
+}
+
+/// Where a line of text is drawn: its galley in display order, where each caret position
+/// (0 to the number of characters) is in it, and each character's left and right.
+struct Placed {
+    galley: Arc<Galley>,
+    carets: Vec<f32>,
+    spans: Vec<(f32, f32)>,
+    /// The character of the text each of the galley's stands for.
+    logical: Vec<usize>,
+}
+
+fn place(ui: &Ui, text: &str, font: &FontId, color: Color32) -> Placed {
+    let n = text.chars().count();
+    let shaped = shape(text);
+    let info = ParagraphBidiInfo::new(&shaped.text, None);
+    let offsets: Vec<usize> = shaped.text.char_indices().map(|(i, _)| i).collect();
+    let mut shown = String::with_capacity(shaped.text.len());
+    let mut from = vec![];
+    for (i, rtl) in visual(&info, 0..shaped.text.len()) {
+        shown.push(drawn(&shaped.text, i, rtl));
+        from.push((shaped.src[offsets.partition_point(|&o| o < i)], rtl));
+    }
+    let galley = ui.painter().layout_no_wrap(shown, font.clone(), color);
+    // Each character's place and direction; one drawn with no glyph of its own (the alef
+    // of a lam-alef, a left-out override) is a point where the one before it ends.
+    let mut placed: Vec<Option<(f32, f32, bool)>> = vec![None; n];
+    if let Some(row) = galley.rows.first() {
+        for (g, &(src, rtl)) in row.glyphs.iter().zip(&from) {
+            placed[src] = Some((g.pos.x, g.pos.x + g.advance_width, rtl));
+        }
+    }
+    let start = if info.paragraph_level.is_rtl() { galley.size().x } else { 0.0 };
+    let mut spans: Vec<(f32, f32)> = Vec::with_capacity(n);
+    let mut dirs: Vec<bool> = Vec::with_capacity(n);
+    for i in 0..n {
+        let (a, b, rtl) = placed[i].unwrap_or_else(|| {
+            let end = if i == 0 { start } else if dirs[i - 1] { spans[i - 1].0 } else { spans[i - 1].1 };
+            (end, end, i > 0 && dirs[i - 1])
+        });
+        spans.push((a, b));
+        dirs.push(rtl);
+    }
+    // A caret before a character sits at its leading edge: the left of a left-to-right
+    // one, the right of a right-to-left one; after the last, at its trailing edge.
+    let mut carets: Vec<f32> = (0..n).map(|i| if dirs[i] { spans[i].1 } else { spans[i].0 }).collect();
+    carets.push(match n {
+        0 => start,
+        _ if dirs[n - 1] => spans[n - 1].0,
+        _ => spans[n - 1].1,
+    });
+    let logical = from.iter().map(|f| f.0).collect();
+    Placed { galley, carets, spans, logical }
+}
+
+/// The caret position nearest `x`.
+fn nearest(carets: &[f32], x: f32) -> usize {
+    (0..carets.len()).min_by(|&a, &b| (carets[a] - x).abs().total_cmp(&(carets[b] - x).abs())).unwrap_or(0)
+}
+
+/// The caret position next to `from` on the screen, left (`toward` below 0) or right;
+/// of two in the same place (inside a lam-alef), the one fewer characters away.
+fn step(carets: &[f32], from: usize, toward: f32) -> usize {
+    let x = carets[from];
+    let key = |i: usize| ((carets[i] - x).abs(), i.abs_diff(from));
+    (0..carets.len()).filter(|&i| (carets[i] - x) * toward > 0.5).min_by(|&a, &b| key(a).partial_cmp(&key(b)).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(from)
 }
 
 /// Text with its Arabic letters joined, in reading order, and for each character the

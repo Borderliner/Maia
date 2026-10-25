@@ -938,7 +938,10 @@ impl Sim {
             if self.check_overlap {
                 if let epaint::Shape::Text(t) = &cs.shape {
                     let s = t.galley.text().trim().to_string();
-                    if !s.is_empty() && vis.is_positive() && vis.height() > 4.0 {
+                    // Text laid out but not shown (a field's own, under right-to-left text
+                    // drawn in display order) covers nothing.
+                    let shown = t.override_text_color.or_else(|| t.galley.job.sections.first().map(|x| x.format.color)).unwrap_or(t.fallback_color).a() > 0;
+                    if shown && !s.is_empty() && vis.is_positive() && vis.height() > 4.0 {
                         texts.push((vis, s));
                     }
                 }
@@ -16566,5 +16569,54 @@ mod journeys {
         colours("#d7e467", "#23251d", "#3a3e28");
         wait_until(&mut s, "a change the new watcher sees", 10, |s| s.app.pal.accent == c(0xd7, 0xe4, 0x67));
         report("system theme", &s);
+    }
+
+    /// A Persian name in the save dialog's name field: drawn joined and from the right,
+    /// Left moving left on the screen, a click landing where it is aimed.
+    #[test]
+    fn picker_name_in_persian() {
+        if !sandboxed() {
+            return;
+        }
+        use crate::picker::Picker;
+        use crate::portal::{Mode, Pick};
+        let docs = fixture("picker-rtl").join("Documents");
+        let mut s = Sim::new(&docs, vec2(1000.0, 640.0));
+        s.app.picker = Some(Box::new(Picker::new(Pick { mode: Mode::Save, current_name: "Untitled.md".into(), ..Default::default() })));
+        s.settle();
+        let caret = |s: &Sim| egui::TextEdit::load_state(&s.ctx, egui::Id::new("picker name")).and_then(|st| st.cursor.char_range()).map(|r| (r.secondary.index, r.primary.index));
+        // Typed straight away, over the name part: گزارش.md, drawn md.شرازگ.
+        s.act("text گزارش");
+        assert_eq!(s.app.picker.as_ref().unwrap().name, "گزارش.md");
+        assert!(some_text(&s, &crate::rtl::display("گزارش.md")), "drawn joined, from the right");
+        assert_eq!(caret(&s), Some((5, 5)), "after the typed name");
+        look(&mut s, "persian name");
+        s.shot("picker-persian-name");
+        // Home is the name's start, on the right; Left goes on into it, Shift taking it.
+        s.act("key home");
+        assert_eq!(caret(&s), Some((0, 0)));
+        s.act("key left");
+        assert_eq!(caret(&s), Some((1, 1)), "one letter on, to the left");
+        s.act("key shift+left");
+        assert_eq!(caret(&s), Some((1, 2)), "the next letter selected");
+        s.shot("picker-persian-selection");
+        // Right goes back the way it came.
+        s.act("key right");
+        assert_eq!(caret(&s), Some((1, 1)), "the selection collapsed to its right end");
+        // A click at the field's left lands before the m of md, drawn there.
+        let r = control_rect(&mut s, "picker name");
+        s.act(&format!("click {:.0} {:.0}", r.left() + 10.0, r.center().y));
+        assert_eq!(caret(&s), Some((6, 6)));
+        // سلام draws its lam and alef as one: Right from its end steps over م, then the
+        // pair, then س, then stays.
+        s.act("key ctrl+a");
+        s.act("text سلام");
+        s.act("key end");
+        assert_eq!(caret(&s), Some((4, 4)));
+        for want in [3, 1, 0, 0] {
+            s.act("key right");
+            assert_eq!(caret(&s), Some((want, want)));
+        }
+        report("picker persian", &s);
     }
 }
