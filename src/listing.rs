@@ -145,34 +145,39 @@ pub fn paint_view_glyph(p: &egui::Painter, r: Rect, mode: Mode, col: Color32) {
     }
 }
 
-/// Single-line galley elided with "…" to `width`.
 /// Like `elided`, but keeps the end ("…/parent/folder"): for paths, where the tail matters.
 pub fn elided_tail(ui: &Ui, text: &str, font: FontId, width: f32, color: Color32) -> Arc<Galley> {
-    let fixed = crate::rtl::fix_rtl(text);
-    let full = ui.painter().layout_no_wrap(fixed.clone(), font.clone(), color);
+    let shown = |s: String| if crate::rtl::has_rtl(&s) { crate::rtl::display_path(&s).into_owned() } else { s };
+    let full = ui.painter().layout_no_wrap(shown(text.to_string()), font.clone(), color);
     if full.size().x <= width {
         return full;
     }
-    let chars: Vec<char> = fixed.chars().collect();
+    let chars: Vec<char> = text.chars().collect();
     // Longest suffix that fits after the ellipsis (binary search on its length).
     let (mut lo, mut hi) = (0usize, chars.len());
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
         let s: String = std::iter::once('…').chain(chars[chars.len() - mid..].iter().copied()).collect();
-        if ui.painter().layout_no_wrap(s, font.clone(), color).size().x <= width {
+        if ui.painter().layout_no_wrap(shown(s), font.clone(), color).size().x <= width {
             lo = mid;
         } else {
             hi = mid - 1;
         }
     }
     let s: String = std::iter::once('…').chain(chars[chars.len() - lo..].iter().copied()).collect();
-    ui.painter().layout_no_wrap(s, font, color)
+    ui.painter().layout_no_wrap(shown(s), font, color)
 }
 
+/// Single-line galley elided with "…" to `width`.
 pub fn elided(ui: &Ui, text: &str, font: FontId, width: f32, color: Color32) -> Arc<Galley> {
-    let fixed = crate::rtl::fix_rtl(text);
-    let mut job = LayoutJob::simple_singleline(fixed, font, color);
-    job.wrap = egui::text::TextWrapping { max_width: width.max(8.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let wrap = egui::text::TextWrapping { max_width: width.max(8.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let job = if crate::rtl::has_rtl(text) {
+        crate::rtl::layout_job(ui, &[crate::rtl::Span { text, leading_space: 0.0, format: egui::TextFormat::simple(font, color), hits: None }], wrap)
+    } else {
+        let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
+        job.wrap = wrap;
+        job
+    };
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
@@ -187,40 +192,54 @@ pub fn display_name(e: &Entry, cfg: &Config) -> String {
     e.name.clone()
 }
 
-/// Name with fuzzy-match highlights, plus an optional dimmed suffix (flattened relative path).
-fn name_job(name: &str, suffix: Option<&str>, q: &fuzzy::Query, font: &FontId, col: Color32, dim: Color32, accent: Color32, width: f32, rows: usize) -> LayoutJob {
+/// Name with fuzzy-match highlights, plus an optional dimmed suffix (flattened relative path)
+/// and the line a content search matched in it, as (line, what was searched for).
+#[allow(clippy::too_many_arguments)]
+fn name_job(ui: &Ui, name: &str, suffix: Option<&str>, matched: Option<(&str, &str)>, q: &fuzzy::Query, font: &FontId, col: Color32, dim: Color32, accent: Color32, width: f32, rows: usize) -> LayoutJob {
     let mut job = LayoutJob::default();
     let hits: HashSet<usize> = if q.is_empty() { HashSet::new() } else { fuzzy::positions(q, name).map(|(_, p)| p.into_iter().collect()).unwrap_or_default() };
     let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
+    let wrap = egui::text::TextWrapping { max_width: width.max(8.0), max_rows: rows, break_anywhere: true, overflow_character: Some('…') };
+    if [Some(name), suffix, matched.map(|m| m.0)].into_iter().flatten().any(crate::rtl::has_rtl) {
+        use crate::rtl::Span;
+        let mut spans = vec![Span { text: name, leading_space: 0.0, format: fmt(col), hits: Some((&hits, accent)) }];
+        if let Some(s) = suffix {
+            spans.push(Span { text: s, leading_space: 8.0, format: fmt(dim), hits: None });
+        }
+        let found: HashSet<usize>;
+        if let Some((line, needle)) = matched {
+            let at = match_at(line, needle).map_or(0..0, |i| i..i + needle.len());
+            found = line.char_indices().enumerate().filter(|(_, (b, _))| at.contains(b)).map(|(i, _)| i).collect();
+            let gap = if suffix.is_some() || !hits.is_empty() { 12.0 } else { 8.0 };
+            spans.push(Span { text: line, leading_space: gap, format: fmt(dim), hits: Some((&found, accent)) });
+        }
+        return crate::rtl::layout_job(ui, &spans, wrap);
+    }
     if hits.is_empty() {
-        let fixed = crate::rtl::fix_rtl(name);
-        job.append(&fixed, 0.0, fmt(col));
+        job.append(name, 0.0, fmt(col));
     } else {
-        if crate::rtl::has_rtl(name) {
-            let fixed = crate::rtl::fix_rtl(name);
-            job.append(&fixed, 0.0, fmt(accent));
-        } else {
-            let mut buf = String::new();
-            let mut buf_hit = false;
-            for (i, ch) in name.chars().enumerate() {
-                let h = hits.contains(&i);
-                if h != buf_hit && !buf.is_empty() {
-                    job.append(&buf, 0.0, fmt(if buf_hit { accent } else { col }));
-                    buf.clear();
-                }
-                buf_hit = h;
-                buf.push(ch);
-            }
-            if !buf.is_empty() {
+        let mut buf = String::new();
+        let mut buf_hit = false;
+        for (i, ch) in name.chars().enumerate() {
+            let h = hits.contains(&i);
+            if h != buf_hit && !buf.is_empty() {
                 job.append(&buf, 0.0, fmt(if buf_hit { accent } else { col }));
+                buf.clear();
             }
+            buf_hit = h;
+            buf.push(ch);
+        }
+        if !buf.is_empty() {
+            job.append(&buf, 0.0, fmt(if buf_hit { accent } else { col }));
         }
     }
     if let Some(s) = suffix {
-        let fixed_s = crate::rtl::fix_rtl(s);
-        job.append(&fixed_s, 8.0, fmt(dim));
+        job.append(s, 8.0, fmt(dim));
     }
-    job.wrap = egui::text::TextWrapping { max_width: width.max(8.0), max_rows: rows, break_anywhere: true, overflow_character: Some('…') };
+    if let Some((line, needle)) = matched {
+        append_match(&mut job, line, needle, font, dim, accent);
+    }
+    job.wrap = wrap;
     job
 }
 
@@ -292,18 +311,22 @@ fn tags_cell(ui: &Ui, r: Rect, tags: &(Vec<Color32>, String), font: &FontId, dim
     }
 }
 
+/// Where `needle` is in `line`, ignoring case, when lowercasing keeps byte offsets (nearly
+/// all text) so the match can be found in place.
+fn match_at(line: &str, needle: &str) -> Option<usize> {
+    let (low, nl) = (line.to_lowercase(), needle.to_lowercase());
+    (!nl.is_empty() && low.len() == line.len()).then(|| low.find(&nl)).flatten().filter(|i| line.is_char_boundary(i + nl.len()))
+}
+
 /// A matched line after the name, with the words it matched in the accent colour.
 fn append_match(job: &mut LayoutJob, line: &str, needle: &str, font: &FontId, dim: Color32, accent: Color32) {
     let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
     let gap = if job.sections.len() > 1 { 12.0 } else { 8.0 };
-    // Lowercasing that keeps byte offsets (nearly all text) lets the match be found in place.
-    let (low, nl) = (line.to_lowercase(), needle.to_lowercase());
-    let at = (!nl.is_empty() && low.len() == line.len()).then(|| low.find(&nl)).flatten().filter(|i| line.is_char_boundary(i + nl.len()));
-    match at {
+    match match_at(line, needle) {
         Some(i) => {
             job.append(&line[..i], gap, fmt(dim));
-            job.append(&line[i..i + nl.len()], 0.0, fmt(accent));
-            job.append(&line[i + nl.len()..], 0.0, fmt(dim));
+            job.append(&line[i..i + needle.len()], 0.0, fmt(accent));
+            job.append(&line[i + needle.len()..], 0.0, fmt(dim));
         }
         None => job.append(line, gap, fmt(dim)),
     }
@@ -1003,11 +1026,10 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                     let suffix = rel.as_deref().and_then(|r| std::path::Path::new(r).parent()).filter(|p| !p.as_os_str().is_empty()).map(|p| format!("› {}", p.display()));
                                     let tags = if computer || tag_col { None } else { row_tags(&e.path) };
                                     let room = tags.as_ref().map_or(0.0, |tg| tags_width(ui, tg, &font));
-                                    let mut job = name_job(&name, suffix.as_deref(), q, &font, dimc(pal.text), dimc(sub), acc, (name_r.width() - room).max(24.0), 1);
                                     // The line that matched, after the name (elided with it).
-                                    if let Some(line) = t.content.snippet(&e.path) {
-                                        append_match(&mut job, line, crate::query::name_part(&t.filter).trim(), &font, dimc(sub), acc);
-                                    }
+                                    let needle = crate::query::name_part(&t.filter);
+                                    let matched = t.content.snippet(&e.path).map(|line| (line, needle.trim()));
+                                    let job = name_job(ui, &name, suffix.as_deref(), matched, q, &font, dimc(pal.text), dimc(sub), acc, (name_r.width() - room).max(24.0), 1);
                                     let g = ui.fonts_mut(|f| f.layout_job(job));
                                     let gw = g.size().x;
                                     ui.painter().galley(pos2(name_r.left(), cell.center().y - g.size().y / 2.0), g, pal.text);
@@ -1344,7 +1366,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                         let tags = row_tags(&e.path);
                         let room = tags.as_ref().map_or(0.0, |tg| tags_width(ui, tg, &font));
                         let (sub, acc, ring) = sel_colors(&pal, selected && !editing);
-                        let job = name_job(&display_name(&e, env.cfg), None, q, &font, dimc(pal.text), sub, acc, (name_r.width() - room).max(24.0), 1);
+                        let job = name_job(ui, &display_name(&e, env.cfg), None, None, q, &font, dimc(pal.text), sub, acc, (name_r.width() - room).max(24.0), 1);
                         let g = ui.fonts_mut(|f| f.layout_job(job));
                         let gw = g.size().x;
                         ui.painter().galley(pos2(name_r.left(), r.center().y - g.size().y / 2.0), g, pal.text);
@@ -1407,7 +1429,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                     if !rename_field(ui, name_line, idx, t, env, &font) {
                         let rows = if s < 72.0 { 1 } else { 2 };
                         let (sub, acc, _) = sel_colors(&pal, selected && !editing);
-                        let mut job = name_job(&display_name(&e, env.cfg), None, q, &font, dimc(pal.text), sub, acc, text_r.width(), rows);
+                        let mut job = name_job(ui, &display_name(&e, env.cfg), None, None, q, &font, dimc(pal.text), sub, acc, text_r.width(), rows);
                         job.halign = egui::Align::Center;
                         let g = ui.fonts_mut(|f| f.layout_job(job));
                         let gh = g.size().y;
@@ -1551,7 +1573,7 @@ fn column_cells(ui: &Ui, r: Rect, ic: Rect, e: &Entry, env: &Env, q: &fuzzy::Que
     let room = tags.as_ref().map_or(0.0, |tg| tags_width(ui, tg, &font));
     let rel = e.rel();
     let suffix = rel.as_deref().and_then(|r| std::path::Path::new(r).parent()).filter(|p| !p.as_os_str().is_empty()).map(|p| format!("› {}", p.display()));
-    let job = name_job(&display_name(e, env.cfg), suffix.as_deref(), q, &font, dimc(pal.text), dimc(sub), acc, (name_r.width() - room).max(24.0), 1);
+    let job = name_job(ui, &display_name(e, env.cfg), suffix.as_deref(), None, q, &font, dimc(pal.text), dimc(sub), acc, (name_r.width() - room).max(24.0), 1);
     let g = ui.fonts_mut(|f| f.layout_job(job));
     let gw = g.size().x;
     ui.painter().galley(pos2(name_r.left(), r.center().y - g.size().y / 2.0), g, pal.text);

@@ -12497,14 +12497,72 @@ fn compress_and_extract_say_what_they_need() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Arabic and Persian letters join and right-to-left text reads from the right: lam-alef
+/// as one ligature, a ZWNJ breaking the join as Persian spells, a mark kept after its
+/// letter, brackets mirrored, an extension after a Persian name on its left (as GTK
+/// shows it). Hebrew is only reordered; everything else comes back as it was.
+#[test]
+fn rtl_text_is_joined_and_in_display_order() {
+    use crate::rtl::{display, display_path, has_rtl};
+    assert!(!has_rtl("notes.txt") && !has_rtl("café ünïcödé 日本語"));
+    assert!(has_rtl("سلام") && has_rtl("שלום") && has_rtl("a ب c"));
+    assert!(matches!(display("notes.txt"), std::borrow::Cow::Borrowed("notes.txt")));
+    // س initial, لا final, م alone; drawn right to left.
+    assert_eq!(display("سلام"), "\u{fee1}\u{fefc}\u{feb3}");
+    assert_eq!(display("سلام.pdf"), "pdf.\u{fee1}\u{fefc}\u{feb3}");
+    assert_eq!(display("(سلام)"), "(\u{fee1}\u{fefc}\u{feb3})");
+    // می‌خواهم: the ZWNJ ends می; خ, ه and م join again where Persian joins them.
+    assert_eq!(display("می\u{200c}خواهم"), "\u{fee2}\u{feeb}\u{fe8d}\u{feee}\u{fea7}\u{200c}\u{fbfd}\u{fee3}");
+    // بَب: the fatha stays after the first beh, so it is drawn on it.
+    assert_eq!(display("بَب"), "\u{fe90}\u{fe91}\u{64e}");
+    assert_eq!(display("שלום"), "םולש");
+    assert_eq!(display("שלום\nسلام"), "םולש\n\u{fee1}\u{fefc}\u{feb3}");
+    // Folders keep the path's order, each name read from the right.
+    assert_eq!(display_path("/home/سلام/שלום"), "/home/\u{fee1}\u{fefc}\u{feb3}/םולש");
+    // An override would draw "abc" backwards to pass for another name: it is left out.
+    assert_eq!(display("\u{202e}abc سلام"), "abc \u{fee1}\u{fefc}\u{feb3}");
+}
+
 /// Names no one would type still draw: marks with no letter, a lone lam, joiners, controls.
 /// A ZWJ (as in a family emoji) before a lam-alef once threw ar-reshaper's indexes off,
 /// out of bounds, and a panic quits Maia.
 #[test]
 fn rtl_shaping_survives_odd_names() {
-    use crate::rtl::fix_rtl as display;
+    use crate::rtl::display;
     assert!(display("👨\u{200d}👩 لا").contains('\u{fefb}'));
     for s in ["\u{64e}", "\u{64e}ب", "\u{640}\u{640}", "ل", "لا\u{64e}", "\u{200d}ب", "ب\u{200d}", "ا\u{202b}ب\u{202c}", "x\ty\nز", "ً", "\u{fefb}"] {
         assert!(!display(s).is_empty(), "{s:?}");
     }
+}
+
+/// A long right-to-left name wraps and is elided in reading order: the first row starts
+/// (on its right) with the name's first letter, and the "…" is on the left of the last
+/// row, where the reading stops. A search's matches keep their colour.
+#[test]
+fn rtl_names_wrap_and_elide_in_reading_order() {
+    let ctx = egui::Context::default();
+    crate::theme::install_fonts(&ctx, "", "");
+    let red = egui::Color32::RED;
+    let _ = ctx.run(egui::RawInput::default(), |_| {});
+    let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let font = egui::FontId::proportional(13.0);
+            let text = "یک دو سه چهار پنج شش هفت هشت نه ده";
+            let hits: HashSet<usize> = [0, 1].into();
+            let span = crate::rtl::Span { text, leading_space: 0.0, format: egui::TextFormat::simple(font.clone(), egui::Color32::WHITE), hits: Some((&hits, red)) };
+            let wrap = egui::text::TextWrapping { max_width: 60.0, max_rows: 2, break_anywhere: false, overflow_character: Some('…') };
+            let job = crate::rtl::layout_job(ui, &[span], wrap);
+            let lit: String = job.sections.iter().filter(|s| s.format.color == red).map(|s| &job.text[s.byte_range.clone()]).collect();
+            assert_eq!(lit, "\u{fb8f}\u{fbfe}", "یک in the accent, ی (initial) on the right");
+            let g = ui.fonts_mut(|f| f.layout_job(job));
+            assert_eq!(g.rows.len(), 2, "{:?}", g.text());
+            assert_eq!(g.rows[0].glyphs.last().map(|g| g.chr), Some('\u{fbfe}'), "the first row begins with the first word: {:?}", g.text());
+            assert_eq!(g.rows[1].glyphs.first().map(|g| g.chr), Some('…'), "elided on the left: {:?}", g.text());
+            let one = crate::listing::elided(ui, "گزارش نهایی سال ۱۴۰۲.pdf", font.clone(), 60.0, egui::Color32::WHITE);
+            assert_eq!(one.rows.len(), 1);
+            assert!(one.size().x <= 61.0, "{}", one.size().x);
+            assert_eq!(one.rows[0].glyphs.first().map(|g| g.chr), Some('…'), "{:?}", one.text());
+            assert_eq!(one.rows[0].glyphs.last().map(|g| g.chr), Some('\u{fb94}'), "گ (initial) on the right: {:?}", one.text());
+        });
+    });
 }

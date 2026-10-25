@@ -16457,4 +16457,35 @@ mod journeys {
         crate::archive::GONE.with(|g| g.set(false));
         report("nobsdtar", &s);
     }
+
+    /// Persian, Arabic and Hebrew names in the list, the grid (two rows, elided where the
+    /// reading stops), the tab, the path and Properties: joined, read from the right.
+    #[test]
+    fn rtl_names_read_from_the_right() {
+        if !sandboxed() {
+            return;
+        }
+        let d = fixture("rtl").join("اسناد من");
+        std::fs::create_dir_all(&d).unwrap();
+        for n in ["گزارش نهایی سال ۱۴۰۲.pdf", "نامه‌ی اداری (نسخه دوم).docx", "عکس‌های سفر شمال و جنوب ایران در تابستان گذشته.zip", "السلام عليكم.txt", "שלום עולם.md", "report-فارسی-2026.txt", "notes.txt"] {
+            std::fs::write(d.join(n), "x").unwrap();
+        }
+        let mut s = Sim::new(&d, vec2(1100.0, 640.0));
+        s.idle(20);
+        assert!(some_text(&s, "notes.txt"), "a left-to-right name as it was");
+        assert!(some_text(&s, &crate::rtl::display("السلام عليكم.txt")), "drawn joined, from the right");
+        look(&mut s, "rtl list");
+        s.shot("rtl-list");
+        s.app.run(Cmd::ViewLarge);
+        s.idle(20);
+        look(&mut s, "rtl grid");
+        s.shot("rtl-grid");
+        s.app.run(Cmd::ViewDetails);
+        select_name(&mut s, "گزارش نهایی سال ۱۴۰۲.pdf");
+        s.app.run(Cmd::Properties);
+        s.idle(20);
+        look(&mut s, "rtl properties");
+        s.shot("rtl-properties");
+        report("rtl", &s);
+    }
 }
