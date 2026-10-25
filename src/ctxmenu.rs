@@ -364,7 +364,9 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         }
         items.push(Item::cmd(Cmd::CopyTo));
         items.push(Item::cmd(Cmd::MoveTo));
-        let mut copy = vec![Item::cmd(Cmd::CopyPath), Item::cmd(Cmd::CopyPathRaw), Item::cmd(Cmd::CopyName), Item::cmd(Cmd::CopyPathRelative)];
+        // The full path as it is, to paste anywhere; quoted for a shell under Copy as.
+        items.push(Item::labeled(Cmd::CopyPathRaw, "Copy Path"));
+        let mut copy = vec![Item::cmd(Cmd::CopyPath), Item::cmd(Cmd::CopyName), Item::cmd(Cmd::CopyPathRelative)];
         // path:line, for the file a search showed a line of.
         if p.line_hint.as_ref().is_some_and(|h| ents.iter().any(|e| e.0 == h.0)) {
             copy.push(Item::cmd(Cmd::CopyPathLine));
@@ -508,7 +510,7 @@ pub fn build_place(panel: u64, path: PathBuf, bookmarked: bool, drive: Option<cr
     if !computer {
         items.push(Item { id: "terminal_here".into(), label: "Open Terminal Here".into(), act: Act::Terminal(path.clone()), children: vec![] });
         items.push(Item::sep());
-        items.push(place("copy_path", "Copy As Path", PlaceAct::CopyPath));
+        items.push(place("copy_path", "Copy Path", PlaceAct::CopyPath));
         items.push(Item::sep());
         items.push(if bookmarked { place("unbookmark", "Remove Bookmark", PlaceAct::RemoveBookmark) } else { place("bookmark", "Add Bookmark", PlaceAct::AddBookmark) });
         if let Some(uri) = network {
