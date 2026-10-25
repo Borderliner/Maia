@@ -16518,4 +16518,52 @@ mod journeys {
         look(&mut s, "location copied");
         report("location", &s);
     }
+
+    /// The System theme takes the desktop's colours from a GTK stylesheet, as a shell like
+    /// Noctalia writes them, and follows them when the shell writes new ones.
+    #[test]
+    fn system_theme_follows_the_desktop() {
+        if !sandboxed() {
+            return;
+        }
+        use crate::theme::ThemeName;
+        let c = egui::Color32::from_rgb;
+        // The fixture sets up the sandbox's XDG folders.
+        let home = fixture("systheme");
+        let gtk = PathBuf::from(std::env::var("XDG_CONFIG_HOME").unwrap()).join("gtk-4.0");
+        std::fs::create_dir_all(&gtk).unwrap();
+        std::fs::write(gtk.join("gtk.css"), "@import url(\"noctalia.css\");\n").unwrap();
+        let colours = |accent: &str, bg: &str, side: &str| {
+            let css = format!("@define-color accent_bg_color {accent};\n@define-color window_bg_color {bg};\n@define-color window_fg_color #f2f3f2;\n@define-color view_bg_color {bg};\n@define-color sidebar_bg_color {side};\n@define-color popover_bg_color {side};\n");
+            std::fs::write(gtk.join("noctalia.css"), css).unwrap();
+        };
+        colours("#67e497", "#18251d", "#283e30");
+        crate::syscolors::changed();
+        let mut s = Sim::new(&home.join("Documents"), vec2(1100.0, 640.0));
+        s.app.cfg.theme = ThemeName::System;
+        s.app.set_config_changed();
+        s.idle(10);
+        assert_eq!((s.app.pal.accent, s.app.pal.panel, s.app.pal.sidebar), (c(0x67, 0xe4, 0x97), c(0x18, 0x25, 0x1d), c(0x28, 0x3e, 0x30)));
+        select_name(&mut s, "notes.txt");
+        look(&mut s, "system theme");
+        s.shot("system-theme-green");
+        // A new wallpaper, new colours: followed while Maia runs.
+        colours("#e49767", "#251d18", "#3e3028");
+        wait_until(&mut s, "the new colours", 10, |s| s.app.pal.accent == c(0xe4, 0x97, 0x67));
+        assert_eq!(s.app.pal.panel, c(0x25, 0x1d, 0x18));
+        look(&mut s, "system theme changed");
+        s.shot("system-theme-orange");
+        // The whole config folder deleted and made again (as between sessions here): the
+        // colours are read again and a new watcher follows the new folder.
+        let config = gtk.parent().unwrap().to_path_buf();
+        std::fs::remove_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&gtk).unwrap();
+        std::fs::write(gtk.join("gtk.css"), "@import url(\"noctalia.css\");\n").unwrap();
+        colours("#6797e4", "#181d25", "#28303e");
+        wait_until(&mut s, "the colours in the new folder", 10, |s| s.app.pal.accent == c(0x67, 0x97, 0xe4));
+        s.idle(5);
+        colours("#d7e467", "#23251d", "#3a3e28");
+        wait_until(&mut s, "a change the new watcher sees", 10, |s| s.app.pal.accent == c(0xd7, 0xe4, 0x67));
+        report("system theme", &s);
+    }
 }

@@ -1,5 +1,6 @@
-//! The desktop's light or dark preference (the XDG portal's color-scheme): read at start
-//! and followed as it changes, on a thread with a session bus connection of its own.
+//! The desktop's light or dark preference and accent colour (the XDG portal's
+//! color-scheme and accent-color): read at start and followed as they change, on a thread
+//! with a session bus connection of its own. The accent is for the System theme.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -27,21 +28,35 @@ fn scheme(v: Option<u32>) -> u8 {
 pub fn watch(state: Arc<AtomicU8>, wake: impl Fn() + Send + 'static) {
     std::thread::spawn(move || {
         let Some(mut bus) = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok().and_then(|a| Bus::connect(&a)) else { return };
-        let mut key = vec![];
-        put_str(&mut key, "org.freedesktop.appearance");
-        put_str(&mut key, "color-scheme");
-        // ReadOne where the portal has it; the older Read wraps the value once more.
-        let now = bus.call(PORTAL, PATH, SETTINGS, "ReadOne", "ss", &key).or_else(|| bus.call(PORTAL, PATH, SETTINGS, "Read", "ss", &key));
-        state.store(scheme(now.and_then(|m| crate::fm1::variant_u32(&m.body, 0))), Ordering::Relaxed);
+        let mut read = |name: &str| {
+            let mut key = vec![];
+            put_str(&mut key, "org.freedesktop.appearance");
+            put_str(&mut key, name);
+            // ReadOne where the portal has it; the older Read wraps the value once more.
+            bus.call(PORTAL, PATH, SETTINGS, "ReadOne", "ss", &key).or_else(|| bus.call(PORTAL, PATH, SETTINGS, "Read", "ss", &key))
+        };
+        let look = scheme(read("color-scheme").and_then(|m| crate::fm1::variant_u32(&m.body, 0)));
+        let accent = read("accent-color").and_then(|m| crate::fm1::variant_rgb(&m.body, 0));
+        state.store(look, Ordering::Relaxed);
+        crate::syscolors::set_scheme(look);
+        crate::syscolors::set_accent(accent);
         wake();
         let mut rule = vec![];
-        put_str(&mut rule, "type='signal',interface='org.freedesktop.portal.Settings',member='SettingChanged',arg0='org.freedesktop.appearance',arg1='color-scheme'");
+        put_str(&mut rule, "type='signal',interface='org.freedesktop.portal.Settings',member='SettingChanged',arg0='org.freedesktop.appearance'");
         if bus.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "AddMatch", "s", &rule).is_none() {
             return;
         }
         while let Some(m) = bus.recv() {
             if m.kind == 4 && m.member == "SettingChanged" {
-                state.store(scheme(crate::fm1::variant_u32(&m.body, 2)), Ordering::Relaxed);
+                match crate::fm1::string_at(&m.body, 1).as_deref() {
+                    Some("color-scheme") => {
+                        let look = scheme(crate::fm1::variant_u32(&m.body, 2));
+                        state.store(look, Ordering::Relaxed);
+                        crate::syscolors::set_scheme(look);
+                    }
+                    Some("accent-color") => crate::syscolors::set_accent(crate::fm1::variant_rgb(&m.body, 2)),
+                    _ => continue,
+                }
                 wake();
             }
         }

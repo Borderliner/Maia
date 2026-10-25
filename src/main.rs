@@ -100,6 +100,7 @@ mod sqlite;
 mod single;
 mod spaceuse;
 mod svg;
+mod syscolors;
 mod syntax;
 mod tags;
 mod textsel;

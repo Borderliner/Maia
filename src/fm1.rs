@@ -148,6 +148,39 @@ pub fn variant_u32(body: &[u8], skip: usize) -> Option<u32> {
     }
 }
 
+/// The colour in a variant after `skip` strings at the start of a body, as a portal's
+/// accent-color gives it: red, green and blue from 0 to 1.
+pub fn variant_rgb(body: &[u8], skip: usize) -> Option<[f64; 3]> {
+    let mut c = Cur { b: body, at: 0 };
+    for _ in 0..skip {
+        c.str()?;
+    }
+    loop {
+        match c.sig()?.as_str() {
+            "v" => continue,
+            "(ddd)" => {
+                c.align(8);
+                let mut rgb = [0.0; 3];
+                for v in rgb.iter_mut() {
+                    *v = f64::from_le_bytes(c.b.get(c.at..c.at + 8)?.try_into().ok()?);
+                    c.at += 8;
+                }
+                return Some(rgb);
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The `n`-th string at the start of a body (a setting's namespace, then its key).
+pub fn string_at(body: &[u8], n: usize) -> Option<String> {
+    let mut c = Cur { b: body, at: 0 };
+    for _ in 0..n {
+        c.str()?;
+    }
+    c.str()
+}
+
 /// The strings of an `as` at the start of a body.
 pub fn strings(body: &[u8]) -> Vec<String> {
     let mut c = Cur { b: body, at: 0 };

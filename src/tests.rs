@@ -12593,3 +12593,63 @@ fn rtl_names_wrap_and_elide_in_reading_order() {
         });
     });
 }
+
+/// The System theme's colours: a GTK user stylesheet's (its imports followed, names
+/// resolved, comments and rules passed over), kdeglobals' (first on KDE; elsewhere only a
+/// scheme someone chose), else Adwaita's light or dark with the portal's accent.
+#[test]
+fn system_colours_come_from_gtk_kde_or_adwaita() {
+    use crate::syscolors::{adwaita, read};
+    let c = egui::Color32::from_rgb;
+    let d = tmpdir("syscolors");
+    // Nothing: Adwaita, as the portal's light or dark says, with its accent.
+    assert_eq!(read(&d, false, Some(false), None), adwaita(false, None));
+    assert_eq!(read(&d, false, None, Some(c(1, 2, 3))).accent, c(1, 2, 3));
+    assert!(read(&d, false, None, None).dark, "dark when nothing says");
+    // KDE colours a KDE program left behind count only on KDE.
+    touch(&d.join("kdeglobals"), "[Colors:Window]\nBackgroundNormal=239,240,241\nForegroundNormal=35,38,41\n[Colors:View]\nBackgroundNormal=255,255,255\nForegroundNegative=218,68,83\n[Colors:Selection]\nBackgroundNormal=61,174,233\n");
+    assert_eq!(read(&d, false, Some(true), None), adwaita(true, None));
+    let k = read(&d, true, Some(true), None);
+    assert_eq!((k.dark, k.window, k.text, k.view, k.accent, k.danger), (false, c(239, 240, 241), c(35, 38, 41), c(255, 255, 255), c(61, 174, 233), Some(c(218, 68, 83))));
+    // A scheme someone chose counts everywhere, its accent first.
+    touch(&d.join("kdeglobals"), "[General]\nColorScheme=Noctalia\nAccentColor=#67e497\n[Colors:Window]\nBackgroundNormal=24,37,29\nForegroundNormal=242,243,242,255\n");
+    let k = read(&d, false, None, None);
+    assert_eq!((k.dark, k.window, k.text, k.view, k.accent), (true, c(24, 37, 29), c(242, 243, 242), c(24, 37, 29), c(0x67, 0xe4, 0x97)));
+    // Outside KDE a GTK stylesheet comes first: its import read where it stands, names
+    // resolved at the end, comments and rules passed over, the last definition kept.
+    touch(&d.join("gtk-4.0/gtk.css"), "@import url('libadwaita.css');\n@import url(\"noctalia.css\");\n/* @define-color window_bg_color #ff0000; */\nwindow { color: red; }\n@define-color view_bg_color @window_bg_color;\n");
+    touch(&d.join("gtk-4.0/noctalia.css"), "@define-color accent_bg_color #67e497;\n@define-color window_bg_color #18251d;\n@define-color window_fg_color rgba(242, 243, 242, 0.9);\n@define-color sidebar_bg_color mix(@window_bg_color, white, 0.1);\n@define-color popover_bg_color alpha(#283e30, 0.95);\n@define-color destructive_color #c01c28;\n@define-color window_bg_color #18251E;\n");
+    let g = read(&d, false, None, None);
+    assert_eq!(g.from, "Your desktop's GTK colours");
+    assert_eq!((g.dark, g.window, g.text, g.view, g.accent), (true, c(0x18, 0x25, 0x1e), c(242, 243, 242), c(0x18, 0x25, 0x1e), c(0x67, 0xe4, 0x97)));
+    assert_eq!((g.sidebar, g.popover, g.danger), (Some(c(0x2f, 0x3b, 0x35)), Some(c(0x28, 0x3e, 0x30)), Some(c(0xc0, 0x1c, 0x28))));
+    assert_eq!(read(&d, true, None, None).from, "Your desktop's KDE colours", "KDE's first on KDE");
+    // GTK 3's names, in GTK 3's folder, when GTK 4 has none.
+    std::fs::remove_dir_all(d.join("gtk-4.0")).unwrap();
+    touch(&d.join("gtk-3.0/gtk.css"), "@define-color theme_bg_color #f6f5f4;\n@define-color theme_fg_color #2e3436;\n@define-color theme_base_color #fff;\n@define-color theme_selected_bg_color shade(#3584e4, 0.5);\n");
+    let g = read(&d, false, None, None);
+    assert_eq!((g.dark, g.window, g.view, g.accent), (false, c(0xf6, 0xf5, 0xf4), c(255, 255, 255), c(0x1b, 0x42, 0x72)));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The System theme puts any desktop's colours in Maia's places with the selection still
+/// readable: a mid-grey "dark" desktop with a yellow accent too.
+#[test]
+fn system_theme_reads_on_any_desktop() {
+    use crate::syscolors::{Desktop, adwaita};
+    let c = egui::Color32::from_rgb;
+    let made = |dark, window, text, view, accent| Desktop { dark, window, text, view, sidebar: None, popover: None, accent, danger: None, from: "" };
+    let desktops = [
+        adwaita(true, None),
+        adwaita(false, Some(c(0xf6, 0xd3, 0x2d))),
+        made(true, c(0x18, 0x25, 0x1d), c(0xf2, 0xf3, 0xf2), c(0x18, 0x25, 0x1d), c(0x67, 0xe4, 0x97)),
+        made(true, c(0x55, 0x55, 0x55), c(0xee, 0xee, 0xee), c(0x5a, 0x5a, 0x5a), c(0xff, 0xff, 0x00)),
+        made(false, c(0xef, 0xf0, 0xf1), c(0x23, 0x26, 0x29), c(0xff, 0xff, 0xff), c(0x3d, 0xae, 0xe9)),
+    ];
+    for d in desktops {
+        let p = crate::theme::desktop_palette(&d);
+        assert_eq!((p.dark, p.bg, p.panel, p.text, p.accent), (d.dark, d.window, d.view, d.text, d.accent));
+        assert!(contrast(p.on_sel(), p.selected) >= 4.5 && contrast(p.on_sel_dim(), p.selected) >= 3.0, "{d:?}: text on the selection {:.2}", contrast(p.on_sel(), p.selected));
+        assert_ne!(p.selected, p.panel, "a selection to see");
+    }
+}

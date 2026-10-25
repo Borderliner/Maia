@@ -255,7 +255,9 @@ pub struct App {
     pub queue: std::sync::Arc<ops::Queue>,
     /// Moves that Undo or Redo handed to a job, by job: what to record when it ends.
     pub job_steps: HashMap<u64, crate::redo::Step>,
-    pub theme_applied: (theme::ThemeName, f32, f32, bool, bool),
+    /// The theme, font size, spacing, animations, code colours and, for the System
+    /// theme, which reading of the desktop's colours it was built from.
+    pub theme_applied: (theme::ThemeName, f32, f32, bool, bool, u64),
     pub ctx: egui::Context,
     pub fresh: bool,
     /// Set to close the window at the end of the frame.
@@ -412,7 +414,7 @@ impl App {
             undo_keep: crate::undofile::Keeper::new((!cfg!(test)).then(crate::undofile::path), &ctx),
             queue: Default::default(),
             job_steps: HashMap::new(),
-            theme_applied: (cfg.theme, cfg.font_size, cfg.spacing, cfg.animations, cfg.syntax_theme),
+            theme_applied: (cfg.theme, cfg.font_size, cfg.spacing, cfg.animations, cfg.syntax_theme, crate::syscolors::generation()),
             ctx: ctx.clone(),
             fresh: true,
             quit: false,
@@ -1182,7 +1184,8 @@ impl App {
     /// Match the desktop's light or dark: back to the theme last left, when it fits, else
     /// Midnight or Paper.
     pub fn follow_system(&mut self, dark: bool) {
-        if self.cfg.theme.is_light() != dark {
+        // The System theme is the desktop's own already.
+        if self.cfg.theme == theme::ThemeName::System || self.cfg.theme.is_light() != dark {
             return;
         }
         let back = self.other_theme.filter(|t| t.is_light() != dark);
@@ -1250,7 +1253,13 @@ impl App {
             crate::ui::POPUPS.with(|c| c.borrow_mut().clear());
         }
         self.heal();
-        let t = (self.preview_theme.unwrap_or(self.cfg.theme), self.cfg.font_size, self.cfg.spacing, self.cfg.animations, self.cfg.syntax_theme);
+        let theme = self.preview_theme.unwrap_or(self.cfg.theme);
+        // The System theme follows the desktop's colours as they change.
+        if theme == theme::ThemeName::System {
+            let c = ctx.clone();
+            crate::syscolors::watch(move || c.request_repaint());
+        }
+        let t = (theme, self.cfg.font_size, self.cfg.spacing, self.cfg.animations, self.cfg.syntax_theme, crate::syscolors::generation());
         self.preview_theme = None;
         crate::icons::set_enabled(self.cfg.system_icons);
         // One wheel notch scrolls three rows (eased out by egui over ~100 ms).

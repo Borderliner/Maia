@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ThemeName {
+    /// The desktop's own colours, as `syscolors` reads them.
+    System,
     #[default]
     Midnight,
     Graphite,
@@ -111,7 +113,8 @@ pub enum ThemeName {
 }
 
 impl ThemeName {
-    pub const ALL: [ThemeName; 100] = [
+    pub const ALL: [ThemeName; 101] = [
+        ThemeName::System,
         ThemeName::Midnight,
         ThemeName::Graphite,
         ThemeName::Lagoon,
@@ -215,6 +218,7 @@ impl ThemeName {
     ];
     pub fn label(self) -> &'static str {
         match self {
+            ThemeName::System => "System",
             ThemeName::Midnight => "Midnight",
             ThemeName::Graphite => "Graphite",
             ThemeName::Lagoon => "Lagoon",
@@ -320,6 +324,7 @@ impl ThemeName {
     /// A line about the theme, under its name in the theme picker.
     pub fn blurb(self) -> &'static str {
         match self {
+            ThemeName::System => crate::syscolors::current().from,
             ThemeName::Midnight => "Graphite with teal",
             ThemeName::Graphite => "Grey with amber",
             ThemeName::Lagoon => "Deep teal",
@@ -423,6 +428,9 @@ impl ThemeName {
         }
     }
     pub fn is_light(self) -> bool {
+        if self == ThemeName::System {
+            return !crate::syscolors::current().dark;
+        }
         matches!(self, ThemeName::Paper | ThemeName::Linen | ThemeName::Latte | ThemeName::SolarizedLight | ThemeName::RosePineDawn | ThemeName::GruvboxLight | ThemeName::AyuLight | ThemeName::EverforestLight | ThemeName::TokyoNightDay | ThemeName::KanagawaLotus | ThemeName::OneLight | ThemeName::LightOwl | ThemeName::Dayfox | ThemeName::FlexokiLight | ThemeName::GitHubLight | ThemeName::Tomorrow | ThemeName::IcebergLight | ThemeName::ModusOperandi | ThemeName::SelenizedLight | ThemeName::QuietLight | ThemeName::PaperColor | ThemeName::LightModern | ThemeName::IntelliJLight | ThemeName::XcodeLight | ThemeName::Dawnfox | ThemeName::VitesseLight | ThemeName::GruvboxMaterialLight | ThemeName::Alabaster | ThemeName::EdgeLight | ThemeName::MonokaiProLight | ThemeName::Alucard | ThemeName::Zenbones | ThemeName::SpacemacsLight | ThemeName::Leuven | ThemeName::DoomOneLight)
     }
 }
@@ -459,6 +467,7 @@ impl Syntax {
     pub fn of(t: ThemeName) -> Syntax {
         let c = Color32::from_rgb;
         let (keyword, kind, string, comment, number, function, property, meta) = match t {
+            ThemeName::System => return Syntax::classic(crate::syscolors::current().dark),
             ThemeName::Midnight => (c(0x5f, 0xb3, 0xe8), c(0x4f, 0xd1, 0xc5), c(0x9f, 0xd3, 0x8a), c(0x6f, 0x73, 0x7a), c(0xf2, 0xa6, 0x6c), c(0xe8, 0xd3, 0x8a), c(0xec, 0x9a, 0x9a), c(0xc3, 0x9a, 0xe8)),
             ThemeName::Graphite => (c(0xf0, 0xa0, 0x40), c(0xe2, 0xc5, 0x8a), c(0xa9, 0xc9, 0x7c), c(0x7a, 0x7a, 0x7e), c(0xc7, 0x9b, 0xec), c(0x7f, 0xb7, 0xe6), c(0xe8, 0xa0, 0xa0), c(0x8f, 0xd3, 0xc6)),
             ThemeName::Lagoon => (c(0x3e, 0xd0, 0xc8), c(0x8c, 0xc8, 0xff), c(0xc3, 0xe8, 0x8d), c(0x6a, 0x82, 0x85), c(0xf7, 0xb4, 0x6b), c(0xff, 0xd5, 0x80), c(0xff, 0x9e, 0x9e), c(0xc3, 0xa6, 0xff)),
@@ -642,10 +651,53 @@ pub fn palette(t: ThemeName) -> Palette {
     p
 }
 
+/// The System theme: the desktop's colours in Maia's places, in the proportions of the
+/// editor themes here: a selection a fifth of the way from the list to the accent, the
+/// cursor's a third, hover a step from the window towards the text.
+pub fn desktop_palette(d: &crate::syscolors::Desktop) -> Palette {
+    let dark = d.dark;
+    let mix = |a: Color32, b: Color32, t: f32| a.lerp_to_gamma(b, t);
+    let mut p = Palette {
+        dark,
+        bg: d.window,
+        panel: d.view,
+        sidebar: d.sidebar.unwrap_or(d.window),
+        raised: d.popover.filter(|p| *p != d.window).unwrap_or_else(|| mix(d.window, d.text, if dark { 0.08 } else { 0.05 })),
+        hover: mix(d.window, d.text, if dark { 0.12 } else { 0.04 }),
+        selected: mix(d.view, d.accent, if dark { 0.25 } else { 0.2 }),
+        cursor: mix(d.view, d.accent, if dark { 0.35 } else { 0.3 }),
+        accent: d.accent,
+        text: d.text,
+        text_dim: mix(d.text, d.window, 0.4),
+        border: mix(d.window, d.text, 0.12),
+        danger: d.danger.unwrap_or(if dark { Color32::from_rgb(0xff, 0x6b, 0x6b) } else { Color32::from_rgb(0xd6, 0x33, 0x33) }),
+        chrome: Color32::TRANSPARENT,
+        alt: Color32::TRANSPARENT,
+        row_hover: Color32::TRANSPARENT,
+        syntax: Syntax::classic(dark),
+    };
+    // A desktop's colours can be anything: deepen (or pale) the selection until its text
+    // reads, as every theme's does.
+    let contrast = |a: Color32, b: Color32| {
+        let (x, y) = (crate::syscolors::luminance(a), crate::syscolors::luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    };
+    let away = if dark { Color32::BLACK } else { Color32::WHITE };
+    for _ in 0..12 {
+        if contrast(p.on_sel(), p.selected) >= 4.5 && contrast(p.on_sel_dim(), p.selected) >= 3.0 {
+            break;
+        }
+        p.selected = mix(p.selected, away, 0.2);
+        p.cursor = mix(p.cursor, away, 0.2);
+    }
+    p
+}
+
 fn base_palette(t: ThemeName) -> Palette {
     let c = Color32::from_rgb;
     let z = Color32::TRANSPARENT;
     match t {
+        ThemeName::System => desktop_palette(&crate::syscolors::current()),
         ThemeName::Midnight => Palette {
             dark: true,
             bg: c(0x18, 0x19, 0x1c),
