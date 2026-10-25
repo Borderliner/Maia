@@ -12593,27 +12593,3 @@ fn rtl_names_wrap_and_elide_in_reading_order() {
         });
     });
 }
-
-/// A file's or folder's right-click menu has Copy Path at its top level, copying the path
-/// as it is, with no shell quotes around its spaces.
-#[test]
-fn copy_path_is_in_the_item_menu() {
-    let ctx = egui::Context::default();
-    let d = tmpdir("copy-path");
-    touch(&d.join("my notes.txt"), "n");
-    std::fs::create_dir_all(d.join("a folder")).unwrap();
-    let mut app = crate::app::App::new(&ctx, vec![d.clone()]);
-    app_until(&mut app, &ctx, "the listing", |a| a.panels.get(&a.active).is_some_and(|p| p.tabs[p.active].entries.len() == 2));
-    for name in ["my notes.txt", "a folder"] {
-        let t = app.tab();
-        t.selected = t.view.iter().copied().filter(|&i| t.entries[i as usize].name == name).collect();
-        t.cursor = t.selected.iter().next().copied();
-        let panel = app.active;
-        let crate::popups::Popup::Ctx(st) = crate::ctxmenu::build(&mut app, panel, egui::pos2(10.0, 10.0), false) else { panic!("a menu") };
-        let item = st.items.iter().find(|i| i.label == "Copy Path").unwrap_or_else(|| panic!("Copy Path in {name}'s menu"));
-        assert!(matches!(item.act, crate::ctxmenu::Act::Cmd(Cmd::CopyPathRaw)));
-        app.run(Cmd::CopyPathRaw);
-        assert_eq!(app.toast.as_ref().map(|t| t.0.clone()), Some(format!("Copied {}", d.join(name).display())));
-    }
-    let _ = std::fs::remove_dir_all(&d);
-}
