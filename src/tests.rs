@@ -8631,7 +8631,9 @@ fn tour_first_start_and_updates() {
     ud.seen_version = "0.3.0".into();
     let back: crate::config::UserData = serde_json::from_str(&serde_json::to_string(&ud).unwrap()).unwrap();
     assert_eq!(back.seen_version, "0.3.0");
-    assert_eq!(env!("CARGO_PKG_VERSION"), crate::tour::NEWS_VERSION, "What's New describes this version");
+    // A fork's release without notes of its own keeps those of the version it builds on.
+    let now = env!("CARGO_PKG_VERSION");
+    assert!(now == crate::tour::NEWS_VERSION || now.split('+').next() == Some(crate::tour::NEWS_VERSION), "What's New describes this version");
 }
 
 /// Every film decodes as made: an animation of a few states of the same window, each
