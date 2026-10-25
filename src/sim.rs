@@ -14816,6 +14816,12 @@ mod journeys {
         wait_until(&mut s, "found far in", 20, |s| inspector(s).big_state().and_then(|b| b.1).is_some_and(|f| f.0 == 1 && f.1));
         wait_until(&mut s, "the match on screen", 10, |s| some_text_at(s, "row 345678 payload"));
         s.shot("find-in-big-file");
+        // Then one near the top, found from down there: back up to it. (Asked for by a part
+        // of it, so the line on screen isn't the query in the bar.)
+        s.act("key ctrl+a");
+        s.act("text w 7 pay");
+        wait_until(&mut s, "found near the top", 20, |s| inspector(s).big_state().and_then(|b| b.1).is_some_and(|f| f.0 == 1 && f.1));
+        wait_until(&mut s, "back up to it", 10, |s| some_text_at(s, "row 7 payload"));
         s.act("key escape");
         // Anything that isn't text: hex, every byte of it, found in too.
         select_name(&mut s, "blob.bin");
@@ -14826,6 +14832,10 @@ mod journeys {
         wait_until(&mut s, "scrolled to them", 10, |s| s.texts.iter().any(|(_, t)| t.starts_with(&format!("{:08x}", 2_000_000 / 16 * 16))));
         wait_until(&mut s, "their bytes read", 10, |s| s.texts.iter().any(|(_, t)| t.contains("4d 41 49 41")));
         s.shot("hex-view");
+        // Then bytes at the very start, found from down there: back up to them.
+        s.act("key ctrl+a");
+        s.act("text 00 00");
+        wait_until(&mut s, "back up to the first bytes", 10, |s| some_text_at(s, "00000000"));
         s.act("key escape");
         // A long log opens at its end; finding in it finds in all of it, and closing the
         // bar goes back to the end.
@@ -14837,6 +14847,9 @@ mod journeys {
         wait_until(&mut s, "the log listed", 10, |s| s.tab().entries.iter().any(|e| e.name == "app.log"));
         select_name(&mut s, "app.log");
         wait_until(&mut s, "the log's end", 10, |s| inspector(s).text_lines().is_some_and(|l| l.0.last().is_some_and(|x| x.starts_with("059999"))));
+        // Scrolled down to it, as someone would see it before searching: the first match
+        // is then above the view.
+        wait_until(&mut s, "the log's end on screen", 10, |s| some_text_at(s, "059999 INFO worker request handled"));
         s.cmd(FindInPreview);
         s.act("text ERROR");
         wait_until(&mut s, "every error in the log", 20, |s| inspector(s).big_state().and_then(|b| b.1).is_some_and(|f| f.0 == 60 && f.1));

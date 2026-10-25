@@ -2129,7 +2129,7 @@ fn hex_view(ui: &mut Ui, body: Rect, v: &mut crate::bigfile::Pager, size: f32, s
     let x_of = |i: usize| x_hex + (i * 3 + i / 8) as f32 * cw;
     let x_txt = x_of(bpr) + cw;
     let mut inner = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(8.0, 4.0))));
-    let sid = inner.make_persistent_id("insp_hex");
+    let sid = inner.make_persistent_id(Id::new("insp_hex"));
     let mut area = egui::ScrollArea::both().id_salt("insp_hex").auto_shrink([false, false]);
     if let Some(off) = target {
         let at = egui::scroll_area::State::load(ui.ctx(), sid).map_or(0.0, |s| s.offset.y);
@@ -2860,7 +2860,7 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
     }
     if let Some((line, byte)) = opts.reveal {
         // Only when out of view: stepping through matches on screen shouldn't jump.
-        let at = egui::scroll_area::State::load(ui.ctx(), inner.make_persistent_id("insp_text")).map_or(Vec2::ZERO, |s| s.offset);
+        let at = egui::scroll_area::State::load(ui.ctx(), inner.make_persistent_id(Id::new("insp_text"))).map_or(Vec2::ZERO, |s| s.offset);
         let view = inner.max_rect().size();
         // Wrapped: the last row starting at or before the byte.
         let row = rows.map_or(line, |r| r.partition_point(|x| (x.0 as usize, x.1 as usize) <= (line, byte)).saturating_sub(1));
