@@ -9641,7 +9641,8 @@ mod journeys {
         look(&mut s, "gitignore menu");
         s.shot("share-gitignore-menu");
         s.click_text("This File");
-        wait_until(&mut s, "scratch.txt ignored", 10, |s| faded(s, "scratch.txt"));
+        // The file is written before git is asked what it tracks; the toast comes after.
+        wait_until(&mut s, "scratch.txt ignored", 10, |s| faded(s, "scratch.txt") && s.app.toast.as_ref().is_some_and(|t| t.0.contains(".gitignore")));
         assert!(toast_is(&s, "Added /scratch.txt to .gitignore"), "{:?}", s.app.toast);
         menu(&mut s, "a.tmp", "all *.tmp");
         wait_until(&mut s, "*.tmp ignored", 10, |s| faded(s, "a.tmp") && faded(s, "b.tmp"));
