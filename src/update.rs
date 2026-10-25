@@ -147,8 +147,16 @@ pub enum State {
     CantWrite(PathBuf),
 }
 
-/// "v1.2.3", "1.2", "1.2.3-beta" as (major, minor, patch); None for anything else.
-pub fn version(v: &str) -> Option<(u64, u64, u64)> {
+/// A fork's own release count, in the version's build part ("0.5.0+fork.2" is the second
+/// release built on 0.5.0); 0 for a version of the project itself.
+pub fn fork_count(v: &str) -> u64 {
+    v.split_once('+').and_then(|(_, build)| build.strip_prefix("fork.")?.parse().ok()).unwrap_or(0)
+}
+
+/// "v1.2.3", "1.2", "1.2.3-beta", "1.2.3+fork.4" as (major, minor, patch, fork count);
+/// None for anything else. A fork's releases come after the version they build on and
+/// before the next one.
+pub fn version(v: &str) -> Option<(u64, u64, u64, u64)> {
     let core = v.trim().trim_start_matches(['v', 'V']).split(['-', '+']).next()?;
     let mut n = core.split('.').map(|p| p.parse::<u64>());
     let major = n.next()?.ok()?;
@@ -160,7 +168,7 @@ pub fn version(v: &str) -> Option<(u64, u64, u64)> {
         Some(p) => p.ok()?,
         None => 0,
     };
-    n.next().is_none().then_some((major, minor, patch))
+    n.next().is_none().then_some((major, minor, patch, fork_count(v)))
 }
 
 /// Whether `candidate` is a later version than `current`.

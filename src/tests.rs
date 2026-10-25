@@ -3975,13 +3975,18 @@ fn option_search_spans_sections() {
 #[test]
 fn updates_check_compare_and_install() {
     use crate::update::{Fetch, Release, State, Updater, curl_args, newer, parse_release, parse_sum, version};
-    assert_eq!(version("v1.2.3"), Some((1, 2, 3)));
-    assert_eq!(version("0.10"), Some((0, 10, 0)));
-    assert_eq!(version("2.0.0-beta.1"), Some((2, 0, 0)));
+    assert_eq!(version("v1.2.3"), Some((1, 2, 3, 0)));
+    assert_eq!(version("0.10"), Some((0, 10, 0, 0)));
+    assert_eq!(version("2.0.0-beta.1"), Some((2, 0, 0, 0)));
+    assert_eq!(version("v0.5.0+fork.12"), Some((0, 5, 0, 12)));
+    assert_eq!(version("0.5.0+build.7"), Some((0, 5, 0, 0)));
     assert_eq!(version("one"), None);
     assert_eq!(version("1.2.3.4"), None);
     assert!(newer("0.2.0", "v0.10.0"), "numbers, not text");
     assert!(!newer("0.2.0", "v0.2.0") && !newer("0.3.0", "0.2.9") && !newer("0.2.0", "garbage"));
+    // A fork's releases: after the version they build on, before the next.
+    assert!(newer("0.5.0", "v0.5.0+fork.1") && newer("0.5.0+fork.1", "v0.5.0+fork.2") && newer("0.5.0+fork.9", "v0.5.1"));
+    assert!(!newer("0.5.0+fork.2", "v0.5.0+fork.2") && !newer("0.5.0+fork.1", "v0.5.0") && !newer("0.5.1", "v0.5.0+fork.9"));
     let json = |tag: &str, host: &str| format!(r#"{{"tag_name":"{tag}","body":"Faster search.\n\nNew themes.","assets":[
         {{"name":"maia-linux-x86_64","browser_download_url":"{host}/yappologistic/Maia/releases/download/{tag}/maia-linux-x86_64"}},
         {{"name":"maia-linux-x86_64.sha256","browser_download_url":"{host}/yappologistic/Maia/releases/download/{tag}/maia-linux-x86_64.sha256"}}]}}"#);
@@ -8602,10 +8607,12 @@ fn convert_uses_the_encoders_ffmpeg_has() {
 #[test]
 fn tour_first_start_and_updates() {
     use crate::tour::{Kind, at_start_kind, version};
-    assert_eq!(version("0.3.0"), [0, 3, 0]);
-    assert_eq!(version("v0.10.2-rc1"), [0, 10, 2]);
-    assert_eq!(version("1"), [1, 0, 0]);
+    assert_eq!(version("0.3.0"), [0, 3, 0, 0]);
+    assert_eq!(version("v0.10.2-rc1"), [0, 10, 2, 0]);
+    assert_eq!(version("1"), [1, 0, 0, 0]);
+    assert_eq!(version("0.5.0+fork.2"), [0, 5, 0, 2]);
     assert!(version("0.10.0") > version("0.9.9"), "numbers, not text");
+    assert!(version("0.5.0") < version("0.5.0+fork.1") && version("0.5.0+fork.3") < version("0.5.1"));
     // Nothing on disk: the tour, whatever else.
     assert_eq!(at_start_kind(true, "", "0.3.0"), Some(Kind::Welcome));
     // A 0.2 home: settings, no version recorded.
@@ -8614,6 +8621,9 @@ fn tour_first_start_and_updates() {
     // Seen already, or newer.
     assert_eq!(at_start_kind(false, "0.3.0", "0.3.0"), None);
     assert_eq!(at_start_kind(false, "0.3.1", "0.3.0"), None);
+    // A fork's release shows its own notes once, not those of the version it builds on.
+    assert_eq!(at_start_kind(false, "0.5.0", "0.5.0+fork.1"), Some(Kind::News));
+    assert_eq!(at_start_kind(false, "0.5.0+fork.1", "0.5.0+fork.1"), None);
     // A userdata.json from 0.2.2 reads with no version seen; this one keeps it.
     let old: crate::config::UserData = serde_json::from_str(r#"{"bookmarks":["/tmp"],"recents":[],"quick":["new_tab"]}"#).unwrap();
     assert!(old.seen_version.is_empty() && old.bookmarks.len() == 1);

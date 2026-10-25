@@ -208,13 +208,15 @@ thread_local! {
     pub static AUTO: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// A version as numbers ("0.3.0" → [0, 3, 0]); missing parts are 0, anything after a
-/// number (a "-rc1") is ignored.
-pub fn version(v: &str) -> [u32; 3] {
-    let mut out = [0; 3];
+/// A version as numbers ("0.3.0" → [0, 3, 0, 0]), a fork's release count last
+/// ("0.5.0+fork.2" → [0, 5, 0, 2]); missing parts are 0, anything else after a number (a
+/// "-rc1") is ignored.
+pub fn version(v: &str) -> [u64; 4] {
+    let mut out = [0; 4];
     for (i, p) in v.trim().trim_start_matches('v').split('.').take(3).enumerate() {
         out[i] = p.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0);
     }
+    out[3] = crate::update::fork_count(v);
     out
 }
 
