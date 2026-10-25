@@ -2630,6 +2630,9 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
     const SANS: &[u8] = include_bytes!("../assets/fallback-sans.ttf");
     const MONO: &[u8] = include_bytes!("../assets/fallback-mono.ttf");
     const SYMBOLS: &[u8] = include_bytes!("../assets/fallback-symbols.ttf");
+    // Those scripts' letters only (tools/rtl_fonts.sh), joined by src/rtl.rs.
+    const ARABIC: &[u8] = include_bytes!("../assets/fallback-arabic.ttf");
+    const HEBREW: &[u8] = include_bytes!("../assets/fallback-hebrew.ttf");
     // System fonts are memory-mapped, not read: egui then uses the bytes in place (no
     // copy) and the kernel only pages in the glyph tables actually used, sharing them
     // with every other app (the CJK fallback alone is ~20 MB).
@@ -2695,53 +2698,19 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
             break;
         }
     }
-    let fc_match_exact = |pattern: &str, expected: &str| -> Option<&'static [u8]> {
-        let out = std::process::Command::new("fc-match").args(["--format=%{file}|%{family}", pattern]).output().ok()?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        let mut parts = text.trim().splitn(2, '|');
-        let file = parts.next()?;
-        let family = parts.next().unwrap_or_default();
-        if family.to_lowercase().contains(&expected.to_lowercase()) {
-            map_font(std::path::Path::new(file))
-        } else {
-            None
-        }
-    };
-    let fc_match_lang = |lang: &str| -> Option<&'static [u8]> {
-        let pattern = format!(":lang={lang}");
-        let out = std::process::Command::new("fc-match").args(["--format=%{file}|%{lang}", &pattern]).output().ok()?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        let mut parts = text.trim().splitn(2, '|');
-        let file = parts.next()?;
-        let langs = parts.next().unwrap_or_default();
-        if langs.split('|').any(|l| l.split('-').next().unwrap_or("") == lang) {
-            map_font(std::path::Path::new(file))
-        } else {
-            None
-        }
-    };
-    let arabic_font = fc_match_exact("Noto Sans Arabic UI", "Noto Sans Arabic UI")
-        .or_else(|| fc_match_exact("Noto Sans Arabic", "Noto Sans Arabic"))
-        .or_else(|| fc_match_lang("fa"))
-        .or_else(|| fc_match_lang("ar"))
-        .or_else(|| first(&[
-            "/usr/share/fonts/noto/NotoSansArabicUI-Regular.ttf",
-            "/usr/share/fonts/noto/NotoSansArabic-Regular.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSansArabicUI-Regular.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
-            "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        ]));
-    if let Some(b) = arabic_font {
-        add(&mut fonts, "arabic", b, &mut prop);
-    }
     // Interface glyphs: a Lucide subset (ISC), drawn as text in its own family.
     const ICONS: &[u8] = include_bytes!("../assets/lucide-subset.ttf");
     fonts.font_data.insert("lucide".into(), FontData::from_static(ICONS).into());
     fonts.families.insert(FontFamily::Name("icons".into()), vec!["lucide".into()]);
-    for (name, bytes) in [("fb-sans", SANS), ("fb-mono", MONO), ("fb-symbols", SYMBOLS)] {
+    for (name, bytes) in [("fb-sans", SANS), ("fb-mono", MONO), ("fb-symbols", SYMBOLS), ("fb-arabic", ARABIC), ("fb-hebrew", HEBREW)] {
         fonts.font_data.insert(name.into(), FontData::from_static(bytes).into());
     }
     prop.extend(["fb-sans", "fb-symbols", "fb-mono"].map(String::from));
+    // Arabic and Persian letters from Vazirmatn, Hebrew from Noto Sans Hebrew, ahead of
+    // every font but the first: a UI font with those letters still draws them, a later
+    // fallback that happens to have some (DejaVu Sans, a mono font) does not. Not first,
+    // as the first font sets the height of every line.
+    prop.splice(1..1, ["fb-arabic", "fb-hebrew"].map(String::from));
     mono.push("fb-mono".into());
     mono.extend(prop.iter().filter(|n| *n != "mono").cloned());
     fonts.families.insert(FontFamily::Proportional, prop);

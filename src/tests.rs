@@ -12535,6 +12535,21 @@ fn rtl_shaping_survives_odd_names() {
     }
 }
 
+/// The bundled Vazirmatn and Noto Sans Hebrew subsets give every interface font the
+/// joined Persian and Arabic forms and the Hebrew letters.
+#[test]
+fn rtl_fonts_cover_persian_arabic_and_hebrew() {
+    let ctx = egui::Context::default();
+    crate::theme::install_fonts(&ctx, "", "");
+    let _ = ctx.run(egui::RawInput::default(), |_| {});
+    for font in [egui::FontId::proportional(13.0), egui::FontId::monospace(13.0)] {
+        // ﺳ ﻼ ﮔ ﯾ ک ۱ ، and ש ל
+        for c in ['\u{feb3}', '\u{fefc}', '\u{fb94}', '\u{fbfe}', '\u{fb8f}', '\u{6f1}', '\u{60c}', '\u{5e9}', '\u{5dc}'] {
+            assert!(ctx.fonts_mut(|f| f.has_glyph(&font, c)), "U+{:04X} has a glyph", c as u32);
+        }
+    }
+}
+
 /// A long right-to-left name wraps and is elided in reading order: the first row starts
 /// (on its right) with the name's first letter, and the "…" is on the left of the last
 /// row, where the reading stops. A search's matches keep their colour.

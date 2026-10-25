@@ -1,5 +1,9 @@
-Noto Sans, Noto Sans Mono and Noto Sans Symbols 2 (assets/fallback-*.ttf):
+Noto Sans, Noto Sans Mono, Noto Sans Symbols 2 and Noto Sans Hebrew
+(assets/fallback-sans, -mono, -symbols and -hebrew.ttf):
 Copyright 2022 The Noto Project Authors (https://github.com/notofonts)
+
+Vazirmatn (assets/fallback-arabic.ttf):
+Copyright 2015 The Vazirmatn Project Authors (https://github.com/rastikerdar/vazirmatn)
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:
