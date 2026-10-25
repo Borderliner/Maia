@@ -426,8 +426,11 @@ fn finished_move_updates_every_listing() {
     // Moving them back (Undo) lands them in a flattened listing by walking it again.
     let c = ops::Changed::moved(&[(to.join("a.txt"), from.join("a.txt"))]);
     std::fs::rename(to.join("a.txt"), from.join("a.txt")).unwrap();
+    let walk = |t: &Tab| t.walk.as_ref().map(|w| std::sync::Arc::as_ptr(&w.done));
+    let before = walk(&flat);
     flat.changed(&c);
-    assert!(flat.is_loading(), "something arrived under it");
+    // A walk of its own, though so small a folder may be walked already.
+    assert!(walk(&flat).is_some() && walk(&flat) != before, "something arrived under it");
     pump(&mut flat, &stats);
     assert!(shows(&flat, &from.join("a.txt")) && !shows(&flat, &from.join("sub/c.txt")));
     let _ = std::fs::remove_dir_all(&d);
