@@ -26,6 +26,7 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.5.0+fork.3" date="2026-10-25"/>
     <release version="0.5.0+fork.2" date="2026-10-25"/>
     <release version="0.5.0+fork.1" date="2026-10-25"/>
     <release version="0.5.0" date="2026-10-21"/>
