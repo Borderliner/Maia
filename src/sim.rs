@@ -651,6 +651,7 @@ impl Sim {
         crate::testkit::parse("hold none");
         // Space used's map is chosen for the session: a new one starts on the ring.
         crate::spaceuse::MAP.store(false, std::sync::atomic::Ordering::Relaxed);
+        crate::spaceuse::BY_CHANGE.store(false, std::sync::atomic::Ordering::Relaxed);
         let ctx = egui::Context::default();
         let app = App::new(&ctx, vec![path.to_path_buf()]);
         let shots = std::env::var_os("MAIA_SIM_SHOTS").map(|d| Box::new(Shots { dir: PathBuf::from(d), textures: Default::default(), prims: vec![] }));
@@ -17994,6 +17995,14 @@ mod journeys {
         assert!(some_text(&s, "Change"), "sorted by change on offer");
         look(&mut s, "what grew");
         s.shot("what-grew");
+        // By change: what grew most first, what shrank most last; S back to size.
+        click_control(&mut s, "space sort change");
+        s.idle(10);
+        let names = space_names(&s);
+        assert_eq!((names.first().map(String::as_str), names.last().map(String::as_str)), (Some("Films"), Some("Mail")), "{names:?}");
+        s.act("key s");
+        s.idle(10);
+        assert_eq!(space_names(&s), ["Films", "Photos", "Music", "Mail", "notes.txt"], "biggest first again");
         // The map.
         click_control(&mut s, "space map");
         s.idle(20);

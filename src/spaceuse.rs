@@ -42,7 +42,7 @@ const SLICES: usize = 8;
 /// The dialog fills the window (F). Kept for the next time it opens.
 static FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The list sorted by how much each grew rather than by size (S). Kept likewise.
-static BY_CHANGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static BY_CHANGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The contents drawn as a map instead of the ring and list, for the session.
 pub(crate) static MAP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
