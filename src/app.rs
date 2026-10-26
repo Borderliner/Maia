@@ -232,6 +232,9 @@ pub struct App {
     pub stats: Stats,
     pub watch: Watch,
     pub jobs: Vec<Job>,
+    /// The status bar's transfers chip as last drawn, and the panel whose bar has it.
+    pub jobs_chip: Option<egui::Rect>,
+    pub jobs_panel: u64,
     pub clipboard: Option<(Vec<PathBuf>, bool)>,
     pub popup: Popup,
     pub sidebar: bool,
@@ -392,6 +395,8 @@ impl App {
             stats: Stats::new(ctx.clone()),
             watch: Watch::new(ctx.clone()),
             jobs: vec![],
+            jobs_chip: None,
+            jobs_panel: 0,
             clipboard: None,
             popup: Popup::None,
             sidebar: if session.sidebar_width > 0.0 { session.sidebar } else { true },
@@ -3118,6 +3123,16 @@ impl App {
                 self.undo_last();
             }
             Cmd::UndoHistory => self.popup = Popup::UndoHistory(crate::undohist::State::new(&self.undo)),
+            Cmd::Transfers => {
+                if crate::transfers::live(self) == 0 {
+                    self.toast("Nothing is being copied or moved");
+                } else {
+                    // Above the chip; in a bar too narrow for it, above the window's corner.
+                    let corner = ctx.content_rect().right_bottom() - egui::vec2(8.0, 6.0);
+                    let at = self.jobs_chip.unwrap_or(egui::Rect::from_min_max(corner - egui::vec2(1.0, crate::ui::FOOTER_H), corner));
+                    self.popup = Popup::Transfers(crate::transfers::State::new(at));
+                }
+            }
             Cmd::Hints => crate::hints::start(self, &ctx),
             Cmd::SetMark => match crate::marks::here(self) {
                 Some(_) => self.popup = Popup::Marks(crate::marks::State { set: true, sel: 0 }),
@@ -3382,8 +3397,12 @@ impl App {
                 }
             })
             .collect();
-        if conflicts.is_empty() {
-            let kind = if mv { OpKind::Move { srcs, dest, decide: HashMap::new() } } else { OpKind::Copy { srcs, dest, decide: HashMap::new() } };
+        // Behind other transfers it waits its turn: a name taken is asked inside the job when
+        // it comes to it, not now, and anything that lands there meanwhile is asked too.
+        let behind = !conflicts.is_empty() && self.jobs.iter().any(|j| j.finished_at.is_none() && matches!(j.kind, OpKind::Copy { .. } | OpKind::Move { .. } | OpKind::Extract { .. } | OpKind::Sync { .. } | OpKind::Compress { .. } | OpKind::ArchiveEdit { .. } | OpKind::Place { .. }) && !j.progress.lock().is_ok_and(|p| p.finished));
+        if conflicts.is_empty() || behind {
+            let decide: HashMap<PathBuf, ops::Conflict> = if behind { srcs.iter().map(|s| (s.clone(), ops::Conflict::Ask)).collect() } else { HashMap::new() };
+            let kind = if mv { OpKind::Move { srcs, dest, decide } } else { OpKind::Copy { srcs, dest, decide } };
             self.actions.push(Action::StartJob(kind));
         } else {
             self.popup = Popup::conflict(srcs, dest, mv, conflicts);

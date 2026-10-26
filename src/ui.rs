@@ -444,6 +444,10 @@ impl App {
                 self.shown_rects = leaves.iter().copied().collect();
             }
             let in_title = self.title_tab_panels.clone();
+            // The transfers chip goes in the bar nearest the job cards: the bottom right panel's.
+            if let Some((id, _)) = leaves.iter().max_by(|a, b| a.1.bottom().total_cmp(&b.1.bottom()).then(a.1.right().total_cmp(&b.1.right()))) {
+                self.jobs_panel = *id;
+            }
             for (id, rect) in leaves.clone() {
                 if growing.contains(&id) {
                     ui.painter().rect_filled(rect, CornerRadius::same(if self.cfg.round_corners { 8 } else { 0 }), pal.panel);
@@ -1244,6 +1248,9 @@ impl App {
         let (show_folders, show_files) = (t.settings.show_folders, t.settings.show_files);
         let mut toggle_folders = false;
         let mut toggle_files = false;
+        let jobs = if id == self.jobs_panel { crate::transfers::summary(&self.jobs) } else { None };
+        let jobs_open = matches!(self.popup, Popup::Transfers(_));
+        let mut jobs_at = None;
         // The right-hand group (counts, view, zoom…) is drawn twice: first invisibly to
         // measure it (no painting, no clicks), then for real once the filter box is sized.
         let mut right = |ui: &mut Ui| {
@@ -1268,6 +1275,15 @@ impl App {
                 ui.painter().galley(pos2(r.left() + 6.0 + iw, r.center().y - g.size().y / 2.0), g, col);
                 if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
             };
+            // While jobs run: how many and how far, opening the list of them.
+            if let Some((text, frac)) = &jobs {
+                if let Some(r) = crate::transfers::chip(ui, text, *frac, jobs_open, font_small.clone(), &pal) {
+                    jobs_at = Some(r.rect);
+                    if r.clicked() && ui.is_visible() {
+                        self.popup = if jobs_open { Popup::None } else { Popup::Transfers(crate::transfers::State::new(r.rect)) };
+                    }
+                }
+            }
             // Zoom chip with a fill bar proportional to the zoom (none in Columns, which has
             // no zoom).
             let zr = if matches!(view_mode, listing::Mode::Columns | listing::Mode::Stack) { ui.allocate_exact_size(Vec2::ZERO, Sense::hover()).1 } else { chip(ui, None, &format!("{}%", (zoom * 100.0 + 1e-3).floor() as i32), pal.text_dim, false, "View size (Ctrl+wheel)") };
@@ -1524,6 +1540,9 @@ impl App {
         if let Some(p) = self.panels.get_mut(&id) {
             p.branch_chip = chip_at;
         }
+        if id == self.jobs_panel {
+            self.jobs_chip = jobs_at;
+        }
         if let Some(r) = branch_menu {
             self.actions.push(Action::FocusPanel(id));
             self.actions.push(Action::Cmd(Cmd::GitBranches));
@@ -1638,7 +1657,9 @@ impl App {
     fn jobs_overlay(&mut self, ctx: &egui::Context) {
         let pal = self.pal;
         let has_toast = self.toast.as_ref().map(|t| t.1.elapsed().as_secs_f32() < 3.0).unwrap_or(false);
-        if self.jobs.is_empty() && !has_toast {
+        // The transfers list shows the same jobs, above the chip.
+        let listed = matches!(self.popup, Popup::Transfers(_));
+        if (self.jobs.is_empty() || listed) && !has_toast {
             return;
         }
         let screen = ctx.content_rect();
@@ -1648,7 +1669,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_max_width(340.0f32.min(screen.width() - 40.0));
                 let mut remove = None;
-                for (k, j) in self.jobs.iter_mut().enumerate() {
+                for (k, j) in self.jobs.iter_mut().enumerate().filter(|_| !listed) {
                     egui::Frame::popup(ui.style()).fill(pal.raised).corner_radius(CornerRadius::same(10)).inner_margin(10.0).show(ui, |ui| {
                         ui.set_width(320.0);
                         let mut p = j.progress.lock().unwrap();
@@ -1702,7 +1723,7 @@ impl App {
                             _ => 0.0,
                         };
                         ui.add(egui::ProgressBar::new(if done && !cancelled { 1.0 } else { frac }).desired_height(5.0).fill(if p.errors.is_empty() { pal.accent } else { pal.danger }));
-                        let el = p.since.unwrap_or(j.started).elapsed().as_secs_f64().max(0.001);
+                        let el = p.since.unwrap_or(j.started).elapsed().saturating_sub(p.held).as_secs_f64().max(0.001);
                         let mut line = format!("{} / {} item{}", p.done_items, p.total_items, if p.total_items == 1 { "" } else { "s" });
                         if let Some(w) = &waiting {
                             line = format!("Waiting for “{w}”");
@@ -1722,10 +1743,17 @@ impl App {
                         } else {
                             ui.label(egui::RichText::new(line).small().color(pal.text_dim));
                         }
-                        if !done && !p.current.is_empty() {
+                        if !done && !p.current.is_empty() && p.clash.is_none() {
                             // One line, cut with "…": a long name wrapped and the card grew and
                             // shrank from file to file.
                             ui.add(egui::Label::new(egui::RichText::new(&p.current).small().color(pal.text_dim)).truncate());
+                        }
+                        // A name already taken, answered here or in the transfers list.
+                        if let Some(c) = p.clash.clone().filter(|_| !done) {
+                            let same = p.same;
+                            drop(p);
+                            crate::transfers::clash_box(ui, j, &c, same, &pal);
+                            p = j.progress.lock().unwrap();
                         }
                         if !p.errors.is_empty() {
                             let n = p.errors.len();

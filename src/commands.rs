@@ -325,6 +325,7 @@ commands! {
     WhatsUsing, "whats_using", Files, "What's Using This…", "List the programs that have the selection open or work inside it, and stop your own.", [];
     FindDuplicates, "find_duplicates", Files, "Find Duplicates…", "Find files with the same contents under this folder, whatever their names, and trash the extra copies.", [];
     TidyFolder, "tidy_folder", Files, "Tidy Folder…", "Sort this folder's loose files into folders by kind, or its photos into a folder a month by when they were taken, seeing every move first.", [];
+    Transfers, "transfers", Files, "Show Transfers", "The copies and moves under way: pause one, start a waiting one now, or drag them into another order.", ["Ctrl+Shift+J"];
     SpaceUsed, "space_used", Files, "Show Space Used", "This folder's contents biggest first, each with its share, to find what fills the disk.", [];
     FreeUpSpace, "free_up_space", Files, "Free Up Space…", "What could go to make room on this folder's disk: build output, download caches, thumbnails, the trash.", [];
     PreviousVersions, "previous_versions", Files, "Previous Versions…", "Earlier copies of the file kept in the disk's snapshots, to look at and restore.", [];

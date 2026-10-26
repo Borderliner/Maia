@@ -250,6 +250,8 @@ pub enum Popup {
     Viewer(Box<crate::viewer::State>),
     /// The welcome tour or What's New.
     Tour(Box<crate::tour::State>),
+    /// The jobs under way, above the status bar's chip.
+    Transfers(crate::transfers::State),
 }
 
 /// The branch menu, its lists read on a worker as it opens.
@@ -488,6 +490,7 @@ impl Popup {
             Popup::SpaceUsed(..) => "SpaceUsed",
             Popup::Viewer(..) => "Viewer",
             Popup::Tour(..) => "Tour",
+            Popup::Transfers(..) => "Transfers",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -1152,6 +1155,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::SpaceUsed(st) => crate::spaceuse::popup(app, ctx, st),
         Popup::Viewer(st) => crate::viewer::draw(app, ctx, st),
         Popup::Tour(st) => crate::tour::draw(app, ctx, st),
+        Popup::Transfers(st) => crate::transfers::popup(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -1659,6 +1663,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::OpenLinkTarget => t.target_entries().first().map(|e| e.is_link).unwrap_or(false),
         Cmd::RestoreTrash => t.path.starts_with(crate::sidebar::trash_dir()),
         Cmd::Undo => !app.undo.is_empty(),
+        Cmd::Transfers => crate::transfers::live(app) > 0,
         Cmd::Redo => app.undo.can_redo(),
         Cmd::ReopenTab => !app.closed_tabs.is_empty(),
         Cmd::EditTags => t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()) && crate::musictags::applies(&t.target_entries().iter().map(|e| (e.ext(), e.is_dir)).collect::<Vec<_>>()),

@@ -121,6 +121,7 @@ mod timefmt;
 mod trashcan;
 mod theme;
 mod tidy;
+mod transfers;
 mod tour;
 mod thumbcache;
 mod thumbs;
