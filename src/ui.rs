@@ -15,6 +15,8 @@ use crate::theme::{Glyph, Palette, paint_glyph};
 
 pub const TITLE_H: f32 = 36.0;
 pub const TAB_H: f32 = 30.0;
+/// A pinned tab: its icon with room either side.
+const PIN_TAB_W: f32 = 36.0;
 pub const HEADER_H: f32 = 34.0;
 pub const FOOTER_H: f32 = 30.0;
 
@@ -641,17 +643,21 @@ impl App {
         let Some(p) = self.panels.get(&panel_id) else { return };
         let n = p.tabs.len();
         let plus_w = 28.0;
-        // Tabs share what's left after the + button and the gaps between items.
+        // Tabs share what's left after the + button, the pinned tabs (an icon each) and
+        // the gaps between items.
         let gap = ui.spacing().item_spacing.x;
+        let pins = p.tabs.iter().filter(|t| t.pinned).count();
+        let free = n - pins;
         // A point of slack per tab: placing them rounds to pixels, and a strip filled to
         // the exact width lost its + to the rounding (at other font sizes and Spacings).
-        let avail = max_w - plus_w - (gap + 1.0) * n as f32;
-        let per = (avail / n.max(1) as f32).clamp(56.0, 220.0);
+        let avail = max_w - plus_w - (gap + 1.0) * n as f32 - PIN_TAB_W * pins as f32;
+        let per = (avail / free.max(1) as f32).clamp(56.0, 220.0);
         // Squeezed tabs read "D…", "Q…": the active one keeps room for its name, as the
         // one being looked at.
         // The others never get narrower than their least for it (the strip would overflow).
-        let active_w = if n > 1 && per < 120.0 { (avail * 0.4).min(160.0).min(avail - 56.0 * (n - 1) as f32).max(per) } else { per };
-        let rest = if active_w > per { ((avail - active_w) / (n - 1) as f32).clamp(56.0, 220.0) } else { per };
+        let active_free = p.tabs.get(p.active).is_some_and(|t| !t.pinned);
+        let active_w = if free > 1 && active_free && per < 120.0 { (avail * 0.4).min(160.0).min(avail - 56.0 * (free - 1) as f32).max(per) } else { per };
+        let rest = if active_w > per { ((avail - active_w) / (free - 1) as f32).clamp(56.0, 220.0) } else { per };
         let strip_start = ui.cursor().min;
         let col_x = self.shown_rects.get(&panel_id).map(|r| r.x_range());
         let dragging_tab = matches!(self.drag, Some(Drag::Tab { .. }));
@@ -686,7 +692,7 @@ impl App {
             if grow < 1.0 {
                 ui.ctx().request_repaint();
             }
-            let w = if i == p.active { active_w } else { rest } * (0.3 + 0.7 * grow);
+            let w = if t.pinned { PIN_TAB_W } else if i == p.active { active_w } else { rest } * (0.3 + 0.7 * grow);
             widths.push(w);
             let (r, resp) = ui.allocate_exact_size(vec2(w, TAB_H - 4.0), Sense::click_and_drag());
             let is_active = i == p.active;
@@ -718,8 +724,8 @@ impl App {
                 ui.painter().rect_filled(r.shrink2(vec2(2.0, 3.0)), CornerRadius::same(rad.min(6)), fill);
             }
             let _ = active_panel;
-            // Icon or spinner.
-            let ic = Rect::from_center_size(pos2(r.left() + 15.0, r.center().y), Vec2::splat(14.0));
+            // Icon or spinner; a pinned tab is its icon alone.
+            let ic = Rect::from_center_size(pos2(if t.pinned { r.center().x } else { r.left() + 15.0 }, r.center().y), Vec2::splat(14.0));
             if t.is_loading() {
                 spinner(ui.painter(), ic.center(), 5.5, pal.accent, now);
                 ui.ctx().request_repaint();
@@ -730,11 +736,14 @@ impl App {
             }
             // The close button waits until the tab (growing in as it opens) has room beside
             // the icon.
-            let close_w = if (hovered || is_active) && r.width() >= 52.0 { 18.0 } else { 0.0 };
+            // A pinned tab has none: it closes from its menu, on purpose.
+            let close_w = if (hovered || is_active) && r.width() >= 52.0 && !t.pinned { 18.0 } else { 0.0 };
             let text_rect = Rect::from_min_max(pos2(r.left() + 27.0, r.top()), pos2(r.right() - 6.0 - close_w, r.bottom()));
             let title = t.title();
-            let g = listing::elided(ui, &title, FontId::proportional(self.cfg.font_size - 0.5), text_rect.width(), if is_active { pal.text } else { pal.text_dim });
-            ui.painter().galley(pos2(text_rect.left(), r.center().y - g.size().y / 2.0), g, pal.text);
+            if !t.pinned {
+                let g = listing::elided(ui, &title, FontId::proportional(self.cfg.font_size - 0.5), text_rect.width(), if is_active { pal.text } else { pal.text_dim });
+                ui.painter().galley(pos2(text_rect.left(), r.center().y - g.size().y / 2.0), g, pal.text);
+            }
             // Close button
             if close_w > 0.0 {
                 let cr = Rect::from_center_size(pos2(r.right() - 14.0, r.center().y), Vec2::splat(16.0));
@@ -752,7 +761,7 @@ impl App {
             if resp.clicked() {
                 actions.push(Action::ActivateTab { panel: panel_id, idx: i });
             }
-            if resp.middle_clicked() {
+            if resp.middle_clicked() && !t.pinned {
                 actions.push(Action::CloseTab { panel: panel_id, idx: i });
             }
             if resp.double_clicked() && !tab::is_computer(&t.path) {

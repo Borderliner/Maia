@@ -1134,6 +1134,7 @@ impl App {
                     _ if ts.flatten => t.set_flatten(true),
                     _ => {}
                 }
+                t.pinned = ts.pinned;
                 tabs.push(t);
             }
             if tabs.is_empty() {
@@ -1248,6 +1249,11 @@ impl App {
     /// leaf has a panel, every panel has a tab and an in-range active index, and the
     /// active panel exists. Cheap (a handful of panels); runs every frame and after each action.
     fn heal(&mut self) {
+        // However a tab got among them (opened beside a pinned one, dragged), pinned
+        // tabs stay together at the left.
+        for p in self.panels.values_mut() {
+            p.settle_pins();
+        }
         let mut leaves = vec![];
         self.tree.leaves(&mut leaves);
         for id in &leaves {
@@ -2241,10 +2247,21 @@ impl App {
                 let (id, idx) = (self.active, self.panel().active);
                 self.close_tab(id, idx);
             }
+            Cmd::PinTab => {
+                let t = self.tab();
+                t.pinned = !t.pinned;
+                // Settled into place at once, so the next command finds it where it shows.
+                self.panel().settle_pins();
+            }
             Cmd::CloseAllTabs => {
                 let id = self.active;
                 let n = self.panel().tabs.len();
+                // Pinned tabs stay, unless they are all there is.
+                let all = self.panel().tabs.iter().all(|t| t.pinned);
                 for i in (0..n).rev() {
+                    if !all && self.panel().tabs.get(i).is_some_and(|t| t.pinned) {
+                        continue;
+                    }
                     self.close_tab(id, i);
                 }
             }
@@ -2252,14 +2269,16 @@ impl App {
                 let id = self.active;
                 let n = self.panel().tabs.len();
                 let keep = self.panel().active.min(n.saturating_sub(1));
+                let kept = self.panel().tabs[keep].id;
                 for i in (0..n).rev() {
-                    if i != keep {
+                    if i != keep && !self.panel().tabs[i].pinned {
                         let p = self.panels.get_mut(&id).unwrap();
                         let t = p.tabs.remove(i);
-                        self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false, smart: None });
+                        self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), ..Default::default() });
                     }
                 }
-                self.panel().active = 0;
+                let p = self.panel();
+                p.active = p.tabs.iter().position(|t| t.id == kept).unwrap_or(0);
             }
             Cmd::ReopenTab => {
                 if let Some(s) = self.closed_tabs.pop() {
@@ -2607,13 +2626,17 @@ impl App {
                 let cur = self.panel().active;
                 let n = self.panel().tabs.len();
                 let range: Vec<usize> = if cmd == Cmd::CloseRightTabs { ((cur + 1)..n).rev().collect() } else { (0..cur).rev().collect() };
+                let kept = self.panel().tabs.get(cur).map(|t| t.id);
                 for i in range {
                     let p = self.panels.get_mut(&id).unwrap();
+                    if p.tabs[i].pinned {
+                        continue;
+                    }
                     let t = p.tabs.remove(i);
-                    self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false, smart: None });
+                    self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), ..Default::default() });
                 }
                 let p = self.panel();
-                p.active = if cmd == Cmd::CloseLeftTabs { 0 } else { p.active.min(p.tabs.len().saturating_sub(1)) };
+                p.active = kept.and_then(|k| p.tabs.iter().position(|t| t.id == k)).unwrap_or(0);
             }
             Cmd::OpenTabInWindow => {
                 let p = self.panel().path();
@@ -3381,7 +3404,7 @@ impl App {
         if self.cfg.animations && !p.tabs.is_empty() {
             self.tab_ghosts.push((panel, idx, t.shown_tab_w, std::time::Instant::now()));
         }
-        self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false, smart: None });
+        self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), ..Default::default() });
         if self.closed_tabs.len() > 50 {
             self.closed_tabs.remove(0);
         }
@@ -3412,7 +3435,7 @@ impl App {
         }
         if let Some(p) = self.panels.remove(&id) {
             for t in p.tabs {
-                self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false, smart: None });
+                self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), ..Default::default() });
             }
         }
         self.tree.remove(id);
@@ -3967,6 +3990,7 @@ impl App {
         }
         let path = src.tabs[idx].path.clone();
         let settings = src.tabs[idx].settings.clone();
+        let pinned = src.tabs[idx].pinned;
         // Moving a panel's only tab onto its own side is meaningless.
         if from == to && side.is_some() && src.tabs.len() == 1 && !copy {
             return;
@@ -3974,6 +3998,7 @@ impl App {
         let tid = self.alloc_id();
         let mut t = Tab::new(tid, path, settings, self.ctx.clone());
         t.saved_scope = None;
+        t.pinned = pinned;
         let mut removed = None;
         if !copy {
             let Some(p) = self.panels.get_mut(&from) else { return };

@@ -1693,9 +1693,11 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::SortFullAsc | Cmd::SortFullDesc => tab::is_computer(&t.path) && !(t.settings.sort == crate::config::SortKey::Usage && t.settings.desc == (c == Cmd::SortFullDesc)),
         Cmd::SortNameAsc | Cmd::SortNameDesc => !(t.settings.sort == crate::config::SortKey::Name && t.settings.desc == (c == Cmd::SortNameDesc)),
         Cmd::SortSizeAsc | Cmd::SortSizeDesc => !(t.settings.sort == crate::config::SortKey::Size && t.settings.desc == (c == Cmd::SortSizeDesc)),
-        Cmd::CloseOtherTabs => p.tabs.len() > 1,
-        Cmd::CloseRightTabs | Cmd::MoveTabRight => p.active + 1 < p.tabs.len(),
-        Cmd::CloseLeftTabs | Cmd::MoveTabLeft => p.active > 0,
+        Cmd::CloseOtherTabs => p.tabs.iter().enumerate().any(|(i, t)| i != p.active && !t.pinned),
+        Cmd::CloseRightTabs => p.tabs.iter().skip(p.active + 1).any(|t| !t.pinned),
+        Cmd::CloseLeftTabs => p.tabs.iter().take(p.active).any(|t| !t.pinned),
+        Cmd::MoveTabRight => p.tabs.get(p.active + 1).is_some_and(|t| t.pinned == p.tab().pinned),
+        Cmd::MoveTabLeft => p.active > 0 && p.tabs.get(p.active - 1).is_some_and(|t| t.pinned == p.tab().pinned),
         Cmd::TabNewOrRecent | Cmd::ToggleFlatten | Cmd::OpenTerminal => !tab::is_computer(&t.path),
         Cmd::OpenInEditor => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::CopyPathRelative => !tab::is_computer(&t.path) && t.archive.is_none(),
@@ -1735,11 +1737,16 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
 
 /// A menu row for a command: dimmed (and inert) when it can't apply.
 fn cmd_row(ui: &mut Ui, app: &App, c: Cmd) -> bool {
+    cmd_row_as(ui, app, c, c.info().title)
+}
+
+/// `cmd_row` under another label, for a command whose name follows its state.
+fn cmd_row_as(ui: &mut Ui, app: &App, c: Cmd, title: &str) -> bool {
     let pal = app.pal;
     let enabled = applicable(app, c);
     let chips: Vec<String> = app.keymap.bindings(c).iter().take(3).map(commands::binding_to_string).collect();
     let resp = row(ui, 26.0, false, &pal, |ui, r| {
-        ui.painter().text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, c.info().title, FontId::proportional(13.0), if enabled { pal.text } else { pal.text_dim.gamma_multiply(0.6) });
+        ui.painter().text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, title, FontId::proportional(13.0), if enabled { pal.text } else { pal.text_dim.gamma_multiply(0.6) });
         let mut x = r.right() - 6.0;
         for ch in chips.iter().rev() {
             x -= crate::ui::paint_chip(ui.painter(), pos2(x, r.center().y), ch, &pal) + 3.0;
@@ -6149,6 +6156,10 @@ fn tab_menu(app: &mut App, ctx: &egui::Context, panel: u64, idx: usize, pos: Pos
             if cmd_row(ui, app, c) {
                 run = Some(c);
             }
+        }
+        let pinned = app.panels.get(&panel).and_then(|p| p.tabs.get(idx)).is_some_and(|t| t.pinned);
+        if cmd_row_as(ui, app, Cmd::PinTab, if pinned { "Unpin Tab" } else { "Pin Tab" }) {
+            run = Some(Cmd::PinTab);
         }
         menu_sep(ui, &pal);
         if cmd_row(ui, app, Cmd::OpenTabInWindow) {

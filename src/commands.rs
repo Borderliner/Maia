@@ -166,6 +166,7 @@ commands! {
     NewTab, "new_tab", Tabs, "New Tab", "Open a new tab.", ["Ctrl+T"];
     CloseTab, "close_tab", Tabs, "Close Tab", "Close the current tab.", ["Ctrl+W", "Ctrl+F4"];
     CloseAllTabs, "close_all_tabs", Tabs, "Close All Tabs", "Close every tab in this panel except a fresh one.", ["Ctrl+Shift+W"];
+    PinTab, "pin_tab", Tabs, "Pin Tab", "Keep this tab small at the left and out of Close Other Tabs; again to unpin.", [];
     CloseOtherTabs, "close_other_tabs", Tabs, "Close Other Tabs", "Close all tabs in this panel except the current one.", [];
     CloseRightTabs, "close_right_tabs", Tabs, "Close Right Tabs", "Close the tabs to the right of the current one.", [];
     CloseLeftTabs, "close_left_tabs", Tabs, "Close Left Tabs", "Close the tabs to the left of the current one.", [];

@@ -552,6 +552,7 @@ pub struct TabSnap {
     pub flatten: bool,
     /// The smart folder shown, by its id.
     pub smart: Option<u64>,
+    pub pinned: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

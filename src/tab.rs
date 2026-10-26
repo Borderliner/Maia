@@ -160,6 +160,8 @@ pub struct Tab {
     pub funnel_at: Option<egui::Pos2>,
     /// Width the tab was last drawn at in its strip.
     pub shown_tab_w: f32,
+    /// Kept small at the strip's left and out of Close Other Tabs.
+    pub pinned: bool,
     pub hscroll: f32,
     pub born: std::time::Instant,
     /// Details tree view: expanded folders and their pending child listings.
@@ -261,6 +263,7 @@ impl Tab {
             zoom_acc: 0.0,
             funnel_at: None,
             shown_tab_w: 0.0,
+            pinned: false,
             hscroll: 0.0,
             born: std::time::Instant::now(),
             expanded: HashSet::new(),
