@@ -1223,12 +1223,14 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
             vec2((i % cols) as f32 * step.x, (i / cols) as f32 * step.y)
         }
     };
+    // A panel squeezed to nothing (a tiny split, a tall README card) has no room, and
+    // never less than none.
     let content = if horizontal {
-        vec2((cols as f32 * step.x + 8.0).max(body.width()), body.height())
+        vec2((cols as f32 * step.x + 8.0).max(body.width()), body.height()).max(Vec2::ZERO)
     } else {
         let rows = (n + cols - 1) / cols.max(1);
         let extra = if env.cfg.scroll_beyond { body.height() * 0.5 } else { 0.0 };
-        vec2(body.width(), (rows as f32 * step.y + 8.0 + extra).max(body.height()))
+        vec2(body.width(), (rows as f32 * step.y + 8.0 + extra).max(body.height())).max(Vec2::ZERO)
     };
     if horizontal {
         t.nav_row_step = 1;
