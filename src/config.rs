@@ -613,6 +613,8 @@ pub struct UserData {
     pub destinations: Vec<PathBuf>,
     /// Each folder left: how many times and when last, for Jump.
     pub visits: HashMap<PathBuf, crate::jump::Visit>,
+    /// Files and folders kept first in their folder, whatever the sort.
+    pub pinned: Vec<PathBuf>,
 }
 
 impl UserData {

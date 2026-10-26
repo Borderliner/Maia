@@ -61,6 +61,8 @@ pub struct ViewCtx<'a> {
     pub folders_first: bool,
     pub recents_on_top: bool,
     pub recents: &'a HashSet<PathBuf>,
+    /// Kept first in their folder, before recents and folders-first.
+    pub pinned: &'a HashSet<PathBuf>,
     pub stats: &'a HashMap<PathBuf, DirStats>,
 }
 
@@ -1286,11 +1288,12 @@ impl Tab {
                         // Recents on top (one lookup per item, not per comparison), then
                         // folders-first.
                         let recent = c.recents_on_top && c.recents.contains(&e.path);
+                        let pinned = !c.pinned.is_empty() && c.pinned.contains(&e.path);
                         let (missing, key) = match &keyed {
                             Some(v) => (v[k].is_none(), v[k].unwrap_or(0)),
                             None => (false, primary(e).unwrap_or(0)),
                         };
-                        let rank = if recent { 0 } else { 4 } + if e.is_dir == c.folders_first { 0 } else { 2 } + missing as u8;
+                        let rank = if pinned { 0 } else { 8 } + if recent { 0 } else { 4 } + if e.is_dir == c.folders_first { 0 } else { 2 } + missing as u8;
                         (tier(k), rank, key, u128::from_be_bytes(p), i)
                     })
                     .collect();
@@ -1652,6 +1655,12 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
 }
 
 fn compare(a: &Entry, b: &Entry, key: SortKey, desc: bool, c: &ViewCtx, trash: &HashMap<PathBuf, (PathBuf, Option<SystemTime>)>) -> Ordering {
+    if !c.pinned.is_empty() {
+        let (pa, pb) = (c.pinned.contains(&a.path), c.pinned.contains(&b.path));
+        if pa != pb {
+            return pb.cmp(&pa);
+        }
+    }
     if c.recents_on_top {
         let (ra, rb) = (c.recents.contains(&a.path), c.recents.contains(&b.path));
         if ra != rb {

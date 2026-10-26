@@ -458,6 +458,10 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         if all_dirs {
             items.push(Item::cmd(Cmd::ToggleBookmark));
         }
+        if !in_trash && t.archive.is_none() {
+            let all = ents.iter().all(|e| app.pinned_set.contains(&e.0));
+            items.push(Item::labeled(Cmd::PinToTop, if all { "Unpin" } else { "Pin To Top" }));
+        }
         if !in_trash {
             items.push(Item::cmd(Cmd::WhatsUsing));
         }

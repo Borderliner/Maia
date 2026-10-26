@@ -919,7 +919,7 @@ impl App {
             }
         };
         {
-            let App { panels, cfg, thumbs, stats, recents_set, actions, keymap, drag, clipboard, ud, avatars, .. } = self;
+            let App { panels, cfg, thumbs, stats, recents_set, pinned_set, actions, keymap, drag, clipboard, ud, avatars, .. } = self;
             let panel = panels.get_mut(&id).unwrap();
             panel.rect = rect;
             panel.list_rect = list_rect;
@@ -933,6 +933,7 @@ impl App {
                 thumbs,
                 stats,
                 recents: recents_set,
+                pinned: pinned_set,
                 cut: &cut,
                 actions,
                 keymap,

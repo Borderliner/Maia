@@ -246,6 +246,7 @@ pub struct App {
     pub seq_time: Instant,
     pub drag: Option<Drag>,
     pub recents_set: HashSet<PathBuf>,
+    pub pinned_set: HashSet<PathBuf>,
     pub actions: Vec<Action>,
     pub ud_dirty: bool,
     pub cfg_dirty: bool,
@@ -411,6 +412,7 @@ impl App {
             seq_time: Instant::now(),
             drag: None,
             recents_set: HashSet::new(),
+            pinned_set: HashSet::new(),
             actions: vec![],
             ud_dirty: false,
             cfg_dirty: false,
@@ -555,8 +557,24 @@ impl App {
         self.panel().tab_mut()
     }
 
+    /// Pinned items keep their pin under a new name in the same folder.
+    pub fn follow_pins(&mut self, pairs: &[(PathBuf, PathBuf)]) {
+        let mut moved = false;
+        for p in &mut self.ud.pinned {
+            if let Some((_, to)) = pairs.iter().find(|(from, _)| from == p) {
+                *p = to.clone();
+                moved = true;
+            }
+        }
+        if moved {
+            self.refresh_recents();
+            self.ud_dirty = true;
+        }
+    }
+
     pub fn refresh_recents(&mut self) {
         self.recents_set = self.ud.recents.iter().take(30).cloned().collect();
+        self.pinned_set = self.ud.pinned.iter().cloned().collect();
     }
 
     pub fn toast(&mut self, s: impl Into<String>) {
@@ -779,6 +797,7 @@ impl App {
                             t.pending_restore = Some(tab::HistState { path: t.path.clone(), cursor: new.first().cloned(), selected: new, scroll: t.current_scroll });
                             t.reload();
                         }
+                        self.follow_pins(&pairs);
                         self.undo.push(UndoEntry { label, kind: UndoKind::Rename(pairs) });
                     }
                     if !done.toast.is_empty() {
@@ -1489,6 +1508,7 @@ impl App {
             folders_first: self.cfg.folders_first,
             recents_on_top: self.cfg.recents_on_top,
             recents,
+            pinned: &self.pinned_set,
             stats,
         };
         let mut new_renames = vec![];
@@ -3171,6 +3191,26 @@ impl App {
             Cmd::GoToMark => self.popup = Popup::Marks(crate::marks::State { set: false, sel: 0 }),
             Cmd::Jump => crate::jump::open(self),
             Cmd::SendToPhone => crate::phone::open(self),
+            Cmd::PinToTop => {
+                let sel = self.tab().targets();
+                if sel.is_empty() || tab::is_computer(&self.panel().path()) || self.tab().archive.is_some() {
+                    self.toast("Select what to pin");
+                } else {
+                    // All pinned already: the same command takes them off.
+                    let unpin = sel.iter().all(|p| self.pinned_set.contains(p));
+                    self.ud.pinned.retain(|p| !sel.contains(p));
+                    if !unpin {
+                        self.ud.pinned.extend(sel.iter().cloned());
+                    }
+                    self.refresh_recents();
+                    self.ud_dirty = true;
+                    for p in self.panels.values_mut() {
+                        for t in &mut p.tabs {
+                            t.dirty = true;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -3564,6 +3604,7 @@ impl App {
                 errs = crate::rename::apply(&plan).len();
                 let back: Vec<(PathBuf, PathBuf)> = pairs.iter().map(|(from, to)| (to.clone(), from.clone())).collect();
                 moved_back = ops::Changed::moved(&back);
+                self.follow_pins(&back);
                 UndoKind::Rename(pairs.iter().filter(|(from, to)| here(from) && !here(to)).cloned().collect())
             }
             UndoKind::Copied(made, replaced) => {
@@ -4017,6 +4058,7 @@ impl App {
             _ => format!("Rename {} items", done.len()),
         };
         if !done.is_empty() {
+            self.follow_pins(&done);
             self.undo.push(UndoEntry { label, kind: UndoKind::Rename(done.clone()) });
             // Other tabs on the same folder show the new names too.
             self.show_changed(&ops::Changed::moved(&done));

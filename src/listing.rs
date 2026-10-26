@@ -27,6 +27,7 @@ pub struct Env<'a> {
     pub thumbs: &'a mut Thumbs,
     pub stats: &'a mut Stats,
     pub recents: &'a HashSet<PathBuf>,
+    pub pinned: &'a HashSet<PathBuf>,
     pub cut: &'a HashSet<PathBuf>,
     pub actions: &'a mut Vec<Action>,
     pub keymap: &'a Keymap,
@@ -977,7 +978,7 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                     }
                                 }
                                 crate::gitstatus::paint(ui.painter(), ic, git.as_deref(), &e.path, &pal);
-                                let name_r = Rect::from_min_max(pos2(ic.right() + 7.0, cell.top()), pos2(inner.right() - if env.recents.contains(&e.path) && env.cfg.highlight_recents { 10.0 } else { 0.0 }, cell.bottom()));
+                                let name_r = Rect::from_min_max(pos2(ic.right() + 7.0, cell.top()), pos2(inner.right() - mark_room(&e, env), cell.bottom()));
                                 if !rename_field(ui, name_r, idx, t, env, &font) {
                                     let name = display_name(&e, env.cfg);
                                     let rel = e.rel();
@@ -996,9 +997,7 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                         paint_tags(ui, name_r.left() + gw, cell.center().y, tg, &font, sub, ring);
                                     }
                                 }
-                                if env.cfg.highlight_recents && env.recents.contains(&e.path) {
-                                    ui.painter().circle_filled(pos2(inner.right() - 3.0, cell.center().y), 2.5, pal.accent.gamma_multiply(0.8));
-                                }
+                                paint_mark(ui.painter(), pos2(inner.right() - 3.0, cell.center().y), &e, env, &pal);
                             }
                             Column::Usage => {
                                 let (frac, label) = if computer {
@@ -1401,9 +1400,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                             }
                         }
                     }
-                    if env.cfg.highlight_recents && env.recents.contains(&e.path) {
-                        ui.painter().circle_filled(pos2(r.right() - 9.0, r.top() + 9.0), 3.0, pal.accent.gamma_multiply(0.8));
-                    }
+                    paint_mark(ui.painter(), pos2(r.right() - 9.0, r.top() + 9.0), &e, env, &pal);
                     item_checkbox(ui, Rect::from_min_size(r.min + vec2(7.0, 7.0), Vec2::splat(15.0)), idx, ui.rect_contains_pointer(r), t, env);
                 }
                 Mode::Details | Mode::Tree | Mode::Columns | Mode::Stack => {}
@@ -1437,7 +1434,7 @@ pub fn column_width(cfg: &Config) -> f32 {
 /// the empty and error states go.
 fn columns(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query) -> Rect {
     {
-        let c = tab::ViewCtx { show_hidden: env.cfg.show_hidden, show_system: env.cfg.show_system, folders_first: env.cfg.folders_first, recents_on_top: env.cfg.recents_on_top, recents: env.recents, stats: &env.stats.map };
+        let c = tab::ViewCtx { show_hidden: env.cfg.show_hidden, show_system: env.cfg.show_system, folders_first: env.cfg.folders_first, recents_on_top: env.cfg.recents_on_top, recents: env.recents, pinned: env.pinned, stats: &env.stats.map };
         crate::columns::sync(t, &c);
     }
     let Some(mut st) = t.strip.take() else { return rect };
@@ -1522,12 +1519,12 @@ fn column_cells(ui: &Ui, r: Rect, ic: Rect, e: &Entry, env: &Env, q: &fuzzy::Que
     crate::gitstatus::paint(ui.painter(), ic, git, &e.path, pal);
     let (sub, acc, ring) = sel_colors(pal, selected);
     let chev = e.is_dir && tab::drive_dev(&e.path).is_none();
-    let recent = env.cfg.highlight_recents && env.recents.contains(&e.path);
-    // From the right: the chevron (as big as the text asks), the recents dot, the name.
+    // From the right: the chevron (as big as the text asks), the pin or recents dot, the name.
     let cs = (env.cfg.font_size * 0.72).clamp(9.0, 15.0);
     let chev_w = if chev { cs + 10.0 } else { 6.0 };
     let dot_x = r.right() - chev_w - 4.0;
-    let name_r = Rect::from_min_max(pos2(ic.right() + 7.0, r.top()), pos2(if recent { dot_x - 6.0 } else { r.right() - chev_w - 2.0 }, r.bottom()));
+    let room = mark_room(e, env);
+    let name_r = Rect::from_min_max(pos2(ic.right() + 7.0, r.top()), pos2(if room > 0.0 { dot_x + 3.0 - room } else { r.right() - chev_w - 2.0 }, r.bottom()));
     let tags = row_tags(&e.path);
     let room = tags.as_ref().map_or(0.0, |tg| tags_width(ui, tg, &font));
     let rel = e.rel();
@@ -1543,8 +1540,51 @@ fn column_cells(ui: &Ui, r: Rect, ic: Rect, e: &Entry, env: &Env, q: &fuzzy::Que
         let cr = Rect::from_center_size(pos2(r.right() - 6.0 - cs / 2.0, r.center().y), Vec2::splat(cs));
         theme::paint_glyph(ui.painter(), cr, theme::Glyph::ChevronRight, dimc(if selected { pal.on_sel_dim() } else { pal.text_dim }));
     }
-    if recent {
-        ui.painter().circle_filled(pos2(dot_x, r.center().y), 2.5, pal.accent.gamma_multiply(0.8));
+    paint_mark(ui.painter(), pos2(dot_x, r.center().y), e, env, pal);
+}
+
+/// The mark at the end of a name: a pin for an item kept first in its folder, else the
+/// dot of a recently used one. The pin wins: it is the one the user put there.
+#[derive(PartialEq)]
+enum Mark {
+    Pin,
+    Recent,
+}
+
+fn mark_of(e: &Entry, env: &Env) -> Option<Mark> {
+    if !env.pinned.is_empty() && env.pinned.contains(&e.path) {
+        Some(Mark::Pin)
+    } else if env.cfg.highlight_recents && env.recents.contains(&e.path) {
+        Some(Mark::Recent)
+    } else {
+        None
+    }
+}
+
+/// How much of the name's room the mark takes, from the right.
+fn mark_room(e: &Entry, env: &Env) -> f32 {
+    match mark_of(e, env) {
+        Some(Mark::Pin) => pin_side(env) + 6.0,
+        Some(Mark::Recent) => 10.0,
+        None => 0.0,
+    }
+}
+
+fn pin_side(env: &Env) -> f32 {
+    (env.cfg.font_size * 0.8).clamp(10.0, 16.0).round()
+}
+
+/// The mark centred on `at`'s height, its right edge near `at.x`.
+fn paint_mark(p: &egui::Painter, at: Pos2, e: &Entry, env: &Env, pal: &Palette) {
+    match mark_of(e, env) {
+        Some(Mark::Pin) => {
+            let s = pin_side(env);
+            theme::paint_glyph(p, Rect::from_center_size(pos2(at.x + 2.5 - s / 2.0, at.y), Vec2::splat(s)), theme::Glyph::Pin, pal.accent);
+        }
+        Some(Mark::Recent) => {
+            p.circle_filled(at, 2.5, pal.accent.gamma_multiply(0.8));
+        }
+        None => {}
     }
 }
 

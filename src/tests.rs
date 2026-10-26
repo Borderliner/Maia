@@ -412,7 +412,7 @@ fn finished_move_updates_every_listing() {
     assert!(!flat.is_loading() && !other.is_loading(), "nothing arrived under them: no walk, no read");
     assert!(plain.is_loading() && dest.is_loading(), "the folders it left and reached are read again");
     let recents = HashSet::new();
-    let vc = ViewCtx { show_hidden: false, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, stats: &stats };
+    let vc = ViewCtx { show_hidden: false, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, pinned: &Default::default(), stats: &stats };
     flat.rebuild(&vc);
     assert!(!shows(&flat, &from.join("a.txt")) && !shows(&flat, &from.join("sub/c.txt")) && !shows(&flat, &from.join("deep/e.txt")), "a flattened listing drops what went at once");
     assert!(shows(&flat, &from.join("b.txt")) && shows(&flat, &from.join("sub/d.txt")));
@@ -435,7 +435,7 @@ fn finished_move_updates_every_listing() {
 
 fn pump(t: &mut Tab, stats: &HashMap<PathBuf, crate::stats::DirStats>) {
     let recents = HashSet::new();
-    let ctx = ViewCtx { show_hidden: false, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, stats };
+    let ctx = ViewCtx { show_hidden: false, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, pinned: &Default::default(), stats };
     let start = Instant::now();
     while t.is_loading() {
         t.poll();
@@ -1022,7 +1022,7 @@ fn fast_name_sort_orders_exactly_like_natural_order() {
         pump(&mut t, &stats);
         t.settings.desc = desc;
         t.filter = filter.to_string();
-        let ctx = ViewCtx { show_hidden: true, show_system: true, folders_first, recents_on_top: false, recents: &recents, stats: &stats };
+        let ctx = ViewCtx { show_hidden: true, show_system: true, folders_first, recents_on_top: false, recents: &recents, pinned: &Default::default(), stats: &stats };
         t.rebuild(&ctx);
         assert!(t.view.len() > if filter.is_empty() { 120 } else { 10 }, "{} items", t.view.len());
         let q = crate::fuzzy::Query::new(filter);
@@ -1089,7 +1089,7 @@ fn parallel_filter_path_keeps_every_match_in_order() {
     t.flatten = true;
     t.set_entries(entries.clone());
     t.filter = "lib".into();
-    let ctx = ViewCtx { show_hidden: false, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, stats: &stats };
+    let ctx = ViewCtx { show_hidden: false, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, pinned: &Default::default(), stats: &stats };
     t.rebuild(&ctx);
     let q = crate::fuzzy::Query::new("lib");
     let expect: usize = entries.iter().filter(|e| !e.hidden && !e.rel_hidden() && (crate::fuzzy::score(&q, e.lname()).is_some() || e.rel().is_some_and(|r| crate::fuzzy::score_ci(&q, &r).is_some()))).count();
@@ -1135,7 +1135,7 @@ fn compact_key_sorts_match_full_comparison_for_size_and_dates() {
             pump(&mut t, &stats);
             t.settings.sort = sort;
             t.settings.desc = desc;
-            let ctx = ViewCtx { show_hidden: true, show_system: true, folders_first: true, recents_on_top: false, recents: &recents, stats: &stats };
+            let ctx = ViewCtx { show_hidden: true, show_system: true, folders_first: true, recents_on_top: false, recents: &recents, pinned: &Default::default(), stats: &stats };
             t.rebuild(&ctx);
             assert!(t.view.len() > 100);
             for w in t.view.windows(2) {
@@ -1166,7 +1166,7 @@ fn recents_on_top_sorts_recents_first_then_folders_then_names() {
     let recents: HashSet<PathBuf> = [d.join("z.txt"), d.join("c10.txt"), d.join("dir2")].into_iter().collect();
     let mut t = Tab::new(61, d.clone(), ViewSettings::default(), egui::Context::default());
     pump(&mut t, &stats);
-    let ctx = ViewCtx { show_hidden: true, show_system: true, folders_first: true, recents_on_top: true, recents: &recents, stats: &stats };
+    let ctx = ViewCtx { show_hidden: true, show_system: true, folders_first: true, recents_on_top: true, recents: &recents, pinned: &Default::default(), stats: &stats };
     t.rebuild(&ctx);
     let names: Vec<&str> = t.view.iter().map(|&i| t.entries[i as usize].name.as_str()).collect();
     assert_eq!(names, ["dir2", "c10.txt", "z.txt", "dir1", "a.txt", "b.txt", "c2.txt"]);
@@ -1865,7 +1865,7 @@ fn finished_jobs_read_in_the_past_tense() {
 fn pump_contents(t: &mut Tab, hidden: bool) -> Vec<String> {
     let stats = HashMap::new();
     let recents = HashSet::new();
-    let ctx = ViewCtx { show_hidden: hidden, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, stats: &stats };
+    let ctx = ViewCtx { show_hidden: hidden, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, pinned: &Default::default(), stats: &stats };
     let start = Instant::now();
     loop {
         crate::contentsearch::pump(t, hidden);
@@ -4281,7 +4281,7 @@ fn filter_query_speed() {
     }
     let stats = HashMap::new();
     let recents = HashSet::new();
-    let ctx = ViewCtx { show_hidden: true, show_system: true, folders_first: true, recents_on_top: false, recents: &recents, stats: &stats };
+    let ctx = ViewCtx { show_hidden: true, show_system: true, folders_first: true, recents_on_top: false, recents: &recents, pinned: &Default::default(), stats: &stats };
     let mut t = Tab::new(42, dir, ViewSettings::default(), egui::Context::default());
     t.flatten = true;
     t.set_entries(entries);
@@ -11528,7 +11528,7 @@ fn git_merge_a_remote_branch() {
 /// Let a Columns tab and its strip's listings land, sorting as the view does.
 fn strip_settle(t: &mut Tab, hidden: bool) {
     let (stats, recents) = (HashMap::new(), HashSet::new());
-    let c = ViewCtx { show_hidden: hidden, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, stats: &stats };
+    let c = ViewCtx { show_hidden: hidden, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, pinned: &Default::default(), stats: &stats };
     let start = Instant::now();
     loop {
         t.poll();
@@ -11610,7 +11610,7 @@ fn columns_strip_lists_the_way_down() {
     t.up(|_| None);
     assert!(t.entries.is_empty(), "a fresh read is under way");
     let (stats, recents) = (HashMap::new(), HashSet::new());
-    let c = ViewCtx { show_hidden: false, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, stats: &stats };
+    let c = ViewCtx { show_hidden: false, show_system: false, folders_first: true, recents_on_top: false, recents: &recents, pinned: &Default::default(), stats: &stats };
     crate::columns::sync(&mut t, &c);
     assert_eq!(t.path, d.join("a"));
     assert!(!t.view.is_empty(), "the column's listing stands in");
