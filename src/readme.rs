@@ -2,7 +2,7 @@
 //! the rest a click away, and gone for that folder when closed. It is looked for among
 //! the folder's names once per listing, then read and parsed on a thread.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Instant;
 
