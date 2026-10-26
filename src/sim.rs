@@ -3170,8 +3170,11 @@ mod journeys {
         s.idle(2);
         // Toasts, job cards and letter tags float over the list by design.
         s.check_overlap = !s.popup_open() && s.app.toast.is_none() && s.app.jobs.is_empty() && s.app.hints.is_none();
+        // MAIA_SIM_POPUP_OVERLAP=1: every popup looked at is held to it too.
+        s.check_popup_overlap = s.popup_open() && std::env::var_os("MAIA_SIM_POPUP_OVERLAP").is_some();
         s.idle(2);
         s.check_overlap = false;
+        s.check_popup_overlap = false;
     }
 
     fn report(name: &str, s: &Sim) {
