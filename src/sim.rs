@@ -1532,8 +1532,12 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
         }
         141 => {
             // Show Space Used: walked by keys and clicks, into folders and back, some
-            // checked and trashed (asked first) or left, sometimes shown in Maia.
-            if rng.below(2) == 0 {
+            // checked and trashed (asked first) or left, sometimes shown in Maia. Free up
+            // too, from its command or Tab: groups opened and closed, folders checked,
+            // what is chosen deleted after asking, Find Duplicates opened from it.
+            if rng.below(3) == 0 {
+                s.cmd(Cmd::FreeUpSpace);
+            } else if rng.below(2) == 0 {
                 s.cmd(Cmd::SpaceUsed);
             } else {
                 let (x, y) = p(rng);
@@ -1546,9 +1550,10 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 if !matches!(s.app.popup, Popup::SpaceUsed(_)) {
                     break;
                 }
-                match rng.below(5) {
+                match rng.below(6) {
                     0 => click_control_at(s, rng.pick(&["space row", "space show", "space trash", "space trash cancel", "space close"])),
-                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "Enter", "Backspace", "space", "Delete", "End", "PageDown", "Escape"]))),
+                    1 => click_control_at(s, rng.pick(&["space free up", "space contents", "free group", "free part", "free go", "free delete confirm", "free delete cancel", "free dupes", "free chart"])),
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "ArrowRight", "ArrowLeft", "Enter", "Backspace", "space", "Delete", "End", "PageDown", "Tab", "Escape"]))),
                 }
                 s.idle(rng.below(4));
             }
@@ -13566,6 +13571,195 @@ mod journeys {
         assert!(some_text(&s, "This folder is empty"));
         s.act("key Escape");
         report("space used", &s);
+    }
+
+    fn free_up(s: &Sim) -> &crate::freeup::View {
+        space(s).free_up.as_ref().unwrap_or_else(|| s.fail("Free up has not started"))
+    }
+
+    /// Free Up Space from the palette: Space used on the whole disk, showing Free up. Build
+    /// output, packages, a download cache, thumbnails and the trash found under the home
+    /// folder and grouped; the last thirty days of the disk's record drawn over them, a day
+    /// pointed at; a group opened and a folder in it left out by keys; the rest deleted
+    /// after asking, and what was left out still there; Contents and back by Tab and by the
+    /// tabs; Find Duplicates from its row; a small window and the whole window.
+    #[test]
+    fn free_up_space() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("freeup");
+        let w = |p: &str, n: usize| {
+            let p = home.join(p);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, vec![b'x'; n]).unwrap();
+        };
+        w("Projects/engine/Cargo.toml", 20);
+        w("Projects/engine/target/debug/engine", 3_000_000);
+        w("Projects/tool/Cargo.toml", 20);
+        w("Projects/tool/target/debug/tool", 1_200_000);
+        w("Projects/site/package.json", 2);
+        w("Projects/site/node_modules/react/index.js", 800_000);
+        let cache = dirs::cache_dir().unwrap();
+        let pip = cache.join("pip/http/freeup-wheel");
+        std::fs::create_dir_all(pip.parent().unwrap()).unwrap();
+        std::fs::write(&pip, vec![b'p'; 600_000]).unwrap();
+        std::fs::create_dir_all(cache.join("thumbnails/normal")).unwrap();
+        std::fs::write(cache.join("thumbnails/normal/freeup.png"), vec![b't'; 40_000]).unwrap();
+        w("old draft.txt", 50_000);
+        crate::trashcan::delete(&home.join("old draft.txt")).unwrap();
+        // Twelve days of the disk's record, rising a little each day, under the reading the
+        // dialog takes itself today.
+        let top = crate::trashcan::topdir(&home);
+        let (total, free) = crate::fsx::disk_space(&home).unwrap();
+        let used = total - free;
+        let today = crate::timefmt::local_day(std::time::SystemTime::now());
+        let book = crate::freeup::book_path();
+        let _ = std::fs::remove_file(&book);
+        for k in (1..=12).rev() {
+            crate::freeup::note_in(&book, &top, used / 2 + used / 2 * (12 - k as u64) / 12, total, today - k);
+        }
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        palette_run(&mut s, "Free Up Space");
+        assert!(space(&s).showing_free, "opens on Free up");
+        wait_until(&mut s, "everything found and counted", 20, |s| space(s).free_up.as_ref().is_some_and(|f| f.done && f.counting() == 0));
+        assert_eq!(space(&s).root, top, "the whole disk");
+        s.idle(3);
+        for t in ["Build output", "Contents", "Free up", "Used now", "After", "Used, last 30 days"] {
+            assert!(some_text(&s, t), "{t} on screen");
+        }
+        use crate::freeup::Group;
+        assert_eq!(free_up(&s).groups.iter().map(|g| g.group).collect::<Vec<_>>(), [Group::Builds, Group::Packages, Group::Caches, Group::Thumbs, Group::Trash]);
+        // At a big font the list scrolls: its last row brought into view.
+        s.act("key End");
+        s.idle(20);
+        assert!(some_text(&s, "Duplicate files"));
+        s.act("key Home");
+        s.idle(20);
+        let parts = |s: &Sim, g: crate::freeup::Group| -> Vec<PathBuf> { free_up(s).groups.iter().filter(|x| x.group == g).flat_map(|x| x.parts.iter().map(|p| p.path.clone())).collect() };
+        let builds = parts(&s, crate::freeup::Group::Builds);
+        assert!(builds.contains(&home.join("Projects/engine/target")) && builds.contains(&home.join("Projects/tool/target")), "{builds:?}");
+        assert!(parts(&s, crate::freeup::Group::Packages).contains(&home.join("Projects/site/node_modules")));
+        assert!(parts(&s, crate::freeup::Group::Caches).contains(&cache.join("pip")));
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with('+') && t.ends_with("in 7 days")), "the week's change: {:?}", s.texts.iter().filter(|t| t.1.contains("days")).collect::<Vec<_>>());
+        look(&mut s, "free up");
+        s.shot("free-up-graphite");
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        look(&mut s, "free up, light");
+        s.shot("free-up-paper");
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        // A day of the chart pointed at.
+        let chart = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "free chart").map(|(_, r, _)| *r)).unwrap_or_else(|| s.fail("no chart"));
+        s.act(&format!("move {:.0} {:.0}", chart.right() - 3.0, chart.center().y));
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t.ends_with(" used") && t.contains(':')), "the day pointed at");
+        s.act("move -50 -50");
+        // Build output opened, the tool's build left out, closed again.
+        s.act("key Home");
+        assert_eq!(free_up(&s).sel, 0);
+        let rows = free_up(&s).rows().len();
+        s.act("key ArrowRight");
+        assert_eq!(free_up(&s).rows().len(), rows + free_up(&s).groups[0].parts.len(), "its folders under it");
+        look(&mut s, "free up, a group open");
+        s.shot("free-up-open");
+        let tool = free_up(&s).groups[0].parts.iter().position(|p| p.path == home.join("Projects/tool/target")).unwrap();
+        for _ in 0..=tool {
+            s.act("key ArrowDown");
+        }
+        s.act("key space");
+        assert!(!free_up(&s).groups[0].parts[tool].checked, "left out");
+        s.act("key ArrowLeft");
+        assert_eq!(free_up(&s).rows().len(), rows, "closed, the cursor on its group");
+        assert_eq!(free_up(&s).sel, 0);
+        // The packages put in, the thumbnails (other journeys' too) left alone.
+        s.act("key ArrowDown");
+        s.act("key space");
+        let thumbs = free_up(&s).rows().iter().position(|r| matches!(r, crate::freeup::Row::Group(g) if free_up(&s).groups[*g].group == crate::freeup::Group::Thumbs)).unwrap();
+        while free_up(&s).sel < thumbs {
+            s.act("key ArrowDown");
+        }
+        s.act("key space");
+        let chosen = free_up(&s).chosen();
+        assert!(some_text(&s, &format!("Free {}", crate::fsx::fmt_size(chosen))), "the button says how much");
+        s.act("key Delete");
+        assert!(free_up(&s).confirm, "asks first");
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with(&format!("Delete {} for good?", crate::fsx::fmt_size(chosen)))));
+        look(&mut s, "free up asking");
+        s.shot("free-up-confirm");
+        s.act("key Enter");
+        wait_until(&mut s, "deleted", 20, |_| !home.join("Projects/engine/target").exists() && !home.join("Projects/site/node_modules").exists() && !cache.join("pip").exists());
+        wait_until(&mut s, "the disk read again", 20, |s| free_up(s).note.as_deref().is_some_and(|n| n.starts_with("Freed")));
+        assert!(home.join("Projects/tool/target/debug/tool").exists() && home.join("Projects/engine/Cargo.toml").exists(), "what was left out stays");
+        assert!(crate::trashcan::list().iter().any(|i| i.original == home.join("old draft.txt")), "the trash was not chosen");
+        look(&mut s, "free up after");
+        s.shot("free-up-after");
+        // Contents and back, by key and by the tabs.
+        s.act("key Tab");
+        assert!(!space(&s).showing_free);
+        wait_until(&mut s, "the disk's folders counted", 20, |s| !space(s).counting());
+        assert!(space_names(&s).iter().any(|n| n == "home"), "the disk's top folder");
+        look(&mut s, "space used of the disk");
+        click_control(&mut s, "space free up");
+        assert!(space(&s).showing_free);
+        click_control(&mut s, "space contents");
+        assert!(!space(&s).showing_free);
+        s.act("key Tab");
+        // Find Duplicates from its row, in the home folder.
+        s.act("key End");
+        assert_eq!(free_up(&s).rows()[free_up(&s).sel], crate::freeup::Row::Dupes);
+        s.act("key Enter");
+        s.settle();
+        assert!(matches!(&s.app.popup, Popup::Duplicates(_)), "Find Duplicates open");
+        s.act("key Escape");
+        // A small window, and the whole window.
+        s.resize(520.0, 340.0);
+        palette_run(&mut s, "Free Up Space");
+        wait_until(&mut s, "found again", 20, |s| space(s).free_up.as_ref().is_some_and(|f| f.done && f.counting() == 0));
+        look(&mut s, "free up small");
+        s.shot("free-up-small");
+        s.act("key Escape");
+        s.resize(1280.0, 800.0);
+        palette_run(&mut s, "Free Up Space");
+        wait_until(&mut s, "found once more", 20, |s| space(s).free_up.as_ref().is_some_and(|f| f.done && f.counting() == 0));
+        s.act("key f");
+        s.idle(30);
+        look(&mut s, "free up, whole window");
+        s.shot("free-up-full");
+        s.act("key f");
+        s.idle(30);
+        s.act("key Escape");
+        // From Show Space Used in a project, Free up keeps to that folder.
+        go(&mut s, &home.join("Projects"));
+        palette_run(&mut s, "Show Space Used");
+        click_control(&mut s, "space free up");
+        wait_until(&mut s, "the project folder looked at", 20, |s| space(s).free_up.as_ref().is_some_and(|f| f.done && f.counting() == 0));
+        assert_eq!(parts(&s, crate::freeup::Group::Builds), [home.join("Projects/tool/target")]);
+        assert!(parts(&s, crate::freeup::Group::Trash).is_empty() && parts(&s, crate::freeup::Group::Thumbs).is_empty(), "nothing from outside it");
+        look(&mut s, "free up in a project");
+        s.act("key Escape");
+        // An empty folder has nothing; with animations off, in three more themes.
+        go(&mut s, &home.join("Empty"));
+        palette_run(&mut s, "Show Space Used");
+        s.act("key Tab");
+        wait_until(&mut s, "an empty folder looked at", 20, |s| space(s).free_up.as_ref().is_some_and(|f| f.done));
+        assert!(some_text(&s, "Nothing here that comes back by itself"));
+        look(&mut s, "free up, nothing");
+        s.shot("free-up-empty");
+        s.act("key Escape");
+        go(&mut s, &home);
+        s.app.cfg.animations = false;
+        for (theme, name) in [(crate::theme::ThemeName::Midnight, "midnight"), (crate::theme::ThemeName::Latte, "latte"), (crate::theme::ThemeName::Gruvbox, "gruvbox")] {
+            s.app.cfg.theme = theme;
+            palette_run(&mut s, "Free Up Space");
+            wait_until(&mut s, "found in another theme", 20, |s| space(s).free_up.as_ref().is_some_and(|f| f.done && f.counting() == 0));
+            look(&mut s, &format!("free up, {name}"));
+            s.shot(&format!("free-up-{name}"));
+            s.act("key Escape");
+        }
+        s.app.cfg.animations = true;
+        report("free up", &s);
     }
 
     fn viewer(s: &Sim) -> &crate::viewer::State {

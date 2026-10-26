@@ -790,8 +790,21 @@ fn field_row(ui: &mut Ui, key_w: f32, key: &str, pal: &Palette, value: impl FnOn
 /// dialog opening, a label growing) the frame is drawn again before it is shown, so the
 /// footer never shows a frame laid out for the old width.
 pub(crate) fn footer(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette, add: impl FnOnce(&mut Ui)) {
+    footer_at(ui, items, pal, None, add);
+}
+
+/// `footer` with its buttons' labels (main one first) measured this frame: for buttons that
+/// come and go, which the frame before would lay out a frame late, the keys under them.
+pub(crate) fn footer_with(ui: &mut Ui, items: &[(&str, &str)], labels: &[&str], pal: &Palette, add: impl FnOnce(&mut Ui)) {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let pad = ui.spacing().button_padding.x;
+    let w = labels.iter().map(|l| (ui.painter().layout_no_wrap(l.to_string(), font.clone(), pal.text).size().x + 2.0 * pad).max(80.0)).sum::<f32>() + 8.0 * labels.len().saturating_sub(1) as f32;
+    footer_at(ui, items, pal, Some(w), add);
+}
+
+fn footer_at(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette, measured: Option<f32>, add: impl FnOnce(&mut Ui)) {
     let id = ui.id().with("footer");
-    let known = ui.ctx().data(|d| d.get_temp::<f32>(id));
+    let known = measured.or_else(|| ui.ctx().data(|d| d.get_temp::<f32>(id)));
     let bw = known.unwrap_or(0.0);
     ui.add_space(14.0);
     let (left, avail) = (ui.cursor().left(), ui.available_width());
@@ -815,7 +828,7 @@ pub(crate) fn footer(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette, add: im
     add(&mut b);
     let w = b.min_rect().width();
     ui.allocate_exact_size(vec2(avail, bt + band - top), Sense::hover());
-    if known.is_none_or(|k| (k - w).abs() > 0.5) {
+    if measured.is_none() && known.is_none_or(|k| (k - w).abs() > 0.5) {
         ui.ctx().data_mut(|d| d.insert_temp(id, w));
         ui.ctx().request_discard("dialog footer width");
     }
@@ -1682,7 +1695,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::ShelfMoveHere | Cmd::ShelfCopyHere => !app.shelf.items.is_empty() && t.archive.is_none() && !tab::is_computer(&t.path),
         Cmd::ClearShelf => !app.shelf.items.is_empty(),
         Cmd::TidyFolder => !tab::is_computer(&t.path) && t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()),
-        Cmd::CleanBuilds | Cmd::FindDuplicates | Cmd::SpaceUsed | Cmd::ViewPictures => !tab::is_computer(&t.path) && t.archive.is_none(),
+        Cmd::CleanBuilds | Cmd::FindDuplicates | Cmd::SpaceUsed | Cmd::FreeUpSpace | Cmd::ViewPictures => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::PreviousVersions => t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()) && matches!(t.target_entries().as_slice(), [e] if !e.is_dir),
         Cmd::CopyPathLine => p.line_hint.as_ref().is_some_and(|h| t.target_entries().iter().any(|e| e.path == h.0)),
         Cmd::OpenTabInWindow => p.tabs.len() > 0,

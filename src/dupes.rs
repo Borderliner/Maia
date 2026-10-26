@@ -400,8 +400,9 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         };
         let col = if st.refusal.is_some() { pal.danger } else { pal.text_dim };
         ui.label(egui::RichText::new(status).size(small).color(col));
-        pp::footer(ui, &[("Space", "check"), ("Ctrl+A", "check the extras"), ("Enter", "move to trash"), ("Esc", "close")], &pal, |ui| {
-            let label = if chosen == 0 { "Move to Trash".to_string() } else { format!("Move {} to Trash", crate::fsx::fmt_size(chosen_size)) };
+        let label = if chosen == 0 { "Move to Trash".to_string() } else { format!("Move {} to Trash", crate::fsx::fmt_size(chosen_size)) };
+        let labels: &[&str] = if st.sets.is_empty() { &[&label, "Cancel"] } else { &[&label, "Cancel", "Check the extras"] };
+        pp::footer_with(ui, &[("Space", "check"), ("Ctrl+A", "check the extras"), ("Enter", "move to trash"), ("Esc", "close")], labels, &pal, |ui| {
             let b = pp::primary_button(ui, &label, chosen > 0, &pal);
             crate::ui::note_control(ui, b.rect, "duplicates trash");
             trash |= b.clicked();

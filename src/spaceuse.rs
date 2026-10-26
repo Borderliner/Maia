@@ -3,6 +3,8 @@
 //! come from the folder-size workers (stats.rs) and land as they are counted. The list is
 //! sorted again only when sizes arrive, at most a few times a second, never on every
 //! frame, and the ring eases to the new shares instead of jumping.
+//!
+//! Tab turns it to Free up (freeup.rs): what under the folder could go to make room.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -46,9 +48,23 @@ pub struct State {
     /// Where it was opened: Backspace goes no higher.
     pub root: PathBuf,
     pub dir: PathBuf,
-    listing: Option<mpsc::Receiver<(Vec<Entry>, Option<u64>)>>,
+    listing: Option<mpsc::Receiver<(PathBuf, Vec<Entry>, Option<(u64, u64)>)>>,
     /// Free space on the folder's filesystem, read with the listing.
     free: Option<u64>,
+    /// The filesystem's size, read with it.
+    total: Option<u64>,
+    /// The folder is a stand-in until the listing comes: the disk it is on is what to show.
+    climb: bool,
+    /// Showing Free up instead of the folder's contents.
+    pub showing_free: bool,
+    /// Free up, from the first time it is shown.
+    pub free_up: Option<crate::freeup::View>,
+    /// The folders' sizes were asked for: not until the contents are shown.
+    requested: bool,
+    /// The disk read again after a delete Free up started.
+    disk_again: Option<mpsc::Receiver<Option<(u64, u64)>>>,
+    /// The delete Free up started, until it is done.
+    free_job: Option<u64>,
     slices: Vec<Slice>,
     /// When the listing landed: the ring sweeps round from it.
     shown_at: Option<f64>,
@@ -95,18 +111,40 @@ pub fn open(app: &mut App) {
     }
 }
 
+/// Free Up Space: Space used on the whole disk the folder is on, showing Free up.
+pub fn open_free(app: &mut App) {
+    match crate::devtools::target_dir(app) {
+        Some(d) => {
+            let ctx = app.ctx.clone();
+            let mut st = State::blank(d.clone());
+            st.climb = true;
+            st.showing_free = true;
+            st.go(d, None, &ctx);
+            app.popup = Popup::SpaceUsed(Box::new(st));
+        }
+        None => app.toast("Free Up Space needs a folder"),
+    }
+}
+
 impl State {
     pub fn new(root: PathBuf, ctx: &egui::Context) -> State {
-        let mut st = State { root: root.clone(), dir: root.clone(), listing: None, free: None, slices: vec![], shown_at: None, dim: 0.0, row_hover: None, chrome_h: 230.0, buttons: vec2(330.0, 28.0), items: vec![], order: vec![], waiting: vec![], unsorted: false, sorted_at: Instant::now(), sel: 0, checked: HashSet::new(), select: None, note: None, confirm: false, reveal: false, moved: false };
+        let mut st = State::blank(root.clone());
         st.go(root, None, ctx);
         st
+    }
+
+    fn blank(root: PathBuf) -> State {
+        State { root: root.clone(), dir: root, listing: None, free: None, total: None, climb: false, showing_free: false, free_up: None, requested: false, disk_again: None, free_job: None, slices: vec![], shown_at: None, dim: 0.0, row_hover: None, chrome_h: 230.0, buttons: vec2(330.0, 28.0), items: vec![], order: vec![], waiting: vec![], unsorted: false, sorted_at: Instant::now(), sel: 0, checked: HashSet::new(), select: None, note: None, confirm: false, reveal: false, moved: false }
     }
 
     /// Show `dir`, the cursor going to `select` once it is read.
     fn go(&mut self, dir: PathBuf, select: Option<PathBuf>, ctx: &egui::Context) {
         let (tx, rx) = mpsc::channel();
-        let (d, c) = (dir.clone(), ctx.clone());
+        let (c, climb) = (ctx.clone(), self.climb);
+        let d = dir.clone();
         let _ = std::thread::Builder::new().name("space used".into()).spawn(move || {
+            // Finding the disk's top stats each folder above: here, never in the frame.
+            let d = if climb { crate::trashcan::topdir(&d) } else { d };
             let mut v = vec![];
             if let Ok(rd) = std::fs::read_dir(&d) {
                 for e in rd.flatten() {
@@ -116,8 +154,11 @@ impl State {
                 }
             }
             // statvfs waits on a dead mount like read_dir does: here, never in the frame.
-            let free = crate::fsx::disk_space(&d).map(|s| s.1);
-            let _ = tx.send((v, free));
+            let disk = crate::fsx::disk_space(&d);
+            if let Some((total, free)) = disk {
+                crate::freeup::note(&d, total, free);
+            }
+            let _ = tx.send((d, v, disk));
             c.request_repaint();
         });
         self.dir = dir;
@@ -142,6 +183,21 @@ impl State {
 
     pub fn counting(&self) -> bool {
         self.listing.is_some() || !self.waiting.is_empty()
+    }
+
+    /// Read the disk's free space again, on a thread: once a delete is done.
+    fn read_disk(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = mpsc::channel();
+        let (d, c) = (self.dir.clone(), ctx.clone());
+        let _ = std::thread::Builder::new().name("space used disk".into()).spawn(move || {
+            let disk = crate::fsx::disk_space(&d);
+            if let Some((total, free)) = disk {
+                crate::freeup::note(&d, total, free);
+            }
+            let _ = tx.send(disk);
+            c.request_repaint();
+        });
+        self.disk_again = Some(rx);
     }
 
     fn current(&self) -> Option<&Item> {
@@ -176,15 +232,18 @@ impl State {
     /// Take in a listing that landed and sizes that were counted.
     pub fn pump(&mut self, stats: &mut crate::stats::Stats, ctx: &egui::Context) {
         if let Some(rx) = &self.listing {
-            if let Ok((v, free)) = rx.try_recv() {
+            if let Ok((d, v, disk)) = rx.try_recv() {
                 self.listing = None;
-                self.free = free;
+                if std::mem::take(&mut self.climb) {
+                    self.root = d.clone();
+                    self.dir = d;
+                }
+                self.free = disk.map(|x| x.1);
+                self.total = disk.map(|x| x.0);
                 self.shown_at = Some(ctx.input(|i| i.time));
                 self.items = v.into_iter().map(|e| Item { size: (!e.is_dir || e.is_link).then_some(e.size), entry: e }).collect();
                 self.waiting = (0..self.items.len() as u32).filter(|&i| self.items[i as usize].size.is_none()).collect();
-                for &i in &self.waiting {
-                    stats.request(&self.items[i as usize].entry.path);
-                }
+                self.requested = false;
                 self.sort();
                 if let Some(p) = self.select.take() {
                     self.sel = self.order.iter().position(|&k| self.items[k as usize].entry.path == p).unwrap_or(0);
@@ -192,7 +251,31 @@ impl State {
                 }
             }
         }
-        if !self.waiting.is_empty() {
+        if self.showing_free {
+            if self.free_up.is_none() && !self.climb {
+                self.free_up = Some(crate::freeup::View::new(self.root.clone(), ctx));
+            }
+            if let Some(f) = &mut self.free_up {
+                f.pump();
+            }
+        }
+        if let Some(rx) = &self.disk_again {
+            if let Ok(disk) = rx.try_recv() {
+                self.disk_again = None;
+                if let Some((total, free)) = disk {
+                    self.total = Some(total);
+                    self.free = Some(free);
+                }
+            }
+        }
+        // A whole disk's folders take a while to add up: not while Free up is all there is.
+        if !self.showing_free && !self.requested && self.listing.is_none() {
+            self.requested = true;
+            for &i in &self.waiting {
+                stats.request(&self.items[i as usize].entry.path);
+            }
+        }
+        if !self.waiting.is_empty() && self.requested {
             let items = &mut self.items;
             let before = self.waiting.len();
             self.waiting.retain(|&i| {
@@ -552,19 +635,76 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
     st.pump(&mut app.stats, ctx);
     let k = pp::take_keys(ctx);
     let (space, delete) = (crate::devtools::take(ctx, Modifiers::NONE, Key::Space), crate::devtools::take(ctx, Modifiers::NONE, Key::Delete));
-    let backspace = k.backspace && !st.confirm;
+    let (left, right) = (crate::devtools::take(ctx, Modifiers::NONE, Key::ArrowLeft), crate::devtools::take(ctx, Modifiers::NONE, Key::ArrowRight));
+    let free = st.showing_free;
+    let free_confirm = st.free_up.as_ref().is_some_and(|f| f.confirm);
+    let backspace = k.backspace && !st.confirm && !free;
     if k.esc {
-        if st.confirm {
+        if free_confirm && free {
+            if let Some(f) = &mut st.free_up {
+                f.confirm = false;
+            }
+        } else if st.confirm && !free {
             st.confirm = false;
         } else {
             return false;
+        }
+    }
+    if k.tab && !st.confirm && !free_confirm {
+        st.showing_free = !free;
+        st.note = None;
+        ctx.request_repaint();
+    }
+    // Free up's keys: rows, checks, groups opened and closed, and the delete asked for.
+    let (mut free_go, mut free_dupes) = (false, false);
+    if free {
+        if let Some(f) = &mut st.free_up {
+            let rows = f.rows();
+            if f.confirm {
+                free_go = k.enter || delete;
+            } else {
+                let before = f.sel;
+                pp::step(&mut f.sel, rows.len(), &k, |_| false);
+                if crate::devtools::take(ctx, Modifiers::NONE, Key::Home) {
+                    f.sel = 0;
+                }
+                if crate::devtools::take(ctx, Modifiers::NONE, Key::End) {
+                    f.sel = rows.len().saturating_sub(1);
+                }
+                if f.sel != before || space || left || right || k.enter || delete {
+                    f.note = None;
+                    f.reveal = true;
+                }
+                match rows.get(f.sel).copied() {
+                    Some(r @ crate::freeup::Row::Group(g)) => {
+                        if space {
+                            f.flip(r);
+                        }
+                        if right || left || k.enter {
+                            let open = if k.enter { !f.groups[g].open } else { right };
+                            f.open(r, open);
+                        }
+                    }
+                    Some(r @ crate::freeup::Row::Part(..)) => {
+                        if space {
+                            f.flip(r);
+                        }
+                        if left {
+                            f.open(r, false);
+                        }
+                    }
+                    Some(crate::freeup::Row::Dupes) => free_dupes = k.enter,
+                    None => {}
+                }
+                free_go = delete;
+            }
         }
     }
     if k.up || k.down || k.page_up || k.page_down || space || backspace || k.enter {
         st.note = None;
     }
     let n = st.order.len();
-    if !st.confirm {
+    if !st.confirm && !free {
         let before = st.sel;
         pp::step(&mut st.sel, n, &k, |_| false);
         if crate::devtools::take(ctx, Modifiers::NONE, Key::Home) {
@@ -576,7 +716,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         st.reveal |= st.sel != before;
         st.moved |= st.sel != before;
     }
-    if space && !st.confirm {
+    if space && !st.confirm && !free {
         let at = st.sel;
         st.flip(at);
     }
@@ -585,8 +725,8 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
     let row_h = (fs * 1.35 + 12.0).round();
     let list_max = pp::fit_list(ctx, 460.0, 220.0);
     let total = st.total();
-    let (mut enter, mut show, mut trash, mut cancel, mut close) = (None, false, (delete || k.enter && st.confirm) && !st.checked.is_empty(), false, false);
-    if k.enter && !st.confirm {
+    let (mut enter, mut show, mut trash, mut cancel, mut close) = (None, false, !free && (delete || k.enter && st.confirm) && !st.checked.is_empty(), false, false);
+    if k.enter && !st.confirm && !free {
         enter = Some(st.sel);
     }
     let mut toggle = None;
@@ -605,7 +745,9 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
     };
     let mut ring_click = None;
     use std::sync::atomic::Ordering::Relaxed;
-    let mut flip_full = !st.confirm && crate::devtools::take(ctx, Modifiers::NONE, Key::F);
+    let mut flip_full = !st.confirm && !free_confirm && crate::devtools::take(ctx, Modifiers::NONE, Key::F);
+    let showing_free = st.showing_free;
+    let mut switch_to = None;
     let full = FULL.load(Relaxed);
     // Growing to the window and back, eased at both ends.
     let t = if anim { ctx.animate_bool_with_time(egui::Id::new("space full"), full, 0.2) } else if full { 1.0 } else { 0.0 };
@@ -644,17 +786,27 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         let inset = col - ui.max_rect().left();
         let list_h = list_natural.min(list_cap);
         let mut what = pp::home_short(&st.dir);
-        if !wide {
-            what += &format!(" · {}{}", crate::fsx::fmt_size(total), if counting { " so far" } else { "" });
+        if showing_free {
+            if let (Some(f), Some(t)) = (st.free, st.total) {
+                what += &format!(" · {} free of {}", crate::fsx::fmt_size(f), crate::fsx::fmt_size(t));
+            }
+        } else {
+            if !wide {
+                what += &format!(" · {}{}", crate::fsx::fmt_size(total), if counting { " so far" } else { "" });
+            }
+            if let Some(f) = st.free {
+                what += &format!(" · {} free", crate::fsx::fmt_size(f));
+            }
         }
-        if let Some(f) = st.free {
-            what += &format!(" · {} free", crate::fsx::fmt_size(f));
-        }
+        // The two views' tabs, on the title's line before the full-window button.
+        let tab_font = FontId::proportional(12.0);
+        let tab_labels = ["Contents", "Free up"];
+        let tabs_w: f32 = tab_labels.iter().map(|l| (ui.painter().layout_no_wrap(l.to_string(), tab_font.clone(), pal.text).size().x + 14.0).max(26.0)).sum::<f32>() + 4.0;
         let title_h = ui.painter().layout_no_wrap("Space used".into(), FontId::proportional(ui.style().text_styles.get(&egui::TextStyle::Body).map_or(fs, |f| f.size) + 1.5), pal.text).size().y;
         ui.horizontal(|ui| {
             ui.add_space(inset);
             ui.vertical(|ui| {
-                ui.set_max_width(avail - 36.0);
+                ui.set_max_width(avail - 36.0 - tabs_w - 8.0);
                 pp::dialog_title(ui, "Space used", Some(&what), &pal);
             });
         });
@@ -667,12 +819,40 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         }
         crate::theme::paint_symbol(ui.painter(), Rect::from_center_size(br.center(), Vec2::splat(15.0)), if full { "minimize-2" } else { "maximize-2" }, if b.hovered() { pal.text } else { pal.text_dim });
         flip_full |= b.on_hover_text(if full { "Back to a dialog (F)" } else { "Fill the window (F)" }).clicked();
+        let tabs_r = Rect::from_min_size(pos2(br.left() - 8.0 - tabs_w, (br.center().y - 11.0).round()), vec2(tabs_w, 22.0));
+        let mut tui = ui.new_child(egui::UiBuilder::new().max_rect(tabs_r).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        tui.spacing_mut().item_spacing.x = 4.0;
+        if crate::devtools::chip(&mut tui, tab_labels[0], !showing_free, "space contents", "The folder's contents (Tab)", &pal, false) {
+            switch_to = Some(false);
+        }
+        if crate::devtools::chip(&mut tui, tab_labels[1], showing_free, "space free up", "What could go to make room (Tab)", &pal, false) {
+            switch_to = Some(true);
+        }
         ui.add_space(lerp(18.0, 24.0).round());
         // Ring and list are centred on each other: whichever is shorter stands in the
         // middle of the other's height, and filling the window both stand in its middle.
-        let bh = ring_d.max(list_h).max(lerp(0.0, full_h)).round();
+        let today = crate::timefmt::local_day(std::time::SystemTime::now());
+        let bh = if showing_free {
+            let natural = st.free_up.as_ref().map_or(row_h * 2.0, |f| crate::freeup::natural(f, fs, today));
+            natural.min(full_h.max(list_max)).max(lerp(0.0, full_h)).round()
+        } else {
+            ring_d.max(list_h).max(lerp(0.0, full_h)).round()
+        };
         let (body, _) = ui.allocate_exact_size(vec2(page, bh), Sense::hover());
         let mut ring_hover = None;
+        if showing_free {
+            let area = Rect::from_min_size(pos2(col, body.top()), vec2(avail, bh));
+            match &mut st.free_up {
+                Some(f) => {
+                    let look = crate::freeup::Look { fs, pal: &pal, now, disk: st.total.zip(st.free), after: colors[1 % colors.len()] };
+                    free_dupes |= crate::freeup::draw(ui, area, f, &look).dupes;
+                }
+                None => {
+                    crate::ui::spinner(ui.painter(), area.center(), 6.0, pal.text_dim, now);
+                    ctx.request_repaint();
+                }
+            }
+        } else {
         if wide {
             // The ring keeps 6 points round itself for a slice standing out; its drawn edge,
             // not that margin, lines up with the title.
@@ -781,10 +961,19 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                 st.row_hover = row_hover;
             }
         }
+        }
         body_h = bh;
         ui.add_space(lerp(16.0, 24.0).round());
         let chosen = st.checked.len();
-        let (status, col_status) = if st.confirm {
+        let (status, col_status) = if showing_free {
+            match &st.free_up {
+                Some(f) => {
+                    let (t, danger) = f.status();
+                    (t, if danger { pal.danger } else { pal.text_dim })
+                }
+                None => ("Reading the disk…".to_string(), pal.text_dim),
+            }
+        } else if st.confirm {
             let what = if chosen == 1 { "1 item".to_string() } else { format!("{chosen} items") };
             (format!("Move {what} ({}) to the trash?", crate::fsx::fmt_size(st.checked_size())), pal.danger)
         } else if let Some(t) = &st.note {
@@ -808,7 +997,13 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         let ft = ui.cursor().top();
         // The buttons' width from their labels, this frame: last frame's was a frame late
         // when they changed (asking to trash has two), and the keys ran under them.
-        let labels: Vec<String> = if st.confirm {
+        let free_chosen = st.free_up.as_ref().map_or(0, |f| f.chosen());
+        let free_asking = st.free_up.as_ref().is_some_and(|f| f.confirm);
+        let free_ready = st.free_up.as_ref().is_some_and(|f| f.ready());
+        let free_label = if free_chosen > 0 { format!("Free {}", crate::fsx::fmt_size(free_chosen)) } else { "Free space".to_string() };
+        let labels: Vec<String> = if showing_free {
+            if free_asking { vec!["Delete".into(), "Cancel".into()] } else { vec![free_label.clone(), "Close".into()] }
+        } else if st.confirm {
             vec!["Move to Trash".into(), "Cancel".into()]
         } else {
             let mut v = vec![if chosen == 0 { "Move to Trash".to_string() } else { format!("Move {} to Trash", crate::fsx::fmt_size(st.checked_size())) }, "Close".into()];
@@ -826,7 +1021,11 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         let mut left = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(col, ft), vec2(left_w, 400.0))).layout(egui::Layout::top_down(egui::Align::Min)));
         left.label(egui::RichText::new(status).size(small).color(col_status));
         left.add_space(6.0);
-        pp::hint_chips(&mut left, &[("Enter", "open folder"), ("Backspace", "up"), ("Space", "check"), ("Delete", "trash"), ("F", "full window"), ("Esc", "close")], &pal);
+        if showing_free {
+            pp::hint_chips(&mut left, &[("Space", "check"), ("→", "open"), ("Delete", "free"), ("Tab", "contents"), ("F", "full window"), ("Esc", "close")], &pal);
+        } else {
+            pp::hint_chips(&mut left, &[("Enter", "open folder"), ("Backspace", "up"), ("Space", "check"), ("Delete", "trash"), ("Tab", "free up"), ("F", "full window"), ("Esc", "close")], &pal);
+        }
         let lh = left.min_rect().height();
         let (bt, band) = if side { (ft, lh.max(st.buttons.y)) } else { (ft + lh + 12.0, st.buttons.y) };
         let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(col, bt), vec2(avail, band))).layout(egui::Layout::right_to_left(egui::Align::Center)));
@@ -834,7 +1033,29 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         let mut btn_h: f32 = 0.0;
         {
             let ui = &mut bui;
-            if st.confirm {
+            if showing_free {
+                if free_asking {
+                    let b = pp::primary_button(ui, "Delete", true, &pal);
+                    crate::ui::note_control(ui, b.rect, "free delete confirm");
+                    btn_h = btn_h.max(b.rect.height());
+                    free_go |= b.clicked();
+                    let c = pp::plain_button(ui, "Cancel", &pal);
+                    crate::ui::note_control(ui, c.rect, "free delete cancel");
+                    if c.clicked() {
+                        if let Some(f) = &mut st.free_up {
+                            f.confirm = false;
+                        }
+                    }
+                } else {
+                    let b = pp::primary_button(ui, &free_label, free_ready, &pal);
+                    crate::ui::note_control(ui, b.rect, "free go");
+                    btn_h = btn_h.max(b.rect.height());
+                    free_go |= b.clicked();
+                    let c = pp::plain_button(ui, "Close", &pal);
+                    crate::ui::note_control(ui, c.rect, "space close");
+                    close = c.clicked();
+                }
+            } else if st.confirm {
                 let b = pp::primary_button(ui, "Move to Trash", true, &pal);
                 crate::ui::note_control(ui, b.rect, "space trash confirm");
                 btn_h = btn_h.max(b.rect.height());
@@ -864,6 +1085,44 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         st.chrome_h = ui.min_rect().height() - body_h;
         });
     });
+    if let Some(to) = switch_to.filter(|_| !st.confirm && !st.free_up.as_ref().is_some_and(|f| f.confirm)) {
+        st.showing_free = to;
+        st.note = None;
+    }
+    if free_dupes {
+        let at = crate::freeup::reach(&st.root, &crate::fsx::home());
+        app.popup = crate::dupes::open(ctx, at);
+        return false;
+    }
+    if free_go {
+        if let Some(f) = &mut st.free_up {
+            if !f.confirm {
+                f.confirm = f.ready();
+            } else {
+                let (paths, size) = f.take_chosen();
+                if !paths.is_empty() {
+                    app.start_job(crate::ops::OpKind::Delete { paths });
+                    st.free_job = app.jobs.last().map(|j| j.id);
+                    f.freeing = Some(size);
+                }
+            }
+        }
+    }
+    // Free up's delete done: the disk read again, and how much went said.
+    if let Some(id) = st.free_job {
+        let job = app.jobs.iter().find(|j| j.id == id);
+        if job.is_none_or(|j| j.finished_at.is_some()) {
+            let errs = job.map_or(0, |j| j.progress.lock().map(|p| p.errors.len()).unwrap_or(0));
+            st.free_job = None;
+            if let Some(f) = &mut st.free_up {
+                let n = crate::fsx::fmt_size(f.freeing.take().unwrap_or(0));
+                f.note = Some(if errs == 0 { format!("Freed {n}") } else { format!("Freed part of {n}: {errs} couldn't be deleted") });
+            }
+            st.read_disk(ctx);
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
+    }
     if flip_full {
         FULL.store(!full, Relaxed);
     }

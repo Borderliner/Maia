@@ -1,4 +1,4 @@
-//! Application state, input routing, command dispatch and persistence.
+//! Application state, input routing, command dispatch and persistence.ggg
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -368,6 +368,7 @@ impl App {
         };
         theme::install_fonts(&ctx, &font_family, &cfg_mono);
         crate::mime::preload();
+        crate::freeup::note_home_later();
         // Nothing of Maia's on disk yet: a first start (the welcome tour).
         let first = [config::config_path(), config::userdata_path(), config::session_path()].iter().all(|p| !p.exists());
         let cfg = config::load_config();
@@ -2396,6 +2397,7 @@ impl App {
             },
             Cmd::PreviousVersions => crate::versions::open(self),
             Cmd::SpaceUsed => crate::spaceuse::open(self),
+            Cmd::FreeUpSpace => crate::spaceuse::open_free(self),
             Cmd::ViewPictures => crate::viewer::open(self),
             Cmd::AddToShelf => crate::shelf::add_selection(self),
             Cmd::ShelfMoveHere | Cmd::ShelfCopyHere => crate::shelf::put_here(self, cmd == Cmd::ShelfMoveHere),

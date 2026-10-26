@@ -42,6 +42,7 @@ mod ctxmenu;
 mod filediff;
 mod fontview;
 mod formatdrive;
+mod freeup;
 mod fsx;
 mod fuzzy;
 mod gitchanges;

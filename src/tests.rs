@@ -12500,3 +12500,175 @@ fn compress_and_extract_say_what_they_need() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A home folder with everything Free up looks for, under `d`: a Rust project's build, a
+/// web project's packages, the thumbnail cache, pip's and npm's downloads, a trashed
+/// project (whose node_modules is the trash's, not another project's), a folder this user
+/// can't change, and a plain file.
+fn free_up_home(d: &Path) -> crate::freeup::Places {
+    let home = d.join("home");
+    touch(&home.join("proj/Cargo.toml"), "[package]");
+    touch(&home.join("proj/target/debug/maia"), &"x".repeat(40_000));
+    touch(&home.join("web/package.json"), "{}");
+    touch(&home.join("web/node_modules/left-pad/index.js"), &"y".repeat(20_000));
+    touch(&home.join(".cache/thumbnails/normal/a.png"), &"t".repeat(8_000));
+    touch(&home.join(".cache/pip/http/wheel"), &"p".repeat(12_000));
+    touch(&home.join(".npm/_cacache/index"), &"n".repeat(6_000));
+    let trash = home.join(".local/share/Trash");
+    touch(&trash.join("files/old/package.json"), "{}");
+    touch(&trash.join("files/old/node_modules/x.js"), &"o".repeat(3_000));
+    touch(&trash.join("info/old.trashinfo"), "[Trash Info]\nPath=/home/x/old\nDeletionDate=2026-10-01T10:00:00\n");
+    touch(&home.join("notes.txt"), "keep");
+    // Outside the home folder: a disk's other folders hold no one's projects.
+    touch(&d.join("srv/app/Cargo.toml"), "[package]");
+    touch(&d.join("srv/app/target/x"), "x");
+    crate::freeup::Places { cache: home.join(".cache"), trashes: vec![trash], home }
+}
+
+fn free_up_done(v: &mut crate::freeup::View) {
+    let start = Instant::now();
+    while !(v.done && v.counting() == 0) {
+        assert!(start.elapsed() < Duration::from_secs(10), "the scan never finished");
+        std::thread::sleep(Duration::from_millis(10));
+        v.pump();
+    }
+}
+
+/// What Free up finds and where: everything that comes back by itself inside the folder,
+/// in a folder this user may change, grouped and sized; nothing inside the trash or the
+/// caches found twice by the walk; the walk kept to the home folder when the folder holds
+/// it, and to the folder itself otherwise.
+#[test]
+fn free_up_finds_what_comes_back() {
+    use crate::freeup::{Group, find};
+    let d = tmpdir("freeup-find");
+    let places = free_up_home(&d);
+    let home = places.home.clone();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let run = |root: &Path| {
+        let mut v = vec![];
+        find(root, &places, &stop, &mut |f| v.push((f.group, f.path.strip_prefix(&home).map(Path::to_path_buf).unwrap_or(f.path.clone()), f.note)));
+        v.sort_by(|a, b| a.1.cmp(&b.1));
+        v
+    };
+    let got = run(&home);
+    let want: Vec<(Group, PathBuf)> = vec![
+        (Group::Caches, ".cache/pip".into()),
+        (Group::Thumbs, ".cache/thumbnails".into()),
+        (Group::Trash, ".local/share/Trash".into()),
+        (Group::Caches, ".npm/_cacache".into()),
+        (Group::Builds, "proj/target".into()),
+        (Group::Packages, "web/node_modules".into()),
+    ];
+    assert_eq!(got.iter().map(|g| (g.0, g.1.clone())).collect::<Vec<_>>(), want);
+    assert_eq!(got[2].2, "1 item");
+    assert_eq!(got[4].2, "Rust build");
+    // The disk the home folder is on, opened at its top: only the home folder is walked.
+    assert_eq!(run(&d), got, "/srv's build is no one's project");
+    // A project folder: its own build and nothing from elsewhere in the home folder.
+    assert_eq!(run(&home.join("proj")).iter().map(|g| g.1.clone()).collect::<Vec<_>>(), [PathBuf::from("proj/target")]);
+    // Elsewhere on the disk, that folder is what is walked.
+    assert_eq!(run(&d.join("srv")).iter().map(|g| (g.0, g.1.clone())).collect::<Vec<_>>(), [(Group::Builds, d.join("srv/app/target"))]);
+    // A folder this user may not change keeps its build output.
+    if unsafe { libc::geteuid() } != 0 {
+        touch(&home.join("shared/package.json"), "{}");
+        touch(&home.join("shared/node_modules/a.js"), "a");
+        std::fs::set_permissions(home.join("shared"), std::os::unix::fs::PermissionsExt::from_mode(0o555)).unwrap();
+        assert!(!run(&home).iter().any(|g| g.1.starts_with("shared")), "not this user's to delete");
+        std::fs::set_permissions(home.join("shared"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+    for (kind, group) in [("Node packages", Group::Packages), ("Python environment", Group::Packages), ("Python test environments", Group::Packages), ("Rust build", Group::Builds), ("Python bytecode", Group::Builds), ("Cache", Group::Builds), ("Gradle build", Group::Builds)] {
+        assert_eq!(crate::freeup::group_of(kind), group, "{kind}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Free up's list: what comes back by itself checked and the rest not, sizes added up, a
+/// group checked whole or folder by folder, and the delete given the trash's files and info
+/// (never the trash folder). Run as the dialog runs it: what was not chosen stays.
+#[test]
+fn free_up_deletes_what_was_chosen() {
+    use crate::freeup::{Group, Row, View};
+    let ctx = egui::Context::default();
+    let d = tmpdir("freeup-view");
+    let places = free_up_home(&d);
+    let home = places.home.clone();
+    let mut v = View::new_in(home.clone(), Some(places), d.join("record"), &ctx);
+    free_up_done(&mut v);
+    let groups: Vec<Group> = v.groups.iter().map(|g| g.group).collect();
+    assert_eq!(groups, [Group::Builds, Group::Packages, Group::Caches, Group::Thumbs, Group::Trash], "in one order, whatever turned up first");
+    let checked: Vec<bool> = v.groups.iter().map(|g| g.parts.iter().all(|p| p.checked)).collect();
+    assert_eq!(checked, [true, false, true, true, false], "what comes back by itself is checked");
+    let size = |p: &str| crate::stats::compute(&home.join(p), &std::sync::atomic::AtomicU64::new(0), 0).size;
+    assert_eq!(v.chosen(), size("proj/target") + size(".cache/pip") + size(".npm/_cacache") + size(".cache/thumbnails"));
+    assert!(v.ready());
+    // The caches are two folders: listed under their group once it is opened.
+    let caches = v.rows().iter().position(|r| *r == Row::Group(2)).unwrap();
+    assert_eq!(v.rows().len(), 6, "five groups and Find Duplicates");
+    v.open(Row::Group(2), true);
+    assert_eq!(v.rows().len(), 8);
+    assert_eq!(v.rows()[caches + 1], Row::Part(2, 0));
+    // npm's alone left out; the trash put in.
+    let npm = v.groups[2].parts.iter().position(|p| p.path.ends_with("_cacache")).unwrap();
+    v.flip(Row::Part(2, npm));
+    v.flip(Row::Group(4));
+    let (paths, freed) = v.take_chosen();
+    let mut rel: Vec<PathBuf> = paths.iter().map(|p| p.strip_prefix(&home).unwrap().to_path_buf()).collect();
+    rel.sort();
+    assert_eq!(rel, [".cache/pip", ".cache/thumbnails", ".local/share/Trash/files", ".local/share/Trash/info", "proj/target"].map(PathBuf::from));
+    assert_eq!(freed, size("proj/target") + size(".cache/pip") + size(".cache/thumbnails") + size(".local/share/Trash"));
+    assert_eq!(v.groups.iter().map(|g| g.group).collect::<Vec<_>>(), [Group::Packages, Group::Caches], "what went is out of the list");
+    let j = ops::spawn(1, OpKind::Delete { paths }, ctx);
+    wait_job(&j);
+    assert!(j.progress.lock().unwrap().errors.is_empty());
+    for gone in ["proj/target", ".cache/pip", ".cache/thumbnails", ".local/share/Trash/files"] {
+        assert!(!home.join(gone).exists(), "{gone} deleted");
+    }
+    for kept in ["proj/Cargo.toml", "web/node_modules/left-pad/index.js", ".npm/_cacache/index", "notes.txt", ".local/share/Trash"] {
+        assert!(home.join(kept).exists(), "{kept} kept");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The record of how full a disk is: a reading a day, the day's latest standing only when
+/// it moved (a start that changes nothing writes nothing), a clock gone back ignored, each
+/// disk its own, a year kept. And when it is drawn: three readings reaching a week back,
+/// with the week's change from the reading a week ago or the first after it.
+#[test]
+fn disk_record_keeps_a_reading_a_day() {
+    use crate::freeup::{charted, days_in, note_in, week_change};
+    let d = tmpdir("freeup-record");
+    let f = d.join("maia/space-history");
+    let (root, data) = (Path::new("/"), Path::new("/data"));
+    const GB: u64 = 1 << 30;
+    note_in(&f, root, 10 * GB, 100 * GB, 100);
+    assert_eq!(days_in(&f, root), [(100, 10 * GB, 100 * GB)]);
+    let written = std::fs::metadata(&f).unwrap().modified().unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    note_in(&f, root, 10 * GB + (1 << 20), 100 * GB, 100);
+    assert_eq!(std::fs::metadata(&f).unwrap().modified().unwrap(), written, "a megabyte's change writes nothing");
+    assert_eq!(days_in(&f, root), [(100, 10 * GB, 100 * GB)]);
+    note_in(&f, root, 11 * GB, 100 * GB, 100);
+    assert_eq!(days_in(&f, root), [(100, 11 * GB, 100 * GB)], "the day's latest reading stands");
+    note_in(&f, data, GB, 2000 * GB, 100);
+    note_in(&f, root, 12 * GB, 100 * GB, 101);
+    note_in(&f, root, 5 * GB, 100 * GB, 99);
+    assert_eq!(days_in(&f, root), [(100, 11 * GB, 100 * GB), (101, 12 * GB, 100 * GB)], "a clock gone back changes nothing");
+    assert_eq!(days_in(&f, data), [(100, GB, 2000 * GB)]);
+    for day in 102..520 {
+        note_in(&f, root, day as u64 * GB / 10, 100 * GB, day);
+    }
+    let kept = days_in(&f, root);
+    assert_eq!(kept.len(), 400, "a year or so");
+    assert_eq!((kept[0].0, kept[399].0), (120, 519));
+    assert_eq!(days_in(&f, data).len(), 1, "another disk keeps its own");
+    // Drawn from a week back.
+    let r = |v: &[(i64, u64)]| v.iter().map(|&(d, u)| (d, u * GB, 100 * GB)).collect::<Vec<_>>();
+    assert!(!charted(&r(&[(195, 10), (199, 11)]), 200), "two readings");
+    assert!(!charted(&r(&[(195, 10), (197, 11), (200, 12)]), 200), "five days back");
+    assert!(charted(&r(&[(194, 10), (197, 11), (200, 12)]), 200));
+    assert_eq!(week_change(&r(&[(191, 10), (193, 12), (200, 15)]), 200), Some((7, 3 * GB as i64)), "from the reading a week back");
+    assert_eq!(week_change(&r(&[(195, 20), (200, 18)]), 200), Some((5, -2 * (GB as i64))), "or the first after it");
+    assert_eq!(week_change(&r(&[(200, 18)]), 200), None);
+    let _ = std::fs::remove_dir_all(&d);
+}

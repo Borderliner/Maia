@@ -27,7 +27,7 @@ fn home_trash() -> PathBuf {
 }
 
 /// Top directory (mount point) of the filesystem holding `p`.
-fn topdir(p: &Path) -> PathBuf {
+pub(crate) fn topdir(p: &Path) -> PathBuf {
     let dev = fs::symlink_metadata(p).map(|m| m.dev()).ok();
     let mut cur = p.to_path_buf();
     while let Some(parent) = cur.parent() {
@@ -116,7 +116,7 @@ pub fn delete(p: &Path) -> std::io::Result<()> {
     unreachable!()
 }
 
-fn trash_dirs() -> Vec<PathBuf> {
+pub(crate) fn trash_dirs() -> Vec<PathBuf> {
     let mut v = vec![home_trash()];
     // Every mount point (including tmpfs and removable media) may hold a topdir trash.
     let mounts = fs::read_to_string("/proc/self/mounts").unwrap_or_default();

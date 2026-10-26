@@ -326,6 +326,7 @@ commands! {
     FindDuplicates, "find_duplicates", Files, "Find Duplicates…", "Find files with the same contents under this folder, whatever their names, and trash the extra copies.", [];
     TidyFolder, "tidy_folder", Files, "Tidy Folder…", "Sort this folder's loose files into folders by kind, or its photos into a folder a month by when they were taken, seeing every move first.", [];
     SpaceUsed, "space_used", Files, "Show Space Used", "This folder's contents biggest first, each with its share, to find what fills the disk.", [];
+    FreeUpSpace, "free_up_space", Files, "Free Up Space…", "What could go to make room on this folder's disk: build output, download caches, thumbnails, the trash.", [];
     PreviousVersions, "previous_versions", Files, "Previous Versions…", "Earlier copies of the file kept in the disk's snapshots, to look at and restore.", [];
     CleanBuilds, "clean_build_folders", Files, "Clean Build Folders…", "Find build output and installed packages under this folder and trash the ones you pick.", [];
     CleanBuildsHome, "clean_build_folders_home", Files, "Clean Build Folders In Home…", "Find build output and installed packages in every project under your home folder.", [];
