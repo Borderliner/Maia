@@ -4,7 +4,8 @@
 //! sorted again only when sizes arrive, at most a few times a second, never on every
 //! frame, and the ring eases to the new shares instead of jumping.
 //!
-//! Tab turns it to Free up (freeup.rs): what under the folder could go to make room.
+//! Tab turns it to a map of the same contents, then to Free up (freeup.rs): what under
+//! the folder could go to make room.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -42,6 +43,8 @@ const SLICES: usize = 8;
 static FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The list sorted by how much each grew rather than by size (S). Kept likewise.
 static BY_CHANGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The contents drawn as a map instead of the ring and list, for the session.
+static MAP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// A smaller share than this goes into the shared slice; it would be a sliver.
 const MIN_SHARE: f32 = 0.015;
@@ -104,6 +107,13 @@ pub struct State {
     /// The cursor was put somewhere: it follows its item as sizes reorder the list;
     /// until then it stays on the first row, the biggest.
     moved: bool,
+    /// Where each item's block in the map is drawn now, easing to where it belongs, and
+    /// the folder they are for.
+    map_rects: std::collections::HashMap<u32, Rect>,
+    map_dir: PathBuf,
+    /// The map's layout, kept until a size comes or the room changes: what it was laid
+    /// for (sorted when, how many items, where), the blocks, and what the last one holds.
+    map_laid: Option<((Instant, usize, [u32; 4]), Vec<(u32, Rect)>, f64, usize)>,
 }
 
 /// Show Space Used for the folder the command targets.
@@ -140,7 +150,7 @@ impl State {
     }
 
     fn blank(root: PathBuf) -> State {
-        State { root: root.clone(), dir: root, listing: None, before: None, kept: false, free: None, total: None, climb: false, showing_free: false, free_up: None, requested: false, disk_again: None, free_job: None, slices: vec![], shown_at: None, dim: 0.0, row_hover: None, chrome_h: 230.0, buttons: vec2(330.0, 28.0), items: vec![], order: vec![], waiting: vec![], unsorted: false, sorted_at: Instant::now(), sel: 0, checked: HashSet::new(), select: None, note: None, confirm: false, reveal: false, moved: false }
+        State { root: root.clone(), dir: root, listing: None, before: None, kept: false, free: None, total: None, climb: false, showing_free: false, free_up: None, requested: false, disk_again: None, free_job: None, slices: vec![], shown_at: None, dim: 0.0, row_hover: None, chrome_h: 230.0, buttons: vec2(330.0, 28.0), items: vec![], order: vec![], waiting: vec![], unsorted: false, sorted_at: Instant::now(), sel: 0, checked: HashSet::new(), select: None, note: None, confirm: false, reveal: false, moved: false, map_rects: Default::default(), map_dir: PathBuf::new(), map_laid: None }
     }
 
     /// Show `dir`, the cursor going to `select` once it is read.
@@ -678,8 +688,17 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
             return false;
         }
     }
+    // Tab goes round: the contents as a ring and list, as a map, then Free up.
     if k.tab && !st.confirm && !free_confirm {
-        st.showing_free = !free;
+        use std::sync::atomic::Ordering::Relaxed;
+        if free {
+            st.showing_free = false;
+            MAP.store(false, Relaxed);
+        } else if MAP.load(Relaxed) {
+            st.showing_free = true;
+        } else {
+            MAP.store(true, Relaxed);
+        }
         st.note = None;
         ctx.request_repaint();
     }
@@ -829,7 +848,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         }
         // The two views' tabs, on the title's line before the full-window button.
         let tab_font = FontId::proportional(12.0);
-        let tab_labels = ["Contents", "Free up"];
+        let tab_labels = ["Contents", "Map", "Free up"];
         let tabs_w: f32 = tab_labels.iter().map(|l| (ui.painter().layout_no_wrap(l.to_string(), tab_font.clone(), pal.text).size().x + 14.0).max(26.0)).sum::<f32>() + 4.0;
         // With an earlier reading, the list sorts by size or by what grew.
         let sort_labels = ["Size", "Change"];
@@ -871,11 +890,15 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         let tabs_r = Rect::from_min_size(pos2(br.left() - 8.0 - tabs_w, (br.center().y - 11.0).round()), vec2(tabs_w, 22.0));
         let mut tui = ui.new_child(egui::UiBuilder::new().max_rect(tabs_r).layout(egui::Layout::left_to_right(egui::Align::Center)));
         tui.spacing_mut().item_spacing.x = 4.0;
-        if crate::devtools::chip(&mut tui, tab_labels[0], !showing_free, "space contents", "The folder's contents (Tab)", &pal, false) {
-            switch_to = Some(false);
+        let map = MAP.load(Relaxed);
+        if crate::devtools::chip(&mut tui, tab_labels[0], !showing_free && !map, "space contents", "The folder's contents (Tab)", &pal, false) {
+            switch_to = Some((false, false));
         }
-        if crate::devtools::chip(&mut tui, tab_labels[1], showing_free, "space free up", "What could go to make room (Tab)", &pal, false) {
-            switch_to = Some(true);
+        if crate::devtools::chip(&mut tui, tab_labels[1], !showing_free && map, "space map", "The contents as blocks as big as they are (Tab)", &pal, false) {
+            switch_to = Some((false, true));
+        }
+        if crate::devtools::chip(&mut tui, tab_labels[2], showing_free, "space free up", "What could go to make room (Tab)", &pal, false) {
+            switch_to = Some((true, map));
         }
         if grew {
             let by_change = BY_CHANGE.load(Relaxed);
@@ -897,6 +920,9 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         let bh = if showing_free {
             let natural = st.free_up.as_ref().map_or(row_h * 2.0, |f| crate::freeup::natural(f, fs, today));
             natural.min(full_h.max(list_max)).max(lerp(0.0, full_h)).round()
+        } else if MAP.load(Relaxed) {
+            // The map takes the list's full room, with the ring's height at least.
+            list_cap.max(ring_d).max(lerp(0.0, full_h)).round()
         } else {
             ring_d.max(list_h).max(lerp(0.0, full_h)).round()
         };
@@ -913,6 +939,23 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                     crate::ui::spinner(ui.painter(), area.center(), 6.0, pal.text_dim, now);
                     ctx.request_repaint();
                 }
+            }
+        } else if MAP.load(Relaxed) {
+            let area = Rect::from_min_size(pos2(col, body.top()), vec2(avail, bh));
+            let colours = |k: u32, it: &Item| match slice_of(k, it) {
+                Some((OTHER, _)) | None => other_color(&pal),
+                Some((_, i)) => colors[i % colors.len()],
+            };
+            match draw_map(ui, area, st, &colours, total, fs, &pal, anim) {
+                Some(MapClick::Enter(row)) => enter = Some(row),
+                Some(MapClick::Select(row)) => {
+                    st.sel = row;
+                    st.moved = true;
+                }
+                None => {}
+            }
+            if counting {
+                ctx.request_repaint_after(Duration::from_millis(100));
             }
         } else {
         if wide {
@@ -1122,7 +1165,8 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         if showing_free {
             pp::hint_chips(&mut left, &[("Space", "check"), ("→", "open"), ("Delete", "free"), ("Tab", "contents"), ("F", "full window"), ("Esc", "close")], &pal);
         } else {
-            let mut keys = vec![("Enter", "open folder"), ("Backspace", "up"), ("Space", "check"), ("Delete", "trash"), ("Tab", "free up")];
+            let next = if MAP.load(std::sync::atomic::Ordering::Relaxed) { "free up" } else { "map" };
+            let mut keys = vec![("Enter", "open folder"), ("Backspace", "up"), ("Space", "check"), ("Delete", "trash"), ("Tab", next)];
             if st.before.is_some() {
                 keys.push(("S", "size or change"));
             }
@@ -1188,8 +1232,9 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         st.chrome_h = ui.min_rect().height() - body_h;
         });
     });
-    if let Some(to) = switch_to.filter(|_| !st.confirm && !st.free_up.as_ref().is_some_and(|f| f.confirm)) {
-        st.showing_free = to;
+    if let Some((free, map)) = switch_to.filter(|_| !st.confirm && !st.free_up.as_ref().is_some_and(|f| f.confirm)) {
+        st.showing_free = free;
+        MAP.store(map, std::sync::atomic::Ordering::Relaxed);
         st.note = None;
     }
     if free_dupes {
@@ -1297,4 +1342,151 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         st.confirm = false;
     }
     true
+}
+
+enum MapClick {
+    Enter(usize),
+    Select(usize),
+}
+
+/// Blocks laid out in rows down the shorter side, each row as long as keeps its blocks
+/// nearest square (the squarified layout): `sizes` biggest first, as areas in `r`.
+fn squarify(sizes: &[(u32, f64)], r: Rect, out: &mut Vec<(u32, Rect)>) {
+    let total: f64 = sizes.iter().map(|s| s.1).sum();
+    if total <= 0.0 || r.width() < 1.0 || r.height() < 1.0 {
+        return;
+    }
+    let scale = (r.width() as f64 * r.height() as f64) / total;
+    let mut rest = r;
+    let mut i = 0;
+    // The worst ratio of a row of blocks laid along a side `side` long.
+    let worst = |row: &[(u32, f64)], side: f64| -> f64 {
+        let s: f64 = row.iter().map(|x| x.1 * scale).sum();
+        let (mx, mn) = row.iter().fold((0.0f64, f64::MAX), |(a, b), x| (a.max(x.1 * scale), b.min(x.1 * scale)));
+        let s2 = s * s;
+        let w2 = side * side;
+        (w2 * mx / s2).max(s2 / (w2 * mn))
+    };
+    while i < sizes.len() {
+        let side = rest.width().min(rest.height()) as f64;
+        let mut j = i + 1;
+        while j < sizes.len() && worst(&sizes[i..j + 1], side) <= worst(&sizes[i..j], side) {
+            j += 1;
+        }
+        let row = &sizes[i..j];
+        let sum: f64 = row.iter().map(|x| x.1 * scale).sum();
+        let thick = (sum / side) as f32;
+        let mut at = 0.0f32;
+        if rest.width() >= rest.height() {
+            // A column at the left, the blocks stacked down it.
+            for x in row {
+                let h = (x.1 * scale / thick as f64) as f32;
+                out.push((x.0, Rect::from_min_size(pos2(rest.left(), rest.top() + at), vec2(thick, h))));
+                at += h;
+            }
+            rest.min.x += thick;
+        } else {
+            for x in row {
+                let w = (x.1 * scale / thick as f64) as f32;
+                out.push((x.0, Rect::from_min_size(pos2(rest.left() + at, rest.top()), vec2(w, thick))));
+                at += w;
+            }
+            rest.min.y += thick;
+        }
+        i = j;
+    }
+}
+
+/// The contents as a map: every item a block as big as its share, coloured as its slice
+/// of the ring. A folder's block opens it.
+fn draw_map(ui: &mut egui::Ui, area: Rect, st: &mut State, colour: &dyn Fn(u32, &Item) -> Color32, total: u64, fs: f32, pal: &crate::theme::Palette, anim: bool) -> Option<MapClick> {
+    if st.map_dir != st.dir {
+        st.map_dir = st.dir.clone();
+        st.map_rects.clear();
+    }
+    // Biggest first; past a few hundred the rest share one block, too small to point at.
+    // Laid out again only when sizes came (the list was sorted) or the room changed.
+    const MOST: usize = 300;
+    let key = (st.sorted_at, st.items.len(), [area.min.x, area.min.y, area.max.x, area.max.y].map(|v| v.round() as u32));
+    if st.map_laid.as_ref().is_none_or(|l| l.0 != key) {
+        let mut sized: Vec<(u32, f64)> = st.items.iter().enumerate().filter_map(|(k, it)| it.size.filter(|&s| s > 0).map(|s| (k as u32, s as f64))).collect();
+        crate::tab::merge_sort(&mut sized, &|a: &(u32, f64), b: &(u32, f64)| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let rest: f64 = sized.iter().skip(MOST).map(|s| s.1).sum();
+        let rest_n = sized.len().saturating_sub(MOST);
+        sized.truncate(MOST);
+        if rest > 0.0 {
+            sized.push((OTHER, rest));
+        }
+        let mut laid = Vec::with_capacity(sized.len());
+        squarify(&sized, area, &mut laid);
+        st.map_laid = Some((key, laid, rest, rest_n));
+    }
+    let Some((_, laid, rest, rest_n)) = st.map_laid.take() else { return None };
+    // Each block eases to its place as sizes arrive and the layout shifts.
+    let dt = ui.input(|i| i.stable_dt).min(0.1);
+    let f = if anim { 1.0 - (-dt * 14.0).exp() } else { 1.0 };
+    let mut moving = false;
+    let sel_k = st.order.get(st.sel).copied();
+    let pointer = ui.ctx().pointer_hover_pos().filter(|p| area.contains(*p));
+    let mut click = None;
+    let small = FontId::proportional(fs - 1.5);
+    for &(k, goal) in &laid {
+        let now = st.map_rects.entry(k).or_insert(goal);
+        let lerp = |a: f32, b: f32| a + (b - a) * f;
+        *now = Rect::from_min_max(pos2(lerp(now.min.x, goal.min.x), lerp(now.min.y, goal.min.y)), pos2(lerp(now.max.x, goal.max.x), lerp(now.max.y, goal.max.y)));
+        if (now.min - goal.min).length() + (now.max - goal.max).length() > 0.5 {
+            moving = true;
+        } else {
+            *now = goal;
+        }
+        let r = now.shrink(1.0);
+        if r.width() < 1.0 || r.height() < 1.0 {
+            continue;
+        }
+        let it = st.items.get(k as usize);
+        let base = it.map_or(other_color(pal), |it| colour(k, it));
+        let over = pointer.is_some_and(|p| r.contains(p));
+        let fill = pal.bg.lerp_to_gamma(base, if over { 0.78 } else { 0.62 });
+        let round = CornerRadius::same(if r.width().min(r.height()) > 12.0 { 4 } else { 1 });
+        ui.painter().rect_filled(r, round, fill);
+        if Some(k) == sel_k {
+            ui.painter().rect_stroke(r.shrink(1.0), round, egui::Stroke::new(2.0, pal.text), egui::StrokeKind::Inside);
+        }
+        // Dark text on a light block, light on a dark one.
+        let lum = 0.2126 * fill.r() as f32 + 0.7152 * fill.g() as f32 + 0.0722 * fill.b() as f32;
+        let ink = if lum > 150.0 { Color32::from_gray(20) } else { Color32::from_gray(240) };
+        let name = match it {
+            Some(it) => it.entry.name.clone(),
+            None => format!("{rest_n} more"),
+        };
+        let size = if k == OTHER { rest as u64 } else { it.and_then(|i| i.size).unwrap_or(0) };
+        if r.width() >= 40.0 && r.height() >= fs + 8.0 {
+            let g = crate::listing::elided(ui, &name, FontId::proportional(fs - 0.5), r.width() - 12.0, ink);
+            let gh = g.size().y;
+            ui.painter().galley(pos2(r.left() + 6.0, r.top() + 4.0), g, ink);
+            if r.height() >= gh + fs + 10.0 {
+                let share = if total > 0 { format!(" · {}", percent(size as f32 / total as f32)) } else { String::new() };
+                let sg = crate::listing::elided(ui, &format!("{}{share}", crate::fsx::fmt_size(size)), small.clone(), r.width() - 12.0, ink.gamma_multiply(0.75));
+                ui.painter().galley(pos2(r.left() + 6.0, r.top() + 5.0 + gh), sg, ink);
+            }
+        }
+        if over {
+            let row = st.order.iter().position(|&o| o == k);
+            let resp = ui.interact(r, egui::Id::new(("space map", k)), Sense::click());
+            crate::ui::note_control(ui, r, "space block");
+            let dir = it.is_some_and(|i| i.entry.is_dir && !i.entry.is_link);
+            if dir {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            let tip = format!("{name} · {}", crate::fsx::fmt_size(size));
+            if resp.on_hover_text(tip).clicked() {
+                click = row.map(|r| if dir { MapClick::Enter(r) } else { MapClick::Select(r) });
+            }
+        }
+    }
+    st.map_laid = Some((key, laid, rest, rest_n));
+    if moving {
+        ui.ctx().request_repaint();
+    }
+    click
 }
