@@ -95,8 +95,10 @@ struct Cache {
 static CACHE: RwLock<Option<Cache>> = RwLock::new(None);
 static QUEUE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 static WORKER: Mutex<Option<mpsc::Sender<Vec<PathBuf>>>> = Mutex::new(None);
-/// Past this many marked files the cache starts again.
+/// Past this many marked files the cache starts again; and past this many unmarked
+/// (eight bytes each), they are read again when next drawn.
 const MOST: usize = 100_000;
+const MOST_BARE: usize = 2_000_000;
 
 fn key(p: &Path) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -128,22 +130,29 @@ pub fn get(p: &Path) -> Option<Option<Arc<Origin>>> {
     None
 }
 
-fn land(p: PathBuf, o: Option<Origin>) {
+/// What a batch of reads found, under one lock: the rows drawing wait once, and a list
+/// grouped by origin is sorted again once for all of them.
+fn land(got: Vec<(PathBuf, Option<Origin>)>) {
     let mut g = CACHE.write().unwrap_or_else(|e| e.into_inner());
     let c = g.get_or_insert_with(Cache::default);
-    let k = key(&p);
-    c.pending.remove(&k);
-    match o {
-        Some(o) => {
-            if c.marked.len() >= MOST {
-                c.marked.clear();
+    for (p, o) in got {
+        let k = key(&p);
+        c.pending.remove(&k);
+        match o {
+            Some(o) => {
+                if c.marked.len() >= MOST {
+                    c.marked.clear();
+                }
+                c.bare.remove(&k);
+                c.marked.insert(p, Arc::new(o));
             }
-            c.bare.remove(&k);
-            c.marked.insert(p, Arc::new(o));
-        }
-        None => {
-            c.marked.remove(&p);
-            c.bare.insert(k);
+            None => {
+                if c.bare.len() >= MOST_BARE {
+                    c.bare.clear();
+                }
+                c.marked.remove(&p);
+                c.bare.insert(k);
+            }
         }
     }
     c.generation += 1;
@@ -176,10 +185,7 @@ pub fn flush(ctx: &egui::Context) {
         let _ = std::thread::Builder::new().name("origins".into()).spawn(move || {
             while let Ok(batch) = rx.recv() {
                 for chunk in batch.chunks(2000) {
-                    let got: Vec<(PathBuf, Option<Origin>)> = chunk.iter().map(|p| (p.clone(), read(p))).collect();
-                    for (p, o) in got {
-                        land(p, o);
-                    }
+                    land(chunk.iter().map(|p| (p.clone(), read(p))).collect());
                     ctx.request_repaint();
                 }
             }
