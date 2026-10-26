@@ -4,7 +4,8 @@
 //!
 //! JPEG, PNG, WebP and TIFF are cleaned here, in place: the fields' bytes are blanked
 //! and the location's directory emptied, so nothing moves and the picture itself is
-//! never decoded or saved again. Other kinds (HEIC above all) go through exiftool when it
+//! never decoded or saved again. Copies kept elsewhere in the file go too: the XMP
+//! packet, the IPTC record and the text a PNG writer may have put the Exif in again. Other kinds (HEIC above all) go through exiftool when it
 //! is installed, and can't be cleaned without it.
 
 use std::path::Path;
@@ -63,6 +64,9 @@ pub fn bytes(b: &mut [u8]) {
 /// and serial numbers (0xA430 to 0xA435, but 0xA432, the lens's focal range) and its
 /// MakerNote (0x927C).
 const IFD0_GONE: [u16; 3] = [0x010F, 0x0110, 0x013B];
+/// A TIFF's own copies of the rest: its XMP packet (700) and IPTC record (33723, which
+/// can name the city and the country).
+const IFD0_PACKETS: [u16; 2] = [0x02BC, 0x83BB];
 const EXIF_GONE: [u16; 6] = [0xA430, 0xA431, 0xA433, 0xA434, 0xA435, 0x927C];
 
 fn tiff_fields(d: &mut [u8]) {
@@ -76,7 +80,15 @@ fn tiff_fields(d: &mut [u8]) {
         match tag {
             0x8769 => sub.0 = rd32(d, at, le),
             0x8825 => sub.1 = rd32(d, at, le),
-            t if IFD0_GONE.contains(&t) => blank(d, ty, n, at, le),
+            t if IFD0_GONE.contains(&t) || IFD0_PACKETS.contains(&t) => blank(d, ty, n, at, le),
+            // Photoshop's resources, which hold the IPTC record once more.
+            0x8649 if matches!(ty, 1 | 7) && n > 4 => {
+                if let Some(o) = rd32(d, at, le).map(|o| o as usize) {
+                    if let Some(v) = o.checked_add(n as usize).and_then(|e| d.get_mut(o..e)) {
+                        resources(v);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -158,6 +170,9 @@ fn xmp(b: &mut [u8]) {
                     }
                 }
             }
+            if m == 0xED && s <= e {
+                iptc(&mut b[s..e]);
+            }
             i += 2 + len;
         }
         return;
@@ -182,6 +197,20 @@ fn xmp(b: &mut [u8]) {
                     b[end..end + 4].copy_from_slice(&crc.to_be_bytes());
                 }
             }
+            if matches!(&b[i + 4..i + 8], b"tEXt" | b"zTXt" | b"iTXt") && text_says_too_much(&b[i + 8..end]) {
+                // ImageMagick and others write the Exif again as text ("exif:GPSLatitude",
+                // "Raw profile type exif"): a blank comment of the same length instead.
+                b[i + 4..i + 8].copy_from_slice(b"tEXt");
+                let key: &[u8] = if len >= 8 { b"Comment\0" } else { b"C\0" };
+                if len >= key.len() {
+                    b[i + 8..i + 8 + key.len()].copy_from_slice(key);
+                    b[i + 8 + key.len()..end].fill(b' ');
+                } else {
+                    b[i + 8..end].fill(b' ');
+                }
+                let crc = crc32(&b[i + 4..end]);
+                b[end..end + 4].copy_from_slice(&crc.to_be_bytes());
+            }
             if &b[i + 4..i + 8] == b"IEND" {
                 return;
             }
@@ -199,6 +228,45 @@ fn xmp(b: &mut [u8]) {
             }
             i += 8 + len + (len & 1);
         }
+    }
+}
+
+/// A PNG text chunk (`data` from its keyword on) that holds the place or the camera: a
+/// copy of the Exif, XMP or IPTC kept as text, or one of ImageMagick's "exif:" fields
+/// naming them.
+fn text_says_too_much(data: &[u8]) -> bool {
+    let key = data.split(|&c| c == 0).next().unwrap_or_default().to_ascii_lowercase();
+    if key.starts_with(b"raw profile type ") {
+        let what = &key[17..];
+        return [&b"exif"[..], b"xmp", b"app1", b"iptc", b"8bim"].contains(&what);
+    }
+    let Some(field) = key.strip_prefix(b"exif:") else { return false };
+    [&b"gps"[..], b"make", b"model", b"serial", b"owner", b"artist", b"lens", b"maker"].iter().any(|w| field.windows(w.len()).any(|x| x == *w))
+}
+
+/// A JPEG's APP13 (Photoshop's resources): the IPTC record among them zeroed, the rest
+/// left as they are.
+fn iptc(seg: &mut [u8]) {
+    const HEAD: &[u8] = b"Photoshop 3.0\0";
+    if seg.starts_with(HEAD) {
+        resources(&mut seg[HEAD.len()..]);
+    }
+}
+
+/// Photoshop's resources ("8BIM" blocks): the IPTC record's zeroed.
+fn resources(seg: &mut [u8]) {
+    let mut i = 0;
+    while i + 12 <= seg.len() && &seg[i..i + 4] == b"8BIM" {
+        let id = u16::from_be_bytes([seg[i + 4], seg[i + 5]]);
+        // A Pascal name, padded to an even length.
+        let name = seg[i + 6] as usize;
+        let at = i + 6 + (name + 2) / 2 * 2;
+        let Some(size) = rd32(seg, at, false).map(|s| s as usize) else { return };
+        let (s, e) = (at + 4, (at + 4).saturating_add(size).min(seg.len()));
+        if id == 0x0404 && s <= e {
+            seg[s..e].fill(0);
+        }
+        i = at + 4 + size + (size & 1);
     }
 }
 
@@ -220,8 +288,8 @@ fn crc32(d: &[u8]) -> u32 {
 pub fn copies(files: &[std::path::PathBuf], tools: Option<&crate::drives::Tools>) -> Result<Vec<std::path::PathBuf>, String> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static N: AtomicUsize = AtomicUsize::new(0);
-    let base = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    let dir = base.join(format!("maia-shared/{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let leaf = format!("maia-shared/{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed));
+    let mut dir: Option<std::path::PathBuf> = None;
     let mut out = vec![];
     for f in files {
         let ext = f.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
@@ -231,7 +299,17 @@ pub fn copies(files: &[std::path::PathBuf], tools: Option<&crate::drives::Tools>
         }
         let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let b = clean(f, tools).map_err(|e| format!("Couldn't leave out the place in {name}: {e}"))?;
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        // Made for the first picture; the temporary folder when there is no runtime
+        // folder, or it can't be written.
+        let dir = match &dir {
+            Some(d) => d.clone(),
+            None => {
+                let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(|b| std::path::PathBuf::from(b).join(&leaf)).filter(|d| std::fs::create_dir_all(d).is_ok());
+                let d = runtime.unwrap_or_else(|| std::env::temp_dir().join(&leaf));
+                std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+                dir.insert(d).clone()
+            }
+        };
         let to = dir.join(&name);
         std::fs::write(&to, b).map_err(|e| e.to_string())?;
         out.push(to);
