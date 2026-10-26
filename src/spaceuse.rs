@@ -1444,6 +1444,9 @@ fn draw_map(ui: &mut egui::Ui, area: Rect, st: &mut State, colour: &dyn Fn(u32, 
     let pointer = ui.ctx().pointer_hover_pos().filter(|p| area.contains(*p));
     let mut click = None;
     let small = FontId::proportional(fs - 1.5);
+    // Blocks easing to their places can lie over each other a moment: the one drawn on top
+    // (as it was drawn last frame) is the one pointed at.
+    let top = pointer.and_then(|p| laid.iter().rev().map(|x| x.0).find(|k| st.map_rects.get(k).is_some_and(|r| r.shrink(1.0).contains(p))));
     for &(k, goal) in &laid {
         let now = st.map_rects.entry(k).or_insert(goal);
         let lerp = |a: f32, b: f32| a + (b - a) * f;
@@ -1459,7 +1462,7 @@ fn draw_map(ui: &mut egui::Ui, area: Rect, st: &mut State, colour: &dyn Fn(u32, 
         }
         let it = st.items.get(k as usize);
         let base = it.map_or(other_color(pal), |it| colour(k, it));
-        let over = pointer.is_some_and(|p| r.contains(p));
+        let over = pointer.is_some_and(|p| r.contains(p)) && top.is_none_or(|t| t == k);
         let fill = pal.bg.lerp_to_gamma(base, if over { 0.78 } else { 0.62 });
         let round = CornerRadius::same(if r.width().min(r.height()) > 12.0 { 4 } else { 1 });
         ui.painter().rect_filled(r, round, fill);
