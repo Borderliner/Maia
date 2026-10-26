@@ -1702,6 +1702,10 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                             ui.end_row();
                         }
                     }
+                    // A project's code: how many lines, and in what, most first.
+                    if let Some(c) = e.is_dir.then(|| crate::linecount::get(&e.path, ui.ctx())).flatten() {
+                        code_rows(ui, &c, &pal);
+                    }
                 });
             });
         });
@@ -3198,4 +3202,47 @@ pub(crate) fn user_name(uid: u32) -> String {
             (f.next()?.parse::<u32>().ok()? == uid).then(|| name.to_string())
         }))
         .unwrap_or_else(|| uid.to_string())
+}
+
+/// A project's lines of code in the details grid: the total, a bar of the languages'
+/// shares, then each language (the smallest together as Other).
+fn code_rows(ui: &mut Ui, c: &crate::linecount::Count, pal: &crate::theme::Palette) {
+    let small = |s: String| egui::RichText::new(s).size(11.5);
+    let total = c.lines.max(1) as f32;
+    ui.label(small("Code".into()).color(pal.text_dim));
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let what = format!("{} lines{}", crate::ui::fmt_count(c.lines as usize), if c.cut { " in the part read" } else { "" });
+        ui.add(egui::Label::new(small(what)).truncate());
+    });
+    ui.end_row();
+    ui.label("");
+    let w = ui.available_width().max(40.0);
+    let (r, _) = ui.allocate_exact_size(vec2(w, 8.0), Sense::hover());
+    let mut x = r.left();
+    for l in &c.langs {
+        let lw = r.width() * l.lines as f32 / total;
+        if lw >= 0.5 {
+            ui.painter().rect_filled(Rect::from_min_max(pos2(x, r.top()), pos2((x + lw).min(r.right()), r.bottom())), CornerRadius::ZERO, l.color);
+        }
+        x += lw;
+    }
+    // Round ends without a seam between the shares: the bar's own rounding drawn over.
+    ui.painter().rect_stroke(r.expand(0.5), CornerRadius::same(4), egui::Stroke::new(1.5, pal.panel), egui::StrokeKind::Outside);
+    ui.end_row();
+    let shown = if c.langs.len() > 6 { 5 } else { c.langs.len() };
+    let other: u64 = c.langs.iter().skip(shown).map(|l| l.lines).sum();
+    let rows = c.langs.iter().take(shown).map(|l| (l.name, Some(l.color), l.lines)).chain((other > 0).then_some(("Other", None, other)));
+    for (name, col, lines) in rows {
+        ui.horizontal(|ui| {
+            let (d, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+            ui.painter().rect_filled(d, CornerRadius::same(2), col.unwrap_or(pal.text_dim));
+            ui.label(small(name.into()).color(pal.text_dim));
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let pct = lines as f32 / total * 100.0;
+            let p = if pct < 1.0 { format!("{pct:.1}%") } else { format!("{pct:.0}%") };
+            ui.add(egui::Label::new(small(format!("{} · {p}", crate::ui::fmt_count(lines as usize)))).truncate());
+        });
+        ui.end_row();
+    }
 }
