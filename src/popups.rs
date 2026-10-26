@@ -257,6 +257,8 @@ pub enum Popup {
     Phone(Box<crate::phone::State>),
     /// Paste from earlier copies.
     Pastes(crate::pastes::State),
+    /// A folder's pictures by the day they were taken.
+    Calendar(Box<crate::calendar::State>),
 }
 
 /// The branch menu, its lists read on a worker as it opens.
@@ -499,6 +501,7 @@ impl Popup {
             Popup::Jump(..) => "Jump",
             Popup::Phone(..) => "Phone",
             Popup::Pastes(..) => "Pastes",
+            Popup::Calendar(..) => "Calendar",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -1167,6 +1170,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::Jump(st) => crate::jump::popup(app, ctx, st),
         Popup::Phone(st) => crate::phone::popup(app, ctx, st),
         Popup::Pastes(st) => crate::pastes::popup(app, ctx, st),
+        Popup::Calendar(st) => crate::calendar::popup(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -1713,7 +1717,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::ShelfMoveHere | Cmd::ShelfCopyHere => !app.shelf.items.is_empty() && t.archive.is_none() && !tab::is_computer(&t.path),
         Cmd::ClearShelf => !app.shelf.items.is_empty(),
         Cmd::TidyFolder => !tab::is_computer(&t.path) && t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()),
-        Cmd::CleanBuilds | Cmd::FindDuplicates | Cmd::SpaceUsed | Cmd::FreeUpSpace | Cmd::ViewPictures => !tab::is_computer(&t.path) && t.archive.is_none(),
+        Cmd::CleanBuilds | Cmd::FindDuplicates | Cmd::SpaceUsed | Cmd::FreeUpSpace | Cmd::ViewPictures | Cmd::ViewCalendar => !tab::is_computer(&t.path) && t.archive.is_none(),
         Cmd::PreviousVersions => t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()) && matches!(t.target_entries().as_slice(), [e] if !e.is_dir),
         Cmd::CopyPathLine => p.line_hint.as_ref().is_some_and(|h| t.target_entries().iter().any(|e| e.path == h.0)),
         Cmd::OpenTabInWindow => p.tabs.len() > 0,

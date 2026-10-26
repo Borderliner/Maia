@@ -413,6 +413,7 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         if let [(_, false, _, ext)] = ents.as_slice() {
             if crate::viewer::is_picture(ext) {
                 items.push(Item::cmd(Cmd::ViewPictures));
+                items.push(Item::cmd(Cmd::ViewCalendar));
             }
         }
         // Shown without bsdtar too: chosen, they say what to install.

@@ -2423,6 +2423,7 @@ impl App {
             Cmd::SpaceUsed => crate::spaceuse::open(self),
             Cmd::FreeUpSpace => crate::spaceuse::open_free(self),
             Cmd::ViewPictures => crate::viewer::open(self),
+            Cmd::ViewCalendar => crate::calendar::open(self),
             Cmd::AddToShelf => crate::shelf::add_selection(self),
             Cmd::ShelfMoveHere | Cmd::ShelfCopyHere => crate::shelf::put_here(self, cmd == Cmd::ShelfMoveHere),
             Cmd::ClearShelf => self.shelf.items.clear(),

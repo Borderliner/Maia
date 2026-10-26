@@ -4,6 +4,7 @@ mod admin;
 mod anim;
 mod app;
 mod appearance;
+mod calendar;
 mod checksum;
 mod codesearch;
 mod archive;
