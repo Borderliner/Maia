@@ -182,6 +182,8 @@ pub struct Config {
     pub share_without_place: bool,
     /// A folder's README above its files.
     pub show_readme: bool,
+    /// The height its card was dragged to, in points (0: its own).
+    pub readme_height: f32,
     /// Folder sizes: master switch plus one switch per kind of drive.
     pub folder_sizes: bool,
     pub sizes_ssd: bool,
@@ -272,6 +274,7 @@ impl Default for Config {
             recents_store: RecentsStore::Persistent,
             share_without_place: false,
             show_readme: true,
+            readme_height: 0.0,
             folder_sizes: true,
             sizes_ssd: true,
             sizes_hdd: false,

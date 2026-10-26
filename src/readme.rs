@@ -87,8 +87,9 @@ pub fn sync(t: &mut crate::tab::Tab, ctx: &egui::Context) {
     card.rx = Some(rx);
 }
 
-/// How tall the card wants to be in a list `room` high; 0 for none.
-pub fn height(card: &mut Card, size: f32, room: f32) -> f32 {
+/// How tall the card wants to be in a list `room` high; 0 for none. `chosen` is the
+/// height its edge was dragged to (0: never).
+pub fn height(card: &mut Card, size: f32, room: f32, chosen: f32) -> f32 {
     if let Some(doc) = card.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
         card.rx = None;
         // An empty README is no card.
@@ -100,19 +101,29 @@ pub fn height(card: &mut Card, size: f32, room: f32) -> f32 {
         return 0.0;
     }
     let (h, _) = v.height(size);
-    let shut = shut_height(size);
+    let shut = shut_height(size, chosen, room);
     // The first frames lay out nothing yet: the start's height until they have.
     let want = if h <= 0.0 { shut } else { h };
-    (if card.open { want.min(room * 0.6) } else { want.min(shut) }).round()
+    (if card.open { want.min((room * 0.6).max(shut)) } else { want.min(shut) }).round()
 }
 
-/// The start shown: a heading and a few lines.
-fn shut_height(size: f32) -> f32 {
-    (size * 9.0 + 24.0).round()
+/// The start shown: the height the card was dragged to, else a heading and a few lines.
+pub fn shut_height(size: f32, chosen: f32, room: f32) -> f32 {
+    if chosen > 0.0 { chosen.clamp(min_height(size), max_height(room)) } else { (size * 9.0 + 24.0).round() }
+}
+
+/// The least it can be dragged to: a line or two.
+pub fn min_height(size: f32) -> f32 {
+    (size * 4.0 + 24.0).round()
+}
+
+/// The most: the list keeps a fifth of its room.
+pub fn max_height(room: f32) -> f32 {
+    (room * 0.8).round()
 }
 
 /// Draw the card in `r`, the margin around it included.
-pub fn draw(ui: &mut Ui, r: Rect, card: &mut Card, size: f32, spacing: f32, pal: &Palette, thumbs: &mut crate::thumbs::Thumbs, id: u64) -> Option<Act> {
+pub fn draw(ui: &mut Ui, r: Rect, card: &mut Card, size: f32, shut: f32, spacing: f32, pal: &Palette, thumbs: &mut crate::thumbs::Thumbs, id: u64) -> Option<Act> {
     let Some(v) = card.view.as_deref_mut() else { return None };
     let box_r = r.shrink2(vec2(8.0, 6.0));
     let p = ui.painter().clone();
@@ -126,7 +137,7 @@ pub fn draw(ui: &mut Ui, r: Rect, card: &mut Card, size: f32, spacing: f32, pal:
         act = Some(Act::Follow(f));
     }
     let (full, done) = v.height(size);
-    let more = full > body.height() + 1.0 || !done && full >= shut_height(size);
+    let more = full > body.height() + 1.0 || !done && full >= shut;
     // The start fades out above Show all; open, the link reads Show less.
     let fs = (size - 1.0).max(10.0);
     if more || card.open {

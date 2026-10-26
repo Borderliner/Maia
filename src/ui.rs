@@ -934,24 +934,57 @@ impl App {
             let p = self.panels.get_mut(&id).expect("drawn panel");
             let t = p.tab_mut();
             let fits = show && !tab::is_computer(&t.path) && t.archive.is_none() && !t.flatten && t.smart.is_none() && !t.content.on && t.filter.is_empty() && !t.settings.column_view && !t.settings.stack_view && !hidden.contains(&t.path) && !t.path.starts_with(crate::sidebar::trash_dir());
+            let chosen = self.cfg.readme_height;
+            let room = list_rect.height();
             let want = if fits {
                 crate::readme::sync(t, ui.ctx());
-                t.readme.as_deref_mut().map_or(0.0, |c| crate::readme::height(c, size, list_rect.height()))
+                t.readme.as_deref_mut().map_or(0.0, |c| crate::readme::height(c, size, room, chosen))
             } else {
                 0.0
             };
-            let h = if self.cfg.animations { ui.ctx().animate_value_with_time(Id::new(("readme h", id)), want, 0.16) } else { want };
+            // Dragged, the card follows the pointer at once; otherwise it slides.
+            let grip_id = Id::new(("readme grip", id));
+            let dragging = ui.ctx().is_being_dragged(grip_id);
+            let h = if self.cfg.animations { ui.ctx().animate_value_with_time(Id::new(("readme h", id)), want, if dragging { 0.0 } else { 0.16 }) } else { want };
             if h >= 1.0 && fits {
                 let card = Rect::from_min_max(list_rect.min, pos2(list_rect.right(), list_rect.top() + h));
                 let spacing = self.cfg.spacing;
                 let pal = self.pal;
+                let shut = crate::readme::shut_height(size, chosen, room);
                 let act = {
                     let App { panels, thumbs, .. } = self;
                     let t = panels.get_mut(&id).expect("drawn panel").tab_mut();
                     let mut cu = ui.new_child(UiBuilder::new().max_rect(card));
                     cu.set_clip_rect(card.intersect(ui.clip_rect()));
-                    t.readme.as_deref_mut().and_then(|c| crate::readme::draw(&mut cu, card, c, size, spacing, &pal, thumbs, id))
+                    t.readme.as_deref_mut().and_then(|c| crate::readme::draw(&mut cu, card, c, size, shut, spacing, &pal, thumbs, id))
                 };
+                // Its bottom edge drags to the height wanted, kept for every folder; a
+                // double click gives the start's own height back.
+                let edge = card.bottom() - 6.0;
+                let grip = Rect::from_min_max(pos2(card.left() + 8.0, edge - 3.0), pos2(card.right() - 8.0, card.bottom() + 2.0));
+                let g = ui.interact(grip, grip_id, Sense::click_and_drag());
+                note_control(ui, grip, "readme edge");
+                if g.hovered() || g.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                    let c = pos2(card.center().x, edge);
+                    ui.painter().rect_filled(Rect::from_center_size(c, vec2(36.0, 4.0)), CornerRadius::same(2), if g.dragged() { pal.accent } else { pal.text_dim });
+                }
+                if g.dragged() {
+                    if let Some(pp) = g.interact_pointer_pos() {
+                        let to = (pp.y - card.top() + 6.0).clamp(crate::readme::min_height(size), crate::readme::max_height(room)).round();
+                        if to != self.cfg.readme_height {
+                            self.cfg.readme_height = to;
+                            self.cfg_dirty = true;
+                        }
+                        if let Some(c) = self.panels.get_mut(&id).and_then(|p| p.tab_mut().readme.as_deref_mut()) {
+                            c.open = false;
+                        }
+                    }
+                }
+                if g.double_clicked() {
+                    self.cfg.readme_height = 0.0;
+                    self.cfg_dirty = true;
+                }
                 match act {
                     Some(crate::readme::Act::Hide(dir)) => {
                         self.ud.readme_hidden.push(dir);
