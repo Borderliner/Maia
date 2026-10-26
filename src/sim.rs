@@ -17160,6 +17160,20 @@ mod journeys {
         s.check_popup_overlap = false;
     }
 
+    /// Nothing left asking for frames once the feature is closed and toasts have gone:
+    /// an idle window costs no CPU.
+    fn settles_idle(s: &mut Sim, what: &str) {
+        s.act("move -50 -50");
+        let t0 = Instant::now();
+        while s.repaint != std::time::Duration::MAX {
+            if t0.elapsed().as_secs() >= 8 {
+                s.fail(&format!("{what}: still asking to be drawn again in {:?}", s.repaint));
+            }
+            s.frame(vec![]);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     fn click_rect(s: &mut Sim, r: Rect) {
         s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
     }
@@ -17268,6 +17282,7 @@ mod journeys {
         j.cancel.store(true, Relaxed);
         j.pause.store(false, Relaxed);
         wait_until(&mut s, "cancelled", 10, |s| crate::transfers::live(&s.app) == 0);
+        settles_idle(&mut s, "transfers");
         report("transfers", &s);
     }
 
@@ -17316,6 +17331,7 @@ mod journeys {
         look_popup(&mut s, "paste from earlier, narrow");
         s.act("key Escape");
         assert!(!s.popup_open());
+        settles_idle(&mut s, "pastes");
         report("pastes", &s);
     }
 
@@ -17379,6 +17395,7 @@ mod journeys {
         wait_until(&mut s, "listed small", 10, |s| controls_named("jump row").len() >= 1);
         look_popup(&mut s, "jump small");
         s.act("key Escape");
+        settles_idle(&mut s, "jump");
         report("jump", &s);
     }
 
@@ -17456,6 +17473,7 @@ mod journeys {
         s.cmd(PinTab);
         s.idle(20);
         assert!(!s.app.panel().tabs.iter().any(|t| t.pinned));
+        settles_idle(&mut s, "pins");
         report("pins", &s);
     }
 
@@ -17532,6 +17550,7 @@ mod journeys {
         s.cmd(ToggleReadme);
         s.idle(20);
         let _ = list_top(&s);
+        settles_idle(&mut s, "readme");
         report("readme", &s);
     }
 
@@ -17601,6 +17620,7 @@ mod journeys {
         wait_until(&mut s, "refused", 10, |s| s.app.toast.as_ref().is_some_and(|t| t.0.starts_with("Couldn't paste here")));
         assert_eq!(std::fs::read_dir(&ro).unwrap().count(), 0, "nothing left");
         std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+        settles_idle(&mut s, "paste a picture");
         report("paste a picture", &s);
     }
 
@@ -17706,6 +17726,7 @@ mod journeys {
         look_popup(&mut s, "send to phone small");
         s.shot("phone-small");
         s.act("key Escape");
+        settles_idle(&mut s, "phone");
         report("phone", &s);
     }
 
@@ -17780,6 +17801,7 @@ mod journeys {
         look_popup(&mut s, "calendar small");
         s.shot("calendar-small");
         s.act("key Escape");
+        settles_idle(&mut s, "calendar");
         report("calendar", &s);
     }
 
@@ -17845,6 +17867,7 @@ mod journeys {
         s.app.cfg.font_size = 16.5;
         s.app.cfg.spacing = 1.6;
         look(&mut s, "grouped by origin at a big font");
+        settles_idle(&mut s, "origin");
         report("origin", &s);
     }
 
@@ -17883,6 +17906,7 @@ mod journeys {
         s.resize(700.0, 500.0);
         s.idle(4);
         s.shot("lines-of-code-narrow");
+        settles_idle(&mut s, "lines of code");
         report("lines of code", &s);
     }
 
@@ -17959,6 +17983,7 @@ mod journeys {
         s.idle(20);
         look(&mut s, "what grew small");
         s.act("key Escape");
+        settles_idle(&mut s, "space map");
         report("space map", &s);
     }
 
