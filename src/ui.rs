@@ -962,9 +962,11 @@ impl App {
                 // double click gives the start's own height back.
                 let edge = card.bottom() - 6.0;
                 let grip = Rect::from_min_max(pos2(card.left() + 8.0, edge - 3.0), pos2(card.right() - 8.0, card.bottom() + 2.0));
-                let g = ui.interact(grip, grip_id, Sense::click_and_drag());
-                note_control(ui, grip, "readme edge");
-                if g.hovered() || g.dragged() {
+                let g = ui.interact(grip, grip_id, if crate::readme::settled(h) || dragging { Sense::click_and_drag() } else { Sense::hover() });
+                if crate::readme::settled(h) {
+                    note_control(ui, grip, "readme edge");
+                }
+                if (g.hovered() && crate::readme::settled(h)) || g.dragged() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
                     let c = pos2(card.center().x, edge);
                     ui.painter().rect_filled(Rect::from_center_size(c, vec2(36.0, 4.0)), CornerRadius::same(2), if g.dragged() { pal.accent } else { pal.text_dim });

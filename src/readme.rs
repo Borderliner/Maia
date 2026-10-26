@@ -131,25 +131,28 @@ pub fn draw(ui: &mut Ui, r: Rect, card: &mut Card, size: f32, shut: f32, spacing
     p.rect_stroke(box_r, CornerRadius::same(8), Stroke::new(1.0, pal.card_line()), StrokeKind::Inside);
     let body = box_r.shrink(1.0);
     let mut act = None;
+    // The start fades out above Show all; open, the link reads Show less. Where the fade
+    // or the link's bar is solid, the text under it is not drawn: nothing of it shows.
+    let (full, done) = v.height(size);
+    let more = full > body.height() + 1.0 || !done && full >= shut;
+    let fs = (size - 1.0).max(10.0);
+    let link_h = fs + 12.0;
+    let strip = Rect::from_min_max(pos2(body.left(), body.bottom() - link_h - if card.open { 0.0 } else { 18.0 }), body.max);
+    let steps = 12;
+    let solid = if card.open { strip.top() } else { egui::lerp(strip.top()..=strip.bottom(), SOLID_FROM as f32 / steps as f32) };
+    let shown = if more || card.open { Rect::from_min_max(body.min, pos2(body.right(), solid)) } else { body };
     let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(body));
-    inner.set_clip_rect(body.intersect(ui.clip_rect()));
+    inner.set_clip_rect(shown.intersect(ui.clip_rect()));
     if let Some(f) = crate::markdown::view(&mut inner, body, v, size, pal, spacing, thumbs, id ^ 0x5eed) {
         act = Some(Act::Follow(f));
     }
-    let (full, done) = v.height(size);
-    let more = full > body.height() + 1.0 || !done && full >= shut;
-    // The start fades out above Show all; open, the link reads Show less.
-    let fs = (size - 1.0).max(10.0);
     if more || card.open {
-        let link_h = fs + 12.0;
-        let strip = Rect::from_min_max(pos2(body.left(), body.bottom() - link_h - if card.open { 0.0 } else { 18.0 }), body.max);
         if !card.open {
-            let steps = 12;
             for k in 0..steps {
                 let t0 = k as f32 / steps as f32;
                 let y0 = egui::lerp(strip.top()..=strip.bottom(), t0);
                 let y1 = egui::lerp(strip.top()..=strip.bottom(), (k + 1) as f32 / steps as f32);
-                let a = ((k + 1) as f32 / steps as f32 * 1.6).min(1.0);
+                let a = fade_alpha(k, steps);
                 p.rect_filled(Rect::from_x_y_ranges(strip.x_range(), y0..=y1), CornerRadius::ZERO, pal.alt.gamma_multiply(a));
             }
         } else {
@@ -168,8 +171,13 @@ pub fn draw(ui: &mut Ui, r: Rect, card: &mut Card, size: f32, shut: f32, spacing
             card.open = !card.open;
         }
     }
-    // Close: this folder's README stays out of the way from now on.
+    // Close: this folder's README stays out of the way from now on. While the card slides
+    // in or out it is drawn (clipped) but not yet a button: the edge below is in its way.
     let cr = Rect::from_center_size(pos2(box_r.right() - 14.0, box_r.top() + 14.0), Vec2::splat(18.0));
+    if !settled(r.height()) {
+        crate::theme::paint_glyph(&p, cr.shrink(4.0), crate::theme::Glyph::Close, pal.text_dim);
+        return act;
+    }
     let resp = ui.interact(cr, egui::Id::new(("readme close", id)), Sense::click());
     crate::ui::note_control(ui, cr, "readme close");
     if resp.hovered() {
@@ -180,4 +188,23 @@ pub fn draw(ui: &mut Ui, r: Rect, card: &mut Card, size: f32, shut: f32, spacing
         act = Some(Act::Hide(card.dir.clone()));
     }
     act
+}
+
+/// How solid the fade over the start is at step `k` of `steps`, from the top.
+fn fade_alpha(k: usize, steps: usize) -> f32 {
+    ((k + 1) as f32 / steps as f32 * 1.6).min(1.0)
+}
+
+/// The first of the fade's twelve steps drawn solid.
+const SOLID_FROM: usize = 7;
+
+#[cfg(test)]
+pub fn fade_solid_from_ok() -> bool {
+    fade_alpha(SOLID_FROM, 12) >= 1.0 && fade_alpha(SOLID_FROM - 1, 12) < 1.0
+}
+
+/// Tall enough for the close button and the dragged edge not to meet: the card is out,
+/// not sliding.
+pub fn settled(h: f32) -> bool {
+    h >= 40.0
 }
