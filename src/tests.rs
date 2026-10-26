@@ -13524,3 +13524,91 @@ fn space_readings_stay_small() {
 fn readme_fade_is_solid_where_the_text_stops() {
     assert!(crate::readme::fade_solid_from_ok());
 }
+
+// ------------------------------------------------------------------ robustness
+
+/// What comes from outside never panics (a release build aborts on one): real photos cut
+/// short and with bytes changed at random through the cleaner, the phone server's parser
+/// fed garbage requests, addresses, code and QR texts of every shape.
+#[test]
+fn outside_input_never_panics() {
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let mut rnd = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    // Photos: made by ImageMagick with metadata where it is there, else small hand-made
+    // headers of each kind.
+    let d = tmpdir("fuzz");
+    let mut seeds: Vec<Vec<u8>> = vec![];
+    for ext in ["jpg", "png", "webp", "tif"] {
+        let f = d.join(format!("p.{ext}"));
+        let ok = std::process::Command::new("magick").args(["-size", "16x12", "gradient:red-blue"]).arg(&f).status().is_ok_and(|s| s.success());
+        if ok {
+            let _ = std::process::Command::new("exiv2").args(["-M", "set Exif.GPSInfo.GPSLatitude 1/1 2/1 3/1", "-M", "set Exif.Image.Make X", "-M", "set Xmp.exif.GPSLatitude 1,2N", "-M", "set Iptc.Application2.City C"]).arg(&f).output();
+            seeds.push(std::fs::read(&f).unwrap());
+        }
+    }
+    seeds.push(b"\xFF\xD8\xFF\xE1\x00\x10Exif\0\0II*\0\x08\0\0\0\xFF\xD9".to_vec());
+    seeds.push(b"\x89PNG\r\n\x1a\n\0\0\0\x0diTXtXML:com.adobe.xmp\0\0\0\0\0\0\0\0\0\0IEND".to_vec());
+    seeds.push(b"RIFF\x20\0\0\0WEBPXMP \x08\0\0\0abcdefgh".to_vec());
+    seeds.push(b"MM\0*\0\0\0\x08\0\x02\x88\x25\0\x04\0\0\0\x01\0\0\x01\0\x86\x49\0\x01\0\0\0\x20\0\0\0\x30".to_vec());
+    for round in 0..4000 {
+        let mut b = seeds[round % seeds.len()].clone();
+        match rnd() % 4 {
+            0 => b.truncate((rnd() as usize) % (b.len() + 1)),
+            1 => {
+                for _ in 0..1 + rnd() % 8 {
+                    if !b.is_empty() {
+                        let i = (rnd() as usize) % b.len();
+                        b[i] = rnd() as u8;
+                    }
+                }
+            }
+            2 => {
+                // A length or offset field made huge.
+                if b.len() > 8 {
+                    let i = (rnd() as usize) % (b.len() - 4);
+                    b[i..i + 4].copy_from_slice(&[0xFF, 0xFF, 0xFF, (rnd() as u8) | 0x80]);
+                }
+            }
+            _ => b.extend((0..rnd() % 64).map(|_| rnd() as u8)),
+        }
+        let len = b.len();
+        crate::scrub::bytes(&mut b);
+        assert_eq!(b.len(), len, "the cleaner keeps the length");
+        let _ = crate::exif::block(&b);
+    }
+    // The phone server's request parser.
+    let items = [crate::phone::Item { path: d.join("p.jpg"), name: "p.jpg".into(), dir: false, size: 3 }];
+    let clean = crate::phone::Clean { on: std::sync::atomic::AtomicBool::new(true), tools: None };
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let pieces: [&[u8]; 9] = [b"GET ", b"HEAD ", b"/T0KEN", b"/", b"0", b" HTTP/1.1", b"\r\n", b"\n", b"\xff\xfe"];
+    for _ in 0..3000 {
+        let mut req = vec![];
+        for _ in 0..rnd() % 12 {
+            req.extend_from_slice(pieces[(rnd() as usize) % pieces.len()]);
+            if rnd() % 5 == 0 {
+                req.push(rnd() as u8);
+            }
+        }
+        let mut out = vec![];
+        crate::phone::serve(&mut std::io::Cursor::new(req), &mut out, &items, "T0KEN", None, &clean, &stop, &mut |_| {});
+    }
+    // Addresses, code and QR texts.
+    let chars: Vec<char> = "ab:/@[]?#.%-_ 0é\u{1F600}\t*/\"\\".chars().collect();
+    for _ in 0..3000 {
+        let s: String = (0..rnd() % 40).map(|_| chars[(rnd() as usize) % chars.len()]).collect();
+        let _ = (crate::origin::host(&s), crate::origin::short(&s), crate::origin::openable(&s));
+        let _ = crate::linecount::code_lines(&s, &["//", "#"], Some(("/*", "*/")));
+        let _ = crate::linecount::code_lines(&s, &["--"], Some(("{-", "-}")));
+        let _ = crate::jump::parse_zoxide(&s);
+        let _ = crate::phone::ufw_allows(&s, 47250);
+        if let Some(c) = crate::qr::encode(s.as_bytes()) {
+            assert_eq!((c.size - 17) % 4, 0);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
