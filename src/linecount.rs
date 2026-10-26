@@ -17,7 +17,8 @@ const MAX_FILES: usize = 30_000;
 const MAX_BYTES: u64 = 256 << 20;
 /// A file bigger than this is generated or minified, not written.
 const MAX_FILE: u64 = 1 << 20;
-/// A count this old is made again when the folder is shown.
+/// A count this old is made again when the folder is shown again: while it stays shown
+/// it is left as it is.
 const STALE: Duration = Duration::from_secs(120);
 
 /// The languages counted: their extensions, name and the colour they are known by.
@@ -72,8 +73,9 @@ pub struct Count {
 
 enum Slot {
     Counting,
-    /// None: not a project, or nothing in it is code.
-    Done(Instant, Option<Arc<Count>>),
+    /// When it was made, the last frame (egui's pass) it was asked for in, and the count:
+    /// None when not a project or nothing in it is code.
+    Done(Instant, u64, Option<Arc<Count>>),
 }
 
 #[derive(Default)]
@@ -92,8 +94,14 @@ fn shared() -> &'static Mutex<Shared> {
 /// The count for `dir` when there is one; asked for when not.
 pub fn get(dir: &Path, ctx: &egui::Context) -> Option<Arc<Count>> {
     let mut s = shared().lock().unwrap_or_else(|e| e.into_inner());
-    let (have, again) = match s.slots.get(dir) {
-        Some(Slot::Done(at, c)) => (c.clone(), at.elapsed() > STALE),
+    // Asked for in the frame before (a frame may run twice), it is still shown.
+    let pass = ctx.cumulative_pass_nr();
+    let (have, again) = match s.slots.get_mut(dir) {
+        Some(Slot::Done(at, seen, c)) => {
+            let back = *seen + 2 < pass;
+            *seen = pass;
+            (c.clone(), back && at.elapsed() > STALE)
+        }
         Some(Slot::Counting) => return None,
         None => (None, true),
     };
@@ -127,7 +135,7 @@ fn worker() {
         };
         let (dir, ctx) = job;
         let c = count(&dir).map(Arc::new);
-        shared().lock().unwrap_or_else(|e| e.into_inner()).slots.insert(dir, Slot::Done(Instant::now(), c));
+        shared().lock().unwrap_or_else(|e| e.into_inner()).slots.insert(dir, Slot::Done(Instant::now(), ctx.cumulative_pass_nr(), c));
         ctx.request_repaint();
     }
 }
