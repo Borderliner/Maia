@@ -1351,7 +1351,7 @@ enum MapClick {
 
 /// Blocks laid out in rows down the shorter side, each row as long as keeps its blocks
 /// nearest square (the squarified layout): `sizes` biggest first, as areas in `r`.
-fn squarify(sizes: &[(u32, f64)], r: Rect, out: &mut Vec<(u32, Rect)>) {
+pub(crate) fn squarify(sizes: &[(u32, f64)], r: Rect, out: &mut Vec<(u32, Rect)>) {
     let total: f64 = sizes.iter().map(|s| s.1).sum();
     if total <= 0.0 || r.width() < 1.0 || r.height() < 1.0 {
         return;
@@ -1375,19 +1375,23 @@ fn squarify(sizes: &[(u32, f64)], r: Rect, out: &mut Vec<(u32, Rect)>) {
         }
         let row = &sizes[i..j];
         let sum: f64 = row.iter().map(|x| x.1 * scale).sum();
-        let thick = (sum / side) as f32;
+        // The last block of a row, and the last row, end at the edge exactly: what the
+        // floats lose on the way would put them a fraction past it.
+        let last_row = j == sizes.len();
+        let column = rest.width() >= rest.height();
+        let thick = if last_row { if column { rest.width() } else { rest.height() } } else { ((sum / side) as f32).min(if column { rest.width() } else { rest.height() }) };
         let mut at = 0.0f32;
-        if rest.width() >= rest.height() {
+        if column {
             // A column at the left, the blocks stacked down it.
-            for x in row {
-                let h = (x.1 * scale / thick as f64) as f32;
+            for (k, x) in row.iter().enumerate() {
+                let h = if k + 1 == row.len() { rest.height() - at } else { (x.1 * scale / thick as f64) as f32 };
                 out.push((x.0, Rect::from_min_size(pos2(rest.left(), rest.top() + at), vec2(thick, h))));
                 at += h;
             }
             rest.min.x += thick;
         } else {
-            for x in row {
-                let w = (x.1 * scale / thick as f64) as f32;
+            for (k, x) in row.iter().enumerate() {
+                let w = if k + 1 == row.len() { rest.width() - at } else { (x.1 * scale / thick as f64) as f32 };
                 out.push((x.0, Rect::from_min_size(pos2(rest.left() + at, rest.top()), vec2(w, thick))));
                 at += w;
             }
