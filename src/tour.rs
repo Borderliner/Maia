@@ -16,7 +16,7 @@ use egui::{Align2, CornerRadius, FontId, Id, Key, Modifiers, Rect, Sense, Stroke
 
 use crate::app::App;
 use crate::commands::Cmd;
-use crate::popups::{self as pp, Opt, Popup};
+use crate::popups::{self as pp, Popup};
 use crate::theme::{Palette, ThemeName};
 
 /// The version What's New describes. A start that has seen an older one shows it.
@@ -35,8 +35,13 @@ pub enum Body {
     Hero,
     /// A film of the feature.
     Film(&'static [u8]),
-    /// The choices made on arrival.
-    Setup,
+    /// The choices made on arrival, a few at a time: the look, the text's size, how
+    /// things open, what is shown, and the extras.
+    Look,
+    Size,
+    Clicks,
+    Show,
+    Extras,
     /// Everything else the version added, in groups.
     List,
 }
@@ -68,9 +73,33 @@ pub const WELCOME: &[Page] = &[
         keys: &[],
     },
     Page {
-        title: "Make it yours",
-        text: "The choices most people make on arrival. Nothing changes unless you pick it, and each stays in Options, on the page named above it.",
-        body: Body::Setup,
+        title: "Pick a look",
+        text: "Point at a theme to see the whole window in it. Every one is in Choose Theme, beside its code colours.",
+        body: Body::Look,
+        keys: &[Cmd::ChooseTheme],
+    },
+    Page {
+        title: "A comfortable size",
+        text: "Text and the room around it, together. The window follows as you pick, and the keys change it a step at a time later.",
+        body: Body::Size,
+        keys: &[Cmd::FontBigger],
+    },
+    Page {
+        title: "Opening things",
+        text: "Two clicks open a file, as on most desktops, or one does, as on the web. Enter always opens what the cursor is on.",
+        body: Body::Clicks,
+        keys: &[],
+    },
+    Page {
+        title: "What you see",
+        text: "Hidden files are the ones whose names start with a dot, settings mostly. Pictures can show what they hold where you look at them.",
+        body: Body::Show,
+        keys: &[Cmd::ToggleHidden],
+    },
+    Page {
+        title: "Two extras",
+        text: "Folders other apps open can open here, and files can be found by what they are about. Both wait in Options when you want them later.",
+        body: Body::Extras,
         keys: &[Cmd::Options],
     },
     Page {
@@ -387,16 +416,7 @@ pub(crate) fn play(bytes: &'static [u8], still: bool, tx: SyncSender<Frame>, wai
 
 // ------------------------------------------------------------------ drawing
 
-/// The choices on the first page, by the Options page they live on.
-const SETUP: &[(&str, &[Opt])] = &[
-    ("Appearance", &[Opt::FollowSystem, Opt::FontSize, Opt::Animations]),
-    ("Files & folders", &[Opt::ShowHidden, Opt::Thumbnails]),
-    ("Mouse & keyboard", &[Opt::SingleClick]),
-    ("Search", &[Opt::Meaning]),
-    ("Startup & system", &[Opt::DefaultFm]),
-];
-
-/// The themes offered on the first page: dark and light ones people know.
+/// The themes offered on arrival: dark and light ones people know.
 const THEMES: [ThemeName; 6] = [ThemeName::Midnight, ThemeName::Graphite, ThemeName::TokyoNight, ThemeName::Mocha, ThemeName::Paper, ThemeName::Latte];
 
 pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
@@ -507,8 +527,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
             bui.multiply_opacity(fade * (2.0 - fade));
             match page.body {
                 Body::Film(_) => replay = film_page(&mut bui, app, st, body),
-                Body::Hero => words(&mut bui, page, &pal),
-                Body::Setup => setup_page(&mut bui, app, page, body),
+                Body::Hero | Body::Look | Body::Size | Body::Clicks | Body::Show | Body::Extras => words(&mut bui, page, &pal),
                 Body::List => list_page(&mut bui, app, body),
             }
         });
@@ -629,86 +648,6 @@ fn film_page(ui: &mut Ui, app: &App, st: &State, body: Rect) -> bool {
     words(ui, page, &pal);
     keys_row(ui, app, page.keys, &pal);
     resp.clicked() && st.film_done()
-}
-
-/// The first page: a welcome, then the choices in cards under the name of the Options
-/// page each is on.
-fn setup_page(ui: &mut Ui, app: &mut App, page: &Page, body: Rect) {
-    let pal = app.pal;
-    words(ui, page, &pal);
-    ui.add_space(4.0);
-    let rest = Rect::from_min_max(pos2(body.left(), ui.cursor().top()), body.max);
-    setup_cards(ui, app, rest.height(), true);
-}
-
-/// The choices in cards under the name of the Options page each is on, scrolling in
-/// `height`; `note` says where they stay.
-fn setup_cards(ui: &mut Ui, app: &mut App, height: f32, note: bool) {
-    let pal = app.pal;
-    let mut changed = false;
-    let options = app.keymap.label(Cmd::Options).map_or("Options".to_string(), |k| format!("Options ({k})"));
-    egui::ScrollArea::vertical().id_salt("tour setup").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let cw = (ui.available_width() - 10.0).floor();
-        if note {
-            ui.add(egui::Label::new(egui::RichText::new(format!("Each stays in {options}, on the page named above it.")).size(11.0).color(pal.text_dim)).wrap());
-        }
-        for (gi, (section, opts)) in SETUP.iter().enumerate() {
-            ui.add_space(if gi == 0 { 6.0 } else { 10.0 });
-            let (hr, _) = ui.allocate_exact_size(vec2(cw, 20.0), Sense::hover());
-            ui.painter().text(pos2(hr.left() + 4.0, hr.center().y - 1.0), Align2::LEFT_CENTER, *section, FontId::proportional(11.5), pal.text_dim);
-            let row_h = 44.0;
-            let themes = gi == 0;
-            let theme_h = if themes { 58.0 } else { 0.0 };
-            let (card, _) = ui.allocate_exact_size(vec2(cw, theme_h + opts.len() as f32 * row_h), Sense::hover());
-            ui.painter().rect(card, CornerRadius::same(8), pal.card(), Stroke::new(1.0, pal.card_line()), StrokeKind::Inside);
-            if themes {
-                changed |= theme_strip(ui, app, Rect::from_min_size(card.min, vec2(cw, theme_h)));
-            }
-            for (j, &o) in opts.iter().enumerate() {
-                let r = Rect::from_min_size(card.min + vec2(0.0, theme_h + j as f32 * row_h), vec2(cw, row_h));
-                changed |= pp::option_in(ui, app, o, r, j == 0 && !themes);
-            }
-        }
-        ui.add_space(6.0);
-    });
-    if changed {
-        let ctx = ui.ctx().clone();
-        pp::option_changed(app, &ctx);
-    }
-}
-
-/// A row of themes to pick from, each drawn as a small window in its colours; hovering
-/// one shows the whole window in it. Returns whether one was picked.
-fn theme_strip(ui: &mut Ui, app: &mut App, r: Rect) -> bool {
-    let pal = app.pal;
-    let n = THEMES.len() as f32;
-    let gap = 8.0;
-    let inner = r.shrink2(vec2(12.0, 9.0));
-    let cw = ((inner.width() - gap * (n - 1.0)) / n).floor();
-    let ch = inner.height();
-    let mut picked = false;
-    for (i, t) in THEMES.iter().enumerate() {
-        let cr = Rect::from_min_size(pos2(inner.left() + i as f32 * (cw + gap), inner.top()), vec2(cw, ch));
-        let resp = ui.interact(cr, Id::new(("tour theme", i)), Sense::click()).on_hover_text(t.label());
-        crate::ui::note_control(ui, cr, "tour theme");
-        pp::theme_card(ui.painter(), cr, crate::theme::palette(*t), 5);
-        let on = app.cfg.theme == *t;
-        let line = if on { Stroke::new(2.0, pal.accent) } else if resp.hovered() { Stroke::new(1.0, pal.text_dim) } else { Stroke::new(1.0, pal.border) };
-        ui.painter().rect_stroke(cr, CornerRadius::same(5), line, StrokeKind::Outside);
-        if resp.hovered() {
-            app.preview_theme = Some(*t);
-        }
-        if resp.clicked() && !on {
-            app.cfg.theme = *t;
-            // A theme picked by hand is the one wanted, whatever the desktop's.
-            app.cfg.follow_system_theme = false;
-            picked = true;
-        }
-    }
-    let line = Stroke::new(1.0, pal.border.gamma_multiply(0.7));
-    ui.painter().line_segment([pos2(r.left() + 12.0, r.bottom() - 0.5), pos2(r.right() - 12.0, r.bottom() - 0.5)], line);
-    picked
 }
 
 /// Everything else the version added, a card for each group.
@@ -855,7 +794,9 @@ fn full(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         let stacked = cw < 760.0;
         let pad = (24.0 + (cw - 760.0).max(0.0) * 0.04).round().min(40.0);
         let (words_r, visual) = if stacked {
-            let vh = (ch * 0.44).round();
+            // The choices need the room; a film or the opening picture less of it.
+            let choose = matches!(page.body, Body::Look | Body::Size | Body::Clicks | Body::Show | Body::Extras);
+            let vh = (ch * if choose { 0.62 } else { 0.44 }).round();
             (Rect::from_min_max(pos2(card.left() + pad, card.top() + vh + 12.0), pos2(card.right() - pad, card.bottom() - pad)), Rect::from_min_size(card.min + vec2(10.0, 10.0), vec2(cw - 20.0, vh - 10.0)))
         } else {
             let lw = (cw * 0.4).clamp(320.0, 440.0).round();
@@ -867,7 +808,7 @@ fn full(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         let shift = (1.0 - fade) * 10.0;
         let foot_h = 34.0;
         let foot = Rect::from_min_max(pos2(words_r.left(), words_r.bottom() - foot_h), words_r.max);
-        let mut hero_foot = foot.top();
+        let hero_foot: f32;
         {
             let body = Rect::from_min_max(words_r.min + vec2(shift, 0.0), pos2(words_r.right() + shift, foot.top() - 12.0));
             let mut wui = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(egui::Layout::top_down(egui::Align::Min)));
@@ -939,10 +880,20 @@ fn full(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                     egui::Image::new((t.id(), ir.size())).paint_at(&vui, ir);
                 }
             }
-            Body::Setup => {
-                let inner = visual.shrink(20.0);
-                let mut cui = vui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)));
-                setup_cards(&mut cui, app, inner.height(), false);
+            Body::Look | Body::Size | Body::Clicks | Body::Show | Body::Extras => {
+                let pad = (visual.width() * 0.045).clamp(18.0, 36.0).round();
+                let inner = visual.shrink(pad);
+                let changed = match page.body {
+                    Body::Look => step_look(&mut vui, app, inner),
+                    Body::Size => step_size(&mut vui, app, inner),
+                    Body::Clicks => step_clicks(&mut vui, app, inner),
+                    Body::Show => step_show(&mut vui, app, inner),
+                    _ => step_extras(&mut vui, app, inner),
+                };
+                if changed {
+                    let ctx = vui.ctx().clone();
+                    pp::option_changed(app, &ctx);
+                }
             }
             Body::Film(_) => {
                 let inner = visual.shrink(28.0);
@@ -983,4 +934,364 @@ fn full(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         return closed(app, st);
     }
     true
+}
+
+// ------------------------------------------------------------------ the first choices
+
+/// Text on the accent: dark or light, whichever reads.
+fn on_accent(pal: &Palette) -> egui::Color32 {
+    let a = pal.accent;
+    if 0.2126 * a.r() as f32 + 0.7152 * a.g() as f32 + 0.0722 * a.b() as f32 > 150.0 { egui::Color32::from_gray(20) } else { egui::Color32::WHITE }
+}
+
+/// A card to choose in `r`: it lifts under the pointer, and when chosen it is ringed in
+/// the accent with a check in its corner, both easing in.
+fn card(ui: &mut Ui, r: Rect, on: bool, id: Id, what: &'static str, pal: &Palette) -> egui::Response {
+    let resp = ui.interact(r, id, Sense::click());
+    // A row around a switch is the switch's to note: the two are one control.
+    if !what.is_empty() {
+        crate::ui::note_control(ui, r, what);
+    }
+    let t = ui.ctx().animate_bool_with_time(id.with("on"), on, 0.14);
+    let h = ui.ctx().animate_bool_with_time(id.with("hover"), resp.hovered(), 0.1);
+    let rad = CornerRadius::same(12);
+    ui.painter().rect_filled(r, rad, pal.panel.lerp_to_gamma(pal.hover, h * 0.55));
+    let line = pal.border.lerp_to_gamma(pal.text_dim, h * 0.45).lerp_to_gamma(pal.accent, t);
+    ui.painter().rect_stroke(r, rad, Stroke::new(1.0 + t, line), StrokeKind::Inside);
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}
+
+/// The check in a chosen card's corner, drawn over what the card shows; it grows in as
+/// the card is chosen.
+fn mark(ui: &Ui, r: Rect, id: Id, pal: &Palette) {
+    let t = ui.ctx().animate_bool_with_time(id.with("on"), true, 0.14);
+    let c = pos2(r.right() - 18.0, r.top() + 18.0);
+    ui.painter().circle_filled(c, 10.5 * t, pal.panel);
+    ui.painter().circle_filled(c, 8.5 * t, pal.accent);
+    let s = Stroke::new(1.6, on_accent(pal).gamma_multiply(t));
+    ui.painter().add(egui::Shape::line(vec![c + vec2(-3.6, 0.2), c + vec2(-1.1, 2.7), c + vec2(3.8, -2.4)], s));
+}
+
+/// `area` cut to `h` tall, in its middle: a step's cards stand in the middle of the
+/// panel, not at its top.
+fn middle(area: Rect, h: f32) -> Rect {
+    let h = h.min(area.height());
+    Rect::from_min_size(pos2(area.left(), (area.top() + (area.height() - h) / 2.0).round()), vec2(area.width(), h))
+}
+
+/// A card's name and a dim line under it, from `at`.
+fn card_words(ui: &Ui, at: egui::Pos2, w: f32, name: &str, detail: &str, pal: &Palette) {
+    let fs = ui.style().text_styles.get(&egui::TextStyle::Body).map_or(13.0, |f| f.size);
+    let g = crate::listing::elided(ui, name, FontId::proportional(fs), w, pal.text);
+    let gh = g.size().y;
+    ui.painter().galley(at, g, pal.text);
+    if !detail.is_empty() {
+        let d = crate::listing::elided(ui, detail, FontId::proportional(fs - 1.5), w, pal.text_dim);
+        ui.painter().galley(at + vec2(0.0, gh + 2.0), d, pal.text_dim);
+    }
+}
+
+/// How tall `card_words` is.
+fn words_h(ui: &Ui, detail: bool) -> f32 {
+    let fs = ui.style().text_styles.get(&egui::TextStyle::Body).map_or(13.0, |f| f.size);
+    (fs * 1.3 + if detail { fs * 1.2 + 2.0 } else { 0.0 }).round()
+}
+
+/// A wide row card with a switch at its end: its name and what it does. The whole row
+/// flips it. Returns whether it was flipped.
+fn switch_row(ui: &mut Ui, r: Rect, on: &mut bool, name: &str, detail: &str, what: &'static str, pal: &Palette) -> bool {
+    let resp = card(ui, r, false, Id::new(("welcome row", what)), "", pal);
+    let sw = Rect::from_center_size(pos2(r.right() - 16.0 - 16.0, r.center().y), vec2(32.0, 16.0));
+    let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(sw).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    let flipped = pp::switch(&mut sui, on, pal);
+    let wh = words_h(ui, !detail.is_empty());
+    card_words(ui, pos2(r.left() + 16.0, r.center().y - wh / 2.0), r.width() - 90.0, name, detail, pal);
+    if !flipped && resp.clicked() {
+        *on = !*on;
+        return true;
+    }
+    flipped
+}
+
+/// Cards in a row across `r`, or down it when too narrow for that; each `h` tall.
+fn layout(r: Rect, n: usize, h: f32, min_w: f32) -> Vec<Rect> {
+    let gap = 14.0;
+    let across = (r.width() - gap * (n as f32 - 1.0)) / n as f32 >= min_w;
+    (0..n)
+        .map(|i| {
+            if across {
+                let w = ((r.width() - gap * (n as f32 - 1.0)) / n as f32).floor();
+                Rect::from_min_size(pos2(r.left() + i as f32 * (w + gap), r.top()), vec2(w, h))
+            } else {
+                let hh = ((r.height() - gap * (n as f32 - 1.0)) / n as f32).min(h).floor();
+                Rect::from_min_size(pos2(r.left(), r.top() + i as f32 * (hh + gap)), vec2(r.width(), hh))
+            }
+        })
+        .collect()
+}
+
+/// The look: the desktop's light and dark followed or not, and the themes as small
+/// windows; pointing at one shows the whole window in it.
+fn step_look(ui: &mut Ui, app: &mut App, area: Rect) -> bool {
+    let pal = app.pal;
+    let mut changed = false;
+    // The cards' size first, then the whole stood in the panel's middle.
+    let cols = if area.width() >= 540.0 { 3 } else { 2 };
+    let rows = THEMES.len().div_ceil(cols);
+    let gap = 14.0;
+    let cw = ((area.width() - gap * (cols as f32 - 1.0)) / cols as f32).floor();
+    let wh = words_h(ui, false);
+    let ch = (cw * 0.62 + wh + 26.0).min(((area.height() - 78.0 - gap * (rows as f32 - 1.0)) / rows as f32).floor()).max(wh + 40.0);
+    let area = middle(area, 78.0 + rows as f32 * ch + (rows as f32 - 1.0) * gap);
+    let row = Rect::from_min_size(area.min, vec2(area.width(), 60.0));
+    let mut follow = app.cfg.follow_system_theme;
+    if switch_row(ui, row, &mut follow, "Follow the desktop", "Light or dark as the desktop is, now and when it changes", "welcome follow", &pal) {
+        app.cfg.follow_system_theme = follow;
+        changed = true;
+    }
+    let grid = Rect::from_min_max(pos2(area.left(), row.bottom() + 18.0), area.max);
+    for (i, t) in THEMES.iter().enumerate() {
+        let r = Rect::from_min_size(pos2(grid.left() + (i % cols) as f32 * (cw + gap), grid.top() + (i / cols) as f32 * (ch + gap)), vec2(cw, ch));
+        let on = !app.cfg.follow_system_theme && app.cfg.theme == *t;
+        let resp = card(ui, r, on, Id::new(("welcome theme", i)), "tour theme", &pal);
+        let pic = Rect::from_min_max(r.min + vec2(10.0, 10.0), pos2(r.right() - 10.0, r.bottom() - wh - 16.0));
+        pp::theme_card(ui.painter(), pic, crate::theme::palette(*t), 7);
+        card_words(ui, pos2(r.left() + 12.0, r.bottom() - wh - 9.0), r.width() - 24.0, t.label(), "", &pal);
+        if on {
+            mark(ui, r, Id::new(("welcome theme", i)), &pal);
+        }
+        if resp.hovered() {
+            app.preview_theme = Some(*t);
+        }
+        if resp.clicked() && !on {
+            app.cfg.theme = *t;
+            // A theme picked by hand is the one wanted, whatever the desktop's.
+            app.cfg.follow_system_theme = false;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Text size and spacing, together: (name, size, spacing).
+const SIZES: [(&str, f32, f32); 3] = [("Compact", 12.0, 1.0), ("Comfortable", 14.5, 1.3), ("Roomy", 16.5, 1.6)];
+
+/// The text's size, as a few rows of a folder at each; and animations.
+fn step_size(ui: &mut Ui, app: &mut App, area: Rect) -> bool {
+    let pal = app.pal;
+    let mut changed = false;
+    let motion_h = 60.0;
+    let wh = words_h(ui, true);
+    let ch = (area.height() - motion_h - 18.0).min(320.0);
+    let area = middle(area, ch + 18.0 + motion_h);
+    let cards = Rect::from_min_max(area.min, pos2(area.right(), area.bottom() - motion_h - 18.0));
+    for (i, r) in layout(cards, SIZES.len(), ch, 170.0).into_iter().enumerate() {
+        let (name, fs, sp) = SIZES[i];
+        let on = (app.cfg.font_size - fs).abs() < 0.01 && (app.cfg.spacing - sp).abs() < 0.01;
+        let resp = card(ui, r, on, Id::new(("welcome size", i)), "welcome size", &pal);
+        // A folder's first rows, at this size, as the list draws them.
+        let pic = Rect::from_min_max(r.min + vec2(10.0, 10.0), pos2(r.right() - 10.0, r.bottom() - wh - 18.0));
+        ui.painter().rect_filled(pic, CornerRadius::same(7), pal.bg);
+        let p = ui.painter().with_clip_rect(pic.intersect(ui.clip_rect()));
+        let row_h = (fs * 1.35 + 8.0 * sp).round();
+        let names = ["Documents", "Photos", "Projects", "notes.md", "budget.ods", "trip.mkv"];
+        for (k, n) in names.iter().enumerate() {
+            let y = pic.top() + 6.0 + k as f32 * row_h;
+            if y > pic.bottom() {
+                break;
+            }
+            let rr = Rect::from_min_size(pos2(pic.left() + 4.0, y), vec2(pic.width() - 8.0, row_h));
+            if k == 1 {
+                p.rect_filled(rr, CornerRadius::same(5), pal.selected);
+            }
+            let side = (fs * 1.15).round();
+            let ic = Rect::from_center_size(pos2(rr.left() + 8.0 + side / 2.0, rr.center().y), Vec2::splat(side));
+            let cat = if k < 3 { crate::theme::FileCat::Folder } else { crate::theme::categorize(n.rsplit('.').next().unwrap_or(""), false, false) };
+            crate::theme::paint_icon(&p, ic, cat, "", false);
+            let col = if k == 1 { pal.on_sel() } else { pal.text };
+            p.text(pos2(ic.right() + 8.0, rr.center().y), Align2::LEFT_CENTER, *n, FontId::proportional(fs), col);
+        }
+        card_words(ui, pos2(r.left() + 12.0, r.bottom() - wh - 10.0), r.width() - 24.0, name, &format!("Text {fs}, spacing {sp}"), &pal);
+        if on {
+            mark(ui, r, Id::new(("welcome size", i)), &pal);
+        }
+        if resp.clicked() && !on {
+            app.cfg.font_size = fs;
+            app.cfg.spacing = sp;
+            changed = true;
+        }
+    }
+    let row = Rect::from_min_size(pos2(area.left(), area.bottom() - motion_h), vec2(area.width(), motion_h));
+    let mut anim = app.cfg.animations;
+    if switch_row(ui, row, &mut anim, "Animations", "Pages fade, panels slide open, lists ease to their place", "welcome motion", &pal) {
+        app.cfg.animations = anim;
+        changed = true;
+    }
+    changed
+}
+
+/// A pointer's arrow with its tip at `tip`, `s` points tall.
+fn pointer(p: &egui::Painter, tip: egui::Pos2, s: f32, fill: egui::Color32, line: egui::Color32) {
+    let k = s / 18.0;
+    let pts: Vec<egui::Pos2> = [(0.0, 0.0), (0.0, 15.0), (4.0, 11.5), (7.0, 18.0), (9.5, 17.0), (6.5, 10.5), (11.5, 10.5)].iter().map(|(x, y)| tip + vec2(x * k, y * k)).collect();
+    p.add(egui::Shape::convex_polygon(vec![pts[0], pts[1], pts[2], pts[5], pts[6]], fill, Stroke::NONE));
+    p.add(egui::Shape::convex_polygon(vec![pts[2], pts[3], pts[4], pts[5]], fill, Stroke::NONE));
+    p.add(egui::Shape::closed_line(pts, Stroke::new(1.2, line)));
+}
+
+/// Opening with two clicks or one, each drawn as a row being clicked.
+fn step_clicks(ui: &mut Ui, app: &mut App, area: Rect) -> bool {
+    let pal = app.pal;
+    let mut changed = false;
+    let single = app.cfg.single_click;
+    let extra_h = if single { 60.0 + 18.0 } else { 0.0 };
+    let wh = words_h(ui, true);
+    let ch = (area.height() - extra_h).min(280.0);
+    let area = middle(area, ch + extra_h);
+    let cards = Rect::from_min_max(area.min, pos2(area.right(), area.bottom() - extra_h));
+    let opts = [(false, "Double click", "Opens a file, as on most desktops"), (true, "Single click", "Opens it at once, as on the web")];
+    let now = ui.input(|i| i.time);
+    for (i, r) in layout(cards, 2, ch, 200.0).into_iter().enumerate() {
+        let (one, name, detail) = opts[i];
+        let on = single == one;
+        let resp = card(ui, r, on, Id::new(("welcome click", i)), "welcome click", &pal);
+        let pic = Rect::from_min_max(r.min + vec2(10.0, 10.0), pos2(r.right() - 10.0, r.bottom() - wh - 18.0));
+        let p = ui.painter().with_clip_rect(pic.intersect(ui.clip_rect()));
+        p.rect_filled(pic, CornerRadius::same(7), pal.bg);
+        // A file's row with the pointer on it, and a ring for each click.
+        let fs = 13.0;
+        let rr = Rect::from_center_size(pic.center() - vec2(0.0, 6.0), vec2((pic.width() * 0.7).min(220.0), 30.0));
+        p.rect_filled(rr, CornerRadius::same(6), if on { pal.selected } else { pal.hover });
+        let ic = Rect::from_center_size(pos2(rr.left() + 18.0, rr.center().y), Vec2::splat(16.0));
+        crate::theme::paint_icon(&p, ic, crate::theme::FileCat::Folder, "", false);
+        p.text(pos2(ic.right() + 8.0, rr.center().y), Align2::LEFT_CENTER, "Holiday photos", FontId::proportional(fs), if on { pal.on_sel() } else { pal.text });
+        let tip = pos2(rr.left() + rr.width() * 0.62, rr.center().y + 2.0);
+        // The rings swell and fade, one after the other, while the card is chosen.
+        let n = if one { 1 } else { 2 };
+        for k in 0..n {
+            let phase = if on && app.cfg.animations { ((now * 0.8 - k as f64 * 0.18).rem_euclid(1.0)) as f32 } else { 0.45 + k as f32 * 0.25 };
+            let rad = 6.0 + phase * 14.0;
+            p.circle_stroke(tip, rad, Stroke::new(1.6, pal.accent.gamma_multiply((1.0 - phase) * 0.9)));
+        }
+        if on && app.cfg.animations {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+        }
+        pointer(&p, tip, 20.0, egui::Color32::WHITE, egui::Color32::from_gray(20));
+        card_words(ui, pos2(r.left() + 12.0, r.bottom() - wh - 10.0), r.width() - 24.0, name, detail, &pal);
+        if on {
+            mark(ui, r, Id::new(("welcome click", i)), &pal);
+        }
+        if resp.clicked() && !on {
+            app.cfg.single_click = one;
+            changed = true;
+        }
+    }
+    if single {
+        let row = Rect::from_min_size(pos2(area.left(), area.bottom() - 60.0), vec2(area.width(), 60.0));
+        let mut only = app.cfg.single_click_folders_only;
+        if switch_row(ui, row, &mut only, "Folders only", "Files still open with two clicks, so one selects them", "welcome folders only", &pal) {
+            app.cfg.single_click_folders_only = only;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Hidden files shown or not, each drawn as a folder's list; and where pictures show
+/// what they hold.
+fn step_show(ui: &mut Ui, app: &mut App, area: Rect) -> bool {
+    let pal = app.pal;
+    let mut changed = false;
+    let thumbs_h = 92.0;
+    let wh = words_h(ui, true);
+    let ch = (area.height() - thumbs_h - 18.0).min(280.0);
+    let area = middle(area, ch + 18.0 + thumbs_h);
+    let cards = Rect::from_min_max(area.min, pos2(area.right(), area.bottom() - thumbs_h - 18.0));
+    let opts = [(false, "Leave them out", "The folder as you made it"), (true, "Show them", "Settings and caches among the rest")];
+    for (i, r) in layout(cards, 2, ch, 200.0).into_iter().enumerate() {
+        let (shown, name, detail) = opts[i];
+        let on = app.cfg.show_hidden == shown;
+        let resp = card(ui, r, on, Id::new(("welcome hidden", i)), "welcome hidden", &pal);
+        let pic = Rect::from_min_max(r.min + vec2(10.0, 10.0), pos2(r.right() - 10.0, r.bottom() - wh - 18.0));
+        let p = ui.painter().with_clip_rect(pic.intersect(ui.clip_rect()));
+        p.rect_filled(pic, CornerRadius::same(7), pal.bg);
+        let rows: Vec<(&str, bool)> = [(".cache", true), (".config", true), ("Documents", false), ("Music", false), (".local", true), ("Pictures", false)].into_iter().filter(|(_, dot)| shown || !dot).collect();
+        let row_h = 24.0;
+        for (k, (n, dot)) in rows.iter().enumerate() {
+            let y = pic.top() + 8.0 + k as f32 * row_h;
+            let ic = Rect::from_center_size(pos2(pic.left() + 20.0, y + row_h / 2.0), Vec2::splat(15.0));
+            let faint = if *dot { 0.5 } else { 1.0 };
+            let mut ip = p.clone();
+            ip.multiply_opacity(faint);
+            crate::theme::paint_icon(&ip, ic, crate::theme::FileCat::Folder, "", false);
+            p.text(pos2(ic.right() + 8.0, y + row_h / 2.0), Align2::LEFT_CENTER, *n, FontId::proportional(13.0), pal.text.gamma_multiply(faint));
+        }
+        card_words(ui, pos2(r.left() + 12.0, r.bottom() - wh - 10.0), r.width() - 24.0, name, detail, &pal);
+        if on {
+            mark(ui, r, Id::new(("welcome hidden", i)), &pal);
+        }
+        if resp.clicked() && !on {
+            app.cfg.show_hidden = shown;
+            changed = true;
+        }
+    }
+    // Where pictures get their previews: three choices in a row card.
+    let row = Rect::from_min_size(pos2(area.left(), area.bottom() - thumbs_h), vec2(area.width(), thumbs_h));
+    card(ui, row, false, Id::new("welcome thumbs"), "", &pal);
+    card_words(ui, row.min + vec2(16.0, 14.0), row.width() - 32.0, "Picture previews", "Where pictures and films show what they hold", &pal);
+    let chips = Rect::from_min_max(pos2(row.left() + 14.0, row.bottom() - 34.0), pos2(row.right() - 14.0, row.bottom() - 10.0));
+    let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(chips).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    cu.spacing_mut().item_spacing.x = 6.0;
+    use crate::config::ThumbMode;
+    for (m, label) in [(ThumbMode::LocalDisks, "On this computer's disks"), (ThumbMode::AllDrives, "Everywhere"), (ThumbMode::Never, "Nowhere")] {
+        if crate::devtools::chip(&mut cu, label, app.cfg.thumbnails == m, "welcome thumbs choice", "", &pal, false) && app.cfg.thumbnails != m {
+            app.cfg.thumbnails = m;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Maia for the folders other apps open, and search by meaning, each a card to switch.
+fn step_extras(ui: &mut Ui, app: &mut App, area: Rect) -> bool {
+    let pal = app.pal;
+    let mut changed = false;
+    let h = 96.0;
+    let gap = 14.0;
+    let area = middle(area, h * 2.0 + gap);
+    let fm = Rect::from_min_size(area.min, vec2(area.width(), h));
+    let meaning = Rect::from_min_size(pos2(area.left(), fm.bottom() + gap), vec2(area.width(), h));
+    let mut default = app.default_fm() == Some(true);
+    let icon = |ui: &Ui, r: Rect, sym: &str| {
+        let ir = Rect::from_center_size(pos2(r.left() + 36.0, r.center().y), Vec2::splat(40.0));
+        ui.painter().rect_filled(ir, CornerRadius::same(10), pal.accent.gamma_multiply(0.16));
+        crate::theme::paint_symbol(ui.painter(), ir.shrink(10.0), sym, pal.accent);
+    };
+    let row = |ui: &mut Ui, r: Rect, on: &mut bool, name: &str, detail: &str, what: &'static str, sym: &str| -> bool {
+        let inner = Rect::from_min_max(pos2(r.left() + 56.0, r.top()), r.max);
+        let resp = card(ui, r, false, Id::new(("welcome extra", what)), "", &pal);
+        icon(ui, r, sym);
+        let sw = Rect::from_center_size(pos2(r.right() - 32.0, r.center().y), vec2(32.0, 16.0));
+        let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(sw).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let flipped = pp::switch(&mut sui, on, &pal);
+        let wh = words_h(ui, true);
+        card_words(ui, pos2(inner.left() + 12.0, r.center().y - wh / 2.0), inner.width() - 80.0, name, detail, &pal);
+        if !flipped && resp.clicked() {
+            *on = !*on;
+            return true;
+        }
+        flipped
+    };
+    if row(ui, fm, &mut default, "Open folders in Maia", "When another app or the desktop opens one", "welcome default", "folder") {
+        app.set_default_fm(default);
+    }
+    let mut sem = app.cfg.semantic_search;
+    if row(ui, meaning, &mut sem, "Search by meaning", "Find files by what they are about, with a local Ollama model", "welcome meaning", "search") {
+        app.cfg.semantic_search = sem;
+        changed = true;
+    }
+    changed
 }
