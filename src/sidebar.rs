@@ -246,11 +246,16 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         ui.add_space(8.0);
         let w = ui.available_width() - 8.0;
         // Borderless filter row (icon + text) with a divider under it.
-        let (r, _) = ui.allocate_exact_size(vec2(w, 26.0), Sense::hover());
+        // As tall as its text needs at larger font sizes, 26 points at least.
+        let row_h = (ui.text_style_height(&egui::TextStyle::Body) + 8.0).max(26.0).round();
+        let (r, _) = ui.allocate_exact_size(vec2(w, row_h), Sense::hover());
         paint_glyph(ui.painter(), Rect::from_center_size(pos2(r.left() + 10.0, r.center().y), Vec2::splat(13.0)), Glyph::Search, if filter.is_empty() { pal.text_dim } else { pal.accent });
-        let er = Rect::from_min_max(pos2(r.left() + 24.0, r.top() + 2.0), pos2(r.right() - 6.0, r.bottom() - 2.0));
+        // The text's capitals on the icon's middle (see `cap_nudge`).
+        let nudge = crate::ui::cap_nudge(ui, &egui::TextStyle::Body.resolve(ui.style()));
+        let er = Rect::from_min_max(pos2(r.left() + 24.0, r.top() + 2.0 + nudge), pos2(r.right() - 6.0, r.bottom() - 2.0 + nudge));
         let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(er).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        let resp = cu.add(egui::TextEdit::singleline(&mut filter).hint_text(egui::RichText::new("Filter sidebar…").color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(er.width()));
+        cu.spacing_mut().interact_size.y = er.height();
+        let resp = cu.add(egui::TextEdit::singleline(&mut filter).hint_text(egui::RichText::new("Filter sidebar…").color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(er.width()).align(egui::Align2::LEFT_CENTER));
         if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             filter.clear();
         }

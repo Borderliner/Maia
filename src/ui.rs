@@ -1521,7 +1521,8 @@ impl App {
         // A narrow box keeps its room for typing; the palette still switches contents mode.
         let cont_btn = fw >= 110.0;
         let btns = 1.0 + if cont_btn { 1.0 } else { 0.0 } + if t.filter.is_empty() { 0.0 } else { 1.0 } + if types_on { 1.0 } else { 0.0 };
-        let edit_rect = Rect::from_min_max(pos2(frame_rect.left() + 22.0, frame_rect.top() + 1.0), pos2(frame_rect.right() - 22.0 * btns - 2.0, frame_rect.bottom() - 1.0));
+        let nudge = cap_nudge(ui, &egui::TextStyle::Body.resolve(ui.style()));
+        let edit_rect = Rect::from_min_max(pos2(frame_rect.left() + 22.0, frame_rect.top() + 1.0 + nudge), pos2(frame_rect.right() - 22.0 * btns - 2.0, frame_rect.bottom() - 1.0 + nudge));
         let shown = vf + vfi;
         // Files when only files are listed; an empty folder has items, not files.
         let changed = if t.git_only.is_some() { " changed" } else { "" };
@@ -1531,6 +1532,9 @@ impl App {
         let hint = if t.content.on { if fw < 150.0 { "Find…".into() } else { "Find in files…".into() } } else { hint };
         let before = t.filter.clone();
         let mut fui = ui.new_child(UiBuilder::new().max_rect(edit_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        // A field is at least a control's height, which grows with Spacing: taller than the
+        // box, it would start at the box's top and centre its text below the box's middle.
+        fui.spacing_mut().interact_size.y = edit_rect.height();
         // Conditions and operators the filter understands (size>10M, -draft, a | b) show
         // in the accent, a broken pattern in the danger colour.
         let (accent, text, danger) = (pal.accent, pal.text, pal.danger);
@@ -1540,7 +1544,7 @@ impl App {
             let job = crate::query::job(buf.as_str(), egui::TextStyle::Body.resolve(ui.style()), text, accent, danger);
             ui.fonts_mut(|f| f.layout_job(job))
         };
-        let mut edit = egui::TextEdit::singleline(&mut t.filter).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 0))).desired_width(edit_rect.width()).font(egui::TextStyle::Body);
+        let mut edit = egui::TextEdit::singleline(&mut t.filter).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 0))).desired_width(edit_rect.width()).font(egui::TextStyle::Body).align(egui::Align2::LEFT_CENTER);
         if crate::query::marked(&before) {
             edit = edit.layouter(&mut conds);
         }
@@ -1565,12 +1569,13 @@ impl App {
         }
         let c = br.center();
         let st = Stroke::new(1.3, if flatten { pal.accent } else { pal.text_dim });
-        ui.painter().line_segment([c + vec2(-5.0, -5.0), c + vec2(-5.0, 4.0)], st);
-        for dy in [-1.0, 4.0] {
+        // Three rows evenly apart, as far above the middle as below it.
+        ui.painter().line_segment([c + vec2(-5.0, -4.5), c + vec2(-5.0, 4.5)], st);
+        for dy in [0.0, 4.5] {
             ui.painter().line_segment([c + vec2(-5.0, dy), c + vec2(0.0, dy)], st);
             ui.painter().line_segment([c + vec2(2.0, dy), c + vec2(6.0, dy)], st);
         }
-        ui.painter().line_segment([c + vec2(-5.0, -5.0), c + vec2(6.0, -5.0)], st);
+        ui.painter().line_segment([c + vec2(-5.0, -4.5), c + vec2(6.0, -4.5)], st);
         if fresp.clicked() {
             // In Tree view the same button unfolds everything instead of flattening.
             if t.tree_active() || t.expand_all_on {
@@ -1932,6 +1937,22 @@ impl App {
 
 fn p_filter_active(t: &tab::Tab) -> bool {
     !t.filter.is_empty() || t.flatten || t.git_only.is_some()
+}
+
+/// How far down text in `font` must go for its capitals to stand in the middle of the
+/// line egui centres: the line keeps more room below the baseline than above the
+/// capitals, so centred text otherwise sits high. Whole pixels, so it stays crisp.
+pub fn cap_nudge(ui: &Ui, font: &FontId) -> f32 {
+    let g = ui.fonts_mut(|f| f.layout_no_wrap("H".into(), font.clone(), Color32::WHITE));
+    let Some((row, gl)) = g.rows.first().and_then(|r| r.glyphs.first().map(|gl| (r, gl))) else { return 0.0 };
+    if gl.uv_rect.is_nothing() {
+        return 0.0;
+    }
+    let top = row.pos.y + gl.pos.y + gl.uv_rect.offset.y;
+    let mid = top + gl.uv_rect.size.y / 2.0;
+    let ppp = ui.ctx().pixels_per_point();
+    // Half a pixel or less stays put: moved, it would be as far off the other way.
+    ((g.size().y / 2.0 - mid) * ppp + 0.49).floor() / ppp
 }
 
 pub fn fmt_count(n: usize) -> String {
