@@ -17719,6 +17719,15 @@ mod journeys {
         assert!(some_text(&s, u.trim_start_matches("http://").trim_end_matches('/')) || s.texts.iter().any(|(_, t)| t.contains("127.0.0.1")), "the address shown");
         look_popup(&mut s, "send to phone");
         s.shot("phone");
+        // The code as drawn in the window scans to the address (when frames are painted).
+        if let (Some(dir), Some((w, h, rgb))) = (s.shots_dir(), s.pixels()) {
+            let f = dir.join("phone-scan.png");
+            write_png(&f, w, h, &rgb);
+            if let Ok(o) = std::process::Command::new("zbarimg").args(["--raw", "-q"]).arg(&f).output() {
+                assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), u, "the window's code scans");
+            }
+            let _ = std::fs::remove_file(&f);
+        }
         let (h, body) = fetch(&u);
         assert!(h.starts_with("HTTP/1.1 200") && body == std::fs::read(docs.join("notes.txt")).unwrap(), "{h}");
         wait_until(&mut s, "the phone seen", 10, |s| match &s.app.popup {
