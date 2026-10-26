@@ -674,6 +674,11 @@ const NOT_IN_PLACE: &str = "maia: not in place";
 #[allow(clippy::too_many_arguments)]
 fn in_place(t: &str, archive: &Path, part: &Path, kind: Kind, e: &Edit, lock: (Lock, Option<String>), pw: Option<&str>, all: &[archive::Item], p: &Mutex<Progress>, gate: &Gate, ctx: &egui::Context) -> Result<(), String> {
     let ty = if kind == Kind::Zip { "-tzip" } else { "-t7z" };
+    // 7-Zip 26 renames a ZipCrypto member without its data descriptor flag, and the
+    // password no longer opens it: built anew instead.
+    if matches!(e, Edit::Rename { .. }) && lock.0 == Lock::ZipCrypto {
+        return Err(NOT_IN_PLACE.into());
+    }
     let feed = pw.filter(|_| lock.0 != Lock::Open).map(|pw| format!("{pw}\n").repeat(4));
     // A wrong password would lock what is added with it: it is tried on one file first.
     if let (Some(probe), Some(_)) = (&lock.1, &feed) {
