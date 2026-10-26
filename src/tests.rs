@@ -12860,7 +12860,8 @@ fn download_origin_read_cached_and_grouped() {
     for bad in ["file:///etc/passwd", "javascript:alert(1)", "data:text/html,x", "ftp://x/y", ""] {
         assert!(!origin::openable(bad), "{bad}");
     }
-    assert_eq!(Origin { url: None, page: Some("https://news.example.net/story".into()) }.host().as_deref(), Some("news.example.net"));
+    assert_eq!(Origin::new(None, Some("https://news.example.net/story".into())).site.as_deref(), Some("news.example.net"));
+    assert_eq!(Origin::new(Some("https://www.example.com/a".into()), Some("https://github.com/b".into())).site.as_deref(), Some("example.com"), "the address before the page");
     let d = tmpdir("origin");
     touch(&d.join("report.pdf"), "pdf");
     touch(&d.join("plain.txt"), "txt");
@@ -12872,7 +12873,7 @@ fn download_origin_read_cached_and_grouped() {
     }
     assert!(set_xattr(&d.join("report.pdf"), "user.xdg.referrer.url", "https://example.com/downloads"));
     assert!(set_xattr(&d.join("linked.zip"), "user.xdg.referrer.url", "https://github.com/x/y/releases"));
-    assert_eq!(origin::read(&d.join("report.pdf")), Some(Origin { url: Some("https://www.example.com/files/report.pdf".into()), page: Some("https://example.com/downloads".into()) }));
+    assert_eq!(origin::read(&d.join("report.pdf")), Some(Origin::new(Some("https://www.example.com/files/report.pdf".into()), Some("https://example.com/downloads".into()))));
     assert_eq!(origin::read(&d.join("plain.txt")), None);
     let ctx = egui::Context::default();
     let before = origin::generation();

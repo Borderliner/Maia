@@ -23,12 +23,15 @@ pub struct Origin {
     pub url: Option<String>,
     /// The page that linked to it, when written.
     pub page: Option<String>,
+    /// The site it is grouped under: the address's host, else the page's. Worked out
+    /// once, as it is read: a grouped list asks for it of every file each time it sorts.
+    pub site: Option<String>,
 }
 
 impl Origin {
-    /// The site it is grouped under: the address's host, else the page's.
-    pub fn host(&self) -> Option<String> {
-        self.url.as_deref().and_then(host).or_else(|| self.page.as_deref().and_then(host))
+    pub fn new(url: Option<String>, page: Option<String>) -> Origin {
+        let site = url.as_deref().and_then(host).or_else(|| page.as_deref().and_then(host));
+        Origin { url, page, site }
     }
 }
 
@@ -48,7 +51,7 @@ pub fn read(p: &Path) -> Option<Origin> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
     let (url, page) = (attr(&c, URL), attr(&c, PAGE));
-    (url.is_some() || page.is_some()).then_some(Origin { url, page })
+    (url.is_some() || page.is_some()).then(|| Origin::new(url, page))
 }
 
 /// The host of an address, without "www.": "https://www.example.com:8080/a" is
@@ -85,7 +88,8 @@ pub fn openable(url: &str) -> bool {
 
 #[derive(Default)]
 struct Cache {
-    marked: HashMap<PathBuf, Arc<Origin>>,
+    /// By the path's hash, as the unmarked are: one hash a lookup.
+    marked: HashMap<u64, Arc<Origin>>,
     /// Read and found unmarked (hashes: big folders are mostly these).
     bare: HashSet<u64>,
     pending: HashSet<u64>,
@@ -113,7 +117,7 @@ pub fn get(p: &Path) -> Option<Option<Arc<Origin>>> {
     {
         let g = CACHE.read().unwrap_or_else(|e| e.into_inner());
         if let Some(c) = g.as_ref() {
-            if let Some(o) = c.marked.get(p) {
+            if let Some(o) = c.marked.get(&k) {
                 return Some(Some(o.clone()));
             }
             if c.bare.contains(&k) {
@@ -144,13 +148,13 @@ fn land(got: Vec<(PathBuf, Option<Origin>)>) {
                     c.marked.clear();
                 }
                 c.bare.remove(&k);
-                c.marked.insert(p, Arc::new(o));
+                c.marked.insert(k, Arc::new(o));
             }
             None => {
                 if c.bare.len() >= MOST_BARE {
                     c.bare.clear();
                 }
-                c.marked.remove(&p);
+                c.marked.remove(&k);
                 c.bare.insert(k);
             }
         }
@@ -162,7 +166,8 @@ fn land(got: Vec<(PathBuf, Option<Origin>)>) {
 pub fn invalidate(p: &Path) {
     let mut g = CACHE.write().unwrap_or_else(|e| e.into_inner());
     if let Some(c) = g.as_mut() {
-        if c.marked.remove(p).is_some() | c.bare.remove(&key(p)) {
+        let k = key(p);
+        if c.marked.remove(&k).is_some() | c.bare.remove(&k) {
             c.generation += 1;
         }
     }
@@ -201,7 +206,7 @@ pub fn group(e: &crate::fsx::Entry) -> String {
     if e.is_dir {
         return FOLDERS.into();
     }
-    get(&e.path).flatten().and_then(|o| o.host()).unwrap_or_else(|| UNKNOWN.into())
+    get(&e.path).flatten().and_then(|o| o.site.clone()).unwrap_or_else(|| UNKNOWN.into())
 }
 
 pub fn rank(label: &str) -> usize {
