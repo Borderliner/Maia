@@ -763,6 +763,18 @@ impl App {
         });
     }
 
+    /// Email `files`, the photos among them without their place and camera.
+    pub fn email_clean(&mut self, files: Vec<PathBuf>) {
+        let ctx = self.ctx.clone();
+        self.share(&ctx, move || {
+            let toast = match crate::scrub::copies(&files, crate::drives::Tools::current().as_ref()).and_then(|f| crate::sendto::email(&f)) {
+                Ok(()) => "Opening a new email, the photos without their place".to_string(),
+                Err(e) => e,
+            };
+            ShareDone { copy: None, open: vec![], toast, rescan: None, renamed: None }
+        });
+    }
+
     fn share(&mut self, ctx: &egui::Context, work: impl FnOnce() -> ShareDone + Send + 'static) {
         let (tx, rx) = std::sync::mpsc::channel();
         let c = ctx.clone();
@@ -3246,6 +3258,11 @@ impl App {
             Cmd::GoToMark => self.popup = Popup::Marks(crate::marks::State { set: false, sel: 0 }),
             Cmd::Jump => crate::jump::open(self),
             Cmd::SendToPhone => crate::phone::open(self),
+            Cmd::ToggleSharePlace => {
+                self.cfg.share_without_place = !self.cfg.share_without_place;
+                self.cfg_dirty = true;
+                self.toast(if self.cfg.share_without_place { "Photos are shared without their place and camera" } else { "Photos are shared as they are" });
+            }
             Cmd::PinToTop => {
                 let sel = self.tab().targets();
                 if sel.is_empty() || tab::is_computer(&self.panel().path()) || self.tab().archive.is_some() {

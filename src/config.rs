@@ -178,6 +178,8 @@ pub struct Config {
     pub highlight_recents: bool,
     pub recents_on_top: bool,
     pub recents_store: RecentsStore,
+    /// Photos sent or attached without where they were taken and the camera's details.
+    pub share_without_place: bool,
     /// Folder sizes: master switch plus one switch per kind of drive.
     pub folder_sizes: bool,
     pub sizes_ssd: bool,
@@ -266,6 +268,7 @@ impl Default for Config {
             highlight_recents: true,
             recents_on_top: false,
             recents_store: RecentsStore::Persistent,
+            share_without_place: false,
             folder_sizes: true,
             sizes_ssd: true,
             sizes_hdd: false,

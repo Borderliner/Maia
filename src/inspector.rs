@@ -1667,6 +1667,16 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                             ui.add(egui::Label::new(egui::RichText::new(crate::exif::place(lat, lon)).size(11.5)).truncate());
                         });
                         ui.end_row();
+                        // Whether Send To Phone and Email take the place along.
+                        ui.label(egui::RichText::new("Shared").color(pal.text_dim).size(11.5));
+                        ui.horizontal(|ui| {
+                            let mut on = env.cfg.share_without_place;
+                            if crate::popups::switch(ui, &mut on, &pal) {
+                                env.actions.push(crate::app::Action::Cmd(crate::commands::Cmd::ToggleSharePlace));
+                            }
+                            ui.label(egui::RichText::new(if on { "without place and camera" } else { "with place and camera" }).size(11.5).color(pal.text_dim));
+                        });
+                        ui.end_row();
                     }
                     // A download: the address it came from and the page that linked to it,
                     // each opening in the browser.

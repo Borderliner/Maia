@@ -48,10 +48,19 @@ pub struct Shared {
     pub blocked: Option<String>,
 }
 
+/// Pictures sent without where they were taken and the camera's details, while `on`
+/// (it can be switched with the popup open).
+pub struct Clean {
+    pub on: AtomicBool,
+    /// exiftool, for the kinds Maia can't clean itself.
+    pub tools: Option<crate::drives::Tools>,
+}
+
 /// The running server: dropped, it stops.
 pub struct Server {
     stop: Arc<AtomicBool>,
     pub shared: Arc<Mutex<Shared>>,
+    pub clean: Arc<Clean>,
 }
 
 impl Drop for Server {
@@ -195,10 +204,11 @@ fn token() -> Option<String> {
 }
 
 /// Start sharing `items`, folders only when `zip` can pack them.
-pub fn start(items: Vec<Item>, zip: Option<crate::drives::Tools>, tools: Option<crate::drives::Tools>, ctx: &egui::Context) -> Server {
+pub fn start(items: Vec<Item>, zip: Option<crate::drives::Tools>, tools: Option<crate::drives::Tools>, clean_on: bool, ctx: &egui::Context) -> Server {
     let stop = Arc::new(AtomicBool::new(false));
     let shared = Arc::new(Mutex::new(Shared::default()));
-    let (s2, sh2, c2) = (stop.clone(), shared.clone(), ctx.clone());
+    let clean = Arc::new(Clean { on: AtomicBool::new(clean_on), tools: tools.clone() });
+    let (s2, sh2, c2, cl2) = (stop.clone(), shared.clone(), ctx.clone(), clean.clone());
     let _ = std::thread::Builder::new().name("send to phone".into()).spawn(move || {
         let fail = |e: &str| {
             sh2.lock().unwrap_or_else(|e| e.into_inner()).url = Some(Err(e.to_string()));
@@ -237,7 +247,7 @@ pub fn start(items: Vec<Item>, zip: Option<crate::drives::Tools>, tools: Option<
             }
             match l.accept() {
                 Ok((conn, peer)) if busy.load(Relaxed) < AT_ONCE => {
-                    let (items, tok, busy, stop, shared, ctx, zip) = (items.clone(), tok.clone(), busy.clone(), s2.clone(), sh2.clone(), c2.clone(), zip.clone());
+                    let (items, tok, busy, stop, shared, ctx, zip, clean) = (items.clone(), tok.clone(), busy.clone(), s2.clone(), sh2.clone(), c2.clone(), zip.clone(), cl2.clone());
                     busy.fetch_add(1, Relaxed);
                     let _ = std::thread::Builder::new().name("send to phone conn".into()).spawn(move || {
                         let _ = conn.set_nonblocking(false);
@@ -250,7 +260,7 @@ pub fn start(items: Vec<Item>, zip: Option<crate::drives::Tools>, tools: Option<
                         let r = conn.try_clone().map(BufReader::new);
                         if let Ok(mut r) = r {
                             let mut w = &conn;
-                            serve(&mut r, &mut w, &items, &tok, zip.as_ref(), &stop, &mut got);
+                            serve(&mut r, &mut w, &items, &tok, zip.as_ref(), &clean, &stop, &mut got);
                         }
                         let _ = conn.shutdown(std::net::Shutdown::Both);
                         busy.fetch_sub(1, Relaxed);
@@ -264,12 +274,12 @@ pub fn start(items: Vec<Item>, zip: Option<crate::drives::Tools>, tools: Option<
         s2.store(true, Relaxed);
         c2.request_repaint();
     });
-    Server { stop, shared }
+    Server { stop, shared, clean }
 }
 
 /// One request read from `r` and answered on `w`: the page, an item, or nothing at all
 /// for a path without the token. `got` hears of each item sent whole.
-pub fn serve(r: &mut impl BufRead, w: &mut impl Write, items: &[Item], tok: &str, zip: Option<&crate::drives::Tools>, stop: &AtomicBool, got: &mut dyn FnMut(usize)) {
+pub fn serve(r: &mut impl BufRead, w: &mut impl Write, items: &[Item], tok: &str, zip: Option<&crate::drives::Tools>, clean: &Clean, stop: &AtomicBool, got: &mut dyn FnMut(usize)) {
     let mut line = String::new();
     if r.by_ref().take(4096).read_line(&mut line).is_err() {
         return;
@@ -302,7 +312,7 @@ pub fn serve(r: &mut impl BufRead, w: &mut impl Write, items: &[Item], tok: &str
     let pick = if rest.is_empty() { (items.len() == 1).then_some(0) } else { rest.split('/').next().and_then(|n| n.parse::<usize>().ok()).filter(|&k| k < items.len()) };
     match pick {
         Some(k) => {
-            if send_item(w, &items[k], zip, stop, head) {
+            if send_item(w, &items[k], zip, clean, stop, head) {
                 got(k);
             }
         }
@@ -340,8 +350,18 @@ fn disposition(name: &str) -> String {
 }
 
 /// Send one item; true when it went whole.
-fn send_item(w: &mut impl Write, it: &Item, zip: Option<&crate::drives::Tools>, stop: &AtomicBool, head: bool) -> bool {
+fn send_item(w: &mut impl Write, it: &Item, zip: Option<&crate::drives::Tools>, clean: &Clean, stop: &AtomicBool, head: bool) -> bool {
     let name = saved_name(it);
+    let ext = it.path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    if !it.dir && clean.on.load(Relaxed) && crate::scrub::applies(&ext) {
+        // Cleaned in memory; one that can't be is not sent rather than sent whole.
+        let Ok(b) = crate::scrub::clean(&it.path, clean.tools.as_ref()) else {
+            let _ = w.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return false;
+        };
+        let _ = write!(w, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nContent-Disposition: {}\r\nConnection: close\r\n\r\n", b.len(), disposition(&name));
+        return !head && w.write_all(&b).and_then(|_| w.flush()).is_ok();
+    }
     if it.dir {
         let Some(tools) = zip else { return false };
         let _ = write!(w, "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Disposition: {}\r\nConnection: close\r\n\r\n", disposition(&name));
@@ -446,7 +466,7 @@ pub fn open(app: &mut App) {
         return;
     }
     let ctx = app.ctx.clone();
-    let server = start(items.clone(), zip, tools, &ctx);
+    let server = start(items.clone(), zip, tools, app.cfg.share_without_place, &ctx);
     app.popup = pp::Popup::Phone(Box::new(State { items, left_out, server, opened: Instant::now(), code: None }));
 }
 
@@ -475,6 +495,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
     let n = st.items.len();
     let total: u64 = st.items.iter().map(|i| i.size).sum();
     let mut copy = None;
+    let mut toggled = None;
     let (_, rect) = pp::centered(ctx, "send to phone", 600.0, &pal, |ui| {
         let side = 216.0f32.min(ui.available_width() * 0.45).round();
         ui.horizontal_top(|ui| {
@@ -513,6 +534,24 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                         ui.label(egui::RichText::new(format!("and {} more", n - 5)).font(small.clone()).color(pal.text_dim));
                     }
                     ui.add_space(6.0);
+                }
+                // Photos: with or without where they were taken and the camera's details.
+                let ext = |i: &Item| i.path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+                let pics: Vec<&Item> = st.items.iter().filter(|i| !i.dir && crate::scrub::applies(&ext(i))).collect();
+                if !pics.is_empty() {
+                    let mut on = st.server.clean.on.load(Relaxed);
+                    ui.horizontal(|ui| {
+                        if pp::switch(ui, &mut on, &pal) {
+                            st.server.clean.on.store(on, Relaxed);
+                            toggled = Some(on);
+                        }
+                        ui.label(egui::RichText::new("Leave out place and camera").font(small.clone()).color(pal.text));
+                    });
+                    let stuck = pics.iter().filter(|i| !crate::scrub::can(&ext(i), st.server.clean.tools.as_ref())).count();
+                    if on && stuck > 0 {
+                        let what = if stuck == 1 { "1 picture isn't".to_string() } else { format!("{stuck} pictures aren't") };
+                        ui.add(egui::Label::new(egui::RichText::new(format!("{what} sent: cleaning HEIC and raw photos needs exiftool")).font(small.clone()).color(pal.text_dim)).wrap());
+                    }
                 }
                 if st.left_out > 0 {
                     let f = if st.left_out == 1 { "1 folder is" } else { "Some folders are" };
@@ -563,6 +602,10 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         }
         pp::hints(ui, &[("Esc", "stop sending")], &pal);
     });
+    if let Some(on) = toggled {
+        app.cfg.share_without_place = on;
+        app.cfg_dirty = true;
+    }
     if let Some((text, said)) = copy {
         ctx.copy_text(text);
         app.toast(said);

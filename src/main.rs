@@ -95,6 +95,7 @@ mod query;
 mod rename;
 mod runner;
 mod selmatch;
+mod scrub;
 mod semantic;
 mod sendto;
 mod share;
