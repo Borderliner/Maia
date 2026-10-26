@@ -2928,7 +2928,10 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
         }
     };
     let line_of = |li: usize| li.checked_sub(off).and_then(|k| lines.get(k));
-    area.auto_shrink([false, false]).stick_to_bottom(opts.stick).id_salt("insp_text").show_viewport(&mut inner, |ui, vp| {
+    // In a short panel the text gets only the room left (above a find bar, say), not the
+    // least height a scroll area would otherwise keep.
+    let room = inner.max_rect().height().max(0.0);
+    area.auto_shrink([false, false]).min_scrolled_height(room.min(64.0)).max_height(room).stick_to_bottom(opts.stick).id_salt("insp_text").show_viewport(&mut inner, |ui, vp| {
         let w = if rows.is_some() { vp.width() } else { (2000.0 * size * 0.62).min(lines.iter().map(|l| l.len()).max().unwrap_or(0) as f32 * size * 0.62 + gutter + 20.0).max(vp.width()) };
         let sense = if pick.is_some() { Sense::click() } else if sel.is_some() { Sense::click_and_drag() } else { Sense::hover() };
         let (r, resp) = ui.allocate_exact_size(vec2(w, n as f32 * row_h + 8.0), sense);

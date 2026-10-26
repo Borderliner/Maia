@@ -167,7 +167,8 @@ pub fn bar(ui: &mut Ui, body: Rect, f: &mut Finder, count: &str, any: bool, id: 
         r = Some(ui.add(te));
     });
     let Some(r) = r else { return (out, body) };
-    crate::ui::note_control(&bui, r.rect, "find field");
+    // As the bar slides up, only what shows of the field is there to click.
+    crate::ui::note_control(&bui, r.rect.intersect(bar), "find field");
     if f.focus {
         f.focus = false;
         r.request_focus();
