@@ -17506,6 +17506,14 @@ mod journeys {
         assert!(p.tabs[0].pinned && p.tabs[p.active].id == id);
         look(&mut s, "a pinned tab");
         s.shot("pinned-tab");
+        // Kept through a restart: the layout as saved, read back and applied.
+        let ctx = s.ctx.clone();
+        let saved = serde_json::to_string(&s.app.layout_snap(&ctx)).unwrap();
+        let back: crate::config::LayoutSnap = serde_json::from_str(&saved).unwrap();
+        assert!(s.app.apply_layout(&back), "the layout applies");
+        s.idle(20);
+        let p = s.app.panel();
+        assert!(p.tabs[0].pinned && p.tabs.iter().filter(|t| t.pinned).count() == 1, "pinned after a restart");
         s.act("key ctrl+Tab");
         s.idle(20);
         assert!(!s.app.panel().tab().pinned);
