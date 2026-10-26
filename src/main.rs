@@ -71,6 +71,7 @@ mod ollama;
 mod ops;
 mod origin;
 mod panel;
+mod pastes;
 mod perms;
 mod phone;
 mod picfix;

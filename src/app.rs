@@ -236,6 +236,8 @@ pub struct App {
     pub jobs_chip: Option<egui::Rect>,
     pub jobs_panel: u64,
     pub clipboard: Option<(Vec<PathBuf>, bool)>,
+    /// The sets copied and cut this session, newest first (Paste From Earlier).
+    pub pastes: Vec<crate::pastes::Set>,
     pub popup: Popup,
     pub sidebar: bool,
     pub sidebar_width: f32,
@@ -400,6 +402,7 @@ impl App {
             jobs_chip: None,
             jobs_panel: 0,
             clipboard: None,
+            pastes: vec![],
             popup: Popup::None,
             sidebar: if session.sidebar_width > 0.0 { session.sidebar } else { true },
             sidebar_width: if session.sidebar_width > 0.0 { session.sidebar_width } else { 176.0 },
@@ -2047,7 +2050,7 @@ impl App {
         let ctx = self.ctx.clone();
         // Drives aren't files: in the Computer view nothing can be cut, deleted, linked or
         // duplicated (a mounted volume's root would take its whole contents with it).
-        if tab::is_computer(&self.panel().path()) && matches!(cmd, Cmd::Cut | Cmd::Trash | Cmd::DeletePermanent | Cmd::Duplicate | Cmd::CreateLink | Cmd::Paste | Cmd::Rename) {
+        if tab::is_computer(&self.panel().path()) && matches!(cmd, Cmd::Cut | Cmd::Trash | Cmd::DeletePermanent | Cmd::Duplicate | Cmd::CreateLink | Cmd::Paste | Cmd::PasteEarlier | Cmd::Rename) {
             return;
         }
         // Inside an archive: zip, 7z and tarballs change by a job that rewrites them.
@@ -2728,11 +2731,15 @@ impl App {
                     return;
                 }
                 let cut = cmd == Cmd::Cut;
+                let dirs = self.tab().target_entries().iter().filter(|e| e.is_dir && paths.contains(&e.path)).count();
+                let from = self.panel().path();
+                crate::pastes::remember(&mut self.pastes, crate::pastes::Set { paths: paths.clone(), cut, dirs, from, at: crate::jump::now() });
                 crate::clipboard::set_files(&paths, cut);
                 self.toast(format!("{} {} item{}", if cut { "Cut" } else { "Copied" }, paths.len(), if paths.len() == 1 { "" } else { "s" }));
                 self.clipboard = Some((paths, cut));
             }
             Cmd::Paste => self.paste(),
+            Cmd::PasteEarlier => crate::pastes::open(self),
             Cmd::CopyPathRelative => {
                 let mut paths = self.tab().selected_paths();
                 if paths.is_empty() {
@@ -3396,6 +3403,7 @@ impl App {
         if cut {
             self.clipboard = None;
         }
+        crate::pastes::pasted(&mut self.pastes, &paths, cut);
         self.begin_transfer(paths, dest, cut);
     }
 
