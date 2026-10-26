@@ -210,7 +210,9 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
     if take(Modifiers::NONE, Key::Escape) {
         return false;
     }
-    let (up, down, alt_up, alt_down) = (take(Modifiers::NONE, Key::ArrowUp), take(Modifiers::NONE, Key::ArrowDown), take(Modifiers::ALT, Key::ArrowUp), take(Modifiers::ALT, Key::ArrowDown));
+    // Alt first: a plain key's check would take Alt and the key as well.
+    let (alt_up, alt_down) = (take(Modifiers::ALT, Key::ArrowUp), take(Modifiers::ALT, Key::ArrowDown));
+    let (up, down) = (take(Modifiers::NONE, Key::ArrowUp), take(Modifiers::NONE, Key::ArrowDown));
     let (space, del, enter) = (take(Modifiers::NONE, Key::Space), take(Modifiers::NONE, Key::Delete), take(Modifiers::NONE, Key::Enter));
     let at = st.sel.and_then(|s| ids.iter().position(|&x| x == s));
     if down {

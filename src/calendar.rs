@@ -259,13 +259,14 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
     // Page Up and Down a month, Enter the pictures full window.
     let mut step = 0i64;
     let mut run = false;
+    // Shift first: a plain key's check would take Shift and the key as well.
     for (k, d) in [(Key::ArrowLeft, -1), (Key::ArrowRight, 1), (Key::ArrowUp, -7), (Key::ArrowDown, 7)] {
-        if take(Modifiers::NONE, k) {
-            step = d;
-        }
         if take(Modifiers::SHIFT, k) {
             step = d;
             run = true;
+        }
+        if take(Modifiers::NONE, k) {
+            step = d;
         }
     }
     let (prev_m, next_m, enter) = (take(Modifiers::NONE, Key::PageUp), take(Modifiers::NONE, Key::PageDown), take(Modifiers::NONE, Key::Enter));
