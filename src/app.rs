@@ -3162,6 +3162,7 @@ impl App {
             },
             Cmd::GoToMark => self.popup = Popup::Marks(crate::marks::State { set: false, sel: 0 }),
             Cmd::Jump => crate::jump::open(self),
+            Cmd::SendToPhone => crate::phone::open(self),
         }
     }
 

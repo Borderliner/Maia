@@ -299,6 +299,7 @@ commands! {
     CopyWebLink, "copy_web_link", Files, "Copy Web Link", "Copy a link to the selection on GitHub, GitLab or Codeberg at this commit, with the line a search showed.", [];
     OpenWebLink, "open_web_link", Files, "Open Web Link", "Open the selection on GitHub, GitLab or Codeberg in your browser, at this commit and the line a search showed.", [];
     Email, "email", Files, "Email", "Attach the selected files to a new email in your mail app.", [];
+    SendToPhone, "send_to_phone", Files, "Send To Phone…", "Share the selection on this network for five minutes, through a code the phone's camera reads; folders go as zips.", [];
     Print, "print", Files, "Print…", "Print the selected files on one of your printers.", [];
     RotateLeft, "rotate_left", Files, "Rotate Left", "Turn the selected pictures a quarter to the left, in place; the originals go to the trash.", [];
     RotateRight, "rotate_right", Files, "Rotate Right", "Turn the selected pictures a quarter to the right, in place; the originals go to the trash.", [];

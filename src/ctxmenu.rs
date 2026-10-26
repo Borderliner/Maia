@@ -376,6 +376,9 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             copy.push(Item::cmd(Cmd::CopyWebLink));
         }
         items.push(Item::sub("copy_as", "Copy as", copy));
+        if t.archive.is_none() {
+            items.push(Item::cmd(Cmd::SendToPhone));
+        }
         if any_file && ents.iter().all(|e| !e.1) {
             items.push(Item::cmd(Cmd::Email));
             let paper = ents.iter().all(|e| crate::sendto::printable(&e.0.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), &e.3));

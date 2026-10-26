@@ -253,6 +253,8 @@ pub enum Popup {
     /// The jobs under way, above the status bar's chip.
     Transfers(crate::transfers::State),
     Jump(Box<crate::jump::State>),
+    /// Send To Phone: the code, the files, the time left.
+    Phone(Box<crate::phone::State>),
 }
 
 /// The branch menu, its lists read on a worker as it opens.
@@ -493,6 +495,7 @@ impl Popup {
             Popup::Tour(..) => "Tour",
             Popup::Transfers(..) => "Transfers",
             Popup::Jump(..) => "Jump",
+            Popup::Phone(..) => "Phone",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -1159,6 +1162,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::Tour(st) => crate::tour::draw(app, ctx, st),
         Popup::Transfers(st) => crate::transfers::popup(app, ctx, st),
         Popup::Jump(st) => crate::jump::popup(app, ctx, st),
+        Popup::Phone(st) => crate::phone::popup(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -1667,6 +1671,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::RestoreTrash => t.path.starts_with(crate::sidebar::trash_dir()),
         Cmd::Undo => !app.undo.is_empty(),
         Cmd::Transfers => crate::transfers::live(app) > 0,
+        Cmd::SendToPhone => t.archive.is_none() && !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),
         Cmd::Redo => app.undo.can_redo(),
         Cmd::ReopenTab => !app.closed_tabs.is_empty(),
         Cmd::EditTags => t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()) && crate::musictags::applies(&t.target_entries().iter().map(|e| (e.ext(), e.is_dir)).collect::<Vec<_>>()),
