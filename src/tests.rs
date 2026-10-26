@@ -13612,3 +13612,29 @@ fn outside_input_never_panics() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The README card follows its file: edited, the card shows the new text once the folder
+/// is read again; replaced by a better-named one, that one.
+#[test]
+fn readme_card_follows_the_file() {
+    let d = tmpdir("readme-edit");
+    touch(&d.join("README.md"), "# Old title\n\nold words\n");
+    let ctx = egui::Context::default();
+    let stats = HashMap::new();
+    let mut t = Tab::new(1, d.clone(), ViewSettings::default(), ctx.clone());
+    pump(&mut t, &stats);
+    crate::readme::sync(&mut t, &ctx);
+    let text = |t: &mut Tab| {
+        let c = t.readme.as_mut().unwrap();
+        wait_for("the readme read", 5, || crate::readme::height(c, 14.0, 700.0, 0.0) > 0.0 && c.text().is_some());
+        c.text().unwrap()
+    };
+    assert!(text(&mut t).contains("Old title"));
+    std::thread::sleep(Duration::from_millis(20));
+    touch(&d.join("README.md"), "# New title\n\nnew words, more of them\n");
+    t.reload();
+    pump(&mut t, &stats);
+    crate::readme::sync(&mut t, &ctx);
+    assert!(text(&mut t).contains("New title"), "read again after it changed");
+    let _ = std::fs::remove_dir_all(&d);
+}

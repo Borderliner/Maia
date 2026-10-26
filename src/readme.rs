@@ -23,6 +23,8 @@ pub struct Card {
     /// The listing it was looked for in.
     seen: Option<Instant>,
     pub file: Option<PathBuf>,
+    /// The file's size and time when it was read: changed, it is read again.
+    stamp: (u64, Option<std::time::SystemTime>),
     view: Option<Box<crate::markdown::View>>,
     rx: Option<mpsc::Receiver<crate::markdown::Doc>>,
     /// Shown whole rather than its start.
@@ -36,16 +38,16 @@ pub enum Act {
 }
 
 /// The README among `names`, best first.
-fn pick<'a>(names: impl Iterator<Item = (&'a str, &'a Path, bool)>) -> Option<PathBuf> {
-    let mut best: Option<(usize, PathBuf)> = None;
-    for (n, p, dir) in names {
-        if dir || n.len() > 15 {
+fn pick<'a>(entries: impl Iterator<Item = &'a crate::fsx::Entry>) -> Option<&'a crate::fsx::Entry> {
+    let mut best: Option<(usize, &crate::fsx::Entry)> = None;
+    for e in entries {
+        if e.is_dir || e.name.len() > 15 {
             continue;
         }
-        let l = n.to_ascii_lowercase();
+        let l = e.name.to_ascii_lowercase();
         if let Some(k) = NAMES.iter().position(|x| *x == l) {
             if best.as_ref().is_none_or(|b| k < b.0) {
-                best = Some((k, p.to_path_buf()));
+                best = Some((k, e));
             }
         }
     }
@@ -63,11 +65,13 @@ pub fn sync(t: &mut crate::tab::Tab, ctx: &egui::Context) {
         return;
     }
     card.seen = t.loaded_at;
-    let file = pick(t.entries.iter().filter(|e| e.depth == 0).map(|e| (e.name.as_str(), e.path.as_path(), e.is_dir)));
-    if file == card.file && card.view.is_some() {
+    let found = pick(t.entries.iter().filter(|e| e.depth == 0));
+    let (file, stamp) = (found.map(|e| e.path.clone()), found.map_or((0, None), |e| (e.size, e.modified)));
+    if file == card.file && stamp == card.stamp && card.view.is_some() {
         return;
     }
     card.file = file.clone();
+    card.stamp = stamp;
     card.view = None;
     card.rx = None;
     let Some(f) = file else { return };
@@ -85,6 +89,14 @@ pub fn sync(t: &mut crate::tab::Tab, ctx: &egui::Context) {
         ctx.request_repaint();
     });
     card.rx = Some(rx);
+}
+
+/// The README's text as parsed, for the tests.
+#[cfg(test)]
+impl Card {
+    pub fn text(&self) -> Option<String> {
+        self.view.as_ref().map(|v| format!("{:?}", v.doc.blocks))
+    }
 }
 
 /// How tall the card wants to be in a list `room` high; 0 for none. `chosen` is the
