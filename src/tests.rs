@@ -9368,7 +9368,8 @@ fn terminal_mouse_with_real_programs() {
         let mut c = Command::new("less");
         c.arg("--mouse").arg(&file).env("LESSHISTFILE", "-");
         let mut p = Pty::spawn(c, 40, 10, ctx.clone()).unwrap();
-        wait(&p, "less", &|s| s.mouse == crate::vt::Track::Click && s.mouse_enc == crate::vt::Enc::Sgr && s.row_text(0) == "line 1");
+        // less 710 asks for drags too (1002) after clicks (1000); older ones clicks alone.
+        wait(&p, "less", &|s| matches!(s.mouse, crate::vt::Track::Click | crate::vt::Track::Drag) && s.mouse_enc == crate::vt::Enc::Sgr && s.row_text(0) == "line 1");
         let down = p.shared.term().screen.report(Wheel(false), 5, 5, none).unwrap();
         p.write(&down.repeat(3));
         wait(&p, "less scrolled down", &|s| s.row_text(0) != "line 1");
@@ -12671,4 +12672,854 @@ fn disk_record_keeps_a_reading_a_day() {
     assert_eq!(week_change(&r(&[(195, 20), (200, 18)]), 200), Some((5, -2 * (GB as i64))), "or the first after it");
     assert_eq!(week_change(&r(&[(200, 18)]), 200), None);
     let _ = std::fs::remove_dir_all(&d);
+}
+
+// ------------------------------------------------------------------ transfers
+
+fn wait_for(what: &str, secs: u64, mut ok: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while !ok() {
+        assert!(start.elapsed() < Duration::from_secs(secs), "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Jobs waiting for one disk go in the order they are put in: by id at first, then as
+/// moved (before another, or last), the running one left where it is. Their copies land
+/// in that order once the disk is free.
+#[test]
+fn waiting_transfers_go_in_the_order_they_are_put() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let ctx = egui::Context::default();
+    let q = std::sync::Arc::new(ops::Queue::default());
+    let d = tmpdir("reorder");
+    let big: Vec<u8> = (0..6_000_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(d.join("big.bin"), &big).unwrap();
+    for n in ["a", "b", "c", "e"] {
+        touch(&d.join(format!("{n}.txt")), n);
+    }
+    std::fs::create_dir_all(d.join("out")).unwrap();
+    let copy = |id: u64, what: &str| ops::spawn_in(id, OpKind::Copy { srcs: vec![d.join(what)], dest: d.join("out"), decide: HashMap::new() }, ctx.clone(), &q, false);
+    let first = copy(1, "big.bin");
+    first.pause.store(true, Relaxed);
+    wait_for("the first to hold the disk", 5, || q.running() == [1]);
+    let jobs: Vec<ops::Job> = [(2, "a.txt"), (3, "b.txt"), (4, "c.txt"), (5, "e.txt")].into_iter().map(|(id, n)| copy(id, n)).collect();
+    wait_for("four waiting", 5, || q.waiting().len() == 4);
+    assert_eq!(q.waiting(), [2, 3, 4, 5]);
+    q.move_to(5, Some(2));
+    assert_eq!(q.waiting(), [5, 2, 3, 4], "put first");
+    q.move_to(2, None);
+    assert_eq!(q.waiting(), [5, 3, 4, 2], "put last");
+    q.move_to(4, Some(3));
+    assert_eq!(q.waiting(), [5, 4, 3, 2]);
+    q.move_to(1, Some(5));
+    q.move_to(99, Some(5));
+    assert_eq!(q.waiting(), [5, 4, 3, 2], "the running job and an unknown one stay out of it");
+    assert_eq!(q.running(), [1]);
+    // Paused, the first holds its bytes where they are.
+    let held = first.progress.lock().unwrap().done_bytes;
+    std::thread::sleep(Duration::from_millis(120));
+    assert_eq!(first.progress.lock().unwrap().done_bytes, held, "paused");
+    assert!(jobs.iter().all(|j| j.progress.lock().unwrap().waiting.as_deref() == Some("Copying big.bin")));
+    // The chip's sum: five jobs, the waiting ones counting for nothing yet.
+    let all: Vec<ops::Job> = std::iter::once(first).chain(jobs).collect();
+    let (text, frac) = crate::transfers::summary(&all).unwrap();
+    assert!(text.starts_with("5 jobs · "), "{text}");
+    assert!((0.0..1.0).contains(&frac));
+    // Let go: each starts in the order it was put.
+    all[0].pause.store(false, Relaxed);
+    for j in &all {
+        wait_job(j);
+    }
+    let mut order: Vec<(Instant, u64)> = all[1..].iter().map(|j| (j.progress.lock().unwrap().since.expect("started after waiting"), j.id)).collect();
+    order.sort();
+    assert_eq!(order.iter().map(|x| x.1).collect::<Vec<_>>(), [5, 4, 3, 2]);
+    assert_eq!(std::fs::read(d.join("out/big.bin")).unwrap(), big);
+    assert!(crate::transfers::summary(&all).is_none(), "nothing left: no chip");
+    assert!(q.waiting().is_empty() && q.running().is_empty());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A transfer queued behind others asks about a taken name inside its job: the clash
+/// says which is newer and how many more of its names are taken; Replace puts the old one
+/// in the trash, Skip with "the same for the others" answers the rest at once, a name not
+/// taken is copied without asking, and two folders can be merged. Cancelled while it
+/// asks, the job ends and copies nothing more. The time spent asking is left out of the
+/// speed.
+#[test]
+fn a_queued_transfer_asks_about_taken_names_inside_its_job() {
+    let ctx = egui::Context::default();
+    let d = tmpdir("clash");
+    let (src, out) = (d.join("src"), d.join("out"));
+    for n in ["a", "b", "c", "d"] {
+        touch(&src.join(format!("{n}.txt")), &format!("new {n}"));
+    }
+    for n in ["a", "b", "c"] {
+        touch(&out.join(format!("{n}.txt")), &format!("old {n}"));
+    }
+    touch(&src.join("box/new.txt"), "new");
+    touch(&out.join("box/old.txt"), "old");
+    // The one there is two days older than the one coming.
+    let two_days_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 86_400 + 60);
+    std::fs::File::options().write(true).open(out.join("a.txt")).unwrap().set_modified(two_days_ago).unwrap();
+    let ask = |names: &[&str]| -> HashMap<PathBuf, Conflict> { names.iter().map(|n| (src.join(n), Conflict::Ask)).collect() };
+    let srcs: Vec<PathBuf> = ["a.txt", "b.txt", "c.txt", "d.txt"].iter().map(|n| src.join(n)).collect();
+    let j = ops::spawn(1, OpKind::Copy { srcs: srcs.clone(), dest: out.clone(), decide: ask(&["a.txt", "b.txt", "c.txt", "d.txt"]) }, ctx.clone());
+    let clash = |j: &ops::Job| j.progress.lock().unwrap().clash.clone();
+    wait_for("the first clash", 5, || clash(&j).is_some());
+    let c = clash(&j).unwrap();
+    assert_eq!((c.name.as_str(), c.note.as_str(), c.dirs, c.others), ("a.txt", "older by 2 days", false, 2));
+    std::thread::sleep(Duration::from_millis(150));
+    j.progress.lock().unwrap().answer = Some((Conflict::Overwrite, false));
+    wait_for("the second clash", 5, || clash(&j).is_some_and(|c| c.name == "b.txt"));
+    assert_eq!(clash(&j).unwrap().others, 1, "c.txt still to come");
+    assert_eq!(std::fs::read_to_string(out.join("a.txt")).unwrap(), "new a", "replaced");
+    assert!(crate::trashcan::list().iter().any(|i| i.original == out.join("a.txt")), "the old one is in the trash");
+    j.progress.lock().unwrap().answer = Some((Conflict::Skip, true));
+    wait_job(&j);
+    let g = j.progress.lock().unwrap();
+    assert!(g.clash.is_none() && g.errors.is_empty(), "{:?}", g.errors);
+    assert!(g.held >= Duration::from_millis(150), "the wait for answers is counted apart: {:?}", g.held);
+    drop(g);
+    assert_eq!(std::fs::read_to_string(out.join("b.txt")).unwrap(), "old b", "skipped");
+    assert_eq!(std::fs::read_to_string(out.join("c.txt")).unwrap(), "old c", "skipped by the same answer");
+    assert_eq!(std::fs::read_to_string(out.join("d.txt")).unwrap(), "new d", "not taken: copied without asking");
+    // Two folders: merged.
+    let m = ops::spawn(2, OpKind::Copy { srcs: vec![src.join("box")], dest: out.clone(), decide: ask(&["box"]) }, ctx.clone());
+    wait_for("the folder clash", 5, || clash(&m).is_some());
+    assert!(clash(&m).unwrap().dirs);
+    m.progress.lock().unwrap().answer = Some((Conflict::Merge, false));
+    wait_job(&m);
+    assert!(out.join("box/old.txt").exists() && out.join("box/new.txt").exists(), "merged");
+    // A move kept beside the one there.
+    let mv = ops::spawn(3, OpKind::Move { srcs: vec![src.join("b.txt")], dest: out.clone(), decide: ask(&["b.txt"]) }, ctx.clone());
+    wait_for("the move's clash", 5, || clash(&mv).is_some());
+    mv.progress.lock().unwrap().answer = Some((Conflict::KeepBoth, false));
+    wait_job(&mv);
+    assert!(!src.join("b.txt").exists());
+    let kept: Vec<String> = std::fs::read_dir(&out).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with('b') && n != "box").collect();
+    assert_eq!(kept.len(), 2, "both kept: {kept:?}");
+    // Cancelled while it asks: nothing after it is copied.
+    touch(&src.join("z.txt"), "z");
+    let cj = ops::spawn(4, OpKind::Copy { srcs: vec![src.join("c.txt"), src.join("z.txt")], dest: out.clone(), decide: ask(&["c.txt", "z.txt"]) }, ctx.clone());
+    wait_for("the clash before the cancel", 5, || clash(&cj).is_some());
+    cj.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    wait_job(&cj);
+    assert!(clash(&cj).is_none(), "the question goes with the job");
+    assert!(!out.join("z.txt").exists(), "nothing after it");
+    assert_eq!(std::fs::read_to_string(out.join("c.txt")).unwrap(), "old c");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// How the one there compares with the one coming, in the clash's words; and the sizes
+/// in the transfers list, the unit said once when both share it.
+#[test]
+fn clash_notes_and_sizes_read_as_said() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let t = |s: u64| Some(UNIX_EPOCH + Duration::from_secs(1_700_000_000 + s));
+    assert_eq!(ops::clash_note(t(0), t(0)), "same date");
+    assert_eq!(ops::clash_note(t(1), t(0)), "same date");
+    assert_eq!(ops::clash_note(t(45), t(0)), "newer by 45 seconds");
+    assert_eq!(ops::clash_note(t(0), t(60)), "older by 1 minute");
+    assert_eq!(ops::clash_note(t(7200), t(0)), "newer by 2 hours");
+    assert_eq!(ops::clash_note(t(0), t(86_400 * 3 + 5)), "older by 3 days");
+    assert_eq!(ops::clash_note(t(86_400 * 65), t(0)), "newer by 2 months");
+    assert_eq!(ops::clash_note(t(0), t(86_400 * 800)), "older by 2 years");
+    assert_eq!(ops::clash_note(None, t(0)), "");
+    assert_eq!(ops::clash_note(Some(SystemTime::now()), None), "");
+    assert_eq!(crate::transfers::of_size(2_100_000_000, 3_300_000_000), format!("{} of {}", crate::fsx::fmt_size(2_100_000_000).rsplit_once(' ').unwrap().0, crate::fsx::fmt_size(3_300_000_000)));
+    let mixed = crate::transfers::of_size(512_000, 3_300_000_000);
+    assert_eq!(mixed, format!("{} of {}", crate::fsx::fmt_size(512_000), crate::fsx::fmt_size(3_300_000_000)), "two units, both said");
+}
+
+// ------------------------------------------------------------------ download origin
+
+fn set_xattr(p: &Path, name: &str, value: &str) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+    let n = std::ffi::CString::new(name).unwrap();
+    unsafe { libc::setxattr(c.as_ptr(), n.as_ptr(), value.as_ptr().cast(), value.len(), 0) == 0 }
+}
+
+/// Where a download came from, as Chromium writes it: the address in
+/// user.xdg.origin.url and the page in user.xdg.referrer.url. Read off the file, cached
+/// once read (a file without one too), read again when it changed; grouped by its site,
+/// folders first and the unmarked last.
+#[test]
+fn download_origin_read_cached_and_grouped() {
+    use crate::origin::{self, Origin};
+    assert_eq!(origin::host("https://www.Example.com:8080/files/a.pdf?x=1#y").as_deref(), Some("example.com"));
+    assert_eq!(origin::host("https://user:pw@cdn.example.org/a").as_deref(), Some("cdn.example.org"));
+    assert_eq!(origin::host("http://[2001:db8::1]:80/a").as_deref(), Some("[2001:db8::1]"));
+    assert_eq!(origin::host("blob:https://web.whatsapp.com/1b2c").as_deref(), Some("web.whatsapp.com"));
+    assert_eq!(origin::host("data:text/plain,hi"), None);
+    assert_eq!(origin::host("https:///nothing"), None);
+    assert_eq!(origin::short("https://www.example.com/files/report.pdf?token=abc#p2"), "example.com/files/report.pdf");
+    assert_eq!(origin::short("https://example.com/"), "example.com");
+    assert!(origin::openable("HTTPS://example.com/a") && origin::openable("http://x/"));
+    for bad in ["file:///etc/passwd", "javascript:alert(1)", "data:text/html,x", "ftp://x/y", ""] {
+        assert!(!origin::openable(bad), "{bad}");
+    }
+    assert_eq!(Origin { url: None, page: Some("https://news.example.net/story".into()) }.host().as_deref(), Some("news.example.net"));
+    let d = tmpdir("origin");
+    touch(&d.join("report.pdf"), "pdf");
+    touch(&d.join("plain.txt"), "txt");
+    touch(&d.join("linked.zip"), "zip");
+    std::fs::create_dir_all(d.join("Folder")).unwrap();
+    if !set_xattr(&d.join("report.pdf"), "user.xdg.origin.url", "https://www.example.com/files/report.pdf") {
+        eprintln!("no user attributes on {}: skipped", d.display());
+        return;
+    }
+    assert!(set_xattr(&d.join("report.pdf"), "user.xdg.referrer.url", "https://example.com/downloads"));
+    assert!(set_xattr(&d.join("linked.zip"), "user.xdg.referrer.url", "https://github.com/x/y/releases"));
+    assert_eq!(origin::read(&d.join("report.pdf")), Some(Origin { url: Some("https://www.example.com/files/report.pdf".into()), page: Some("https://example.com/downloads".into()) }));
+    assert_eq!(origin::read(&d.join("plain.txt")), None);
+    let ctx = egui::Context::default();
+    let before = origin::generation();
+    for f in ["report.pdf", "plain.txt", "linked.zip"] {
+        assert!(origin::get(&d.join(f)).is_none(), "{f} is read on the worker, not here");
+        assert!(origin::get(&d.join(f)).is_none(), "and asked for once");
+    }
+    origin::flush(&ctx);
+    wait_for("the worker", 5, || origin::get(&d.join("linked.zip")).is_some() && origin::get(&d.join("plain.txt")).is_some() && origin::get(&d.join("report.pdf")).is_some());
+    assert!(origin::generation() > before);
+    assert_eq!(origin::get(&d.join("plain.txt")), Some(None));
+    let entry = |n: &str| crate::fsx::Entry::from_path(&d.join(n)).unwrap();
+    assert_eq!(origin::group(&entry("report.pdf")), "example.com");
+    assert_eq!(origin::group(&entry("linked.zip")), "github.com", "by the page when the address is missing");
+    assert_eq!(origin::group(&entry("plain.txt")), origin::UNKNOWN);
+    assert_eq!(origin::group(&entry("Folder")), origin::FOLDERS);
+    let mut groups = vec![origin::UNKNOWN, "github.com", origin::FOLDERS];
+    groups.sort_by_key(|g| origin::rank(g));
+    assert_eq!(groups, [origin::FOLDERS, "github.com", origin::UNKNOWN]);
+    // Marked later (downloaded again over it): read again once told.
+    assert!(set_xattr(&d.join("plain.txt"), "user.xdg.origin.url", "https://files.example.org/plain.txt"));
+    assert_eq!(origin::get(&d.join("plain.txt")), Some(None), "cached until told");
+    origin::invalidate(&d.join("plain.txt"));
+    assert!(origin::get(&d.join("plain.txt")).is_none());
+    origin::flush(&ctx);
+    wait_for("read again", 5, || origin::get(&d.join("plain.txt")).is_some_and(|o| o.is_some()));
+    assert_eq!(origin::group(&entry("plain.txt")), "files.example.org");
+    // A file named oddly, and an attribute that is all blanks.
+    touch(&d.join("blank.bin"), "b");
+    assert!(set_xattr(&d.join("blank.bin"), "user.xdg.origin.url", "  \0"));
+    assert_eq!(origin::read(&d.join("blank.bin")), None);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ------------------------------------------------------------------ jump
+
+/// Frecency weighs visits as zoxide does; visits are counted and, past the most kept,
+/// the least used are forgotten; zoxide's own list is read from its real output.
+#[test]
+fn jump_counts_visits_and_reads_zoxide() {
+    use crate::jump::{Visit, frecency, note, parse_zoxide};
+    let now = 10_000_000;
+    let v = |n, ago| Visit { n, at: now - ago };
+    assert_eq!(frecency(&v(3, 10), now), 12.0);
+    assert_eq!(frecency(&v(3, 3600), now), 6.0);
+    assert_eq!(frecency(&v(3, 86_400), now), 1.5);
+    assert_eq!(frecency(&v(3, 604_800), now), 0.75);
+    assert_eq!(frecency(&Visit { n: 2, at: now + 50 }, now), 8.0, "a clock gone back counts as now");
+    let mut visits = HashMap::new();
+    note(&mut visits, Path::new("/a"), now);
+    note(&mut visits, Path::new("/a"), now + 5);
+    assert_eq!((visits[Path::new("/a")].n, visits[Path::new("/a")].at), (2, now + 5));
+    // A thousand folders, the first hundred used often: those stay once it is pruned.
+    for i in 0..1001u64 {
+        let p = PathBuf::from(format!("/f/{i}"));
+        let times = if i < 100 { 5 } else { 1 };
+        for _ in 0..times {
+            note(&mut visits, &p, now - (1001 - i) * 10);
+        }
+    }
+    assert!(visits.len() <= 1000, "pruned: {}", visits.len());
+    assert!((0..100).all(|i| visits.contains_key(&PathBuf::from(format!("/f/{i}")))), "the most used stay");
+    assert!(visits.contains_key(Path::new("/a")), "the most recent stays");
+    // zoxide's own output, from a database of its own.
+    let z = tmpdir("zoxide");
+    let have = std::process::Command::new("zoxide").arg("--version").output().is_ok_and(|o| o.status.success());
+    let sample = if have {
+        for (dir, times) in [("/usr", 3), ("/usr/share", 1), ("/tmp", 2)] {
+            for _ in 0..times {
+                let ok = std::process::Command::new("zoxide").env("_ZO_DATA_DIR", &z).env("_ZO_EXCLUDE_DIRS", "").args(["add", dir]).status().is_ok_and(|s| s.success());
+                assert!(ok);
+            }
+        }
+        let out = std::process::Command::new("zoxide").env("_ZO_DATA_DIR", &z).args(["query", "--list", "--score"]).output().unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    } else {
+        "  12.0 /usr\n   8.0 /tmp\n   4.0 /usr/share\n".into()
+    };
+    let got = parse_zoxide(&sample);
+    let paths: Vec<&Path> = got.iter().map(|x| x.0.as_path()).collect();
+    assert_eq!(paths, [Path::new("/usr"), Path::new("/tmp"), Path::new("/usr/share")], "{sample:?}");
+    assert!(got[0].1 > got[1].1 && got[1].1 > got[2].1);
+    assert!(parse_zoxide("garbage\n  1.0 relative/path\n 2.5 /with space/dir\n").iter().map(|x| x.0.clone()).eq([PathBuf::from("/with space/dir")]));
+    let _ = std::fs::remove_dir_all(&z);
+}
+
+// ------------------------------------------------------------------ earlier copies
+
+/// The last nine sets copied or cut, newest first, the same set moved up rather than
+/// kept twice; a cut set gone once pasted; each set said in a few words.
+#[test]
+fn earlier_copies_keep_the_newest_nine() {
+    use crate::pastes::{Set, names, pasted, remember, title};
+    let set = |names: &[&str], cut: bool, dirs: usize| Set { paths: names.iter().map(|n| PathBuf::from("/home/u/Pictures/Camera").join(n)).collect(), cut, dirs, from: PathBuf::from("/home/u/Pictures/Camera"), at: 0 };
+    let mut list = vec![];
+    for i in 0..12 {
+        remember(&mut list, set(&[&format!("{i}.jpg")], false, 0));
+    }
+    assert_eq!(list.len(), 9);
+    assert_eq!(list[0].paths[0].file_name().unwrap(), "11.jpg");
+    assert_eq!(list[8].paths[0].file_name().unwrap(), "3.jpg");
+    remember(&mut list, set(&["5.jpg"], false, 0));
+    assert_eq!(list.len(), 9, "not kept twice");
+    assert_eq!(list[0].paths[0].file_name().unwrap(), "5.jpg");
+    assert_eq!(list[1].paths[0].file_name().unwrap(), "11.jpg");
+    remember(&mut list, set(&["a.jpg", "b.jpg"], true, 0));
+    pasted(&mut list, &[PathBuf::from("/home/u/Pictures/Camera/a.jpg"), PathBuf::from("/home/u/Pictures/Camera/b.jpg")], false);
+    assert_eq!(list.len(), 9, "a copy pasted stays");
+    pasted(&mut list, &[PathBuf::from("/home/u/Pictures/Camera/a.jpg"), PathBuf::from("/home/u/Pictures/Camera/b.jpg")], true);
+    assert_eq!(list.len(), 8, "a cut pasted is gone");
+    assert!(list.iter().all(|s| !s.cut));
+    assert_eq!(title(&set(&["a"], false, 0)), "1 file from Pictures/Camera");
+    assert_eq!(title(&set(&["a", "b", "c", "d"], false, 0)), "4 files from Pictures/Camera");
+    assert_eq!(title(&set(&["a"], false, 1)), "1 folder from Pictures/Camera");
+    assert_eq!(title(&set(&["a", "b"], false, 2)), "2 folders from Pictures/Camera");
+    assert_eq!(title(&set(&["a", "b", "c"], false, 1)), "3 items from Pictures/Camera");
+    assert_eq!(names(&set(&["IMG_2041.jpg", "IMG_2042.jpg", "x", "y"], false, 0)), "IMG_2041.jpg, IMG_2042.jpg and 2 more");
+    assert_eq!(names(&set(&["one.txt", "two.txt"], false, 0)), "one.txt, two.txt");
+}
+
+// ------------------------------------------------------------------ what grew
+
+/// Space used's readings: one a day for each folder, the day's latest standing, the four
+/// newest days kept, and of many folders the most recently counted; the reading before
+/// today found again. Names that would break the file are left out, and a change is said
+/// as it is shown.
+#[test]
+fn space_readings_say_what_grew() {
+    use crate::grew::{Reading, earlier_in, fmt_change, note_in};
+    let d = tmpdir("grew");
+    let f = d.join("maia/space-readings");
+    let dir = PathBuf::from("/data/Projects");
+    let reading = |day: i64, sizes: &[(&str, u64)]| Reading { day, at: day as u64 * 86_400 + 3600, dir: dir.clone(), sizes: sizes.iter().map(|(n, s)| (n.to_string(), *s)).collect() };
+    assert!(earlier_in(&f, &dir, 100).is_none(), "nothing yet");
+    note_in(&f, reading(100, &[("maia", 5_000_000), ("site", 2_000)]));
+    assert!(earlier_in(&f, &dir, 100).is_none(), "today's own reading isn't earlier");
+    let r = earlier_in(&f, &dir, 101).unwrap();
+    assert_eq!((r.day, r.total(), r.sizes["maia"]), (100, 5_002_000, 5_000_000));
+    note_in(&f, reading(100, &[("maia", 7_000_000)]));
+    assert_eq!(earlier_in(&f, &dir, 101).unwrap().sizes.len(), 1, "the day's latest reading stands");
+    for day in 101..110 {
+        note_in(&f, reading(day, &[("maia", day as u64 * 1000)]));
+    }
+    let text = std::fs::read_to_string(&f).unwrap();
+    assert_eq!(text.matches(&format!("\t{}\n", dir.display())).count(), 4, "four days kept:\n{text}");
+    assert_eq!(earlier_in(&f, &dir, 109).unwrap().day, 108);
+    assert_eq!(earlier_in(&f, &dir, 200).unwrap().day, 109);
+    assert!(earlier_in(&f, &dir, 105).is_none(), "the older days are gone");
+    // Names with a tab or a line break, and a folder with one, are left out.
+    note_in(&f, Reading { day: 120, at: 120 * 86_400, dir: dir.clone(), sizes: [("ok".to_string(), 1), ("bad\tname".to_string(), 2), ("line\nbreak".to_string(), 3)].into() });
+    assert_eq!(earlier_in(&f, &dir, 121).unwrap().sizes.keys().collect::<Vec<_>>(), ["ok"]);
+    note_in(&f, Reading { day: 120, at: 1, dir: PathBuf::from("/weird\nfolder"), sizes: [("x".to_string(), 1)].into() });
+    assert!(!std::fs::read_to_string(&f).unwrap().contains("weird"));
+    // A name that starts like a reading's line is still a name.
+    note_in(&f, Reading { day: 121, at: 121 * 86_400, dir: dir.clone(), sizes: [("@100\t5\t/x".to_string(), 9)].into() });
+    assert_eq!(earlier_in(&f, &dir, 122).unwrap().sizes.len(), 0, "kept out: it holds a tab");
+    // Of many folders, the most recently counted are kept.
+    for k in 0..420u64 {
+        note_in(&f, Reading { day: 130, at: 130 * 86_400 + k, dir: PathBuf::from(format!("/many/{k}")), sizes: [("x".to_string(), k)].into() });
+    }
+    assert!(earlier_in(&f, Path::new("/many/419"), 131).is_some());
+    assert!(earlier_in(&f, Path::new("/many/0"), 131).is_none(), "the least recent went");
+    assert!(earlier_in(&f, &dir, 131).is_none());
+    assert_eq!(fmt_change(0), "same");
+    assert_eq!(fmt_change(60_000), "same", "under 64 KB is the same");
+    assert_eq!(fmt_change(9_100_000_000), format!("+{}", crate::fsx::fmt_size(9_100_000_000)));
+    assert_eq!(fmt_change(-3_200_000_000), format!("−{}", crate::fsx::fmt_size(3_200_000_000)));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ------------------------------------------------------------------ calendar
+
+/// The calendar's dates: days and dates convert both ways across centuries, weekdays and
+/// month lengths come out as `date` says.
+#[test]
+fn calendar_dates_agree_with_date() {
+    use crate::calendar::{civil, day_of, weekday};
+    for z in (-800_000i64..800_000).step_by(7) {
+        let (y, m, d) = civil(z);
+        assert!((1..=12).contains(&m) && (1..=31).contains(&d));
+        assert_eq!(day_of(y, m, d), z, "{y}-{m}-{d}");
+    }
+    assert_eq!(civil(0), (1970, 1, 1));
+    assert_eq!(weekday(0), 3, "1970-01-01 was a Thursday");
+    assert_eq!(civil(day_of(2024, 2, 29) + 1), (2024, 3, 1));
+    assert_eq!(civil(day_of(1900, 2, 28) + 1), (1900, 3, 1), "1900 was no leap year");
+    assert_eq!(civil(day_of(2000, 2, 28) + 1), (2000, 2, 29), "2000 was");
+    // What `date` says of a few days, in UTC.
+    for day in [-25_000i64, -1, 0, 11_016, 19_782, 20_757, 47_482] {
+        let out = std::process::Command::new("date").env("TZ", "UTC").args(["-d", &format!("@{}", day * 86_400), "+%Y %m %d %u"]).output();
+        let Ok(out) = out else { continue };
+        let s = String::from_utf8_lossy(&out.stdout);
+        let v: Vec<i64> = s.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+        let (y, m, d) = civil(day);
+        assert_eq!(v, [y, m as i64, d as i64, weekday(day) as i64 + 1], "day {day}");
+    }
+}
+
+// ------------------------------------------------------------------ send to a phone
+
+/// The QR codes Maia draws scan: every length an address can have, at each version,
+/// read back by zbarimg from the modules drawn as a picture; past version 10 there is
+/// no code.
+#[test]
+fn qr_codes_scan_back() {
+    let have = std::process::Command::new("zbarimg").arg("--version").output().is_ok_and(|o| o.status.success());
+    let d = tmpdir("qr");
+    let mut lens: Vec<usize> = (1..60).step_by(3).collect();
+    lens.extend([64, 77, 90, 106, 122, 134, 154, 174, 180, 213, 230, 271]);
+    let mut versions = HashSet::new();
+    for n in lens {
+        let text: String = format!("http://192.168.1.23:47250/{}", "aZ09-_".repeat(60)).chars().take(n).collect();
+        let code = crate::qr::encode(text.as_bytes()).unwrap_or_else(|| panic!("no code for {n} bytes"));
+        assert_eq!((code.size - 17) % 4, 0, "a QR code's size: {}", code.size);
+        versions.insert((code.size - 17) / 4);
+        if !have {
+            continue;
+        }
+        // Four pixels a module, four modules of quiet zone.
+        let px = 4;
+        let side = (code.size + 8) * px;
+        let mut rgb = vec![255u8; side * side * 3];
+        for y in 0..code.size {
+            for x in 0..code.size {
+                if code.get(x, y) {
+                    for dy in 0..px {
+                        for dx in 0..px {
+                            let at = ((y + 4) * px + dy) * side + (x + 4) * px + dx;
+                            rgb[at * 3..at * 3 + 3].fill(0);
+                        }
+                    }
+                }
+            }
+        }
+        let f = d.join(format!("{n}.png"));
+        crate::sim::write_png(&f, side, side, &rgb);
+        let out = std::process::Command::new("zbarimg").args(["--raw", "-q", "-Sbinary"]).arg(&f).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n'), text, "{n} bytes, version {}", (code.size - 17) / 4);
+    }
+    assert!(versions.len() >= 8, "most versions drawn: {versions:?}");
+    assert!(crate::qr::encode(&[b'x'; 300]).is_none(), "too long for version 10");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+fn ask_phone(req: &str, items: &[crate::phone::Item], clean: bool, zip: Option<&crate::drives::Tools>) -> (String, Vec<u8>, Vec<usize>) {
+    let mut out = vec![];
+    let mut got = vec![];
+    let c = crate::phone::Clean { on: std::sync::atomic::AtomicBool::new(clean), tools: None };
+    crate::phone::serve(&mut std::io::Cursor::new(req.as_bytes().to_vec()), &mut out, items, "T0KEN", zip, &c, &std::sync::atomic::AtomicBool::new(false), &mut |k| got.push(k));
+    let split = out.windows(4).position(|w| w == b"\r\n\r\n").map_or(out.len(), |i| i + 4);
+    (String::from_utf8_lossy(&out[..split]).into_owned(), out[split..].to_vec(), got)
+}
+
+/// The phone's server: only a path with the token is answered; one item comes at once,
+/// several as a page of links (names escaped); a folder comes as a zip bsdtar writes; a
+/// photo is sent without its place when that is on; HEAD gets the headers alone; other
+/// methods are refused. Names with any characters reach the phone whole.
+#[test]
+fn phone_server_answers_only_with_its_token() {
+    use crate::phone::Item;
+    let d = tmpdir("phone");
+    touch(&d.join("report final.pdf"), "%PDF-1.4 pdf body");
+    touch(&d.join("box/inner.txt"), "inside");
+    touch(&d.join("<b>&\"odd\".txt"), "odd");
+    let item = |n: &str, dir: bool| Item { path: d.join(n), name: n.into(), dir, size: std::fs::metadata(d.join(n)).map_or(0, |m| m.len()) };
+    let one = [item("report final.pdf", false)];
+    let (h, body, got) = ask_phone("GET /T0KEN/ HTTP/1.1\r\nHost: x\r\n\r\n", &one, false, None);
+    assert!(h.starts_with("HTTP/1.1 200 OK"), "{h}");
+    assert!(h.contains("Content-Length: 17\r\n") && h.contains("filename=\"report final.pdf\""), "{h}");
+    assert_eq!(body, b"%PDF-1.4 pdf body");
+    assert_eq!(got, [0], "heard of as sent whole");
+    for bad in ["GET / HTTP/1.1", "GET /T0KE HTTP/1.1", "GET /WRONG/0 HTTP/1.1", "GET /T0KEN0 HTTP/1.1", "GET /T0KEN/7/ HTTP/1.1", "GET /x/T0KEN/ HTTP/1.1"] {
+        let (h, body, got) = ask_phone(&format!("{bad}\r\n\r\n"), &one, false, None);
+        assert!(h.starts_with("HTTP/1.1 404"), "{bad}: {h}");
+        assert!(body.is_empty() && got.is_empty(), "{bad}");
+    }
+    let (h, _, _) = ask_phone("POST /T0KEN/ HTTP/1.1\r\n\r\n", &one, false, None);
+    assert!(h.starts_with("HTTP/1.1 405"));
+    let (h, body, got) = ask_phone("HEAD /T0KEN/ HTTP/1.1\r\n\r\n", &one, false, None);
+    assert!(h.starts_with("HTTP/1.1 200") && body.is_empty() && got.is_empty(), "{h}");
+    // Several: a page.
+    let many = [item("report final.pdf", false), item("<b>&\"odd\".txt", false), item("box", true)];
+    let (h, body, _) = ask_phone("GET /T0KEN/?x=1 HTTP/1.1\r\n\r\n", &many, false, None);
+    let page = String::from_utf8(body).unwrap();
+    assert!(h.contains("text/html") && page.contains("href=\"/T0KEN/1/\""), "{page}");
+    assert!(page.contains("&lt;b&gt;&amp;&quot;odd&quot;.txt") && !page.contains("&\"odd"), "escaped");
+    assert!(page.contains("box.zip") && page.contains("folder, as a zip"));
+    let (h, body, got) = ask_phone("GET /T0KEN/1/ HTTP/1.1\r\n\r\n", &many, false, None);
+    assert_eq!((body.as_slice(), got.as_slice()), (b"odd".as_slice(), [1].as_slice()));
+    assert!(h.contains("filename=\"<b>&_odd_.txt\"") && h.contains("filename*=UTF-8''%3Cb%3E%26%22odd%22.txt"), "{h}");
+    // A folder, zipped as it is read.
+    let fake = tmpdir("phone-tools");
+    let bsdtar = ["/usr/bin/bsdtar", "/bin/bsdtar"].into_iter().find(|p| Path::new(p).exists());
+    if let Some(b) = bsdtar {
+        std::os::unix::fs::symlink(b, fake.join("bsdtar")).unwrap();
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+        let tools = crate::drives::Tools::current();
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        let (h, body, got) = ask_phone("GET /T0KEN/2/ HTTP/1.1\r\n\r\n", &many, false, tools.as_ref());
+        assert!(h.contains("application/zip") && body.starts_with(b"PK"), "{h}");
+        assert_eq!(got, [2]);
+        std::fs::write(d.join("got.zip"), &body).unwrap();
+        let list = std::process::Command::new(b).arg("-tf").arg(d.join("got.zip")).output().unwrap();
+        let names = String::from_utf8_lossy(&list.stdout);
+        assert!(names.lines().any(|l| l == "box/inner.txt"), "{names}");
+    }
+    // Without bsdtar a folder isn't sent.
+    let (_, body, got) = ask_phone("GET /T0KEN/2/ HTTP/1.1\r\n\r\n", &many, false, None);
+    assert!(body.is_empty() && got.is_empty());
+    // A request line too long, or headers that never end, get nothing harmful.
+    let long = format!("GET /T0KEN/{} HTTP/1.1\r\n\r\n", "9".repeat(10_000));
+    let (h, _, got) = ask_phone(&long, &one, false, None);
+    assert!(!h.starts_with("HTTP/1.1 200") && got.is_empty(), "{h}");
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&fake);
+}
+
+/// ufw's own rules, as ufw writes them: a rule for the port, a range, a list or every
+/// port lets phones in; one for another port, for UDP, or one that drops does not. Of
+/// the addresses, the Wi-Fi or wired one on a home network, never a VPN or a container's.
+#[test]
+fn phone_firewall_rules_and_address() {
+    use crate::phone::{pick, ufw_allows};
+    use std::net::Ipv4Addr;
+    let rules = "*filter\n:ufw-user-input - [0:0]\n### RULES ###\n\n### tuple ### allow tcp 22 0.0.0.0/0 any 0.0.0.0/0 in\n-A ufw-user-input -p tcp --dport 22 -j ACCEPT\n\n### tuple ### allow udp 47250 0.0.0.0/0 any 0.0.0.0/0 in\n-A ufw-user-input -p udp --dport 47250 -j ACCEPT\n\n### tuple ### deny tcp 47250 0.0.0.0/0 any 0.0.0.0/0 in\n-A ufw-user-input -p tcp --dport 47250 -j DROP\n\n### END RULES ###\nCOMMIT\n";
+    assert!(!ufw_allows(rules, 47250));
+    assert!(ufw_allows(rules, 22));
+    assert!(ufw_allows("-A ufw-user-input -p tcp --dport 47250 -j ACCEPT\n", 47250));
+    assert!(ufw_allows("-A ufw-user-input -p tcp -m multiport --dports 8000,47000:48000 -j ACCEPT\n", 47250));
+    assert!(!ufw_allows("-A ufw-user-input -p tcp -m multiport --dports 8000,47000:47249 -j ACCEPT\n", 47250));
+    assert!(ufw_allows("-A ufw-user-input -s 192.168.1.0/24 -j ACCEPT\n", 47250), "a whole network");
+    assert!(!ufw_allows("-A ufw-user-output -p tcp --dport 47250 -j ACCEPT\n", 47250), "going out is not coming in");
+    let found = |v: &[(&str, [u8; 4])]| v.iter().map(|(n, ip)| (n.to_string(), Ipv4Addr::from(*ip))).collect::<Vec<_>>();
+    assert_eq!(pick(&found(&[("docker0", [172, 17, 0, 1]), ("tailscale0", [100, 64, 0, 3]), ("wlan0", [192, 168, 1, 23]), ("enp3s0", [10, 0, 0, 5])])), Some(Ipv4Addr::new(192, 168, 1, 23)));
+    assert_eq!(pick(&found(&[("virbr0", [192, 168, 122, 1]), ("enp3s0", [10, 0, 0, 5])])), Some(Ipv4Addr::new(10, 0, 0, 5)));
+    assert_eq!(pick(&found(&[("wg0", [10, 8, 0, 2]), ("eth0", [8, 8, 8, 8])])), None, "a public address or a VPN's is no use");
+}
+
+// ------------------------------------------------------------------ README card
+
+/// The README card: found among a listing's names (README.md before readme.txt, never a
+/// folder), read on a thread, an empty one no card; its heights: a heading and a few
+/// lines at first, dragged between two lines and four fifths of the room, opened up to
+/// most of it, nothing in a panel too short.
+#[test]
+fn readme_card_found_read_and_sized() {
+    use crate::readme::{height, max_height, min_height, shut_height};
+    let d = tmpdir("readme");
+    touch(&d.join("readme.txt"), "plain");
+    touch(&d.join("README.md"), &format!("# Title\n\n{}", "A line of the readme.\n\n".repeat(80)));
+    std::fs::create_dir_all(d.join("readme")).unwrap();
+    let ctx = egui::Context::default();
+    let stats = HashMap::new();
+    let mut t = Tab::new(1, d.clone(), ViewSettings::default(), ctx.clone());
+    pump(&mut t, &stats);
+    crate::readme::sync(&mut t, &ctx);
+    assert_eq!(t.readme.as_ref().unwrap().file.as_deref(), Some(d.join("README.md").as_path()));
+    let size = 14.0;
+    let room = 700.0;
+    let mut card = t.readme.take().unwrap();
+    wait_for("the readme read", 5, || height(&mut card, size, room, 0.0) > 0.0);
+    assert_eq!(height(&mut card, size, room, 0.0), shut_height(size, 0.0, room), "its start");
+    assert_eq!(height(&mut card, size, 200.0, 0.0), 0.0, "no card in a short panel");
+    assert_eq!(shut_height(size, 1.0, room), min_height(size), "dragged too small");
+    assert_eq!(shut_height(size, 10_000.0, room), max_height(room), "dragged too big");
+    assert_eq!(shut_height(size, 300.0, room), 300.0);
+    card.open = true;
+    let open = height(&mut card, size, room, 0.0);
+    // Its whole height is known once drawn; until then, opened, it keeps its start's.
+    assert!(open >= shut_height(size, 0.0, room) && open <= (room * 0.6).round(), "opened: {open}");
+    assert!(height(&mut card, size, room, 650.0) <= max_height(room));
+    t.readme = Some(card);
+    // An empty README is no card; none at all, no card either.
+    let e = tmpdir("readme-empty");
+    touch(&e.join("README"), "\n\n");
+    let mut t = Tab::new(2, e.clone(), ViewSettings::default(), ctx.clone());
+    pump(&mut t, &stats);
+    crate::readme::sync(&mut t, &ctx);
+    let mut card = t.readme.take().unwrap();
+    assert!(card.file.is_some());
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(height(&mut card, size, room, 0.0), 0.0);
+    std::fs::remove_file(e.join("README")).unwrap();
+    let mut t = Tab::new(3, e.clone(), ViewSettings::default(), ctx.clone());
+    pump(&mut t, &stats);
+    crate::readme::sync(&mut t, &ctx);
+    assert!(t.readme.as_ref().unwrap().file.is_none());
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&e);
+}
+
+// ------------------------------------------------------------------ lines of code
+
+/// Lines of code: blank lines and comments left out (a block comment over several lines,
+/// one closed on its line with code after it), each language summed, a binary file with a
+/// code name skipped, a folder that isn't a project's top not counted. On Maia's own
+/// sources, the Rust is counted as it is.
+#[test]
+fn lines_of_code_counted_by_language() {
+    use crate::linecount::{code_lines, count};
+    let c = (&["//"][..], Some(("/*", "*/")));
+    assert_eq!(code_lines("fn a() {}\n\n// note\n   \n/* one\n two */ let x = 1;\nlet s = \"src/*\";\nlet t = 2;\n", c.0, c.1), 4);
+    assert_eq!(code_lines("/* a */ /* b */\n/*\n*/\ncode /* trailing\nmore\n", c.0, c.1), 2, "a comment opened after code isn't followed");
+    assert_eq!(code_lines("# py\nx = 1  # note\n\n", &["#"], None), 1);
+    assert_eq!(code_lines("", c.0, c.1), 0);
+    let d = tmpdir("loc");
+    touch(&d.join("Cargo.toml"), "[package]\nname = \"x\"\n");
+    touch(&d.join("src/main.rs"), "// main\nfn main() {\n    println!(\"hi\");\n}\n\n/*\n block\n*/\n");
+    touch(&d.join("src/lib.rs"), "pub fn a() {}\npub fn b() {}\n");
+    touch(&d.join("tools/run.py"), "#!/usr/bin/env python3\n# a tool\nprint('x')\n");
+    std::fs::write(d.join("src/blob.rs"), b"fn x() {}\n\0\0\0binary").unwrap();
+    std::fs::create_dir_all(d.join("sub")).unwrap();
+    let got = count(&d).unwrap();
+    let by: HashMap<&str, (u64, u64)> = got.langs.iter().map(|l| (l.name, (l.lines, l.files))).collect();
+    assert_eq!(by.get("Rust"), Some(&(5, 2)), "{:?}", got.langs.iter().map(|l| (l.name, l.lines, l.files)).collect::<Vec<_>>());
+    assert_eq!(by.get("Python"), Some(&(1, 1)));
+    assert_eq!(got.langs[0].name, "Rust", "most lines first");
+    assert_eq!(got.lines, got.langs.iter().map(|l| l.lines).sum::<u64>());
+    assert!(!got.cut);
+    assert!(count(&d.join("sub")).is_none(), "not the top of a project");
+    assert!(count(&d.join("src")).is_none());
+    // Maia itself.
+    let me = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if me.join("src/main.rs").is_file() {
+        let t = Instant::now();
+        let mine = count(me).unwrap();
+        let rust = mine.langs.iter().find(|l| l.name == "Rust").unwrap();
+        assert!(rust.lines > 50_000 && rust.files > 100, "{} lines in {} files", rust.lines, rust.files);
+        assert!(t.elapsed() < Duration::from_secs(10));
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ------------------------------------------------------------------ pins
+
+/// Pinned files and folders come first in their folder whatever the sort, ahead of
+/// folders first and recents on top, in the sort's order among themselves; pinned tabs
+/// go to the left of their strip with the active tab kept active.
+#[test]
+fn pins_come_first_in_folders_and_tab_strips() {
+    let d = tmpdir("pins");
+    for (n, s) in [("a.txt", 5), ("b.txt", 50), ("c.txt", 500), ("z.txt", 1)] {
+        touch(&d.join(n), &"x".repeat(s));
+    }
+    std::fs::create_dir_all(d.join("Folder")).unwrap();
+    std::fs::create_dir_all(d.join("Other")).unwrap();
+    let ctx = egui::Context::default();
+    let stats = HashMap::new();
+    let mut t = Tab::new(1, d.clone(), ViewSettings::default(), ctx.clone());
+    pump(&mut t, &stats);
+    let names = |t: &Tab| t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&t), ["Folder", "Other", "a.txt", "b.txt", "c.txt", "z.txt"]);
+    let pinned: HashSet<PathBuf> = [d.join("z.txt"), d.join("b.txt")].into();
+    let recents: HashSet<PathBuf> = [d.join("c.txt")].into();
+    let rebuild = |t: &mut Tab, recents_on_top: bool| {
+        let c = ViewCtx { show_hidden: false, show_system: false, folders_first: true, recents_on_top, recents: &recents, pinned: &pinned, stats: &stats };
+        t.dirty = true;
+        t.rebuild(&c);
+    };
+    rebuild(&mut t, false);
+    assert_eq!(names(&t), ["b.txt", "z.txt", "Folder", "Other", "a.txt", "c.txt"]);
+    rebuild(&mut t, true);
+    assert_eq!(names(&t), ["b.txt", "z.txt", "c.txt", "Folder", "Other", "a.txt"], "ahead of recents too");
+    t.set_sort(SortKey::Size);
+    rebuild(&mut t, false);
+    assert_eq!(&names(&t)[..2], ["b.txt", "z.txt"], "by size among themselves");
+    t.settings.desc = false;
+    rebuild(&mut t, false);
+    assert_eq!(&names(&t)[..2], ["z.txt", "b.txt"]);
+    // Tabs.
+    let mut p = crate::panel::Panel::new(1, Tab::new(10, d.clone(), ViewSettings::default(), ctx.clone()));
+    for id in 11..14 {
+        p.tabs.push(Tab::new(id, d.clone(), ViewSettings::default(), ctx.clone()));
+    }
+    p.active = 2;
+    p.tabs[3].pinned = true;
+    p.tabs[1].pinned = true;
+    p.settle_pins();
+    assert_eq!(p.tabs.iter().map(|t| t.id).collect::<Vec<_>>(), [11, 13, 10, 12]);
+    assert_eq!(p.tabs[p.active].id, 12, "the active tab stays active");
+    let before: Vec<u64> = p.tabs.iter().map(|t| t.id).collect();
+    p.settle_pins();
+    assert_eq!(p.tabs.iter().map(|t| t.id).collect::<Vec<_>>(), before, "settled stays");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ------------------------------------------------------------------ space map
+
+/// Space used's map: every block inside the area, none over another, each as big as its
+/// share, and none far from square; a single item fills it; nothing to lay out lays out
+/// nothing.
+#[test]
+fn space_map_blocks_fill_their_share() {
+    use egui::{Rect, pos2};
+    let area = Rect::from_min_max(pos2(10.0, 20.0), pos2(810.0, 520.0));
+    for sizes in [vec![500.0, 300.0, 120.0, 50.0, 20.0, 5.0, 4.0, 1.0], vec![1.0; 37], (1..300).rev().map(|x| (x * x) as f64).collect::<Vec<_>>(), vec![42.0]] {
+        let input: Vec<(u32, f64)> = sizes.iter().enumerate().map(|(i, s)| (i as u32, *s)).collect();
+        let mut out = vec![];
+        crate::spaceuse::squarify(&input, area, &mut out);
+        assert_eq!(out.len(), input.len());
+        let total: f64 = sizes.iter().sum();
+        let mut covered = 0.0;
+        for (k, r) in &out {
+            assert!(area.expand(0.05).contains_rect(*r), "{r:?} outside");
+            let share = sizes[*k as usize] / total * area.area() as f64;
+            assert!((r.area() as f64 - share).abs() < share * 0.01 + 0.5, "block {k}: {} for {share}", r.area());
+            covered += r.area() as f64;
+        }
+        assert!((covered - area.area() as f64).abs() < area.area() as f64 * 0.001);
+        for i in 0..out.len() {
+            for j in i + 1..out.len() {
+                let x = out[i].1.intersect(out[j].1);
+                assert!(!x.is_positive() || x.area() < 0.05, "{:?} over {:?}", out[i], out[j]);
+            }
+        }
+        if sizes.len() == 8 {
+            let worst = out.iter().take(4).map(|(_, r)| (r.width() / r.height()).max(r.height() / r.width())).fold(0.0, f32::max);
+            assert!(worst < 3.0, "the big blocks near square: {worst}");
+        }
+    }
+    let mut out = vec![];
+    crate::spaceuse::squarify(&[], area, &mut out);
+    crate::spaceuse::squarify(&[(0, 0.0)], area, &mut out);
+    crate::spaceuse::squarify(&[(0, 1.0)], Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(0.5, 100.0)), &mut out);
+    assert!(out.is_empty());
+}
+
+// ------------------------------------------------------------------ share without the place
+
+/// Photos shared without their place or camera, cleaned by Maia alone: real JPEG, PNG,
+/// WebP and TIFF files written by ImageMagick with a location, camera, serial number,
+/// owner and an XMP copy of the place (exiv2 writes them), read back by exiv2 after
+/// cleaning. Nothing of the place or the camera is left, the date and orientation are,
+/// the length is the same and the pixels are untouched.
+#[test]
+fn photos_shared_without_their_place_or_camera() {
+    let tool = |n: &str| std::process::Command::new(n).arg("--version").output().is_ok_and(|o| o.status.success() || !o.stdout.is_empty());
+    if !tool("magick") || !tool("exiv2") {
+        eprintln!("needs ImageMagick and exiv2: skipped");
+        return;
+    }
+    let d = tmpdir("scrub");
+    let run = |args: &[&str]| {
+        let o = std::process::Command::new(args[0]).args(&args[1..]).current_dir(&d).output().unwrap();
+        assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    };
+    run(&["magick", "-size", "96x64", "gradient:red-blue", "-quality", "92", "photo.jpg"]);
+    run(&[
+        "exiv2",
+        "-M", "set Exif.GPSInfo.GPSLatitude 52/1 30/1 1234/100",
+        "-M", "set Exif.GPSInfo.GPSLatitudeRef N",
+        "-M", "set Exif.GPSInfo.GPSLongitude 13/1 24/1 0/1",
+        "-M", "set Exif.GPSInfo.GPSLongitudeRef E",
+        "-M", "set Exif.Image.Make Canon",
+        "-M", "set Exif.Image.Model EOS R6",
+        "-M", "set Exif.Image.Artist Jane Doe",
+        "-M", "set Exif.Image.Orientation 6",
+        "-M", "set Exif.Photo.DateTimeOriginal 2026:10:18 14:22:05",
+        "-M", "set Exif.Photo.BodySerialNumber 123456789",
+        "-M", "set Exif.Photo.LensModel RF 24-105mm",
+        "-M", "set Exif.Photo.CameraOwnerName Jane Doe",
+        "-M", "set Xmp.exif.GPSLatitude 52,30.2N",
+        "-M", "set Xmp.exif.GPSLongitude 13,24.0E",
+        "-M", "set Xmp.tiff.Make Canon",
+        "-M", "set Iptc.Application2.City Berlin",
+        "-M", "set Iptc.Application2.CountryName Germany",
+        "photo.jpg",
+    ]);
+    for ext in ["png", "webp", "tif"] {
+        run(&["magick", "photo.jpg", &format!("photo.{ext}")]);
+        // ImageMagick carries the Exif over; the XMP is written again by exiv2 where it
+        // isn't, as a camera app's or an editor's would be.
+        let _ = std::process::Command::new("exiv2").args(["-M", "set Xmp.exif.GPSLatitude 52,30.2N", "-M", "set Xmp.tiff.Make Canon"]).arg(format!("photo.{ext}")).current_dir(&d).output();
+    }
+    let leaks = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|l| {
+                let k = l.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+                (k.contains("gps") && !k.ends_with("gpstag")) || k.ends_with(".make") || k.ends_with(".model") || k.contains("serial") || k.contains("owner") || k.contains("artist") || k.contains("lens") || k.contains("city") || k.contains("country")
+            })
+            .filter(|l| l.split_whitespace().nth(3).is_some_and(|v| !v.chars().all(|c| c == '0' || c == ' ' || c == '/')))
+            .map(String::from)
+            .collect()
+    };
+    let pixels = |f: &str| run(&["magick", f, "-depth", "8", "rgb:-"]);
+    for ext in ["jpg", "png", "webp", "tif"] {
+        let f = format!("photo.{ext}");
+        let before = run(&["exiv2", "-pa", "-q", &f]);
+        assert!(!leaks(&before).is_empty(), "{ext}: the place is there to begin with:\n{before}");
+        let b = crate::scrub::clean(&d.join(&f), None).unwrap();
+        assert_eq!(b.len() as u64, std::fs::metadata(d.join(&f)).unwrap().len(), "{ext}: nothing moved");
+        let out = format!("clean.{ext}");
+        std::fs::write(d.join(&out), &b).unwrap();
+        let after = std::process::Command::new("exiv2").args(["-pa", "-q"]).arg(&out).current_dir(&d).output().unwrap();
+        let after = String::from_utf8_lossy(&after.stdout).into_owned() + &String::from_utf8_lossy(&after.stderr);
+        assert!(leaks(&after).is_empty(), "{ext}: left in the copy: {:?}\n{after}", leaks(&after));
+        if ext == "jpg" {
+            assert!(after.contains("DateTimeOriginal") && after.contains("2026:10:18 14:22:05"), "the date stays:\n{after}");
+            assert!(after.contains("Exif.Image.Orientation"), "the orientation stays");
+        }
+        // The text ImageMagick writes into a PNG says it all again.
+        let raw = String::from_utf8_lossy(&b).to_ascii_lowercase();
+        for word in ["canon", "52/1", "jane doe", "123456789", "eos r6", "berlin", "germany"] {
+            assert!(!raw.contains(word), "{ext}: {word:?} still in the bytes");
+        }
+        assert_eq!(pixels(&out), pixels(&f), "{ext}: the picture itself is the same");
+        let _ = run(&["magick", "identify", &out]);
+    }
+    // Pictures without any of it come out as they went in; other kinds need exiftool.
+    run(&["magick", "-size", "8x8", "xc:green", "plain.png"]);
+    assert_eq!(crate::scrub::clean(&d.join("plain.png"), None).unwrap(), std::fs::read(d.join("plain.png")).unwrap());
+    touch(&d.join("photo.heic"), "not really");
+    assert_eq!(crate::scrub::clean(&d.join("photo.heic"), None).unwrap_err(), "needs exiftool");
+    assert!(crate::scrub::applies("HEIC") && !crate::scrub::built_in("heic") && crate::scrub::built_in("JPEG") && !crate::scrub::applies("pdf"));
+    // The copies to attach: pictures cleaned in a folder of their own, the rest as they are.
+    touch(&d.join("notes.txt"), "notes");
+    let copies = crate::scrub::copies(&[d.join("photo.jpg"), d.join("notes.txt")], None).unwrap();
+    assert_eq!(copies[1], d.join("notes.txt"));
+    assert_ne!(copies[0], d.join("photo.jpg"));
+    assert_eq!(copies[0].file_name().unwrap(), "photo.jpg");
+    assert!(!String::from_utf8_lossy(&std::fs::read(&copies[0]).unwrap()).contains("Canon"));
+    let _ = std::fs::remove_dir_all(copies[0].parent().unwrap());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// However many folders Space used counts, the readings file holds a bounded number of
+/// names, the most recently counted folders' kept whole.
+#[test]
+fn space_readings_stay_small() {
+    use crate::grew::{Reading, earlier_in, note_in};
+    let d = tmpdir("grew-budget");
+    let f = d.join("space-readings");
+    for k in 0..60u64 {
+        let sizes: HashMap<String, u64> = (0..4000).map(|i| (format!("item {i:04}"), i)).collect();
+        note_in(&f, Reading { day: 10, at: 10 * 86_400 + k, dir: PathBuf::from(format!("/big/{k}")), sizes });
+    }
+    let lines = std::fs::read_to_string(&f).unwrap().lines().count();
+    assert!(lines <= 104_000, "{lines} lines");
+    assert_eq!(earlier_in(&f, Path::new("/big/59"), 11).unwrap().sizes.len(), 4000, "the newest kept whole");
+    assert!(earlier_in(&f, Path::new("/big/0"), 11).is_none(), "the oldest gone");
+    assert!(std::fs::metadata(&f).unwrap().len() < 4 << 20);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The README card's fade is solid from the step its text stops being drawn at.
+#[test]
+fn readme_fade_is_solid_where_the_text_stops() {
+    assert!(crate::readme::fade_solid_from_ok());
 }

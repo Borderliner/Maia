@@ -307,7 +307,6 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                     let mut rects: Vec<(u64, Rect)> = vec![];
                     for s in &waiting {
                         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click_and_drag());
-                        crate::ui::note_control(ui, r, "transfer waiting");
                         rects.push((s.id, r));
                         let on = st.sel == Some(s.id);
                         let dragged = st.drag == Some(s.id);
@@ -343,6 +342,8 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                         if br.on_hover_text("Start without waiting its turn (Enter)").clicked() {
                             start_now = Some(s.id);
                         }
+                        // The row's own part, where it is picked up: its buttons are theirs.
+                        crate::ui::note_control(ui, Rect::from_min_max(r.min, pos2(b.left() - 4.0, r.max.y)), "transfer waiting");
                         let lg = crate::listing::elided(ui, &s.label, FontId::proportional(fs), b.left() - 8.0 - (r.left() + 24.0), tc);
                         ui.painter().galley(pos2(r.left() + 24.0, r.center().y - lg.size().y / 2.0), lg, tc);
                     }
@@ -424,7 +425,7 @@ pub fn chip(ui: &mut Ui, text: &str, frac: f32, open: bool, font: FontId, pal: &
         return None;
     }
     let (r, resp) = ui.allocate_exact_size(vec2(w, 20.0), Sense::click());
-    crate::ui::note_control(ui, r, "status chip");
+    crate::ui::note_control(ui, r, "transfers chip");
     if resp.hovered() || open {
         ui.painter().rect_filled(r, CornerRadius::same(5), if open { pal.accent.gamma_multiply(0.2) } else { pal.hover });
     }

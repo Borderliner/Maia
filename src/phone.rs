@@ -72,6 +72,10 @@ impl Drop for Server {
 /// The address to listen on: a private IPv4 address of an interface that is up, a
 /// wireless or wired one first, never a container's, a VM's or a VPN's bridge.
 pub fn lan_address() -> Option<Ipv4Addr> {
+    #[cfg(test)]
+    if let Some(ip) = *TEST_LAN.lock().unwrap_or_else(|e| e.into_inner()) {
+        return Some(ip);
+    }
     let mut found: Vec<(String, Ipv4Addr)> = vec![];
     unsafe {
         let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
@@ -94,6 +98,11 @@ pub fn lan_address() -> Option<Ipv4Addr> {
     }
     pick(&found)
 }
+
+/// Test builds: the address to listen on in place of the network's (the sandbox has
+/// only its loopback), so a simulation can fetch as a phone would.
+#[cfg(test)]
+pub static TEST_LAN: Mutex<Option<Ipv4Addr>> = Mutex::new(None);
 
 /// The best of the interfaces' addresses for a phone on the same network.
 pub fn pick(found: &[(String, Ipv4Addr)]) -> Option<Ipv4Addr> {
