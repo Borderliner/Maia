@@ -252,6 +252,7 @@ pub enum Popup {
     Tour(Box<crate::tour::State>),
     /// The jobs under way, above the status bar's chip.
     Transfers(crate::transfers::State),
+    Jump(Box<crate::jump::State>),
 }
 
 /// The branch menu, its lists read on a worker as it opens.
@@ -491,6 +492,7 @@ impl Popup {
             Popup::Viewer(..) => "Viewer",
             Popup::Tour(..) => "Tour",
             Popup::Transfers(..) => "Transfers",
+            Popup::Jump(..) => "Jump",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -1156,6 +1158,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::Viewer(st) => crate::viewer::draw(app, ctx, st),
         Popup::Tour(st) => crate::tour::draw(app, ctx, st),
         Popup::Transfers(st) => crate::transfers::popup(app, ctx, st),
+        Popup::Jump(st) => crate::jump::popup(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {

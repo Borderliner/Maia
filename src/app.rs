@@ -1173,6 +1173,7 @@ impl App {
             // Session-only (or off): never write the recents list to disk.
             let mut ud = self.ud.clone();
             ud.recents.clear();
+            ud.visits.clear();
             let _ = config::save_json(&config::userdata_path(), &ud);
         }
         self.ud_mtime = config::mtime(&config::userdata_path());
@@ -3160,6 +3161,7 @@ impl App {
                 None => self.toast("Nothing here to mark"),
             },
             Cmd::GoToMark => self.popup = Popup::Marks(crate::marks::State { set: false, sel: 0 }),
+            Cmd::Jump => crate::jump::open(self),
         }
     }
 
@@ -3186,6 +3188,10 @@ impl App {
 
     pub(crate) fn track_leave(&mut self, old: &Path) {
         if self.cfg.track_recents() && !tab::is_computer(old) {
+            // Folders inside archives are not counted, judged by name: no disk in the frame.
+            if old.is_absolute() && !old.ancestors().any(|a| a.file_name().is_some_and(|n| crate::archive::is_archive(&n.to_string_lossy()))) {
+                crate::jump::note(&mut self.ud.visits, old, crate::jump::now());
+            }
             self.ud.push_recent(old);
             self.ud_dirty = true;
             self.refresh_recents();

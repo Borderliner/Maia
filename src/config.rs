@@ -611,6 +611,8 @@ pub struct UserData {
     pub tags: Vec<String>,
     /// Folders Copy To… and Move To… sent things into, newest first.
     pub destinations: Vec<PathBuf>,
+    /// Each folder left: how many times and when last, for Jump.
+    pub visits: HashMap<PathBuf, crate::jump::Visit>,
 }
 
 impl UserData {
