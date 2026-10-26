@@ -337,7 +337,11 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
             }
         }
         let count = if st.reading { format!("{in_month} pictures · reading dates…") } else { format!("{in_month} picture{}", if in_month == 1 { "" } else { "s" }) };
-        ui.painter().text(pos2(x0 + grid_w, head.center().y), Align2::RIGHT_CENTER, count, small.clone(), pal.text_dim);
+        // Only where it clears the month's arrows: a narrow calendar keeps the month.
+        let cg = ui.painter().layout_no_wrap(count, small.clone(), pal.text_dim);
+        if x0 + grid_w - cg.size().x >= fwd.right() + 12.0 {
+            ui.painter().galley(pos2(x0 + grid_w - cg.size().x, head.center().y - cg.size().y / 2.0), cg, pal.text_dim);
+        }
         if st.reading {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
@@ -379,8 +383,11 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                     if n > 1 {
                         let cg = p.layout_no_wrap(n.to_string(), FontId::proportional(fs - 2.5), Color32::WHITE);
                         let cr = Rect::from_min_size(r.max - cg.size() - vec2(12.0, 6.0), cg.size() + vec2(8.0, 2.0));
-                        p.rect_filled(cr, CornerRadius::same(7), Color32::from_black_alpha(150));
-                        p.galley(cr.min + vec2(4.0, 1.0), cg, Color32::WHITE);
+                        // In a small cell the count would sit on the day: the strip says it.
+                        if !cr.expand(2.0).intersects(nr) {
+                            p.rect_filled(cr, CornerRadius::same(7), Color32::from_black_alpha(150));
+                            p.galley(cr.min + vec2(4.0, 1.0), cg, Color32::WHITE);
+                        }
                     }
                     if resp.hovered() {
                         p.rect_stroke(r, CornerRadius::same(6), Stroke::new(1.0, pal.text_dim), StrokeKind::Inside);
