@@ -41,13 +41,14 @@ impl Cmd {
             Cmd::GroupFull => G::PercentFull,
             Cmd::GroupTag => G::Tag,
             Cmd::GroupTaken => G::Taken,
+            Cmd::GroupOrigin => G::Origin,
             _ => return None,
         })
     }
 }
 
 /// Every "Group By …" command, in menu order.
-pub const GROUP_CMDS: [Cmd; 16] = [
+pub const GROUP_CMDS: [Cmd; 17] = [
     Cmd::GroupNone,
     Cmd::GroupName,
     Cmd::GroupSize,
@@ -58,6 +59,7 @@ pub const GROUP_CMDS: [Cmd; 16] = [
     Cmd::GroupItems,
     Cmd::GroupType,
     Cmd::GroupTag,
+    Cmd::GroupOrigin,
     Cmd::GroupUsage,
     Cmd::GroupDeleted,
     Cmd::GroupOriginal,
@@ -243,6 +245,7 @@ commands! {
     GroupFull, "group_percent_full", Group, "Group By Percent Full", "Drives by how full they are (Computer only).", [];
     GroupTag, "group_tag", Group, "Group By Tag", "One group per tag, colour labels first; an item shows under its first tag only.", [];
     GroupTaken, "group_date_taken", Group, "Group By Date Taken", "Photos and films by the month they were taken, newest first.", [];
+    GroupOrigin, "group_origin", Group, "Group By Origin", "Downloads by the site they came from, as the browser marked them; the rest under Unknown.", [];
     GroupExpandAll, "group_expand_all", Group, "Expand All Groups", "Open every group.", [];
     GroupCollapseAll, "group_collapse_all", Group, "Collapse All Groups", "Close every group, leaving just the headers.", [];
     SavedView, "saved_view_settings", View, "Saved View Settings", "Remember this view for this folder, its subfolders, or everywhere.", [];

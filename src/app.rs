@@ -305,6 +305,8 @@ pub struct App {
     pw_asked: Option<PathBuf>,
     /// The tag cache's generation last seen.
     tags_gen: u64,
+    /// The origin cache's generation last seen.
+    origin_gen: u64,
     /// Search by meaning, while it is switched on, and the folders it was started for.
     pub semantic: Option<crate::semantic::Engine>,
     semantic_for: Option<String>,
@@ -443,6 +445,7 @@ impl App {
             pw_asks: Default::default(),
             pw_asked: None,
             tags_gen: 0,
+            origin_gen: 0,
             semantic: None,
             semantic_for: None,
             avatars: crate::avatars::Avatars::new(),
@@ -1333,6 +1336,7 @@ impl App {
         for f in &changed_files {
             self.thumbs.invalidate(f);
             crate::tags::invalidate(f);
+            crate::origin::invalidate(f);
             crate::facts::invalidate(f);
         }
         // Dates taken, sizes and lengths: asked for by last frame's rows, read only for
@@ -1344,6 +1348,17 @@ impl App {
         if crate::facts::changed() {
             for t in self.panels.values_mut().flat_map(|p| p.tabs.iter_mut()) {
                 if matches!(t.settings.sort, SortKey::Taken | SortKey::Dimensions | SortKey::Duration) || t.settings.group == crate::config::GroupBy::Taken {
+                    t.stream_dirty = true;
+                }
+            }
+        }
+        // Origins likewise: a list grouped by them looks again as they land.
+        crate::origin::flush(ctx);
+        let og = crate::origin::generation();
+        if og != self.origin_gen {
+            self.origin_gen = og;
+            for t in self.panels.values_mut().flat_map(|p| p.tabs.iter_mut()) {
+                if t.settings.group == crate::config::GroupBy::Origin {
                     t.stream_dirty = true;
                 }
             }
@@ -2509,6 +2524,12 @@ impl App {
             Cmd::SortTaken => self.tab().set_sort(SortKey::Taken),
             Cmd::SortDimensions => self.tab().set_sort(SortKey::Dimensions),
             Cmd::SortDuration => self.tab().set_sort(SortKey::Duration),
+            Cmd::GroupOrigin => {
+                let t = self.tab();
+                t.settings.group = crate::config::GroupBy::Origin;
+                t.collapsed_groups.clear();
+                t.dirty = true;
+            }
             Cmd::GroupTaken => {
                 let t = self.tab();
                 t.settings.group = crate::config::GroupBy::Taken;

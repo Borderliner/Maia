@@ -479,6 +479,8 @@ pub enum GroupBy {
     Tag,
     /// By the month a photo was taken or a film made, newest first.
     Taken,
+    /// Downloads by the site they came from (what the browser wrote on them).
+    Origin,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -1798,6 +1798,7 @@ fn group_label(e: &Entry, g: GroupBy, c: &GroupCtx) -> String {
         GroupBy::Tag => crate::tags::get(&e.path, |t| crate::tags::leading(t).cloned()).flatten().unwrap_or_else(|| NO_TAGS.into()),
         // By the month: photos span years, and a day's group would hold a handful.
         GroupBy::Taken => crate::facts::month_label(e),
+        GroupBy::Origin => crate::origin::group(e),
         GroupBy::PercentFull => match c.vols.get(&e.path) {
             Some(v) if v.total > 0 => match (v.total - v.free) as f64 / v.total as f64 {
                 f if f >= 0.9 => "Nearly full (90%+)".into(),
@@ -1818,6 +1819,9 @@ fn group_rank(l: &str, g: GroupBy) -> usize {
     if g == GroupBy::Taken {
         return crate::facts::month_rank(l);
     }
+    if g == GroupBy::Origin {
+        return crate::origin::rank(l);
+    }
     let order: &[&str] = match g {
         GroupBy::Name => &["A – H", "I – P", "Q – Z", "Other"],
         GroupBy::Type => &["Folder"],
@@ -1827,7 +1831,7 @@ fn group_rank(l: &str, g: GroupBy) -> usize {
         GroupBy::Usage => &["Over half", "10 – 50%", "1 – 10%", "< 1%"],
         GroupBy::FreeSpace => &["Under 1 GB free", "1 – 10 GB free", "10 – 100 GB free", "Over 100 GB free", "Unknown"],
         GroupBy::PercentFull => &["Nearly full (90%+)", "Over half full", "Under half full", "Unknown"],
-        GroupBy::None | GroupBy::Original | GroupBy::FileSystem | GroupBy::Tag | GroupBy::Taken => &[],
+        GroupBy::None | GroupBy::Original | GroupBy::FileSystem | GroupBy::Tag | GroupBy::Taken | GroupBy::Origin => &[],
     };
     order.iter().position(|o| *o == l).unwrap_or(if g == GroupBy::Type { 1 } else { 99 })
 }

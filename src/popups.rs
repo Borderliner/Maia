@@ -1709,7 +1709,7 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::GroupItems | Cmd::GroupUsage | Cmd::GroupName | Cmd::GroupType | Cmd::GroupDate | Cmd::GroupCreated | Cmd::GroupAccessed | Cmd::GroupSize => !tab::is_computer(&t.path) && !t.tree_active(),
         Cmd::GroupTag => !tab::is_computer(&t.path) && !t.tree_active(),
         Cmd::SortTags | Cmd::SortTaken | Cmd::SortDimensions | Cmd::SortDuration => !tab::is_computer(&t.path),
-        Cmd::GroupTaken => !tab::is_computer(&t.path) && !t.tree_active(),
+        Cmd::GroupTaken | Cmd::GroupOrigin => !tab::is_computer(&t.path) && !t.tree_active(),
         Cmd::GroupExpandAll => t.settings.group != crate::config::GroupBy::None && !t.collapsed_groups.is_empty(),
         Cmd::GroupCollapseAll => t.settings.group != crate::config::GroupBy::None,
         _ => true,

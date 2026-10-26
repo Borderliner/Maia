@@ -1668,6 +1668,30 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                         });
                         ui.end_row();
                     }
+                    // A download: the address it came from and the page that linked to it,
+                    // each opening in the browser.
+                    if let Some(o) = (!e.is_dir).then(|| crate::origin::get(&e.path).flatten()).flatten() {
+                        let page = o.page.as_deref().filter(|p| Some(*p) != o.url.as_deref());
+                        for (k, url) in [("From", o.url.as_deref()), ("Page", page)] {
+                            let Some(url) = url else { continue };
+                            ui.label(egui::RichText::new(k).color(pal.text_dim).size(11.5));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let open = crate::origin::openable(url);
+                                let text = egui::RichText::new(crate::origin::short(url)).size(11.5).color(if open { pal.accent } else { pal.text });
+                                let l = ui.add(egui::Label::new(text).truncate().sense(if open { Sense::click() } else { Sense::hover() }));
+                                crate::ui::note_control(ui, l.rect, "origin link");
+                                if open && l.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                                if l.on_hover_text(url).clicked() {
+                                    if let Err(err) = crate::mime::open_uri(url) {
+                                        env.actions.push(crate::app::Action::Toast(format!("Couldn't open the address: {err}")));
+                                    }
+                                }
+                            });
+                            ui.end_row();
+                        }
+                    }
                 });
             });
         });

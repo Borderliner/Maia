@@ -68,6 +68,7 @@ mod network;
 mod office;
 mod ollama;
 mod ops;
+mod origin;
 mod panel;
 mod perms;
 mod picfix;
