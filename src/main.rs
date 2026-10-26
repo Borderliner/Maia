@@ -85,6 +85,7 @@ mod quickopen;
 mod redo;
 mod undofile;
 mod undohist;
+mod grew;
 mod hints;
 mod marks;
 mod qr;

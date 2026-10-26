@@ -40,6 +40,8 @@ const OTHER: u32 = u32::MAX;
 const SLICES: usize = 8;
 /// The dialog fills the window (F). Kept for the next time it opens.
 static FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The list sorted by how much each grew rather than by size (S). Kept likewise.
+static BY_CHANGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// A smaller share than this goes into the shared slice; it would be a sliver.
 const MIN_SHARE: f32 = 0.015;
@@ -48,7 +50,11 @@ pub struct State {
     /// Where it was opened: Backspace goes no higher.
     pub root: PathBuf,
     pub dir: PathBuf,
-    listing: Option<mpsc::Receiver<(PathBuf, Vec<Entry>, Option<(u64, u64)>)>>,
+    listing: Option<mpsc::Receiver<(PathBuf, Vec<Entry>, Option<(u64, u64)>, Option<crate::grew::Reading>)>>,
+    /// The folder's sizes as counted on an earlier day, when there is such a reading.
+    pub before: Option<crate::grew::Reading>,
+    /// This count was kept for the next time.
+    kept: bool,
     /// Free space on the folder's filesystem, read with the listing.
     free: Option<u64>,
     /// The filesystem's size, read with it.
@@ -134,7 +140,7 @@ impl State {
     }
 
     fn blank(root: PathBuf) -> State {
-        State { root: root.clone(), dir: root, listing: None, free: None, total: None, climb: false, showing_free: false, free_up: None, requested: false, disk_again: None, free_job: None, slices: vec![], shown_at: None, dim: 0.0, row_hover: None, chrome_h: 230.0, buttons: vec2(330.0, 28.0), items: vec![], order: vec![], waiting: vec![], unsorted: false, sorted_at: Instant::now(), sel: 0, checked: HashSet::new(), select: None, note: None, confirm: false, reveal: false, moved: false }
+        State { root: root.clone(), dir: root, listing: None, before: None, kept: false, free: None, total: None, climb: false, showing_free: false, free_up: None, requested: false, disk_again: None, free_job: None, slices: vec![], shown_at: None, dim: 0.0, row_hover: None, chrome_h: 230.0, buttons: vec2(330.0, 28.0), items: vec![], order: vec![], waiting: vec![], unsorted: false, sorted_at: Instant::now(), sel: 0, checked: HashSet::new(), select: None, note: None, confirm: false, reveal: false, moved: false }
     }
 
     /// Show `dir`, the cursor going to `select` once it is read.
@@ -158,11 +164,14 @@ impl State {
             if let Some((total, free)) = disk {
                 crate::freeup::note(&d, total, free);
             }
-            let _ = tx.send((d, v, disk));
+            let before = crate::grew::earlier(&d);
+            let _ = tx.send((d, v, disk, before));
             c.request_repaint();
         });
         self.dir = dir;
         self.listing = Some(rx);
+        self.before = None;
+        self.kept = false;
         self.items.clear();
         self.order.clear();
         self.waiting.clear();
@@ -204,14 +213,24 @@ impl State {
         self.items.get(*self.order.get(self.sel)? as usize)
     }
 
-    /// Biggest first; folders not counted yet after them, by name.
+    /// How much an item grew since the earlier reading (all of it when new), once both
+    /// are known.
+    pub fn change(&self, it: &Item) -> Option<i64> {
+        let b = self.before.as_ref()?;
+        Some(it.size? as i64 - b.sizes.get(&it.entry.name).copied().unwrap_or(0) as i64)
+    }
+
+    /// Biggest first, or with an earlier reading and S, what grew most first; folders not
+    /// counted yet after them, by name.
     fn sort(&mut self) {
         let items = &self.items;
         let at = self.current().filter(|_| self.moved).map(|i| i.entry.path.clone());
         let mut order: Vec<u32> = (0..items.len() as u32).collect();
+        let by_change = BY_CHANGE.load(std::sync::atomic::Ordering::Relaxed) && self.before.is_some();
+        let key = |it: &Item| if by_change { self.change(it) } else { it.size.map(|s| s as i64) };
         crate::tab::merge_sort(&mut order, &|a: &u32, b: &u32| {
             let (x, y) = (&items[*a as usize], &items[*b as usize]);
-            match (x.size, y.size) {
+            match (key(x), key(y)) {
                 (Some(p), Some(q)) => q.cmp(&p).then_with(|| crate::tab::natural_cmp(&x.entry.name.to_lowercase(), &y.entry.name.to_lowercase())),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
@@ -232,8 +251,9 @@ impl State {
     /// Take in a listing that landed and sizes that were counted.
     pub fn pump(&mut self, stats: &mut crate::stats::Stats, ctx: &egui::Context) {
         if let Some(rx) = &self.listing {
-            if let Ok((d, v, disk)) = rx.try_recv() {
+            if let Ok((d, v, disk, before)) = rx.try_recv() {
                 self.listing = None;
+                self.before = before;
                 if std::mem::take(&mut self.climb) {
                     self.root = d.clone();
                     self.dir = d;
@@ -293,6 +313,14 @@ impl State {
                 }
             });
             self.unsorted |= self.waiting.len() != before;
+        }
+        // Counted to the end: kept, so a count on a later day can say what grew.
+        if !self.kept && self.requested && self.listing.is_none() && self.waiting.is_empty() && !self.items.is_empty() {
+            self.kept = true;
+            if self.items.len() <= crate::grew::MOST_ITEMS {
+                let sizes = self.items.iter().filter_map(|i| Some((i.entry.name.clone(), i.size?))).collect();
+                crate::grew::note_later(self.dir.clone(), sizes);
+            }
         }
         if self.unsorted {
             let wait = Duration::from_millis(250).saturating_sub(self.sorted_at.elapsed());
@@ -720,6 +748,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         let at = st.sel;
         st.flip(at);
     }
+    let mut flip_sort = !st.confirm && !free && st.before.is_some() && crate::devtools::take(ctx, Modifiers::NONE, Key::S);
     let fs = app.cfg.font_size;
     let small = fs - 1.5;
     let row_h = (fs * 1.35 + 12.0).round();
@@ -802,12 +831,32 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         let tab_font = FontId::proportional(12.0);
         let tab_labels = ["Contents", "Free up"];
         let tabs_w: f32 = tab_labels.iter().map(|l| (ui.painter().layout_no_wrap(l.to_string(), tab_font.clone(), pal.text).size().x + 14.0).max(26.0)).sum::<f32>() + 4.0;
+        // With an earlier reading, the list sorts by size or by what grew.
+        let sort_labels = ["Size", "Change"];
+        let grew = st.before.is_some() && !showing_free;
+        let sort_w: f32 = if grew { sort_labels.iter().map(|l| (ui.painter().layout_no_wrap(l.to_string(), tab_font.clone(), pal.text).size().x + 14.0).max(26.0)).sum::<f32>() + 4.0 + 12.0 } else { 0.0 };
         let title_h = ui.painter().layout_no_wrap("Space used".into(), FontId::proportional(ui.style().text_styles.get(&egui::TextStyle::Body).map_or(fs, |f| f.size) + 1.5), pal.text).size().y;
+        // Counted to the end with an earlier reading: how the whole folder changed since.
+        let since = st.before.as_ref().filter(|_| grew && !counting && st.listing.is_none()).map(|b| (total as i64 - b.total() as i64, b.label()));
         ui.horizontal(|ui| {
             ui.add_space(inset);
             ui.vertical(|ui| {
-                ui.set_max_width(avail - 36.0 - tabs_w - 8.0);
-                pp::dialog_title(ui, "Space used", Some(&what), &pal);
+                ui.set_max_width(avail - 36.0 - tabs_w - sort_w - 8.0);
+                match &since {
+                    Some((d, day)) => {
+                        pp::dialog_title(ui, "Space used", None, &pal);
+                        let body = egui::TextStyle::Body.resolve(ui.style());
+                        let fmt = |c| egui::TextFormat { font_id: body.clone(), color: c, ..Default::default() };
+                        let mut job = egui::text::LayoutJob::default();
+                        job.append(&format!("{what} · "), 0.0, fmt(pal.text_dim));
+                        let col = if *d > 0 { pal.accent } else if *d < 0 { crate::gitstatus::GREEN } else { pal.text_dim };
+                        job.append(&crate::grew::fmt_change(*d), 0.0, fmt(col));
+                        job.append(&format!(" since {day}"), 0.0, fmt(pal.text_dim));
+                        job.wrap.max_width = ui.available_width();
+                        ui.add(egui::Label::new(job).wrap());
+                    }
+                    None => pp::dialog_title(ui, "Space used", Some(&what), &pal),
+                }
             });
         });
         // On the title's line, its middle with the title's; its right edge on the column's.
@@ -827,6 +876,19 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         }
         if crate::devtools::chip(&mut tui, tab_labels[1], showing_free, "space free up", "What could go to make room (Tab)", &pal, false) {
             switch_to = Some(true);
+        }
+        if grew {
+            let by_change = BY_CHANGE.load(Relaxed);
+            let sr = Rect::from_min_size(pos2(tabs_r.left() - sort_w, tabs_r.top()), vec2(sort_w - 12.0, 22.0));
+            let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(sr).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            sui.spacing_mut().item_spacing.x = 4.0;
+            if crate::devtools::chip(&mut sui, sort_labels[0], !by_change, "space sort size", "Biggest first (S)", &pal, false) && by_change {
+                flip_sort = true;
+            }
+            let since = st.before.as_ref().map(|b| b.label()).unwrap_or_default();
+            if crate::devtools::chip(&mut sui, sort_labels[1], by_change, "space sort change", &format!("What grew most since {since} first (S)"), &pal, false) && !by_change {
+                flip_sort = true;
+            }
         }
         ui.add_space(lerp(18.0, 24.0).round());
         // Ring and list are centred on each other: whichever is shorter stands in the
@@ -876,6 +938,14 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                         area = area.vertical_scroll_offset((top - list_cap / 2.0 + row_h).clamp(0.0, most));
                     }
                     ui.spacing_mut().item_spacing.y = 0.0;
+                    // With an earlier reading: each row's change, and a bar of its size then
+                    // and what it gained since, all on one scale.
+                    // Lent out while the rows are drawn (the rows change the cursor), not copied.
+                    let then_owned = st.before.take();
+                    let then = then_owned.as_ref();
+                    let peak = then.map_or(0, |b| st.items.iter().map(|i| i.size.unwrap_or(0).max(b.sizes.get(&i.entry.name).copied().unwrap_or(0))).max().unwrap_or(0)).max(1);
+                    let ch_w = ui.painter().layout_no_wrap("−888.8 MB".into(), FontId::proportional(small), pal.text_dim).size().x;
+                    let size_w = ui.painter().layout_no_wrap("888.8 MB".into(), FontId::proportional(small), pal.text_dim).size().x;
                     area.show_rows(ui, row_h, n, |ui, range| {
                         for row in range {
                             let k = st.order[row];
@@ -935,7 +1005,34 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                             };
                             let pg = ui.painter().layout_no_wrap(share, FontId::proportional(small), tc);
                             ui.painter().galley(pos2(edge - pg.size().x, r.center().y - pg.size().y / 2.0), pg, tc);
-                            let size_right = edge - pct_w - 14.0;
+                            let mut size_right = edge - pct_w - 14.0;
+                            let mut bar_left = f32::INFINITY;
+                            if let Some(b) = then {
+                                if let Some(d) = it.size.map(|s| s as i64 - b.sizes.get(&it.entry.name).copied().unwrap_or(0) as i64) {
+                                    let col = if on { tc } else if d.unsigned_abs() < 64 << 10 { dc } else if d > 0 { pal.accent } else { crate::gitstatus::GREEN };
+                                    let cg = ui.painter().layout_no_wrap(crate::grew::fmt_change(d), FontId::proportional(small), col);
+                                    ui.painter().galley(pos2(size_right - cg.size().x, r.center().y - cg.size().y / 2.0), cg, col);
+                                }
+                                size_right -= ch_w + 14.0;
+                                // The bar only where the name keeps room beside it.
+                                if r.width() >= 460.0 {
+                                    let (old, now) = (b.sizes.get(&it.entry.name).copied().unwrap_or(0), it.size.unwrap_or(0));
+                                    let bw = 48.0;
+                                    let br = Rect::from_min_size(pos2(size_right - size_w - 12.0 - bw, r.center().y - 2.0), vec2(bw, 4.0));
+                                    bar_left = br.left();
+                                    let w = |v: u64| (v as f32 / peak as f32 * bw).max(if v > 0 { 1.0 } else { 0.0 });
+                                    ui.painter().rect_filled(br, CornerRadius::same(2), pal.border.gamma_multiply(0.6));
+                                    let kept = old.min(now);
+                                    let base = Rect::from_min_size(br.min, vec2(w(kept), 4.0));
+                                    ui.painter().rect_filled(base, CornerRadius::same(2), dc.gamma_multiply(0.7));
+                                    if now > old {
+                                        ui.painter().rect_filled(Rect::from_min_max(pos2(base.right(), br.top()), pos2((br.left() + w(now)).min(br.right()), br.bottom())), CornerRadius::same(2), if on { tc } else { pal.accent });
+                                    } else if old > now {
+                                        let gone = Rect::from_min_max(pos2(base.right(), br.top()), pos2((br.left() + w(old)).min(br.right()), br.bottom()));
+                                        ui.painter().rect_stroke(gone, CornerRadius::same(2), egui::Stroke::new(1.0, crate::gitstatus::GREEN.gamma_multiply(0.8)), egui::StrokeKind::Inside);
+                                    }
+                                }
+                            }
                             let left = match it.size {
                                 Some(s) => {
                                     let sg = ui.painter().layout_no_wrap(crate::fsx::fmt_size(s), FontId::proportional(small), dc);
@@ -949,11 +1046,12 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                                 }
                             };
                             let x = ic.right() + 10.0;
-                            let room = left - 16.0 - x;
+                            let room = left.min(bar_left) - 16.0 - x;
                             let g = crate::listing::elided(ui, &it.entry.name, FontId::proportional(fs), room, tc);
                             ui.painter().galley(pos2(x, r.center().y - g.size().y / 2.0), g, tc);
                         }
                     });
+                    st.before = then_owned;
                     if counting {
                         ctx.request_repaint_after(Duration::from_millis(100));
                     }
@@ -1024,7 +1122,12 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         if showing_free {
             pp::hint_chips(&mut left, &[("Space", "check"), ("→", "open"), ("Delete", "free"), ("Tab", "contents"), ("F", "full window"), ("Esc", "close")], &pal);
         } else {
-            pp::hint_chips(&mut left, &[("Enter", "open folder"), ("Backspace", "up"), ("Space", "check"), ("Delete", "trash"), ("Tab", "free up"), ("F", "full window"), ("Esc", "close")], &pal);
+            let mut keys = vec![("Enter", "open folder"), ("Backspace", "up"), ("Space", "check"), ("Delete", "trash"), ("Tab", "free up")];
+            if st.before.is_some() {
+                keys.push(("S", "size or change"));
+            }
+            keys.extend([("F", "full window"), ("Esc", "close")]);
+            pp::hint_chips(&mut left, &keys, &pal);
         }
         let lh = left.min_rect().height();
         let (bt, band) = if side { (ft, lh.max(st.buttons.y)) } else { (ft + lh + 12.0, st.buttons.y) };
@@ -1125,6 +1228,12 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
     }
     if flip_full {
         FULL.store(!full, Relaxed);
+    }
+    if flip_sort {
+        BY_CHANGE.store(!BY_CHANGE.load(Relaxed), Relaxed);
+        st.moved = true;
+        st.sort();
+        st.reveal = true;
     }
     if close {
         return false;
