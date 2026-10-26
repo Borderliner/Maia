@@ -660,6 +660,10 @@ impl Sim {
             s.app.cfg.font_size = f;
             s.app.cfg.spacing = sp;
         }
+        // MAIA_SIM_ANIM=off runs it with animations off.
+        if std::env::var("MAIA_SIM_ANIM").as_deref() == Ok("off") {
+            s.app.cfg.animations = false;
+        }
         // MAIA_SIM_THEME=Paper runs it in another theme.
         if let Some(t) = std::env::var("MAIA_SIM_THEME").ok().and_then(|t| serde_json::from_str(&format!("\"{t}\"")).ok()) {
             s.app.cfg.theme = t;
@@ -14444,7 +14448,9 @@ mod journeys {
             assert!(some_text(&s, t), "{t:?} on the first page");
         }
         let d = crate::config::Config::default();
-        assert!(s.app.cfg.theme == d.theme && !s.app.cfg.show_hidden && !s.app.cfg.single_click && !s.app.cfg_dirty, "nothing chosen yet");
+        // A run in another theme (MAIA_SIM_THEME) starts there.
+        let themed = std::env::var_os("MAIA_SIM_THEME").is_some();
+        assert!((themed || s.app.cfg.theme == d.theme) && !s.app.cfg.show_hidden && !s.app.cfg.single_click && !s.app.cfg_dirty, "nothing chosen yet");
         look_welcome(&mut s, "welcome first page");
         let controls = |s: &Sim, what: &str| crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == what).map(|(_, r, _)| *r).collect::<Vec<_>>());
         let click = |s: &mut Sim, r: Rect| s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
@@ -14477,10 +14483,11 @@ mod journeys {
         assert!((s.app.cfg.font_size - 16.5).abs() < 0.01 && (s.app.cfg.spacing - 1.6).abs() < 0.01, "Roomy: {} {}", s.app.cfg.font_size, s.app.cfg.spacing);
         s.idle(4);
         look_welcome(&mut s, "welcome size, roomy");
+        let anim = s.app.cfg.animations;
         click_in_row(&mut s, "switch", "Animations");
-        assert!(!s.app.cfg.animations);
+        assert_eq!(s.app.cfg.animations, !anim);
         click_in_row(&mut s, "switch", "Animations");
-        assert!(s.app.cfg.animations);
+        assert_eq!(s.app.cfg.animations, anim);
         // Opening: one click, for folders only.
         s.act("key Enter");
         assert_eq!(tour(&s).page, 3, "Enter goes on");
