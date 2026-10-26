@@ -17414,6 +17414,7 @@ mod journeys {
         s.idle(4);
         let rows: Vec<String> = s.texts.iter().filter(|(_, t)| t.starts_with("~/")).map(|(_, t)| t.clone()).collect();
         assert!(!rows.iter().any(|t| t.contains("Gone soon")), "a deleted folder isn't offered: {rows:?}");
+        assert!(!rows.iter().any(|t| t.ends_with("/jump")), "nor the folder shown now: {rows:?}");
         look_popup(&mut s, "jump");
         s.shot("jump");
         s.act("text trip");

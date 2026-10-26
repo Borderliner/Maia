@@ -97,6 +97,8 @@ pub struct State {
     news: u64,
     /// What `rows` were ranked for: the query and the news.
     ranked_for: Option<(String, u64)>,
+    /// The folder shown now: no place to jump to, so not offered.
+    here: PathBuf,
 }
 
 impl State {
@@ -118,7 +120,8 @@ impl State {
             ctx2.request_repaint();
             check(paths, &tx2, &ctx2);
         });
-        State { query: String::new(), focus: true, sel: 0, known, alive: HashSet::new(), rx, rows: vec![], top: 1.0, news: 0, ranked_for: None }
+        let here = app.panels.get(&app.active).map(|p| p.path()).unwrap_or_default();
+        State { query: String::new(), focus: true, sel: 0, known, alive: HashSet::new(), rx, rows: vec![], top: 1.0, news: 0, ranked_for: None, here }
     }
 
     fn take(&mut self) {
@@ -154,7 +157,7 @@ impl State {
         let mut rows: Vec<Row> = vec![];
         let mut v: Vec<(f64, u32)> = vec![];
         for (p, f) in &self.known {
-            if !self.alive.contains(p) {
+            if !self.alive.contains(p) || *p == self.here {
                 continue;
             }
             let text = pp::home_short(p);
