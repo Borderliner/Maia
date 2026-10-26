@@ -31,6 +31,8 @@ pub enum Kind {
 /// What a page shows besides its words.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Body {
+    /// The welcome's opening: its words beside the moving dither and the app's icon.
+    Hero,
     /// A film of the feature.
     Film(&'static [u8]),
     /// The choices made on arrival.
@@ -61,9 +63,15 @@ const SORTING: &[u8] = include_bytes!("../assets/tour/sorting.webp");
 pub const WELCOME: &[Page] = &[
     Page {
         title: "Welcome to Maia",
-        text: "A file manager to drive from the keyboard, with the mouse there when you want it. A few choices first; nothing changes unless you pick it.",
-        body: Body::Setup,
+        text: "A file manager to drive from the keyboard, with the mouse there when you want it. A few choices, then a short look around.",
+        body: Body::Hero,
         keys: &[],
+    },
+    Page {
+        title: "Make it yours",
+        text: "The choices most people make on arrival. Nothing changes unless you pick it, and each stays in Options, on the page named above it.",
+        body: Body::Setup,
+        keys: &[Cmd::Options],
     },
     Page {
         title: "Go anywhere by typing",
@@ -178,10 +186,17 @@ pub struct State {
     film: Option<Film>,
     /// When the page was turned (for its fade in).
     turned: Option<f64>,
+    /// When it opened: the welcome fills the window with a fade.
+    opened: Option<f64>,
+    /// The opening page's moving dither, while that page is shown.
+    dither: Option<crate::dither::Dither>,
+    /// The app's icon, decoded on a thread the first time it is shown.
+    icon: Option<egui::TextureHandle>,
+    icon_rx: Option<Receiver<egui::ColorImage>>,
 }
 
 pub fn open(kind: Kind, auto: bool) -> Popup {
-    Popup::Tour(Box::new(State { kind, page: 0, auto, film: None, turned: None }))
+    Popup::Tour(Box::new(State { kind, page: 0, auto, film: None, turned: None, opened: None, dither: None, icon: None, icon_rx: None }))
 }
 
 impl State {
@@ -385,6 +400,9 @@ const SETUP: &[(&str, &[Opt])] = &[
 const THEMES: [ThemeName; 6] = [ThemeName::Midnight, ThemeName::Graphite, ThemeName::TokyoNight, ThemeName::Mocha, ThemeName::Paper, ThemeName::Latte];
 
 pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
+    if st.kind == Kind::Welcome {
+        return full(app, ctx, st);
+    }
     let pal = app.pal;
     let pages = st.pages();
     let n = pages.len();
@@ -489,6 +507,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
             bui.multiply_opacity(fade * (2.0 - fade));
             match page.body {
                 Body::Film(_) => replay = film_page(&mut bui, app, st, body),
+                Body::Hero => words(&mut bui, page, &pal),
                 Body::Setup => setup_page(&mut bui, app, page, body),
                 Body::List => list_page(&mut bui, app, body),
             }
@@ -619,12 +638,21 @@ fn setup_page(ui: &mut Ui, app: &mut App, page: &Page, body: Rect) {
     words(ui, page, &pal);
     ui.add_space(4.0);
     let rest = Rect::from_min_max(pos2(body.left(), ui.cursor().top()), body.max);
+    setup_cards(ui, app, rest.height(), true);
+}
+
+/// The choices in cards under the name of the Options page each is on, scrolling in
+/// `height`; `note` says where they stay.
+fn setup_cards(ui: &mut Ui, app: &mut App, height: f32, note: bool) {
+    let pal = app.pal;
     let mut changed = false;
     let options = app.keymap.label(Cmd::Options).map_or("Options".to_string(), |k| format!("Options ({k})"));
-    egui::ScrollArea::vertical().id_salt("tour setup").max_height(rest.height()).auto_shrink([false, false]).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("tour setup").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         let cw = (ui.available_width() - 10.0).floor();
-        ui.add(egui::Label::new(egui::RichText::new(format!("Each stays in {options}, on the page named above it.")).size(11.0).color(pal.text_dim)).wrap());
+        if note {
+            ui.add(egui::Label::new(egui::RichText::new(format!("Each stays in {options}, on the page named above it.")).size(11.0).color(pal.text_dim)).wrap());
+        }
         for (gi, (section, opts)) in SETUP.iter().enumerate() {
             ui.add_space(if gi == 0 { 6.0 } else { 10.0 });
             let (hr, _) = ui.allocate_exact_size(vec2(cw, 20.0), Sense::hover());
@@ -710,4 +738,249 @@ fn list_page(ui: &mut Ui, app: &App, body: Rect) {
         }
         ui.add_space(6.0);
     });
+}
+
+// ------------------------------------------------------------------ the welcome, full window
+
+/// The welcome over the whole window: a card with the page's words on one side and
+/// what it is about on the other (the dither and the icon, the choices, a film), the
+/// pages as dots below it. Esc, Skip or the last page's button closes it.
+fn full(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
+    let pal = app.pal;
+    let pages = st.pages();
+    let n = pages.len();
+    st.page = st.page.min(n - 1);
+    let typing = ctx.memory(|m| m.focused()).is_some_and(|f| egui::TextEdit::load_state(ctx, f).is_some());
+    let (esc, left, right, enter) = ctx.input_mut(|i| {
+        (
+            i.consume_key(Modifiers::NONE, Key::Escape),
+            !typing && i.consume_key(Modifiers::NONE, Key::ArrowLeft),
+            !typing && i.consume_key(Modifiers::NONE, Key::ArrowRight),
+            !typing && i.consume_key(Modifiers::NONE, Key::Enter),
+        )
+    });
+    if esc {
+        return closed(app, st);
+    }
+    let mut go: Option<usize> = None;
+    let mut close = false;
+    if left && st.page > 0 {
+        go = Some(st.page - 1);
+    }
+    if right || enter {
+        if st.page + 1 < n {
+            go = Some(st.page + 1);
+        } else if enter {
+            close = true;
+        }
+    }
+    let page = &pages[st.page];
+    let now = ctx.input(|i| i.time);
+    let anim = app.cfg.animations;
+    let opened = *st.opened.get_or_insert(now);
+    let turned = *st.turned.get_or_insert(now);
+    // The window fills with it over a quarter second; each page fades in after.
+    let ease = |t: f32| 1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3);
+    let appear = if anim { ease(((now - opened) / 0.28) as f32) } else { 1.0 };
+    let fade = if anim { ease(((now - turned) / 0.22) as f32) } else { 1.0 };
+    if appear < 1.0 || fade < 1.0 {
+        ctx.request_repaint();
+    }
+    // What the page shows besides its words: started with it, stopped when it goes.
+    if let Body::Film(bytes) = page.body {
+        if st.film.as_ref().is_none_or(|f| !std::ptr::eq(f.bytes, bytes)) {
+            st.film = Some(Film::start(bytes, !anim, ctx));
+        }
+    } else {
+        st.film = None;
+    }
+    if let Some(f) = &mut st.film {
+        f.pump(ctx);
+    }
+    if page.body == Body::Hero {
+        if st.dither.is_none() {
+            st.dither = Some(crate::dither::Dither::new(ctx));
+        }
+        if st.icon.is_none() && st.icon_rx.is_none() {
+            let (tx, rx) = sync_channel(1);
+            let c = ctx.clone();
+            let _ = std::thread::Builder::new().name("welcome icon".into()).spawn(move || {
+                if let Some(i) = crate::imgdec::decode_fit(crate::install::ICON_PNG, 256) {
+                    let _ = tx.send(egui::ColorImage::from_rgba_unmultiplied([i.w as usize, i.h as usize], &i.px));
+                    c.request_repaint();
+                }
+            });
+            st.icon_rx = Some(rx);
+        }
+    } else {
+        st.dither = None;
+    }
+    if let Some(img) = st.icon_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+        st.icon_rx = None;
+        st.icon = Some(ctx.load_texture("welcome icon", img, egui::TextureOptions::LINEAR));
+    }
+    let screen = ctx.content_rect();
+    let fs = app.cfg.font_size;
+    pp::note_layer(Id::new("welcome"));
+    let mut replay = false;
+    egui::Area::new(Id::new("welcome")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
+        let (scr, _) = ui.allocate_exact_size(screen.size(), Sense::click());
+        ui.multiply_opacity(appear);
+        let p = ui.painter().clone();
+        p.rect_filled(scr, CornerRadius::ZERO, pal.bg);
+        // The strip along the top moves the window, as the title bar it covers does.
+        let strip = Rect::from_min_size(scr.min, vec2(scr.width(), 44.0));
+        let drag = ui.interact(strip, Id::new("welcome drag"), Sense::click_and_drag());
+        if drag.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        // Skip, top right, on every page but the last.
+        if st.page + 1 < n {
+            let sr = Rect::from_min_size(pos2(scr.right() - 92.0, scr.top() + 10.0), vec2(80.0, 26.0));
+            let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(sr).layout(egui::Layout::right_to_left(egui::Align::Center)));
+            let b = pp::plain_button(&mut sui, "Skip", &pal);
+            crate::ui::note_control(&sui, b.rect, "welcome skip");
+            if b.on_hover_text("Close the welcome (Esc)").clicked() {
+                close = true;
+            }
+        }
+        // The card, as big as the window allows up to a comfortable reading size.
+        let dots_h = 40.0;
+        let cw = (scr.width() - 48.0).min(1120.0).max(280.0).round();
+        let ch = (scr.height() - 56.0 - dots_h - 16.0).min(700.0).max(240.0).round();
+        let card = Rect::from_min_size(pos2((scr.center().x - cw / 2.0).round(), (scr.top() + 52.0 + ((scr.height() - 52.0 - dots_h - ch) / 2.0 - 8.0).max(0.0)).round()), vec2(cw, ch));
+        let rad = if app.cfg.round_corners { 16 } else { 0 };
+        p.rect(card, CornerRadius::same(rad), pal.panel, Stroke::new(1.0, pal.border), StrokeKind::Inside);
+        // Side by side, or the picture over the words in a narrow window.
+        let stacked = cw < 760.0;
+        let pad = (24.0 + (cw - 760.0).max(0.0) * 0.04).round().min(40.0);
+        let (words_r, visual) = if stacked {
+            let vh = (ch * 0.44).round();
+            (Rect::from_min_max(pos2(card.left() + pad, card.top() + vh + 12.0), pos2(card.right() - pad, card.bottom() - pad)), Rect::from_min_size(card.min + vec2(10.0, 10.0), vec2(cw - 20.0, vh - 10.0)))
+        } else {
+            let lw = (cw * 0.4).clamp(320.0, 440.0).round();
+            (Rect::from_min_max(card.min + vec2(pad, pad), pos2(card.left() + lw, card.bottom() - pad)), Rect::from_min_max(pos2(card.left() + lw + 8.0, card.top() + 10.0), card.max - vec2(10.0, 10.0)))
+        };
+        let vrad = if app.cfg.round_corners { 12 } else { 0 };
+        p.rect_filled(visual, CornerRadius::same(vrad), pal.bg);
+        // The page's words, the way on at their foot.
+        let shift = (1.0 - fade) * 10.0;
+        let foot_h = 34.0;
+        let foot = Rect::from_min_max(pos2(words_r.left(), words_r.bottom() - foot_h), words_r.max);
+        let mut hero_foot = foot.top();
+        {
+            let body = Rect::from_min_max(words_r.min + vec2(shift, 0.0), pos2(words_r.right() + shift, foot.top() - 12.0));
+            let mut wui = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(egui::Layout::top_down(egui::Align::Min)));
+            wui.set_clip_rect(body.expand(2.0).intersect(ui.clip_rect()));
+            wui.multiply_opacity(fade);
+            // Centred in its room on the opening page; from the top on the others.
+            if page.body == Body::Hero && !stacked {
+                wui.add_space((body.height() * 0.28).round());
+            } else if !stacked {
+                wui.add_space(8.0);
+            }
+            wui.label(egui::RichText::new(format!("{} of {n}", st.page + 1)).size(fs - 1.5).color(pal.text_dim));
+            wui.add_space(6.0);
+            let title = if page.body == Body::Hero { fs * 2.3 } else { fs * 1.8 };
+            wui.add(egui::Label::new(egui::RichText::new(page.title).strong().size(title.round()).color(pal.text)).wrap());
+            wui.add_space(8.0);
+            wui.add(egui::Label::new(egui::RichText::new(page.text).size(fs + 0.5).color(pal.text_dim).line_height(Some(((fs + 0.5) * 1.45).round()))).wrap());
+            keys_row(&mut wui, app, page.keys, &pal);
+            hero_foot = (wui.min_rect().bottom() + 24.0).round();
+        }
+        // The opening page's button stands under its words; the others' at the foot.
+        let foot = if page.body == Body::Hero { Rect::from_min_size(pos2(foot.left(), hero_foot.min(foot.top())), foot.size()) } else { foot };
+        let mut fui = ui.new_child(egui::UiBuilder::new().max_rect(foot).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        fui.spacing_mut().item_spacing.x = 8.0;
+        let last = st.page + 1 == n;
+        let label = match (st.page, last) {
+            (0, _) => "Get started",
+            (_, true) => "Start using Maia",
+            _ => "Continue",
+        };
+        // Back first, the way on after it.
+        if st.page > 0 {
+            let b = pp::plain_button(&mut fui, "Back", &pal);
+            crate::ui::note_control(&fui, b.rect, "welcome back");
+            if b.clicked() {
+                go = Some(st.page - 1);
+            }
+        }
+        let b = pp::primary_button(&mut fui, label, true, &pal);
+        crate::ui::note_control(&fui, b.rect, "welcome next");
+        if b.clicked() {
+            if last {
+                close = true;
+            } else {
+                go = Some(st.page + 1);
+            }
+        }
+        // What the page is about, in the other half.
+        let mut vui = ui.new_child(egui::UiBuilder::new().max_rect(visual).layout(egui::Layout::top_down(egui::Align::Min)));
+        vui.set_clip_rect(visual.intersect(ui.clip_rect()));
+        vui.multiply_opacity(fade);
+        match page.body {
+            Body::Hero => {
+                if let Some(d) = &mut st.dither {
+                    d.paint(&vui, visual, pal.accent, pal.bg, anim, vrad, fade);
+                }
+                // The icon on a tile of the card's colour, in the middle, standing a little
+                // off the dither.
+                let side = (visual.width().min(visual.height()) * 0.24).clamp(72.0, 132.0).round();
+                let tile = Rect::from_center_size(visual.center(), Vec2::splat(side));
+                let trad = CornerRadius::same((side * 0.24) as u8);
+                for k in 1..=4 {
+                    let s = k as f32 * 3.0;
+                    vui.painter().rect_filled(tile.translate(vec2(0.0, s * 0.6)).expand(s), CornerRadius::same((side * 0.24 + s) as u8), egui::Color32::from_black_alpha((14.0 / k as f32) as u8));
+                }
+                vui.painter().rect(tile, trad, pal.panel, Stroke::new(1.0, pal.border), StrokeKind::Inside);
+                if let Some(t) = &st.icon {
+                    let ir = tile.shrink((side * 0.14).round());
+                    egui::Image::new((t.id(), ir.size())).paint_at(&vui, ir);
+                }
+            }
+            Body::Setup => {
+                let inner = visual.shrink(20.0);
+                let mut cui = vui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)));
+                setup_cards(&mut cui, app, inner.height(), false);
+            }
+            Body::Film(_) => {
+                let inner = visual.shrink(28.0);
+                let aspect = st.film.as_ref().map_or(1.6, |f| f.aspect);
+                let fw = inner.width().min(inner.height() * aspect).floor();
+                let fr = Rect::from_center_size(inner.center(), vec2(fw, (fw / aspect).round()));
+                let resp = vui.interact(fr, Id::new("welcome film"), Sense::click());
+                crate::ui::note_control(&vui, fr, "tour film");
+                let round = CornerRadius::same(8);
+                match st.film.as_ref().and_then(|f| f.tex.as_ref()) {
+                    Some(t) => {
+                        egui::Image::new((t.id(), fr.size())).corner_radius(round).paint_at(&vui, fr);
+                    }
+                    None => {
+                        vui.painter().rect_filled(fr, round, pal.card());
+                    }
+                }
+                vui.painter().rect_stroke(fr, round, Stroke::new(1.0, pal.card_line()), StrokeKind::Outside);
+                replay = resp.clicked() && st.film_done();
+            }
+            Body::List => {}
+        }
+        // The pages as dots, centred under the card.
+        let dw = n as f32 * 14.0;
+        let dr = Rect::from_min_size(pos2((scr.center().x - dw / 2.0).round(), card.bottom() + 12.0), vec2(dw, 24.0));
+        dots(ui, dr, n, st.page, &pal, &mut go);
+    });
+    if replay {
+        st.film = None;
+    }
+    if let Some(p) = go.filter(|p| *p != st.page && *p < n) {
+        st.page = p;
+        st.turned = Some(now);
+        st.film = None;
+        ctx.request_repaint();
+    }
+    if close {
+        return closed(app, st);
+    }
+    true
 }

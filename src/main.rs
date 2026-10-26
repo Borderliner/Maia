@@ -37,6 +37,7 @@ mod config;
 mod copyto;
 mod convert;
 mod devtools;
+mod dither;
 mod drives;
 mod dupes;
 mod editor;
