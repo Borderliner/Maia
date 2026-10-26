@@ -14570,6 +14570,15 @@ mod journeys {
         assert!(!s.popup_open() && s.app.toast.is_none(), "closed without a word");
         s.app.popup = Popup::options_at(crate::popups::Section::System);
         s.idle(3);
+        // At a big font the section scrolls to it.
+        for _ in 0..6 {
+            if some_text(&s, "What's new") {
+                break;
+            }
+            let c = s.size / 2.0;
+            s.act(&format!("scroll {:.0} {:.0} -10", c.x + 80.0, c.y));
+            s.idle(3);
+        }
         assert!(some_text(&s, "What's new"), "a row in Startup & system");
         click_control(&mut s, "whats new button");
         s.idle(1);
@@ -17816,11 +17825,13 @@ mod journeys {
         // The address in the inspector.
         select_name(&mut s, "setup.tar.gz");
         s.cmd(ToggleInspector);
-        s.idle(4);
+        // The preview read, so its toolbar (and the name's pill) stays where it is.
+        wait_until(&mut s, "the preview", 10, |s| s.app.panels[&s.app.active].inspector_rect.is_some_and(|ir| s.texts.iter().any(|(r, t)| t == "gz" && ir.contains(r.center()))));
         look(&mut s, "the inspector beside groups");
         let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("no inspector"));
         let pill = s.texts.iter().find(|(r, t)| t == "setup.tar.gz" && ir.contains(r.center())).map(|x| x.0).unwrap_or_else(|| s.fail("no name pill"));
         click_rect(&mut s, pill);
+        s.idle(20);
         wait_until(&mut s, "the address shown", 10, |s| some_text(s, "example.com/files/setup.tar.gz"));
         s.shot("origin-inspector");
         click_rect(&mut s, pill);
@@ -17911,7 +17922,8 @@ mod journeys {
         s.idle(20);
         // Each block says its size and share under its name.
         let shares: Vec<Rect> = s.texts.iter().filter(|(_, t)| t.contains(" · ") && t.ends_with('%')).map(|x| x.0).collect();
-        assert_eq!(shares.len(), 5, "a block an item");
+        // The smallest block has no room for its size at the biggest fonts.
+        assert!(shares.len() == 5 || s.app.cfg.font_size > 17.0 && shares.len() == 4, "a block an item: {}", shares.len());
         for (i, a) in shares.iter().enumerate() {
             for b in &shares[i + 1..] {
                 assert!(!a.intersects(*b), "blocks apart: {a:?} {b:?}");
