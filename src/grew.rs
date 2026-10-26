@@ -17,6 +17,9 @@ const DAYS: usize = 4;
 const FOLDERS: usize = 400;
 /// A folder holding more than this isn't kept: its reading would outweigh all the rest.
 pub const MOST_ITEMS: usize = 5000;
+/// Names kept in all, the most recently counted folders' first: the file stays a few
+/// megabytes, rewritten each time a folder is counted.
+const MOST_NAMES: usize = 100_000;
 
 #[derive(Clone, Debug)]
 pub struct Reading {
@@ -94,7 +97,22 @@ pub fn note_in(file: &Path, r: Reading) {
     let mut folders: Vec<(u64, PathBuf)> = newest.into_iter().map(|(d, at)| (at, d)).collect();
     folders.sort_unstable_by(|a, b| b.0.cmp(&a.0));
     folders.truncate(FOLDERS);
-    let kept: std::collections::HashSet<PathBuf> = folders.into_iter().map(|x| x.1).collect();
+    let mut names: HashMap<&Path, Vec<usize>> = HashMap::new();
+    for o in &all {
+        names.entry(o.dir.as_path()).or_default().push(o.sizes.len());
+    }
+    let (mut kept, mut used) = (std::collections::HashSet::new(), 0);
+    for (_, d) in folders {
+        // What is written of a folder, at most: its biggest few days.
+        let mut n = names.remove(d.as_path()).unwrap_or_default();
+        n.sort_unstable_by(|a, b| b.cmp(a));
+        used += n.iter().take(DAYS).sum::<usize>();
+        if used > MOST_NAMES && !kept.is_empty() {
+            break;
+        }
+        kept.insert(d);
+    }
+    drop(names);
     all.retain(|o| kept.contains(&o.dir));
     all.sort_by(|a, b| a.dir.cmp(&b.dir).then(b.at.cmp(&a.at)));
     let mut text = String::new();
