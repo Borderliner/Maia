@@ -826,9 +826,28 @@ impl Sim {
         self.texts.iter().rev().find(|(_, s)| s == label).map(|(r, _)| *r).unwrap_or_else(|| self.fail(&format!("no {label:?} on screen")))
     }
 
+    /// Scroll the open popup (a long menu) down, then up, until `label` shows: at a big
+    /// font a menu is taller than the window, as a person would find.
+    pub fn scroll_popup_to(&mut self, label: &str) {
+        for dy in [-6.0, 6.0] {
+            for _ in 0..12 {
+                if self.texts.iter().any(|(_, s)| s == label) {
+                    return;
+                }
+                // The text drawn last is the topmost layer's: the open menu's.
+                let Some(at) = self.texts.last().map(|t| t.0.center()) else { return };
+                self.act(&format!("scroll {:.0} {:.0} {dy}", at.x, at.y));
+                self.idle(2);
+            }
+        }
+    }
+
     /// Click the last-drawn text exactly equal to `label` (topmost wins), like a user
     /// clicking a button by its caption. Fails if it isn't on screen.
     pub fn click_text(&mut self, label: &str) {
+        if !self.texts.iter().any(|(_, s)| s == label) && self.popup_open() {
+            self.scroll_popup_to(label);
+        }
         let Some((r, _)) = self.texts.iter().rev().find(|(_, s)| s == label).cloned() else {
             let near: Vec<&str> = self.texts.iter().map(|(_, s)| s.as_str()).filter(|s| s.len() < 30).take(40).collect();
             self.fail(&format!("no {label:?} on screen; visible: {near:?}"));
@@ -11449,6 +11468,7 @@ mod journeys {
         right(&mut s, "photo.jpg");
         s.click_text("Picture");
         s.idle(2);
+        s.scroll_popup_to("Crop…");
         for t in ["Rotate left", "Rotate right", "Resize", "Crop…"] {
             assert!(some_text(&s, t), "{t}");
         }
@@ -11967,6 +11987,14 @@ mod journeys {
         let mut s = Sim::new(&home, vec2(1280.0, 800.0));
         s.app.cfg.theme = crate::theme::ThemeName::Graphite;
         s.settle();
+        // The sidebar, long with what other journeys left in it, scrolled to it.
+        for _ in 0..10 {
+            if sidebar_text(&s, "Timeline").is_some() {
+                break;
+            }
+            s.act(&format!("scroll {:.0} 400 -6", s.app.sidebar_width / 2.0));
+            s.idle(2);
+        }
         let row = sidebar_text(&s, "Timeline").unwrap_or_else(|| s.fail("Timeline in the sidebar"));
         let home_row = sidebar_text(&s, "Home").unwrap();
         assert!(row.top() > home_row.top() && row.top() - home_row.top() < 60.0, "right under Home");
