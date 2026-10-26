@@ -640,6 +640,9 @@ fn paint_code(p: &egui::Painter, r: Rect, code: &crate::qr::Code) {
     p.rect_filled(card, CornerRadius::same(8), Color32::WHITE);
     let ink = Color32::from_gray(16);
     let at = card.min + vec2(quiet as f32 * m, quiet as f32 * m);
+    // One mesh of plain quads: rects each get a soft edge, and where rows meet the edges
+    // leave light seams through the dark, which a camera reads worse.
+    let mut mesh = egui::Mesh::default();
     for y in 0..code.size {
         let mut x = 0;
         while x < code.size {
@@ -652,7 +655,8 @@ fn paint_code(p: &egui::Painter, r: Rect, code: &crate::qr::Code) {
                 x += 1;
             }
             let rr = Rect::from_min_size(at + vec2(start as f32 * m, y as f32 * m), vec2((x - start) as f32 * m, m));
-            p.rect_filled(rr, CornerRadius::ZERO, ink);
+            mesh.add_colored_rect(rr, ink);
         }
     }
+    p.add(egui::Shape::mesh(mesh));
 }
