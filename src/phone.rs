@@ -44,6 +44,8 @@ pub struct Shared {
     pub url: Option<Result<String, String>>,
     /// Each device and the items it has fetched whole.
     pub got: BTreeMap<IpAddr, BTreeSet<usize>>,
+    /// The command that lets phones through the firewall, while it turns them away.
+    pub blocked: Option<String>,
 }
 
 /// The running server: dropped, it stops.
@@ -102,6 +104,72 @@ pub fn pick(found: &[(String, Ipv4Addr)]) -> Option<Ipv4Addr> {
         .map(|x| x.1)
 }
 
+/// The port tried first. The same one every time, so a firewall that turns phones away
+/// needs to be told about it only once; a random one when it is taken.
+pub const PORT: u16 = 47250;
+
+/// The command that lets phones in, when the firewall is known to drop what comes to
+/// `port`; None when it lets them in or can't be asked. Only reads: changing the firewall
+/// is the user's call.
+pub fn firewall_blocks(t: &crate::drives::Tools, port: u16) -> Option<String> {
+    let read = |rel: &str| std::fs::read_to_string(t.etc(rel)).unwrap_or_default();
+    let conf = read("ufw/ufw.conf");
+    if conf.lines().any(|l| l.trim() == "ENABLED=yes") {
+        let policy = read("default/ufw");
+        let drops = policy.lines().find_map(|l| l.trim().strip_prefix("DEFAULT_INPUT_POLICY=")).is_none_or(|v| v.trim_matches('"') != "ACCEPT");
+        return (drops && !ufw_allows(&read("ufw/user.rules"), port)).then(|| format!("sudo ufw allow {port}/tcp"));
+    }
+    if t.has("firewall-cmd") && exits_with(t, &["--state"]) == Some(0) && exits_with(t, &[&format!("--query-port={port}/tcp")]) == Some(1) {
+        return Some(format!("sudo firewall-cmd --permanent --add-port={port}/tcp && sudo firewall-cmd --reload"));
+    }
+    None
+}
+
+/// Whether ufw's own rules accept TCP to `port`: a rule for that port or a range or list
+/// holding it, or one for every port (allowing a whole network, say).
+pub fn ufw_allows(rules: &str, port: u16) -> bool {
+    let holds = |spec: &str| {
+        spec.split(',').any(|p| match p.split_once(':') {
+            Some((a, b)) => a.parse::<u16>().is_ok_and(|a| a <= port) && b.parse::<u16>().is_ok_and(|b| port <= b),
+            None => p.parse::<u16>() == Ok(port),
+        })
+    };
+    rules.lines().any(|l| {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        if w.first() != Some(&"-A") || w.get(1) != Some(&"ufw-user-input") || !w.windows(2).any(|p| p == ["-j", "ACCEPT"]) {
+            return false;
+        }
+        let arg = |k: &str| w.windows(2).find(|p| p[0] == k).map(|p| p[1]);
+        if arg("-p").is_some_and(|p| p != "tcp" && p != "all") {
+            return false;
+        }
+        match (arg("--dport"), arg("--dports")) {
+            (Some(d), _) | (None, Some(d)) => holds(d),
+            (None, None) => true,
+        }
+    })
+}
+
+/// The exit code of `firewall-cmd args`, waited for two seconds at most: its service can
+/// hang, and a hung one can't be asked.
+fn exits_with(t: &crate::drives::Tools, args: &[&str]) -> Option<i32> {
+    let mut c = crate::media::tool_cmd(t.cmd("firewall-cmd"));
+    c.args(args).stdout(std::process::Stdio::null());
+    let mut child = c.spawn().ok()?;
+    let t0 = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => return st.code(),
+            Ok(None) if t0.elapsed() < Duration::from_secs(2) => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 /// 128 random bits, written in letters and digits a phone's camera reads back well.
 fn token() -> Option<String> {
     let mut b = [0u8; 16];
@@ -127,7 +195,7 @@ fn token() -> Option<String> {
 }
 
 /// Start sharing `items`, folders only when `zip` can pack them.
-pub fn start(items: Vec<Item>, zip: Option<crate::drives::Tools>, ctx: &egui::Context) -> Server {
+pub fn start(items: Vec<Item>, zip: Option<crate::drives::Tools>, tools: Option<crate::drives::Tools>, ctx: &egui::Context) -> Server {
     let stop = Arc::new(AtomicBool::new(false));
     let shared = Arc::new(Mutex::new(Shared::default()));
     let (s2, sh2, c2) = (stop.clone(), shared.clone(), ctx.clone());
@@ -138,7 +206,7 @@ pub fn start(items: Vec<Item>, zip: Option<crate::drives::Tools>, ctx: &egui::Co
         };
         let Some(ip) = lan_address() else { return fail("This computer is on no local network: join the phone's Wi-Fi network or plug in a cable.") };
         let Some(tok) = token() else { return fail("Couldn't make a private address") };
-        let l = match TcpListener::bind((ip, 0)) {
+        let l = match TcpListener::bind((ip, PORT)).or_else(|_| TcpListener::bind((ip, 0))) {
             Ok(l) => l,
             Err(e) => return fail(&format!("Couldn't listen on {ip}: {e}")),
         };
@@ -146,11 +214,27 @@ pub fn start(items: Vec<Item>, zip: Option<crate::drives::Tools>, ctx: &egui::Co
         if l.set_nonblocking(true).is_err() {
             return fail("Couldn't listen");
         }
-        sh2.lock().unwrap_or_else(|e| e.into_inner()).url = Some(Ok(format!("http://{ip}:{port}/{tok}/")));
+        let blocked = tools.as_ref().and_then(|t| firewall_blocks(t, port));
+        {
+            let mut s = sh2.lock().unwrap_or_else(|e| e.into_inner());
+            s.url = Some(Ok(format!("http://{ip}:{port}/{tok}/")));
+            s.blocked = blocked;
+        }
         c2.request_repaint();
         let (items, tok, busy) = (Arc::new(items), Arc::new(tok), Arc::new(AtomicUsize::new(0)));
         let end = Instant::now() + SPAN;
+        // While the firewall is in the way, asked again now and then, so allowing the port
+        // with the popup open clears the warning.
+        let mut asked = Instant::now();
         while !s2.load(Relaxed) && Instant::now() < end {
+            if asked.elapsed() >= Duration::from_secs(2) && sh2.lock().unwrap_or_else(|e| e.into_inner()).blocked.is_some() {
+                asked = Instant::now();
+                let b = tools.as_ref().and_then(|t| firewall_blocks(t, port));
+                if b.is_none() {
+                    sh2.lock().unwrap_or_else(|e| e.into_inner()).blocked = None;
+                    c2.request_repaint();
+                }
+            }
             match l.accept() {
                 Ok((conn, peer)) if busy.load(Relaxed) < AT_ONCE => {
                     let (items, tok, busy, stop, shared, ctx, zip) = (items.clone(), tok.clone(), busy.clone(), s2.clone(), sh2.clone(), c2.clone(), zip.clone());
@@ -346,7 +430,7 @@ pub fn open(app: &mut App) {
         return;
     }
     let tools = crate::drives::Tools::current();
-    let zip = tools.filter(|t| t.has("bsdtar"));
+    let zip = tools.clone().filter(|t| t.has("bsdtar"));
     let mut items = vec![];
     let mut left_out = 0;
     for e in sel {
@@ -362,7 +446,7 @@ pub fn open(app: &mut App) {
         return;
     }
     let ctx = app.ctx.clone();
-    let server = start(items.clone(), zip, &ctx);
+    let server = start(items.clone(), zip, tools, &ctx);
     app.popup = pp::Popup::Phone(Box::new(State { items, left_out, server, opened: Instant::now(), code: None }));
 }
 
@@ -377,9 +461,9 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         app.toast("Stopped sending to the phone after five minutes");
         return false;
     }
-    let (url, got) = {
+    let (url, got, blocked) = {
         let s = st.server.shared.lock().unwrap_or_else(|e| e.into_inner());
-        (s.url.clone(), s.got.iter().map(|(ip, k)| (*ip, k.len())).collect::<Vec<_>>())
+        (s.url.clone(), s.got.iter().map(|(ip, k)| (*ip, k.len())).collect::<Vec<_>>(), s.blocked.clone())
     };
     if let Some(Ok(u)) = &url {
         if st.code.as_ref().is_none_or(|c| c.0 != *u) {
@@ -439,9 +523,21 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                         let l = ui.add(egui::Label::new(egui::RichText::new(u.trim_end_matches('/')).font(FontId::monospace(fs - 2.0)).color(pal.text)).truncate().sense(Sense::click()));
                         crate::ui::note_control(ui, l.rect, "phone address");
                         if l.on_hover_text("Copy the address").clicked() {
-                            copy = Some(u.clone());
+                            copy = Some((u.clone(), "Copied the address"));
                         }
-                        ui.label(egui::RichText::new("Point the phone's camera at the code; it must be on this network.").font(small.clone()).color(pal.text_dim));
+                        match &blocked {
+                            None => {
+                                ui.label(egui::RichText::new("Point the phone's camera at the code; it must be on this network.").font(small.clone()).color(pal.text_dim));
+                            }
+                            Some(cmd) => {
+                                ui.add(egui::Label::new(egui::RichText::new("The firewall turns phones away. Let them in once, in a terminal:").font(small.clone()).color(pal.danger)).wrap());
+                                let c = ui.add(egui::Label::new(egui::RichText::new(cmd).font(FontId::monospace(fs - 2.0)).color(pal.text)).wrap().sense(Sense::click()));
+                                crate::ui::note_control(ui, c.rect, "firewall command");
+                                if c.on_hover_text("Copy the command").clicked() {
+                                    copy = Some((cmd.clone(), "Copied the command"));
+                                }
+                            }
+                        }
                     }
                     Some(Err(e)) => {
                         ui.add(egui::Label::new(egui::RichText::new(e).color(pal.danger)).wrap());
@@ -467,9 +563,9 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         }
         pp::hints(ui, &[("Esc", "stop sending")], &pal);
     });
-    if let Some(u) = copy {
-        ctx.copy_text(u);
-        app.toast("Copied the address");
+    if let Some((text, said)) = copy {
+        ctx.copy_text(text);
+        app.toast(said);
     }
     // The bar moves a pixel or so a second; nothing needs drawing in between.
     ctx.request_repaint_after(Duration::from_millis(500));
