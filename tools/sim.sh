@@ -34,6 +34,6 @@ exec $SCOPE \
   $( [ -f /etc/bash.bashrc ] && echo --ro-bind /dev/null /etc/bash.bashrc ) \
   --unsetenv WAYLAND_DISPLAY --unsetenv DISPLAY --unsetenv DBUS_SESSION_BUS_ADDRESS \
   ${MAIA_SIM_SHOTS:+--bind "$MAIA_SIM_SHOTS" "$MAIA_SIM_SHOTS" --setenv MAIA_SIM_SHOTS "$MAIA_SIM_SHOTS"} \
-  --setenv SDL_AUDIODRIVER dummy ${MAIA_PROF:+--setenv MAIA_PROF 1} ${MAIA_SIM_DEBUG:+--setenv MAIA_SIM_DEBUG 1} ${TMP:+--setenv TMPDIR "$TMP"} --setenv MAIA_SIM_SANDBOX 1 --setenv MAIA_SIM_ROOT "$SIM" --setenv HOME "$SIM/home" \
+  ${RUST_BACKTRACE:+--setenv RUST_BACKTRACE $RUST_BACKTRACE} --setenv SDL_AUDIODRIVER dummy ${MAIA_PROF:+--setenv MAIA_PROF 1} ${MAIA_SIM_DEBUG:+--setenv MAIA_SIM_DEBUG 1} ${TMP:+--setenv TMPDIR "$TMP"} --setenv MAIA_SIM_SANDBOX 1 --setenv MAIA_SIM_ROOT "$SIM" --setenv HOME "$SIM/home" \
   ${MAIA_SIM_SEED:+--setenv MAIA_SIM_SEED $MAIA_SIM_SEED} ${MAIA_SIM_LOOK:+--setenv MAIA_SIM_LOOK $MAIA_SIM_LOOK} ${MAIA_SIM_THEME:+--setenv MAIA_SIM_THEME $MAIA_SIM_THEME} --setenv MAIA_SIM_SEEDS "${MAIA_SIM_SEEDS:-10}" --setenv MAIA_SIM_STEPS "${MAIA_SIM_STEPS:-300}" \
   "$C/$BIN" "$F" --test-threads=1 --nocapture "$@"

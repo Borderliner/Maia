@@ -15864,6 +15864,14 @@ mod journeys {
         assert_eq!(last_copy(&s), "first line here\nsecond line with words\nthird line");
         // A click in the list gives Ctrl+C back to the files.
         let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
+        // At a big font the folder's README card leaves it below the fold: scrolled to.
+        if !s.texts.iter().any(|(r, t)| t == "notes.txt" && r.left() > s.app.sidebar_width && !ir.contains(r.center())) {
+            let id = s.app.active;
+            let t = s.app.panels.get_mut(&id).unwrap().tab_mut();
+            t.cursor = t.entries.iter().position(|e| e.name == "notes.txt").map(|i| i as u32);
+            t.scroll_to_cursor = true;
+            s.idle(20);
+        }
         let row = s.texts.iter().find(|(r, t)| t == "notes.txt" && r.left() > s.app.sidebar_width && !ir.contains(r.center())).map(|x| x.0).unwrap_or_else(|| s.fail("notes.txt listed"));
         s.idle(40);
         s.act(&format!("click {:.0} {:.0}", row.center().x, row.center().y));
