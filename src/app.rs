@@ -238,6 +238,8 @@ pub struct App {
     pub clipboard: Option<(Vec<PathBuf>, bool)>,
     /// The sets copied and cut this session, newest first (Paste From Earlier).
     pub pastes: Vec<crate::pastes::Set>,
+    /// Pictures and text from the clipboard being written as files.
+    pub clip_files: Vec<crate::clipfile::Pending>,
     pub popup: Popup,
     pub sidebar: bool,
     pub sidebar_width: f32,
@@ -404,6 +406,7 @@ impl App {
             jobs_panel: 0,
             clipboard: None,
             pastes: vec![],
+            clip_files: vec![],
             popup: Popup::None,
             sidebar: if session.sidebar_width > 0.0 { session.sidebar } else { true },
             sidebar_width: if session.sidebar_width > 0.0 { session.sidebar_width } else { 176.0 },
@@ -769,6 +772,34 @@ impl App {
         });
         if started.is_ok() {
             self.shares.push(rx);
+        }
+    }
+
+    /// Pictures and text pasted as files: named as they land, like a new file.
+    fn pump_clip_files(&mut self) {
+        let mut i = 0;
+        while i < self.clip_files.len() {
+            let Ok(done) = self.clip_files[i].rx.try_recv() else {
+                i += 1;
+                continue;
+            };
+            let p = self.clip_files.remove(i);
+            match done {
+                crate::clipfile::Pasted::File(f) => {
+                    self.undo.push(UndoEntry { label: format!("Paste {}", f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()), kind: UndoKind::Created(vec![f.clone()]) });
+                    let dir = f.parent().map(Path::to_path_buf).unwrap_or_default();
+                    match self.panels.get_mut(&p.panel).and_then(|pn| pn.tabs.iter_mut().find(|t| t.id == p.tab)).filter(|t| t.path == dir) {
+                        Some(t) => {
+                            t.filter.clear();
+                            t.pending_rename = Some(f);
+                            t.reload();
+                        }
+                        None => self.toast(format!("Pasted {}", f.display())),
+                    }
+                }
+                crate::clipfile::Pasted::Nothing => self.paste_own(p.dest),
+                crate::clipfile::Pasted::Failed(e) => self.toast(e),
+            }
         }
     }
 
@@ -1333,6 +1364,7 @@ impl App {
         self.pump_requests(ctx);
         self.pump_net();
         self.pump_shares(ctx);
+        self.pump_clip_files();
         self.age_trash();
         crate::errands::pump(self);
         crate::tags::pump(self);
@@ -3447,16 +3479,6 @@ impl App {
     // ---------------------------------------------------------------- file ops
 
     pub fn paste(&mut self) {
-        let (paths, cut) = match crate::clipboard::get_files() {
-            Some(x) => x,
-            None => match &self.clipboard {
-                Some((p, c)) => (p.clone(), *c),
-                None => {
-                    self.toast("Nothing to paste");
-                    return;
-                }
-            },
-        };
         // Paste into the single selected folder, else the current folder.
         let t = self.tab();
         let sel = t.target_entries();
@@ -3464,6 +3486,32 @@ impl App {
         if tab::is_computer(&dest) {
             return;
         }
+        let (paths, cut) = match crate::clipboard::get_files() {
+            Some(x) => x,
+            // Something newer than any files: a picture or text, written as a file.
+            None if crate::clipboard::available() => {
+                let (panel, tab) = (self.active, self.tab().id);
+                let p = crate::clipfile::start(panel, tab, dest, &self.ctx);
+                self.clip_files.push(p);
+                return;
+            }
+            None => return self.paste_own(dest),
+        };
+        self.paste_files(paths, cut, dest);
+    }
+
+    /// The files this app copied, when the system clipboard has nothing of its own.
+    fn paste_own(&mut self, dest: PathBuf) {
+        match &self.clipboard {
+            Some((p, c)) => {
+                let (paths, cut) = (p.clone(), *c);
+                self.paste_files(paths, cut, dest);
+            }
+            None => self.toast("Nothing to paste"),
+        }
+    }
+
+    fn paste_files(&mut self, paths: Vec<PathBuf>, cut: bool, dest: PathBuf) {
         if cut {
             self.clipboard = None;
         }

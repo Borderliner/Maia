@@ -135,6 +135,16 @@ pub fn set_text(s: &str) {
     });
 }
 
+/// The clipboard's contents in the first of `prefer` it is offered in.
+pub fn get_bytes(prefer: &[&str]) -> Option<(String, Vec<u8>)> {
+    with(|c| c.load(prefer).ok())
+}
+
+/// The system clipboard can be read (there is a display server to ask).
+pub fn available() -> bool {
+    with(|_| Some(())).is_some()
+}
+
 /// Clipboard text; a copied file list is returned as one path per line.
 pub fn get_text() -> Option<String> {
     with(|c| {
