@@ -44,7 +44,7 @@ static FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(
 /// The list sorted by how much each grew rather than by size (S). Kept likewise.
 static BY_CHANGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The contents drawn as a map instead of the ring and list, for the session.
-static MAP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static MAP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// A smaller share than this goes into the shared slice; it would be a sliver.
 const MIN_SHARE: f32 = 0.015;
@@ -687,6 +687,16 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         } else {
             return false;
         }
+    }
+    // Tab is Space used's own: egui moved its focus on to a button of the window when the
+    // key came, and Enter would then press that button. Nothing here takes the focus.
+    if k.tab {
+        ctx.memory_mut(|m| {
+            m.move_focus(egui::FocusDirection::None);
+            if let Some(f) = m.focused() {
+                m.surrender_focus(f);
+            }
+        });
     }
     // Tab goes round: the contents as a ring and list, as a map, then Free up.
     if k.tab && !st.confirm && !free_confirm {
