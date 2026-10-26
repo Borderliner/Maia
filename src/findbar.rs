@@ -163,6 +163,8 @@ pub fn bar(ui: &mut Ui, body: Rect, f: &mut Finder, count: &str, any: bool, id: 
             let (cr, _) = ui.allocate_exact_size(cg.size() + vec2(10.0, 0.0), Sense::hover());
             ui.painter().galley(pos2(cr.left() + 4.0, cr.center().y - cg.size().y / 2.0), cg, pal.text_dim);
         }
+        // The bar's height, whatever the Spacing.
+        ui.spacing_mut().interact_size.y = ui.available_height();
         let te = egui::TextEdit::singleline(&mut f.query).id(fid).hint_text(egui::RichText::new("Find").color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(ui.available_width()).font(FontId::proportional(12.5));
         r = Some(ui.add(te));
     });

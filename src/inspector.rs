@@ -1897,6 +1897,9 @@ fn text_body(ui: &mut Ui, body: Rect, ins: &mut Inspector, e: &Entry, env: &mut 
         ui.painter().galley(pos2(bar.right() - 8.0 - cg.size().x, bar.center().y - cg.size().y / 2.0), cg, pal.text_dim);
         if field.width() > 30.0 {
             let mut fui = ui.new_child(UiBuilder::new().max_rect(field).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            // The bar's height, whatever the Spacing: a field as tall as a control would be
+            // runs out of it.
+            fui.spacing_mut().interact_size.y = field.height();
             let te = egui::TextEdit::singleline(&mut ins.filter).id_salt(("log-filter", id)).hint_text(egui::RichText::new("Filter lines").color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(field.width()).font(FontId::proportional(12.5));
             let r = fui.add(te);
             crate::ui::note_control(ui, r.rect, "line filter");
