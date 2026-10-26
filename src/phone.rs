@@ -304,7 +304,8 @@ pub fn serve(r: &mut impl BufRead, w: &mut impl Write, items: &[Item], tok: &str
         return;
     }
     let path = target.split('?').next().unwrap_or("");
-    let Some(rest) = path.strip_prefix('/').and_then(|p| p.strip_prefix(tok)) else {
+    // The whole token, then a slash or nothing: "/TOKEN0" is not "/TOKEN/0".
+    let Some(rest) = path.strip_prefix('/').and_then(|p| p.strip_prefix(tok)).filter(|r| r.is_empty() || r.starts_with('/')) else {
         let _ = w.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return;
     };
