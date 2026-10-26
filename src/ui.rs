@@ -927,6 +927,50 @@ impl App {
                 }
             }
         };
+        // The folder's README over the list: its start, or all of it, sliding to its height.
+        let list_rect = {
+            let size = self.cfg.font_size;
+            let (show, hidden) = (self.cfg.show_readme, &self.ud.readme_hidden);
+            let p = self.panels.get_mut(&id).expect("drawn panel");
+            let t = p.tab_mut();
+            let fits = show && !tab::is_computer(&t.path) && t.archive.is_none() && !t.flatten && t.smart.is_none() && !t.content.on && t.filter.is_empty() && !t.settings.column_view && !t.settings.stack_view && !hidden.contains(&t.path) && !t.path.starts_with(crate::sidebar::trash_dir());
+            let want = if fits {
+                crate::readme::sync(t, ui.ctx());
+                t.readme.as_deref_mut().map_or(0.0, |c| crate::readme::height(c, size, list_rect.height()))
+            } else {
+                0.0
+            };
+            let h = if self.cfg.animations { ui.ctx().animate_value_with_time(Id::new(("readme h", id)), want, 0.16) } else { want };
+            if h >= 1.0 && fits {
+                let card = Rect::from_min_max(list_rect.min, pos2(list_rect.right(), list_rect.top() + h));
+                let spacing = self.cfg.spacing;
+                let pal = self.pal;
+                let act = {
+                    let App { panels, thumbs, .. } = self;
+                    let t = panels.get_mut(&id).expect("drawn panel").tab_mut();
+                    let mut cu = ui.new_child(UiBuilder::new().max_rect(card));
+                    cu.set_clip_rect(card.intersect(ui.clip_rect()));
+                    t.readme.as_deref_mut().and_then(|c| crate::readme::draw(&mut cu, card, c, size, spacing, &pal, thumbs, id))
+                };
+                match act {
+                    Some(crate::readme::Act::Hide(dir)) => {
+                        self.ud.readme_hidden.push(dir);
+                        self.ud_dirty = true;
+                    }
+                    Some(crate::readme::Act::Follow(crate::markdown::Follow::Open(f))) => self.actions.push(Action::OpenFile(f)),
+                    Some(crate::readme::Act::Follow(crate::markdown::Follow::Folder(f))) => self.actions.push(Action::Navigate { panel: id, path: f }),
+                    Some(crate::readme::Act::Follow(crate::markdown::Follow::Url(u))) if crate::markdown::is_web(&u) => {
+                        if let Err(e) = crate::mime::open_uri(&u) {
+                            self.toast(format!("Couldn't open: {e}"));
+                        }
+                    }
+                    _ => {}
+                }
+                Rect::from_min_max(pos2(list_rect.left(), card.bottom()), list_rect.max)
+            } else {
+                list_rect
+            }
+        };
         {
             let App { panels, cfg, thumbs, stats, recents_set, pinned_set, actions, keymap, drag, clipboard, ud, avatars, .. } = self;
             let panel = panels.get_mut(&id).unwrap();

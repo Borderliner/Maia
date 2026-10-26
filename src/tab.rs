@@ -162,6 +162,8 @@ pub struct Tab {
     pub shown_tab_w: f32,
     /// Kept small at the strip's left and out of Close Other Tabs.
     pub pinned: bool,
+    /// The folder's README, shown above the listing.
+    pub readme: Option<Box<crate::readme::Card>>,
     pub hscroll: f32,
     pub born: std::time::Instant,
     /// Details tree view: expanded folders and their pending child listings.
@@ -264,6 +266,7 @@ impl Tab {
             funnel_at: None,
             shown_tab_w: 0.0,
             pinned: false,
+            readme: None,
             hscroll: 0.0,
             born: std::time::Instant::now(),
             expanded: HashSet::new(),

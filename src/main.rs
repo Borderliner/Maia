@@ -84,6 +84,7 @@ mod project;
 mod projects;
 mod fm1;
 mod quickopen;
+mod readme;
 mod redo;
 mod undofile;
 mod undohist;

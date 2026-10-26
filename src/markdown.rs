@@ -1112,6 +1112,22 @@ impl Piece {
     }
 }
 
+/// Space around the document, at a text size.
+fn margin(size: f32) -> f32 {
+    (size * 1.1).round().clamp(10.0, 18.0)
+}
+
+impl View {
+    /// How tall the document is as laid out so far, margins included, and whether that
+    /// is all of it.
+    pub fn height(&self, size: f32) -> (f32, bool) {
+        match &self.laid {
+            Some(l) => (l.height + margin(size) * 2.0, l.next > self.doc.blocks.len()),
+            None => (0.0, false),
+        }
+    }
+}
+
 pub struct View {
     pub doc: Doc,
     laid: Option<Laid>,
@@ -1730,7 +1746,7 @@ pub enum Follow {
 /// Draw the document; returns a link the user clicked.
 pub fn view(ui: &mut Ui, body: Rect, v: &mut View, size: f32, pal: &Palette, spacing: f32, thumbs: &mut crate::thumbs::Thumbs, id: u64) -> Option<Follow> {
     let ppp = ui.ctx().pixels_per_point();
-    let margin = (size * 1.1).round().clamp(10.0, 18.0);
+    let margin = margin(size);
     let w = (body.width() - margin * 2.0 - 12.0).max(40.0).min(900.0);
     // Pictures as they load: their size in points, shrunk to the width.
     let pics: Vec<Option<Vec2>> = v

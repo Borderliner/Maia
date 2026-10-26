@@ -180,6 +180,8 @@ pub struct Config {
     pub recents_store: RecentsStore,
     /// Photos sent or attached without where they were taken and the camera's details.
     pub share_without_place: bool,
+    /// A folder's README above its files.
+    pub show_readme: bool,
     /// Folder sizes: master switch plus one switch per kind of drive.
     pub folder_sizes: bool,
     pub sizes_ssd: bool,
@@ -269,6 +271,7 @@ impl Default for Config {
             recents_on_top: false,
             recents_store: RecentsStore::Persistent,
             share_without_place: false,
+            show_readme: true,
             folder_sizes: true,
             sizes_ssd: true,
             sizes_hdd: false,
@@ -619,6 +622,8 @@ pub struct UserData {
     pub visits: HashMap<PathBuf, crate::jump::Visit>,
     /// Files and folders kept first in their folder, whatever the sort.
     pub pinned: Vec<PathBuf>,
+    /// Folders whose README was closed.
+    pub readme_hidden: Vec<PathBuf>,
 }
 
 impl UserData {

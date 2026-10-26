@@ -2661,6 +2661,15 @@ impl App {
                 t.dirty = true;
                 t.scroll_to_cursor = true;
             }
+            Cmd::ToggleReadme => {
+                // Back on everywhere, the folders it was closed in included.
+                self.cfg.show_readme = !self.cfg.show_readme;
+                if self.cfg.show_readme {
+                    self.ud.readme_hidden.clear();
+                    self.ud_dirty = true;
+                }
+                self.cfg_dirty = true;
+            }
             Cmd::ToggleRecents => {
                 self.cfg.highlight_recents = !self.cfg.highlight_recents;
                 self.set_config_changed();

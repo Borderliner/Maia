@@ -220,6 +220,7 @@ commands! {
     ToggleSystem, "toggle_system", View, "Toggle System Files", "Show or hide backup files and special files (sockets, devices).", [];
     ToggleExtensions, "toggle_extensions", View, "Toggle File Extensions", "Show or hide file name extensions.", [];
     ToggleRecents, "toggle_recents", View, "Toggle Recents", "Mark recently used items with a dot.", [];
+    ToggleReadme, "toggle_readme", View, "Toggle Folder README", "Show a folder's README above its files.", [];
     ToggleRecentsOnTop, "toggle_recents_on_top", View, "Toggle Recents On Top", "Sort recently used items above the rest.", [];
     ToggleSidebar, "toggle_sidebar", View, "Toggle Sidebar", "Show or hide the quick access sidebar.", ["Ctrl+B"];
     ZoomIn, "zoom_in", View, "Zoom In", "Step toward bigger icons (also Ctrl+wheel).", ["Ctrl+Equals", "Ctrl+Plus"];
