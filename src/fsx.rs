@@ -524,6 +524,15 @@ pub fn expand_path(input: &str) -> PathBuf {
     PathBuf::from(out)
 }
 
+/// `p` opened for reading when it is a plain file (links followed), else None. Opened
+/// without waiting: a named pipe opened the usual way blocks until something writes to
+/// it, which would hang the worker for good.
+pub fn open_plain(p: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(p).ok()?;
+    f.metadata().ok()?.is_file().then_some(f)
+}
+
 /// Unique destination name: "name (1).ext", "name (2).ext", ...
 pub fn unique_dest(dir: &Path, name: &str) -> PathBuf {
     let cand = dir.join(name);

@@ -13326,6 +13326,40 @@ fn phone_firewall_rules_and_address() {
 
 // ------------------------------------------------------------------ README card
 
+/// A named pipe in a project, among its code or as its README, is passed over: the code is
+/// counted and the README thread finishes, where opening the pipe would wait for a writer
+/// for good and nothing would be counted again until Maia restarted.
+#[test]
+fn a_named_pipe_never_hangs_the_line_count_or_the_readme() {
+    let d = tmpdir("fifo-project");
+    touch(&d.join("Cargo.toml"), "[package]");
+    touch(&d.join("src/main.rs"), "fn main() {\n    println!(\"hi\");\n}\n");
+    for p in ["src/pipe.rs", "README.md"] {
+        let c = std::ffi::CString::new(d.join(p).as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dir = d.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(crate::linecount::count(&dir));
+    });
+    let count = rx.recv_timeout(Duration::from_secs(5)).expect("the count is waiting on the pipe").expect("a project");
+    let rust = count.langs.iter().find(|l| l.name == "Rust").expect("the Rust counted");
+    assert_eq!((rust.lines, rust.files), (3, 1), "main.rs alone, the pipe passed over");
+    let ctx = egui::Context::default();
+    let mut t = Tab::new(1, d.clone(), ViewSettings::default(), ctx.clone());
+    pump(&mut t, &HashMap::new());
+    crate::readme::sync(&mut t, &ctx);
+    let mut card = t.readme.take().unwrap();
+    assert_eq!(card.file.as_deref(), Some(d.join("README.md").as_path()));
+    wait_for("the README thread to finish", 5, || {
+        crate::readme::height(&mut card, 14.0, 700.0, 0.0);
+        !card.reading()
+    });
+    assert!(card.text().is_none(), "nothing read, no card");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// The README card: found among a listing's names (README.md before readme.txt, never a
 /// folder), read on a thread, an empty one no card; its heights: a heading and a few
 /// lines at first, dragged between two lines and four fifths of the room, opened up to

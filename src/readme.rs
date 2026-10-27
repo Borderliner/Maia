@@ -80,7 +80,7 @@ pub fn sync(t: &mut crate::tab::Tab, ctx: &egui::Context) {
     let _ = std::thread::Builder::new().name("readme".into()).spawn(move || {
         use std::io::Read;
         let mut b = vec![];
-        if let Ok(h) = std::fs::File::open(&f) {
+        if let Some(h) = crate::fsx::open_plain(&f) {
             let _ = h.take(MAX).read_to_end(&mut b);
         }
         let text = String::from_utf8_lossy(&b);
@@ -96,6 +96,11 @@ pub fn sync(t: &mut crate::tab::Tab, ctx: &egui::Context) {
 impl Card {
     pub fn text(&self) -> Option<String> {
         self.view.as_ref().map(|v| format!("{:?}", v.doc.blocks))
+    }
+
+    /// The file is still being read.
+    pub fn reading(&self) -> bool {
+        self.rx.is_some()
     }
 }
 

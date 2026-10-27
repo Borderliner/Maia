@@ -159,8 +159,8 @@ pub fn count(dir: &Path) -> Option<Count> {
         let ext = rel.rsplit_once('.').map(|x| x.1.to_ascii_lowercase()).unwrap_or_default();
         let Some(k) = LANGS.iter().position(|l| l.0.contains(&ext.as_str())) else { continue };
         let path = dir.join(rel);
-        let Ok(f) = std::fs::File::open(&path) else { continue };
-        if f.metadata().map_or(true, |m| !m.is_file() || m.len() > MAX_FILE) {
+        let Some(f) = crate::fsx::open_plain(&path) else { continue };
+        if f.metadata().map_or(true, |m| m.len() > MAX_FILE) {
             continue;
         }
         buf.clear();
