@@ -310,7 +310,18 @@ pub fn copies(files: &[std::path::PathBuf], tools: Option<&crate::drives::Tools>
                 dir.insert(d).clone()
             }
         };
-        let to = dir.join(&name);
+        // Two pictures of one name (IMG_0001.jpg from two cameras) would overwrite each
+        // other and go out as one picture twice: the second waits in a folder of its own,
+        // keeping the name the recipient sees.
+        let mut to = dir.join(&name);
+        for k in 1.. {
+            if !out.contains(&to) {
+                break;
+            }
+            let sub = dir.join(k.to_string());
+            std::fs::create_dir_all(&sub).map_err(|e| e.to_string())?;
+            to = sub.join(&name);
+        }
         std::fs::write(&to, b).map_err(|e| e.to_string())?;
         out.push(to);
     }

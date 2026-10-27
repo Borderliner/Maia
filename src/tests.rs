@@ -13613,6 +13613,27 @@ fn photos_shared_without_their_place_or_camera() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Two photos of one name attached together both go, each with its own picture and the
+/// name it had: the second waits in a folder of its own rather than over the first.
+#[test]
+fn email_copies_keep_two_photos_of_one_name_apart() {
+    let d = tmpdir("scrub-twins");
+    for (dir, size) in [("Camera", "40x30"), ("Desktop", "64x48")] {
+        std::fs::create_dir_all(d.join(dir)).unwrap();
+        if exif_photo(&d.join(dir).join("IMG_0001.jpg"), size, "2026:05:01 10:00:00", None).is_none() {
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+    }
+    let copies = crate::scrub::copies(&[d.join("Camera/IMG_0001.jpg"), d.join("Desktop/IMG_0001.jpg")], None).unwrap();
+    assert_ne!(copies[0], copies[1], "both attachments are one file");
+    assert!(copies.iter().all(|c| c.file_name().unwrap() == "IMG_0001.jpg"), "{copies:?}");
+    let size = |p: &Path| String::from_utf8_lossy(&std::process::Command::new("magick").args(["identify", "-format", "%wx%h"]).arg(p).output().unwrap().stdout).into_owned();
+    assert_eq!((size(&copies[0]), size(&copies[1])), ("40x30".to_string(), "64x48".to_string()));
+    let _ = std::fs::remove_dir_all(copies[0].parent().unwrap());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// However many folders Space used counts, the readings file holds a bounded number of
 /// names, the most recently counted folders' kept whole.
 #[test]
