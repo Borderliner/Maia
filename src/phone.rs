@@ -374,6 +374,19 @@ fn send_item(w: &mut impl Write, it: &Item, zip: Option<&crate::drives::Tools>, 
     }
     if it.dir {
         let Some(tools) = zip else { return false };
+        // With places left out, the folder's pictures go in cleaned too; when one can't be,
+        // the folder isn't sent, as with a single picture.
+        let cleaned = if clean.on.load(Relaxed) && !head {
+            match CleanList::make(&it.path, &it.name, clean.tools.as_ref(), stop) {
+                Some(l) => Some(l),
+                None => {
+                    let _ = w.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    return false;
+                }
+            }
+        } else {
+            None
+        };
         let _ = write!(w, "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Disposition: {}\r\nConnection: close\r\n\r\n", disposition(&name));
         if head {
             return false;
@@ -382,7 +395,17 @@ fn send_item(w: &mut impl Write, it: &Item, zip: Option<&crate::drives::Tools>, 
         // closing ends it.
         let parent = it.path.parent().map(PathBuf::from).unwrap_or_default();
         let mut c = crate::media::tool_cmd(tools.cmd("bsdtar"));
-        c.env("LC_ALL", "C.UTF-8").arg("-cf").arg("-").arg("--format").arg("zip").arg("-C").arg(&parent).arg("--").arg(&it.name).stdout(std::process::Stdio::piped());
+        c.env("LC_ALL", "C.UTF-8").arg("-cf").arg("-").arg("--format").arg("zip").stdout(std::process::Stdio::piped());
+        match &cleaned {
+            Some(l) => {
+                let mut list = std::ffi::OsString::from("@");
+                list.push(&l.spec);
+                c.arg(list);
+            }
+            None => {
+                c.arg("-C").arg(&parent).arg("--").arg(&it.name);
+            }
+        }
         let Ok(mut child) = c.spawn() else { return false };
         let ok = match child.stdout.take() {
             Some(mut out) => pump(&mut out, w, stop),
@@ -400,6 +423,87 @@ fn send_item(w: &mut impl Write, it: &Item, zip: Option<&crate::drives::Tools>, 
     let len = f.metadata().map(|m| m.len()).unwrap_or(it.size);
     let _ = write!(w, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {len}\r\nContent-Disposition: {}\r\nConnection: close\r\n\r\n", disposition(&name));
     !head && pump(&mut f, w, stop)
+}
+
+/// A folder described for bsdtar as an mtree list, each picture's data taken from a copy
+/// with its place and camera left out and everything else from the folder as it is. The
+/// copies sit in a folder of their own, removed with the list.
+struct CleanList {
+    dir: PathBuf,
+    spec: PathBuf,
+}
+
+impl Drop for CleanList {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl CleanList {
+    /// None when a picture couldn't be cleaned, or sharing stopped.
+    fn make(folder: &std::path::Path, name: &str, tools: Option<&crate::drives::Tools>, stop: &AtomicBool) -> Option<CleanList> {
+        use std::os::unix::fs::DirBuilderExt;
+        static N: AtomicUsize = AtomicUsize::new(0);
+        // On disk rather than in the runtime folder: a folder of photos can be gigabytes.
+        // Tests run outside the sandbox too: never the real cache.
+        let base = if cfg!(test) { None } else { dirs::cache_dir() };
+        let dir = base.unwrap_or_else(std::env::temp_dir).join(format!("maia/phone-{}-{}", std::process::id(), N.fetch_add(1, Relaxed)));
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).ok()?;
+        let list = CleanList { spec: dir.join("list"), dir };
+        let mut spec = b"#mtree\n".to_vec();
+        let mut n = 0;
+        list.add(folder, &format!("./{}", mtree_escape(name.as_bytes())), tools, stop, &mut spec, &mut n)?;
+        std::fs::write(&list.spec, spec).ok()?;
+        Some(list)
+    }
+
+    fn add(&self, path: &std::path::Path, key: &str, tools: Option<&crate::drives::Tools>, stop: &AtomicBool, spec: &mut Vec<u8>, n: &mut usize) -> Option<()> {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt;
+        if stop.load(Relaxed) {
+            return None;
+        }
+        // Something that went or can't be read is left out, as bsdtar would leave it.
+        let Ok(m) = std::fs::symlink_metadata(path) else { return Some(()) };
+        let head = format!("{key} mode={:o} time={}.{:09}", m.mode() & 0o7777, m.mtime(), m.mtime_nsec());
+        if m.is_dir() {
+            spec.extend_from_slice(format!("{head} type=dir\n").as_bytes());
+            let mut kids: Vec<_> = std::fs::read_dir(path).map(|rd| rd.flatten().map(|e| e.file_name()).collect()).unwrap_or_default();
+            kids.sort();
+            for k in kids {
+                self.add(&path.join(&k), &format!("{key}/{}", mtree_escape(k.as_bytes())), tools, stop, spec, n)?;
+            }
+        } else if m.is_symlink() {
+            let to = std::fs::read_link(path).ok()?;
+            spec.extend_from_slice(format!("{head} type=link link={}\n", mtree_escape(to.as_os_str().as_bytes())).as_bytes());
+        } else if m.is_file() {
+            let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+            let from = if crate::scrub::applies(&ext) {
+                let copy = self.dir.join(n.to_string());
+                *n += 1;
+                std::fs::write(&copy, crate::scrub::clean(path, tools).ok()?).ok()?;
+                copy
+            } else {
+                path.to_path_buf()
+            };
+            spec.extend_from_slice(format!("{head} type=file contents={}\n", mtree_escape(from.as_os_str().as_bytes())).as_bytes());
+        }
+        Some(())
+    }
+}
+
+/// A name as an mtree list writes it: anything but plain visible ASCII as a backslash and
+/// three octal digits, so spaces, any script and odd bytes all come back as they were.
+fn mtree_escape(b: &[u8]) -> String {
+    let mut s = String::with_capacity(b.len());
+    for &c in b {
+        if c.is_ascii_graphic() && !matches!(c, b'\\' | b'#' | b'=') {
+            s.push(c as char);
+        } else {
+            s.push_str(&format!("\\{c:03o}"));
+        }
+    }
+    s
 }
 
 /// Copy until the end, or false when the phone went away or sharing stopped.

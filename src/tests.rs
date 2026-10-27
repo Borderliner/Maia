@@ -13248,6 +13248,61 @@ fn phone_server_answers_only_with_its_token() {
     let _ = std::fs::remove_dir_all(&fake);
 }
 
+/// A folder sent to a phone with places left out has its photos cleaned inside the zip, at
+/// any depth and under any name, and the rest as it is (a link stays a link); the cleaned
+/// copies are gone once it's sent. With the option off it goes as it is, and a picture
+/// that can't be cleaned keeps the whole folder home, as it keeps a single picture.
+#[test]
+fn phone_folder_goes_without_its_photos_places() {
+    use crate::phone::Item;
+    let Some(b) = ["/usr/bin/bsdtar", "/bin/bsdtar"].into_iter().find(|p| Path::new(p).exists()) else { return };
+    let d = tmpdir("phone-clean");
+    let trip = d.join("سفر trip");
+    std::fs::create_dir_all(trip.join("day 2")).unwrap();
+    let place = Some(["N", "52/1 30/1 1234/100", "E", "13/1 24/1 0/1"]);
+    if exif_photo(&trip.join("day 2/IMG_0001.jpg"), "64x48", "2026:05:01 10:00:00", place).is_none() {
+        let _ = std::fs::remove_dir_all(&d);
+        return;
+    }
+    touch(&trip.join("notes.txt"), "pack light");
+    std::os::unix::fs::symlink("notes.txt", trip.join("latest")).unwrap();
+    let fake = tmpdir("phone-clean-tools");
+    std::os::unix::fs::symlink(b, fake.join("bsdtar")).unwrap();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let tools = crate::drives::Tools::current();
+    crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+    let items = [Item { path: trip.clone(), name: "سفر trip".into(), dir: true, size: 0 }];
+    let unzip = |body: &[u8], to: &str| -> PathBuf {
+        let zip = d.join(format!("{to}.zip"));
+        std::fs::write(&zip, body).unwrap();
+        std::fs::create_dir_all(d.join(to)).unwrap();
+        assert!(std::process::Command::new(b).arg("-xf").arg(&zip).arg("-C").arg(d.join(to)).status().unwrap().success());
+        d.join(to).join("سفر trip")
+    };
+    let gps = |p: &Path| String::from_utf8_lossy(&std::process::Command::new("exiv2").args(["-pa", "-q"]).arg(p).output().unwrap().stdout).contains("GPSLatitude");
+    let (h, body, got) = ask_phone("GET /T0KEN/ HTTP/1.1\r\n\r\n", &items, true, tools.as_ref());
+    assert!(h.contains("application/zip") && body.starts_with(b"PK"), "{h}");
+    assert_eq!(got, [0]);
+    let out = unzip(&body, "cleaned");
+    let photo = std::fs::read(out.join("day 2/IMG_0001.jpg")).unwrap();
+    assert!(photo.starts_with(&[0xff, 0xd8]), "still a JPEG");
+    assert!(!gps(&out.join("day 2/IMG_0001.jpg")), "the place went to the phone");
+    assert_eq!(std::fs::read_to_string(out.join("notes.txt")).unwrap(), "pack light");
+    assert_eq!(std::fs::read_link(out.join("latest")).unwrap(), Path::new("notes.txt"));
+    let mine = format!("phone-{}-", std::process::id());
+    let left = std::fs::read_dir(std::env::temp_dir().join("maia")).map(|rd| rd.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&mine)).count()).unwrap_or(0);
+    assert_eq!(left, 0, "the cleaned copies stayed behind");
+    // Off: the folder as it is, place and all.
+    let (_, body, _) = ask_phone("GET /T0KEN/ HTTP/1.1\r\n\r\n", &items, false, tools.as_ref());
+    assert!(gps(&unzip(&body, "as-is").join("day 2/IMG_0001.jpg")));
+    // A picture that can't be cleaned (HEIC, with no exiftool): nothing is sent.
+    touch(&trip.join("day 2/IMG_0002.heic"), "heic");
+    let (h, body, got) = ask_phone("GET /T0KEN/ HTTP/1.1\r\n\r\n", &items, true, tools.as_ref());
+    assert!(h.starts_with("HTTP/1.1 404") && body.is_empty() && got.is_empty(), "{h}");
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&fake);
+}
+
 /// ufw's own rules, as ufw writes them: a rule for the port, a range, a list or every
 /// port lets phones in; one for another port, for UDP, or one that drops does not. Of
 /// the addresses, the Wi-Fi or wired one on a home network, never a VPN or a container's.
