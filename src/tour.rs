@@ -1,7 +1,8 @@
 //! The welcome tour, shown once on a first start, and What's New, shown once after an
-//! update. A few pages, each a feature with a short film of it at work; the tour's first
-//! page holds the choices most people make on arrival. Both close with Esc or a click
-//! outside at any page, and come back only from the palette or Options.
+//! update. Both fill the window: a few pages, each a feature with a short film of it at
+//! work; the tour's first pages hold the choices most people make on arrival, What's
+//! New's last one the rest of what the version added. Both close with Esc or Skip at any
+//! page, and come back only from the palette or Options.
 //!
 //! The films (assets/tour) are made by tools/tour-media.sh from the simulator, in the
 //! Graphite theme with Google Sans Flex and Google Sans Code, a few states each: the
@@ -20,7 +21,7 @@ use crate::popups::{self as pp, Popup};
 use crate::theme::{Palette, ThemeName};
 
 /// The version What's New describes. A start that has seen an older one shows it.
-pub const NEWS_VERSION: &str = "0.5.0";
+pub const NEWS_VERSION: &str = "0.6.0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -59,11 +60,11 @@ const PALETTE: &[u8] = include_bytes!("../assets/tour/palette.webp");
 const SPLIT: &[u8] = include_bytes!("../assets/tour/split.webp");
 const PREVIEW: &[u8] = include_bytes!("../assets/tour/preview.webp");
 const GIT: &[u8] = include_bytes!("../assets/tour/git.webp");
-const PICKER: &[u8] = include_bytes!("../assets/tour/picker.webp");
-const COLUMNS: &[u8] = include_bytes!("../assets/tour/columns.webp");
-const FILTER: &[u8] = include_bytes!("../assets/tour/filter.webp");
-const GITSEARCH: &[u8] = include_bytes!("../assets/tour/gitsearch.webp");
-const SORTING: &[u8] = include_bytes!("../assets/tour/sorting.webp");
+const JUMP: &[u8] = include_bytes!("../assets/tour/jump.webp");
+const SPACE: &[u8] = include_bytes!("../assets/tour/space.webp");
+const CALENDAR: &[u8] = include_bytes!("../assets/tour/calendar.webp");
+const README: &[u8] = include_bytes!("../assets/tour/readme.webp");
+const PASTES: &[u8] = include_bytes!("../assets/tour/pastes.webp");
 
 pub const WELCOME: &[Page] = &[
     Page {
@@ -136,68 +137,67 @@ pub const WELCOME: &[Page] = &[
 
 pub const NEWS: &[Page] = &[
     Page {
-        title: "Maia picks your files",
-        text: "Apps that ask the desktop for a file can get Maia instead of their own dialog, with the filter, previews and every key you know. Turn it on in Options, Startup & system.",
-        body: Body::Film(PICKER),
-        keys: &[Cmd::Options],
+        title: "Maia 0.6.0",
+        text: "Space used draws the disk as a map and says what grew, the folders you use most are a few letters away, and photos lie on a calendar by day. The next pages show them at work.",
+        body: Body::Hero,
+        keys: &[],
     },
     Page {
-        title: "A column for each folder",
-        text: "Columns lays out the way down side by side, one folder to a column. Right goes into a folder and Left back out; everything else works as it does in the list.",
-        body: Body::Film(COLUMNS),
-        keys: &[Cmd::ViewColumns],
+        title: "Jump to the folders you use",
+        text: "Jump ranks the folders you go to by how often and how lately. A few letters of a name find one, and Enter goes there. With zoxide installed, its folders join in.",
+        body: Body::Film(JUMP),
+        keys: &[Cmd::Jump],
     },
     Page {
-        title: "Say what you want",
-        text: "The filter takes OR, NOT, type:, ext:, owner: and patterns, as in pdf | ext:md -recipes. Save As Smart Folder keeps all of it in the sidebar.",
-        body: Body::Film(FILTER),
-        keys: &[Cmd::FocusFilter, Cmd::SaveSmart],
+        title: "See what fills the disk",
+        text: "Space used lists a folder biggest first, and Tab turns it into a map of blocks, each as big as what it holds. A later count says what grew since, and Free up lists what could go.",
+        body: Body::Film(SPACE),
+        keys: &[Cmd::SpaceUsed, Cmd::FreeUpSpace],
     },
     Page {
-        title: "Search the history",
-        text: "Ctrl+F over the git history finds commits by their words, author:, path: or date. A branch's menu compares it with yours, or merges it in.",
-        body: Body::Film(GITSEARCH),
-        keys: &[Cmd::GitHistory, Cmd::GitSearch],
+        title: "Photos by the day",
+        text: "View Calendar lays a folder's pictures on the days they were taken. Click a day to select its pictures, take in a run of days with Shift and the arrows, and Enter opens them.",
+        body: Body::Film(CALENDAR),
+        keys: &[Cmd::ViewCalendar],
     },
     Page {
-        title: "Sort photos as you look",
-        text: "In the viewer, Delete puts a picture in the trash, R and L turn it, Ctrl+1 to Ctrl+7 give it a colour, T any tag, and C holds it beside the next one.",
-        body: Body::Film(SORTING),
-        keys: &[Cmd::ViewPictures],
+        title: "A folder's README above its files",
+        text: "A folder with a README shows the start of it in a card over the list. Drag the card's edge for more of it in every folder, or close it for this one.",
+        body: Body::Film(README),
+        keys: &[Cmd::ToggleReadme],
     },
-    Page { title: "Also new", text: "", body: Body::List, keys: &[] },
+    Page {
+        title: "Paste what you copied earlier",
+        text: "The last nine sets of files copied or cut wait in a list for the session. A number or a click pastes one here; the clipboard itself still holds only the latest.",
+        body: Body::Film(PASTES),
+        keys: &[Cmd::PasteEarlier],
+    },
+    Page { title: "Also new", text: "The rest of 0.6.0, by who will use it most.", body: Body::List, keys: &[] },
 ];
 
-/// Everything else 0.5.0 added: (group, [(name, one line)]).
-pub const ALSO: &[(&str, &[(&str, &str)])] = &[
+/// Everything else 0.6.0 added: (group, [(icon, name, one line)]).
+pub const ALSO: &[(&str, &[(&str, &str, &str)])] = &[
     (
         "For everyone",
         &[
-            ("Copies take turns", "Copies to and from one disk wait for each other instead of slowing each other down; Start now runs one at once."),
-            ("Check copies", "Every copy read back from the disk and compared with the original (Options, Files & folders)."),
-            ("Redo", "Ctrl+Shift+Z or Ctrl+Y does again what Undo took back, and both outlast a restart."),
-            ("Undo across drives", "A move to another drive is undone by moving it back."),
-            ("Select and copy text", "In every preview: text, Markdown, tables, data, logs and hex."),
-            ("Tags in the sidebar", "Every file with a tag in one place, a Tags column, sort and group by tag, and a tag renamed or removed across your home."),
-            ("Date taken, size and length", "Date Taken, Dimensions and Duration columns; photos grouped by the month they were taken."),
-            ("Change archives", "Add, rename and delete inside zip, 7z and tar files; compress with a name, a level and real progress."),
+            ("smartphone", "Send To Phone", "The selection on this network for five minutes, through a code the phone's camera reads. Folders go as zips."),
+            ("pause", "Transfers you can steer", "Ctrl+Shift+J lists the copies and moves: pause one, start a waiting one now, or drag them into another order."),
+            ("pin", "Pin To Top", "A file or folder kept first in its folder, whatever the sort. Pin Tab keeps a tab small at the left."),
+            ("image", "Paste a picture", "A picture or text copied in another app pastes as a new file, named after the time."),
+            ("lock", "Photos without their place", "Email and Send To Phone can send copies without where a photo was taken or the camera. The original stays as it was."),
+            ("globe", "Where a download came from", "The inspector names the site a file was downloaded from, and Group By Origin sorts a folder by it."),
+            ("trash-2", "Free Up Space", "What could go to make room on a disk: build output, download caches, thumbnails, the trash."),
         ],
     ),
     (
-        "For power users",
+        "Views and the look",
         &[
-            ("Copy To and Move To", "Shift+F5 and Shift+F6 pick the folder in Go To, the recent ones first."),
-            ("Select Matching", "A pattern such as *.jpg or IMG_*.{png,jpg} selects what it names."),
-            ("Packages and lone files", ".deb and .rpm packages, and a lone .gz, .xz, .bz2 or .zst file, open like folders."),
+            ("view-stack", "The Stack view", "The items standing in a row, the one at the cursor turned to face you. Ctrl+Shift+8."),
+            ("diamond", "New icons", "One set throughout, drawn at exactly the pixels it takes, so it stays sharp at every size."),
+            ("house", "A new welcome", "A first start picks the look, the size and how things open, over the whole window."),
         ],
     ),
-    (
-        "For developers",
-        &[
-            ("Several terminals", "Ctrl+Shift+T in the terminal opens another shell; Ctrl+Shift+F searches what scrolled past."),
-            ("Links in the terminal", "Ctrl+click a URL or a file:line to open it; vim, less and tmux get the mouse."),
-        ],
-    ),
+    ("For developers", &[("code", "Lines of code", "The inspector counts a project's lines by language, in the files git keeps.")]),
 ];
 
 pub fn pages(kind: Kind) -> &'static [Page] {
@@ -419,138 +419,6 @@ pub(crate) fn play(bytes: &'static [u8], still: bool, tx: SyncSender<Frame>, wai
 /// The themes offered on arrival: dark and light ones people know.
 const THEMES: [ThemeName; 6] = [ThemeName::Midnight, ThemeName::Graphite, ThemeName::TokyoNight, ThemeName::Mocha, ThemeName::Paper, ThemeName::Latte];
 
-pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
-    if st.kind == Kind::Welcome {
-        return full(app, ctx, st);
-    }
-    let pal = app.pal;
-    let pages = st.pages();
-    let n = pages.len();
-    st.page = st.page.min(n - 1);
-    // A text field with the keyboard (Options' own, in a setup row) keeps its arrows.
-    let typing = ctx.memory(|m| m.focused()).is_some_and(|f| egui::TextEdit::load_state(ctx, f).is_some());
-    let (esc, left, right, enter) = ctx.input_mut(|i| {
-        (
-            i.consume_key(Modifiers::NONE, Key::Escape),
-            !typing && i.consume_key(Modifiers::NONE, Key::ArrowLeft),
-            !typing && i.consume_key(Modifiers::NONE, Key::ArrowRight),
-            !typing && i.consume_key(Modifiers::NONE, Key::Enter),
-        )
-    });
-    if esc {
-        return closed(app, st);
-    }
-    let mut go: Option<usize> = None;
-    let mut close = false;
-    if left && st.page > 0 {
-        go = Some(st.page - 1);
-    }
-    if right || enter {
-        if st.page + 1 < n {
-            go = Some(st.page + 1);
-        } else if enter {
-            close = true;
-        }
-    }
-    let page = &pages[st.page];
-    let now = ctx.input(|i| i.time);
-    let turned = *st.turned.get_or_insert(now);
-    // The page's film: started when the page is, decoded off the window's thread.
-    if let Body::Film(bytes) = page.body {
-        if st.film.as_ref().is_none_or(|f| !std::ptr::eq(f.bytes, bytes)) {
-            st.film = Some(Film::start(bytes, !app.cfg.animations, ctx));
-        }
-    } else {
-        st.film = None;
-    }
-    if let Some(f) = &mut st.film {
-        f.pump(ctx);
-    }
-    // A new page fades in, as other surfaces of the window do.
-    let fade = if app.cfg.animations { (((now - turned) / 0.16) as f32).clamp(0.0, 1.0) } else { 1.0 };
-    if fade < 1.0 {
-        ctx.request_repaint();
-    }
-    let screen = ctx.content_rect();
-    let w = 556f32.min(screen.width() - 24.0).round();
-    // Tall enough for a film at one pixel for one and its words at this font size.
-    let fs = app.cfg.font_size;
-    let h = (528.0 + (fs - 12.0).max(0.0) * 10.0).min(screen.height() - 24.0).round();
-    let at = pos2((screen.center().x - w / 2.0).round(), (screen.top() + ((screen.height() - h) / 2.0).clamp(12.0, 70.0)).round());
-    pp::note_layer(Id::new("tour"));
-    let mut replay = false;
-    let area = egui::Area::new(Id::new("tour")).order(egui::Order::Foreground).fixed_pos(at).show(ctx, |ui| {
-        pp::dialog_frame(&pal).show(ui, |ui| {
-            let (_, inner) = ui.allocate_space(vec2(w - 2.0 * pp::DIALOG_PAD, h - 2.0 * pp::DIALOG_PAD));
-            // The head: what this is, and a close button.
-            let head = Rect::from_min_size(inner.min, vec2(inner.width(), 24.0));
-            // What's New says which version; the tour's first title says the rest.
-            let label = match st.kind {
-                Kind::Welcome => String::new(),
-                Kind::News => format!("New in Maia {NEWS_VERSION}"),
-            };
-            ui.painter().text(pos2(head.left() + 4.0, head.center().y), Align2::LEFT_CENTER, label, FontId::proportional(11.5), pal.text_dim);
-            let mut hui = ui.new_child(egui::UiBuilder::new().max_rect(head).layout(egui::Layout::right_to_left(egui::Align::Center)));
-            if crate::ui::glyph_button_as(&mut hui, crate::theme::Glyph::Close, "Close (Esc)", true, &pal, "tour close").clicked() {
-                close = true;
-            }
-            // The foot: where you are, the keys, and the way on.
-            let foot = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 28.0), inner.max);
-            let dots_w = dots(ui, foot, n, st.page, &pal, &mut go);
-            let mut fui = ui.new_child(egui::UiBuilder::new().max_rect(foot).layout(egui::Layout::right_to_left(egui::Align::Center)));
-            fui.spacing_mut().item_spacing.x = 8.0;
-            let last = st.page + 1 == n;
-            let b = pp::primary_button(&mut fui, if last { "Done" } else { "Next" }, true, &pal);
-            crate::ui::note_control(&fui, b.rect, "tour next");
-            if b.clicked() {
-                if last {
-                    close = true;
-                } else {
-                    go = Some(st.page + 1);
-                }
-            }
-            if st.page > 0 {
-                let b = pp::plain_button(&mut fui, "Back", &pal);
-                crate::ui::note_control(&fui, b.rect, "tour back");
-                if b.clicked() {
-                    go = Some(st.page - 1);
-                }
-            }
-            let hints = Rect::from_min_max(pos2(foot.left() + dots_w + 16.0, foot.top()), pos2(fui.min_rect().left() - 12.0, foot.bottom()));
-            if hints.width() > 40.0 {
-                pp::hint_row(ui, hints, &[("←→", "pages"), ("Esc", "close")], &pal);
-            }
-            // The page itself, between them.
-            let body = Rect::from_min_max(pos2(inner.left(), head.bottom() + 6.0), pos2(inner.right(), foot.top() - 10.0));
-            let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(egui::Layout::top_down(egui::Align::Min)));
-            bui.set_clip_rect(body.intersect(ui.clip_rect()));
-            bui.multiply_opacity(fade * (2.0 - fade));
-            match page.body {
-                Body::Film(_) => replay = film_page(&mut bui, app, st, body),
-                Body::Hero | Body::Look | Body::Size | Body::Clicks | Body::Show | Body::Extras => words(&mut bui, page, &pal),
-                Body::List => list_page(&mut bui, app, body),
-            }
-        });
-    });
-    let rect = area.response.rect;
-    crate::ui::note_popup(rect);
-    if replay {
-        st.film = None;
-    }
-    if let Some(p) = go.filter(|p| *p != st.page && *p < n) {
-        st.page = p;
-        st.turned = Some(now);
-        st.film = None;
-        ctx.request_repaint();
-    }
-    // A click outside closes it, as it does other dialogs, unless it lands in a menu
-    // one of its controls opened.
-    if close || (!egui::Popup::is_any_open(ctx) && pp::clicked_outside(ctx, rect)) {
-        return closed(app, st);
-    }
-    true
-}
-
 /// Closing: the first time by itself, a word on where to find it again.
 fn closed(app: &mut App, st: &State) -> bool {
     if st.auto {
@@ -577,16 +445,6 @@ fn dots(ui: &mut Ui, foot: Rect, n: usize, page: usize, pal: &Palette, go: &mut 
         }
     }
     n as f32 * step
-}
-
-/// A page's title and its line of text.
-fn words(ui: &mut Ui, page: &Page, pal: &Palette) {
-    let fs = ui.style().text_styles.get(&egui::TextStyle::Body).map_or(13.0, |f| f.size);
-    ui.add(egui::Label::new(egui::RichText::new(page.title).strong().size(fs + 3.0).color(pal.text)).wrap());
-    if !page.text.is_empty() {
-        ui.add_space(2.0);
-        ui.add(egui::Label::new(egui::RichText::new(page.text).color(pal.text_dim)).wrap());
-    }
 }
 
 /// The commands that reach a page, as key chips with what they do; a command with no
@@ -618,73 +476,13 @@ fn keys_row(ui: &mut Ui, app: &App, keys: &[Cmd], pal: &Palette) {
     });
 }
 
-/// A film, as large as the page leaves room for, its words and keys below. Returns
-/// whether it was clicked to play again.
-fn film_page(ui: &mut Ui, app: &App, st: &State, body: Rect) -> bool {
-    let pal = app.pal;
-    let page = &st.pages()[st.page];
-    let aspect = st.film.as_ref().map_or(1.6, |f| f.aspect);
-    // The words take what they need at this width; the film what is left, up to its
-    // size at one pixel for one on a 1.6 screen.
-    let fs = ui.style().text_styles.get(&egui::TextStyle::Body).map_or(13.0, |f| f.size);
-    let lay = |t: &str, size: f32| ui.painter().layout(t.to_string(), FontId::proportional(size), pal.text, body.width()).size().y;
-    let keys_h = 26.0 * (page.keys.len() as f32 * 150.0 / body.width()).ceil();
-    let words_h = 10.0 + lay(page.title, fs + 3.0) + 2.0 + lay(page.text, fs) + keys_h + 4.0 + 4.0 * ui.spacing().item_spacing.y;
-    let fw = body.width().min(540.0).min(((body.height() - words_h).max(60.0)) * aspect).floor();
-    let fr = Rect::from_min_size(pos2((body.center().x - fw / 2.0).round(), body.top()), vec2(fw, (fw / aspect).round()));
-    let resp = ui.allocate_rect(fr, Sense::click());
-    crate::ui::note_control(ui, fr, "tour film");
-    let round = CornerRadius::same(8);
-    match st.film.as_ref().and_then(|f| f.tex.as_ref()) {
-        Some(t) => {
-            egui::Image::new((t.id(), fr.size())).corner_radius(round).paint_at(ui, fr);
-        }
-        None => {
-            ui.painter().rect_filled(fr, round, pal.card());
-        }
-    }
-    ui.painter().rect_stroke(fr, round, Stroke::new(1.0, pal.card_line()), StrokeKind::Outside);
-    ui.add_space(10.0);
-    words(ui, page, &pal);
-    keys_row(ui, app, page.keys, &pal);
-    resp.clicked() && st.film_done()
-}
+// ------------------------------------------------------------------ the whole window
 
-/// Everything else the version added, a card for each group.
-fn list_page(ui: &mut Ui, app: &App, body: Rect) {
-    let pal = app.pal;
-    let fs = ui.style().text_styles.get(&egui::TextStyle::Body).map_or(13.0, |f| f.size);
-    ui.add(egui::Label::new(egui::RichText::new(format!("Also new in {NEWS_VERSION}")).strong().size(fs + 3.0).color(pal.text)).wrap());
-    ui.add_space(4.0);
-    let rest = Rect::from_min_max(pos2(body.left(), ui.cursor().top()), body.max);
-    egui::ScrollArea::vertical().id_salt("tour also").max_height(rest.height()).auto_shrink([false, false]).show(ui, |ui| {
-        let cw = (ui.available_width() - 10.0).floor();
-        ui.set_width(cw);
-        for (gi, (group, items)) in ALSO.iter().enumerate() {
-            ui.add_space(if gi == 0 { 2.0 } else { 10.0 });
-            let (hr, _) = ui.allocate_exact_size(vec2(cw, 20.0), Sense::hover());
-            ui.painter().text(pos2(hr.left() + 4.0, hr.center().y - 1.0), Align2::LEFT_CENTER, *group, FontId::proportional(11.5), pal.text_dim);
-            pp::card(ui, &pal, |ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                for (k, (name, line)) in items.iter().enumerate() {
-                    if k > 0 {
-                        ui.add_space(6.0);
-                    }
-                    ui.add(egui::Label::new(egui::RichText::new(*name).size(12.5).color(pal.text)).wrap());
-                    ui.add(egui::Label::new(egui::RichText::new(*line).size(11.0).color(pal.text_dim)).wrap());
-                }
-            });
-        }
-        ui.add_space(6.0);
-    });
-}
-
-// ------------------------------------------------------------------ the welcome, full window
-
-/// The welcome over the whole window: a card with the page's words on one side and
-/// what it is about on the other (the dither and the icon, the choices, a film), the
-/// pages as dots below it. Esc, Skip or the last page's button closes it.
-fn full(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
+/// The welcome or What's New over the whole window: a card with the page's words on one
+/// side and what it is about on the other (the dither and the icon, the choices, a film,
+/// the rest of a version's additions), the pages as dots below it. Esc, Skip or the last
+/// page's button closes it.
+pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
     let pal = app.pal;
     let pages = st.pages();
     let n = pages.len();
@@ -779,7 +577,11 @@ fn full(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
             let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(sr).layout(egui::Layout::right_to_left(egui::Align::Center)));
             let b = pp::plain_button(&mut sui, "Skip", &pal);
             crate::ui::note_control(&sui, b.rect, "welcome skip");
-            if b.on_hover_text("Close the welcome (Esc)").clicked() {
+            let tip = match st.kind {
+                Kind::Welcome => "Close the welcome (Esc)",
+                Kind::News => "Close What's New (Esc)",
+            };
+            if b.on_hover_text(tip).clicked() {
                 close = true;
             }
         }
@@ -794,8 +596,8 @@ fn full(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         let stacked = cw < 760.0;
         let pad = (24.0 + (cw - 760.0).max(0.0) * 0.04).round().min(40.0);
         let (words_r, visual) = if stacked {
-            // The choices need the room; a film or the opening picture less of it.
-            let choose = matches!(page.body, Body::Look | Body::Size | Body::Clicks | Body::Show | Body::Extras);
+            // The choices and the list need the room; a film or the opening picture less.
+            let choose = matches!(page.body, Body::Look | Body::Size | Body::Clicks | Body::Show | Body::Extras | Body::List);
             let vh = (ch * if choose { 0.62 } else { 0.44 }).round();
             (Rect::from_min_max(pos2(card.left() + pad, card.top() + vh + 12.0), pos2(card.right() - pad, card.bottom() - pad)), Rect::from_min_size(card.min + vec2(10.0, 10.0), vec2(cw - 20.0, vh - 10.0)))
         } else {
@@ -834,9 +636,11 @@ fn full(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         let mut fui = ui.new_child(egui::UiBuilder::new().max_rect(foot).layout(egui::Layout::left_to_right(egui::Align::Center)));
         fui.spacing_mut().item_spacing.x = 8.0;
         let last = st.page + 1 == n;
-        let label = match (st.page, last) {
-            (0, _) => "Get started",
-            (_, true) => "Start using Maia",
+        let label = match (st.kind, st.page, last) {
+            (Kind::Welcome, 0, _) => "Get started",
+            (Kind::Welcome, _, true) => "Start using Maia",
+            (Kind::News, 0, _) => "See what's new",
+            (Kind::News, _, true) => "Done",
             _ => "Continue",
         };
         // Back first, the way on after it.
@@ -879,6 +683,14 @@ fn full(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                     let ir = tile.shrink((side * 0.14).round());
                     egui::Image::new((t.id(), ir.size())).paint_at(&vui, ir);
                 }
+                // What's New says which version under the icon, where there is room.
+                let g = vui.painter().layout_no_wrap(NEWS_VERSION.to_string(), FontId::proportional(fs), pal.text);
+                let size = g.size() + vec2(24.0, 10.0);
+                let chip = Rect::from_min_size(pos2((tile.center().x - size.x / 2.0).round(), (tile.bottom() + 22.0).round()), size);
+                if st.kind == Kind::News && chip.bottom() < visual.bottom() - 10.0 {
+                    vui.painter().rect(chip, CornerRadius::same((chip.height() / 2.0) as u8), pal.panel, Stroke::new(1.0, pal.border), StrokeKind::Inside);
+                    vui.painter().galley(chip.center() - g.size() / 2.0, g, pal.text);
+                }
             }
             Body::Look | Body::Size | Body::Clicks | Body::Show | Body::Extras => {
                 let pad = (visual.width() * 0.045).clamp(18.0, 36.0).round();
@@ -914,7 +726,7 @@ fn full(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                 vui.painter().rect_stroke(fr, round, Stroke::new(1.0, pal.card_line()), StrokeKind::Outside);
                 replay = resp.clicked() && st.film_done();
             }
-            Body::List => {}
+            Body::List => also(&mut vui, app, visual),
         }
         // The pages as dots, centred under the card.
         let dw = n as f32 * 14.0;
@@ -934,6 +746,55 @@ fn full(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         return closed(app, st);
     }
     true
+}
+
+/// The rest of what the version added, in its groups: a card for each, its icon beside
+/// its name and a line on it, two to a row where there is room for that.
+fn also(ui: &mut Ui, app: &App, visual: Rect) {
+    let pal = app.pal;
+    let fs = app.cfg.font_size;
+    let pad = (visual.width() * 0.045).clamp(18.0, 36.0).round();
+    let area = visual.shrink(pad);
+    let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::top_down(egui::Align::Min)));
+    egui::ScrollArea::vertical().id_salt("news also").max_height(area.height()).auto_shrink([false, false]).show(&mut sui, |ui| {
+        let gap = 12.0;
+        // Room kept at the right for the scroll bar.
+        let w = (ui.available_width() - 12.0).floor();
+        let cols = if w >= 520.0 { 2 } else { 1 };
+        let cw = ((w - gap * (cols as f32 - 1.0)) / cols as f32).floor();
+        let icon = 36.0;
+        let text_w = cw - 14.0 - icon - 12.0 - 14.0;
+        ui.spacing_mut().item_spacing.y = gap;
+        for (gi, (group, items)) in ALSO.iter().enumerate() {
+            if gi > 0 {
+                ui.add_space(8.0);
+            }
+            ui.label(egui::RichText::new(*group).size(fs - 1.5).color(pal.text_dim));
+            for row in items.chunks(cols) {
+                let lay: Vec<_> = row
+                    .iter()
+                    .map(|(_, name, line)| {
+                        let n = ui.painter().layout(name.to_string(), FontId::proportional(fs), pal.text, text_w);
+                        let l = ui.painter().layout(line.to_string(), FontId::proportional(fs - 1.5), pal.text_dim, text_w);
+                        (n, l)
+                    })
+                    .collect();
+                let h = lay.iter().map(|(n, l)| n.size().y + 3.0 + l.size().y).fold(icon, f32::max) + 28.0;
+                let (r, _) = ui.allocate_exact_size(vec2(w, h.ceil()), Sense::hover());
+                for (k, ((sym, _, _), (n, l))) in row.iter().zip(lay).enumerate() {
+                    let c = Rect::from_min_size(pos2(r.left() + k as f32 * (cw + gap), r.top()), vec2(cw, r.height()));
+                    ui.painter().rect(c, CornerRadius::same(12), pal.panel, Stroke::new(1.0, pal.border), StrokeKind::Inside);
+                    let ir = Rect::from_min_size(c.min + vec2(14.0, 14.0), Vec2::splat(icon));
+                    ui.painter().rect_filled(ir, CornerRadius::same(9), pal.accent.gamma_multiply(0.16));
+                    crate::theme::paint_symbol(ui.painter(), ir.shrink(9.0), sym, pal.accent);
+                    let at = pos2(ir.right() + 12.0, c.top() + 14.0);
+                    let nh = n.size().y;
+                    ui.painter().galley(at, n, pal.text);
+                    ui.painter().galley(at + vec2(0.0, nh + 3.0), l, pal.text_dim);
+                }
+            }
+        }
+    });
 }
 
 // ------------------------------------------------------------------ the first choices

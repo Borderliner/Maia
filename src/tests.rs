@@ -8701,7 +8701,7 @@ fn tour_words_match_the_app() {
     let mut all: Vec<&str> = WELCOME.iter().chain(NEWS).flat_map(|p| [p.title, p.text]).collect();
     for (g, items) in ALSO {
         all.push(g);
-        for (a, b) in *items {
+        for (_, a, b) in *items {
             all.push(a);
             all.push(b);
         }

@@ -1073,7 +1073,7 @@ thread_local! {
     /// Layers drawn by popups this frame, and the last open popup's shapes (for the
     /// close fade): (shapes, fade start time).
     static POPUP_LAYERS: std::cell::RefCell<Vec<egui::LayerId>> = const { std::cell::RefCell::new(Vec::new()) };
-    static FADE: std::cell::RefCell<(Vec<egui::epaint::ClippedShape>, Option<f64>)> = const { std::cell::RefCell::new((Vec::new(), None)) };
+    pub(crate) static FADE: std::cell::RefCell<(Vec<egui::epaint::ClippedShape>, Option<f64>)> = const { std::cell::RefCell::new((Vec::new(), None)) };
 }
 
 const CLOSE_FADE: f64 = 0.08;
