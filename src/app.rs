@@ -3379,7 +3379,7 @@ impl App {
         match ed.save(force) {
             Ok(trashed) => {
                 if trashed {
-                    self.undo.push(UndoEntry { label: format!("Edit {name}"), kind: UndoKind::Replaced(vec![ed.file.clone()]) });
+                    self.undo.push(UndoEntry { label: format!("Edit {name}"), kind: UndoKind::Replaced(vec![ed.target.clone()]) });
                 }
                 self.toast(format!("Saved {name}"));
                 true

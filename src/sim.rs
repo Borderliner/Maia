@@ -8476,13 +8476,14 @@ mod journeys {
             if let Popup::Sync(st) = &mut s.app.popup
                 && let Some(p) = st.plan.as_mut()
             {
-                p.unread = v;
+                p.unlisted = v;
             }
             s.idle(3);
         };
         unread(&mut s, vec![b.join("both"), a.join("folder-a")]);
-        assert!(some_text_at(&s, "2 folders couldn't be read, so nothing in them changes"), "counted");
+        assert!(some_text_at(&s, "2 folders couldn't be read and are left as they are"), "counted");
         assert!(s.texts.iter().filter(|(r, t)| t == "Unread" && popup.contains_rect(*r)).count() == 2 && some_text_at(&s, "both"), "each listed");
+        s.shot("sync-preview-unread");
         look(&mut s, "sync preview with unread folders");
         unread(&mut s, vec![]);
         s.act("key Enter");

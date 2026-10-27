@@ -5109,7 +5109,8 @@ fn sync(app: &mut App, ctx: &egui::Context, st: &mut crate::compare::SyncState) 
             dialog_buttons(ui, |ui| close = plain_button(ui, "Cancel", &pal).clicked());
             return;
         };
-        if plan.copy.is_empty() && plan.update.is_empty() && plan.extra.is_empty() && plan.unread.is_empty() {
+        let nothing = [plan.copy.is_empty(), plan.update.is_empty(), plan.extra.is_empty(), plan.unlisted.is_empty()];
+        if nothing.iter().all(|&n| n) {
             ui.label(egui::RichText::new("Both sides are the same already").color(pal.text_dim));
             dialog_buttons(ui, |ui| close = primary_button(ui, "Close", true, &pal).clicked());
             return;
@@ -5130,8 +5131,10 @@ fn sync(app: &mut App, ctx: &egui::Context, st: &mut crate::compare::SyncState) 
             if !plan.update.is_empty() {
                 dot(ui, crate::gitstatus::GREEN, format!("{} here, replacing the older ones there (to the trash)", count(plan.update.len(), "newer file", "newer files")));
             }
-            if !plan.unread.is_empty() {
-                dot(ui, pal.danger, if plan.unread.len() == 1 { "1 folder couldn't be read, so nothing in it changes".to_string() } else { format!("{} folders couldn't be read, so nothing in them changes", plan.unread.len()) });
+            match plan.unlisted.len() {
+                0 => {}
+                1 => dot(ui, pal.danger, "1 folder couldn't be read and is left as it is".to_string()),
+                n => dot(ui, pal.danger, format!("{n} folders couldn't be read and are left as they are")),
             }
             if extra > 0 {
                 let text = egui::RichText::new(format!("Mirror: also move {} only there to the trash", count(extra, "item", "items"))).color(if st.mirror { pal.danger } else { pal.text });
@@ -5147,7 +5150,7 @@ fn sync(app: &mut App, ctx: &egui::Context, st: &mut crate::compare::SyncState) 
             .iter()
             .map(|(_, d)| ("New", pal.accent, rel(d)))
             .chain(plan.update.iter().map(|(_, d)| ("Newer", crate::gitstatus::GREEN, rel(d))))
-            .chain(plan.unread.iter().map(|d| ("Unread", pal.danger, rel(d))))
+            .chain(plan.unlisted.iter().map(|d| ("Unread", pal.danger, rel(d))))
             .chain(plan.extra.iter().filter(|_| st.mirror).map(|d| ("Trash", pal.danger, rel(d))))
             .collect();
         group_label(ui, &format!("In “{}”", name(&st.to)), &pal);
