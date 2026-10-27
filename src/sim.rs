@@ -2421,7 +2421,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 }
                 match rng.below(4) {
                     0 => s.act(&format!("key {}", rng.pick(&["ArrowRight", "ArrowLeft", "Enter", "Tab", "space"]))),
-                    1 => click_control_at(s, rng.pick(&["tour next", "tour back", "tour dot", "tour film", "tour theme", "switch", "choice"])),
+                    1 => click_control_at(s, rng.pick(&["welcome next", "welcome back", "welcome skip", "tour dot", "tour film", "tour theme", "switch", "choice"])),
                     2 => {
                         let r = s.text_rect_any(&["Font size", "Show hidden files", "Animations"]);
                         if let Some(r) = r {
@@ -14581,18 +14581,45 @@ mod journeys {
         let mut s = Sim::new(&home, vec2(1280.0, 800.0));
         s.idle(3);
         assert!(tour(&s).kind == crate::tour::Kind::News && tour(&s).auto, "What's New after an update");
-        film_on(&mut s);
-        assert!(some_text(&s, &format!("New in Maia {}", crate::tour::NEWS_VERSION)) && some_text(&s, "Maia picks your files") && some_text(&s, "Options"));
+        // Over the whole window as the welcome is: the version, then a film a page.
+        let v = crate::tour::NEWS_VERSION;
         let n = crate::tour::NEWS.len();
-        for _ in 1..n {
+        s.idle(14);
+        for t in [&format!("Maia {v}") as &str, v, "See what's new", "Skip", &format!("1 of {n}")] {
+            assert!(some_text(&s, t), "{t:?} on What's New's first page");
+        }
+        look_welcome(&mut s, "news first page");
+        click_control(&mut s, "welcome next");
+        assert_eq!(tour(&s).page, 1);
+        film_on(&mut s);
+        assert!(some_text(&s, "Jump to the folders you use") && some_text(&s, "Ctrl+G") && some_text(&s, "Jump To Folder"), "the page, its keys as bound");
+        look_welcome(&mut s, "news film page");
+        // A command without keys is shown by its name, as the palette finds it.
+        s.act("key ArrowRight");
+        film_on(&mut s);
+        assert!(some_text(&s, "Show Space Used") && some_text(&s, "Free Up Space"));
+        for _ in 2..n {
             s.act("key ArrowRight");
         }
-        s.idle(12);
-        assert!(some_text(&s, &format!("Also new in {}", crate::tour::NEWS_VERSION)) && some_text(&s, "For everyone"), "the rest, in groups");
-        look(&mut s, "tour list page");
-        // A click outside closes it.
-        s.act("click 20 790");
-        assert!(!s.popup_open(), "a click outside closes it");
+        s.idle(14);
+        assert_eq!(tour(&s).page, n - 1);
+        for t in ["Also new", "For everyone", "Send To Phone", "Transfers you can steer", "Done"] {
+            assert!(some_text(&s, t), "{t:?} on the last page");
+        }
+        assert!(!some_text(&s, "Skip"), "the last page ends it, no Skip");
+        look_welcome(&mut s, "news list page");
+        // The groups further down are a scroll away.
+        let at = s.text_rect_any(&["Send To Phone"]).unwrap_or_else(|| s.fail("no card"));
+        for _ in 0..6 {
+            s.act(&format!("scroll {:.0} {:.0} -10", at.center().x, at.center().y));
+            s.idle(3);
+        }
+        assert!(some_text(&s, "Lines of code") && some_text(&s, "For developers"), "the last group reached");
+        look_welcome(&mut s, "news list page scrolled");
+        // Done closes it, saying where it is.
+        click_control(&mut s, "welcome next");
+        assert!(!s.popup_open(), "done");
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0.contains("What's New in Maia")), "where to find it again");
         assert_eq!(seen(), now);
         drop(s);
         // A newer version seen (Maia went back a version): nothing.
@@ -14625,6 +14652,7 @@ mod journeys {
         s.idle(1);
         assert!(tour(&s).kind == crate::tour::Kind::News, "from Options");
         // A film plays to its end, then rests, and nothing wakes the window.
+        s.act("key ArrowRight");
         film_on(&mut s);
         wait_until(&mut s, "the film over", 60, |s| {
             tour(s).film_done()
@@ -14639,6 +14667,7 @@ mod journeys {
         // Animations off: each film shows its last state at once, nothing ticking.
         s.app.cfg.animations = false;
         s.cmd(WhatsNew);
+        s.act("key ArrowRight");
         film_on(&mut s);
         wait_until(&mut s, "the still", 10, |s| tour(s).film_done());
         s.idle(3);
