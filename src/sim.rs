@@ -7487,7 +7487,9 @@ mod journeys {
         let before = changes(&s).said;
         click_control(&mut s, "commit");
         s.idle(5);
-        assert!(changes(&s).said == before && !changes(&s).busy, "nothing staged, nothing tried");
+        // The index changed a moment ago: the page may still be reading it again.
+        wait_until(&mut s, "the page settled", 10, |s| !changes(s).busy);
+        assert!(changes(&s).said == before, "nothing staged, nothing tried");
         // The keys (the button took the keyboard from the field): Home and Down to a
         // file, Space stages it, Delete asks.
         assert!(s.ctx.memory(|m| m.focused()).is_none());
@@ -9869,8 +9871,9 @@ mod journeys {
         look(&mut s, "gitignore menu");
         s.shot("share-gitignore-menu");
         s.click_text("This File");
-        wait_until(&mut s, "scratch.txt ignored", 10, |s| faded(s, "scratch.txt"));
-        assert!(toast_is(&s, "Added /scratch.txt to .gitignore"), "{:?}", s.app.toast);
+        // The row fades when git's status is read again, which can land a frame before
+        // the word on what was added.
+        wait_until(&mut s, "scratch.txt ignored", 10, |s| faded(s, "scratch.txt") && toast_is(s, "Added /scratch.txt to .gitignore"));
         menu(&mut s, "a.tmp", "all *.tmp");
         wait_until(&mut s, "*.tmp ignored", 10, |s| faded(s, "a.tmp") && faded(s, "b.tmp"));
         let gi = std::fs::read_to_string(app.join(".gitignore")).unwrap();
