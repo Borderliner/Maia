@@ -3286,6 +3286,42 @@ mod journeys {
         report("views", &s);
     }
 
+    /// Names and text in scripts the interface font has no letters for, Persian and Hebrew
+    /// above all, are drawn from the fallback fonts in every view and in the preview,
+    /// never as boxes, and lay out like any other name.
+    #[test]
+    fn names_in_other_scripts() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("scripts");
+        let dir = home.join("نامه‌ها");
+        let names = ["سفر نوروز ۱۴۰۴.jpg", "گزارش مالی.pdf", "یادداشت.txt", "קבצים חדשים.odt", "trip سفر 2026.png", "plain.txt"];
+        for n in names {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(n), if n.ends_with(".txt") { "سلام، این یک یادداشت است.\nخط دوم با English وسطش.\n" } else { "x" }).unwrap();
+        }
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        go(&mut s, &dir);
+        for n in names {
+            assert!(some_text(&s, n), "{n} listed whole");
+        }
+        s.shot("scripts-details");
+        for v in [ViewList, ViewLarge, ViewTree] {
+            s.cmd(v);
+            look(&mut s, &format!("scripts {v:?}"));
+        }
+        s.cmd(ViewLarge);
+        s.shot("scripts-icons");
+        s.cmd(ViewDetails);
+        s.cmd(ToggleInspector);
+        select_path(&mut s, &dir.join("یادداشت.txt"));
+        s.idle(5);
+        look(&mut s, "scripts preview");
+        s.shot("scripts-preview");
+        report("scripts", &s);
+    }
+
     #[test]
     fn browse_rename_create_trash_undo() {
         if !sandboxed() {

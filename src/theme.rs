@@ -3130,6 +3130,10 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
     // The Nerd Font search (below) reads every font's character set: it runs meanwhile.
     let nerd_list = || std::process::Command::new("fc-list").args(["--format=%{style[0]}|%{family[0]}|%{file}\n", NERD_CHARS]).output().ok();
     let nerd = std::thread::Builder::new().spawn(nerd_list).ok();
+    // fontconfig's fallback order for sans-serif, with the languages each font covers:
+    // one call, read meanwhile too.
+    let sorted_list = || std::process::Command::new("fc-match").args(["-s", "sans-serif", "--format=%{file}\t%{lang}\n"]).output().ok();
+    let sorted = std::thread::Builder::new().spawn(sorted_list).ok();
     // System fonts are memory-mapped, not read: egui then uses the bytes in place (no
     // copy) and the kernel only pages in the glyph tables actually used, sharing them
     // with every other app (the CJK fallback alone is ~20 MB).
@@ -3184,8 +3188,25 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
         (s.as_ptr() != b.as_ptr()).then(|| FontData::from_static(s))
     });
     // Symbols (arrows, stars, blocks) from the system when available.
-    if let Some(b) = first(&["/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]) {
+    let symbols = first(&["/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]);
+    if let Some(b) = symbols {
         add(&mut fonts, "symbols", b, &mut prop);
+    }
+    // Scripts the interface font has no letters for, each from the font the desktop's
+    // other apps fall back to; before the monospace font, which may cover some of them
+    // too and would set a Persian name in a typewriter face.
+    let sorted = match sorted {
+        Some(t) => t.join().ok().flatten(),
+        None => sorted_list(),
+    };
+    // The same file maps to the same bytes, so a font already in the list isn't added twice.
+    let mut have: Vec<*const u8> = [ui, symbols].into_iter().flatten().map(|b| b.as_ptr()).collect();
+    let text = sorted.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    for b in script_fonts(&text).into_iter().filter_map(|f| map_font(std::path::Path::new(f))) {
+        if !have.contains(&b.as_ptr()) {
+            add(&mut fonts, &format!("script-{}", have.len()), b, &mut prop);
+            have.push(b.as_ptr());
+        }
     }
     let custom_mono = if mono_family.trim().is_empty() { None } else { fc_match(mono_family.trim()) };
     let sys_mono = custom_mono.or_else(|| first(&[
@@ -3235,6 +3256,28 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
     fonts.families.insert(FontFamily::Proportional, prop);
     fonts.families.insert(FontFamily::Monospace, mono);
     ctx.set_fonts(fonts);
+}
+
+/// Languages whose script an interface font often lacks, one for each script: Persian
+/// (its letters are Arabic's and four more), Urdu, Hebrew, the Indic scripts, Thai, Lao,
+/// Khmer, Burmese, Georgian, Armenian, Ethiopic and Tibetan.
+const SCRIPT_LANGS: [&str; 20] = ["fa", "ur", "he", "hi", "bn", "pa", "gu", "ta", "te", "kn", "ml", "si", "th", "lo", "km", "my", "ka", "hy", "am", "bo"];
+
+/// From fontconfig's sorted fallback list (`file<TAB>lang|lang|...` lines), the first font
+/// for each of `SCRIPT_LANGS`, in the list's order and each file once.
+pub fn script_fonts(sorted: &str) -> Vec<&str> {
+    let fonts: Vec<(&str, &str)> = sorted.lines().filter_map(|l| l.split_once('\t')).collect();
+    let mut out: Vec<&str> = vec![];
+    for lang in SCRIPT_LANGS {
+        if let Some((file, _)) = fonts.iter().find(|(_, langs)| langs.split('|').any(|l| l == lang))
+            && !out.contains(file)
+        {
+            out.push(file);
+        }
+    }
+    // In the list's own order: the desktop's preference among them stands.
+    out.sort_by_key(|f| fonts.iter().position(|(g, _)| g == f));
+    out
 }
 
 /// The interface font a weight heavier (`install_fonts`), for titles, headers and labels.

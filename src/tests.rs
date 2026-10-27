@@ -1766,6 +1766,43 @@ Regular|GeistMono Nerd Font Mono|/usr/share/fonts/OTF/GeistMonoNerdFontMono-Regu
     }
 }
 
+/// Fonts for the scripts the interface font lacks come from fontconfig's own fallback
+/// order, the first that covers each, every file once and in that order: the lines are
+/// fc-match -s as it prints them, cut short.
+#[test]
+fn script_fonts_follow_fontconfigs_order() {
+    let sorted = "/home/u/.local/share/fonts/Flex.ttf\taa|af|de|en|fr\n\
+/usr/share/fonts/noto/NotoSans-Regular.ttf\taa|af|de|el|en|ru\n\
+/usr/share/fonts/TTF/DejaVuSans.ttf\taa|ar|en|fa|he|hy|ka|lo|ur\n\
+/usr/share/fonts/noto/NotoKufiArabic-Regular.ttf\tar|fa|ur\n\
+/usr/share/fonts/noto/NotoSansDevanagari-Regular.ttf\ten|hi|mr|ne\n\
+/usr/share/fonts/noto/NotoSansThai-Regular.ttf\ten|th\n\
+/usr/share/fonts/noto/NotoSansHebrew-Regular.ttf\the\n";
+    assert_eq!(crate::theme::script_fonts(sorted), ["/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/noto/NotoSansDevanagari-Regular.ttf", "/usr/share/fonts/noto/NotoSansThai-Regular.ttf"]);
+    assert!(crate::theme::script_fonts("").is_empty() && crate::theme::script_fonts("no tab here\n").is_empty());
+}
+
+/// Persian and Hebrew names get letters, not boxes, wherever this machine has a font for
+/// them: the interface font rarely does, so they come from the fallback fonts.
+#[test]
+fn persian_and_hebrew_letters_have_glyphs() {
+    let ctx = egui::Context::default();
+    crate::theme::install_fonts(&ctx, "", "");
+    ctx.run_pass(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+    for (lang, sample) in [("fa", "پرونده‌های گچ"), ("he", "קבצים")] {
+        let any = std::process::Command::new("fc-list").arg(format!(":lang={lang}")).arg("file").output().is_ok_and(|o| !o.stdout.is_empty());
+        if !any {
+            eprintln!("{lang}: skipped (no font for it here)");
+            continue;
+        }
+        for font in [egui::FontId::proportional(13.0), egui::FontId::monospace(13.0), crate::theme::semibold(13.0)] {
+            for c in sample.chars().filter(|c| c.is_alphabetic()) {
+                assert!(ctx.fonts_mut(|f| f.has_glyph(&font, c)), "{lang}: U+{:04X} in {font:?}", c as u32);
+            }
+        }
+    }
+}
+
 #[test]
 fn drag_picture_is_a_clean_premultiplied_card() {
     let ctx = egui::Context::default();
