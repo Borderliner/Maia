@@ -112,6 +112,8 @@ pub struct Found {
     pub name: String,
     /// Said dim after it: its kind, or where a cache is.
     pub note: String,
+    /// A trash's entries as the scan saw them; see `Part::items`.
+    pub items: Vec<(std::ffi::OsString, bool)>,
 }
 
 fn writable(p: &Path) -> bool {
@@ -129,6 +131,13 @@ pub fn reach(root: &Path, home: &Path) -> PathBuf {
 /// thumbnails and the download caches first, then build output from a walk. Only folders
 /// inside `root`, on its disk, that this user may delete: never the system's own (a package
 /// manager's node_modules under /usr). The walk goes where `reach` says.
+/// The `.trashinfo` file that goes with the trashed entry `name`.
+fn info_name(name: &std::ffi::OsStr) -> std::ffi::OsString {
+    let mut n = name.to_os_string();
+    n.push(".trashinfo");
+    n
+}
+
 pub fn find(root: &Path, places: &Places, stop: &AtomicBool, found: &mut dyn FnMut(Found)) {
     use std::os::unix::fs::MetadataExt;
     let Ok(dev) = std::fs::metadata(root).map(|m| m.dev()) else { return };
@@ -138,22 +147,28 @@ pub fn find(root: &Path, places: &Places, stop: &AtomicBool, found: &mut dyn FnM
     // Found already, and the trash: the walk leaves what is inside them alone.
     let mut taken: Vec<PathBuf> = places.trashes.clone();
     for t in &places.trashes {
-        let n = std::fs::read_dir(t.join("files")).map(|rd| rd.count()).unwrap_or(0);
-        // Its own files and info folders are what goes, not the trash folder.
-        if n > 0 && t.starts_with(root) && on_disk(t) && writable(t) {
+        if !(t.starts_with(root) && on_disk(t) && writable(t)) {
+            continue;
+        }
+        let entries = std::fs::read_dir(t.join("files")).map(|rd| rd.flatten().map(|e| e.file_name()).collect::<Vec<_>>()).unwrap_or_default();
+        let items: Vec<(std::ffi::OsString, bool)> = entries.into_iter().map(|n| {
+            let info = t.join("info").join(info_name(&n)).is_file();
+            (n, info)
+        }).collect();
+        if let n @ 1.. = items.len() {
             let note = if n == 1 { "1 item".to_string() } else { format!("{} items", crate::table::fmt_count(n)) };
-            found(Found { group: Group::Trash, path: t.clone(), name: short(t), note });
+            found(Found { group: Group::Trash, path: t.clone(), name: short(t), note, items });
         }
     }
     let thumbs = places.cache.join("thumbnails");
     if here(&thumbs) {
-        found(Found { group: Group::Thumbs, name: short(&thumbs), note: String::new(), path: thumbs.clone() });
+        found(Found { group: Group::Thumbs, name: short(&thumbs), note: String::new(), path: thumbs.clone(), items: vec![] });
     }
     taken.push(thumbs);
     for &(in_cache, rel, what) in CACHES {
         let p = if in_cache { places.cache.join(rel) } else { places.home.join(rel) };
         if here(&p) {
-            found(Found { group: Group::Caches, name: what.into(), note: short(&p), path: p.clone() });
+            found(Found { group: Group::Caches, name: what.into(), note: short(&p), path: p.clone(), items: vec![] });
         }
         taken.push(p);
     }
@@ -161,7 +176,7 @@ pub fn find(root: &Path, places: &Places, stop: &AtomicBool, found: &mut dyn FnM
     if on_disk(&walk) {
         crate::buildclean::walk(&walk, stop, &mut |f| {
             if !taken.iter().any(|t| f.path.starts_with(t)) && f.path.parent().is_some_and(writable) {
-                found(Found { group: group_of(f.kind), name: short(&f.path), note: f.kind.to_string(), path: f.path });
+                found(Found { group: group_of(f.kind), name: short(&f.path), note: f.kind.to_string(), path: f.path, items: vec![] });
             }
         });
     }
@@ -356,6 +371,10 @@ pub struct Part {
     pub note: String,
     pub size: Option<u64>,
     pub checked: bool,
+    /// A trash's entries when it was scanned (a name in its files folder, and whether a
+    /// .trashinfo went with it). Only these are deleted: something trashed after the
+    /// scan was never shown or counted, so it stays.
+    pub items: Vec<(std::ffi::OsString, bool)>,
 }
 
 pub struct Grp {
@@ -420,7 +439,7 @@ impl View {
                             at
                         }
                     };
-                    self.groups[gi].parts.push(Part { checked: f.group.ticked(), path: f.path, name: f.name, note: f.note, size: None });
+                    self.groups[gi].parts.push(Part { checked: f.group.ticked(), path: f.path, name: f.name, note: f.note, size: None, items: f.items });
                 }
                 Msg::Size(p, n) => {
                     if let Some(part) = self.groups.iter_mut().flat_map(|g| g.parts.iter_mut()).find(|x| x.path == p) {
@@ -518,14 +537,20 @@ impl View {
     }
 
     /// The checked folders, taken out of the list: what the delete is given (a trash's
-    /// files and info, not the trash), and the bytes they hold.
+    /// entries as scanned, each with its .trashinfo; never the trash itself), and the
+    /// bytes they hold.
     pub fn take_chosen(&mut self) -> (Vec<PathBuf>, u64) {
         let (mut paths, mut size) = (vec![], 0);
         for g in &mut self.groups {
             for p in g.parts.iter().filter(|p| p.checked) {
                 size += p.size.unwrap_or(0);
                 if g.group == Group::Trash {
-                    paths.extend(["files", "info"].map(|d| p.path.join(d)).into_iter().filter(|d| d.exists()));
+                    for (name, info) in &p.items {
+                        paths.push(p.path.join("files").join(name));
+                        if *info {
+                            paths.push(p.path.join("info").join(info_name(name)));
+                        }
+                    }
                 } else {
                     paths.push(p.path.clone());
                 }

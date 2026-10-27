@@ -12606,8 +12606,9 @@ fn free_up_finds_what_comes_back() {
 }
 
 /// Free up's list: what comes back by itself checked and the rest not, sizes added up, a
-/// group checked whole or folder by folder, and the delete given the trash's files and info
-/// (never the trash folder). Run as the dialog runs it: what was not chosen stays.
+/// group checked whole or folder by folder, and the delete given the trash's entries with
+/// their .trashinfo (never the trash folder). Run as the dialog runs it: what was not
+/// chosen stays.
 #[test]
 fn free_up_deletes_what_was_chosen() {
     use crate::freeup::{Group, Row, View};
@@ -12637,17 +12638,52 @@ fn free_up_deletes_what_was_chosen() {
     let (paths, freed) = v.take_chosen();
     let mut rel: Vec<PathBuf> = paths.iter().map(|p| p.strip_prefix(&home).unwrap().to_path_buf()).collect();
     rel.sort();
-    assert_eq!(rel, [".cache/pip", ".cache/thumbnails", ".local/share/Trash/files", ".local/share/Trash/info", "proj/target"].map(PathBuf::from));
+    assert_eq!(rel, [".cache/pip", ".cache/thumbnails", ".local/share/Trash/files/old", ".local/share/Trash/info/old.trashinfo", "proj/target"].map(PathBuf::from));
     assert_eq!(freed, size("proj/target") + size(".cache/pip") + size(".cache/thumbnails") + size(".local/share/Trash"));
     assert_eq!(v.groups.iter().map(|g| g.group).collect::<Vec<_>>(), [Group::Packages, Group::Caches], "what went is out of the list");
     let j = ops::spawn(1, OpKind::Delete { paths }, ctx);
     wait_job(&j);
     assert!(j.progress.lock().unwrap().errors.is_empty());
-    for gone in ["proj/target", ".cache/pip", ".cache/thumbnails", ".local/share/Trash/files"] {
+    for gone in ["proj/target", ".cache/pip", ".cache/thumbnails", ".local/share/Trash/files/old", ".local/share/Trash/info/old.trashinfo"] {
         assert!(!home.join(gone).exists(), "{gone} deleted");
     }
     for kept in ["proj/Cargo.toml", "web/node_modules/left-pad/index.js", ".npm/_cacache/index", "notes.txt", ".local/share/Trash"] {
         assert!(home.join(kept).exists(), "{kept} kept");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Something trashed while Free up is open was never listed or counted, so emptying the
+/// trash from Free up leaves it: only the entries the scan saw go, with their .trashinfo.
+#[test]
+fn free_up_leaves_what_was_trashed_after_its_scan() {
+    use crate::freeup::{Group, View};
+    let ctx = egui::Context::default();
+    let d = tmpdir("freeup-late");
+    let places = free_up_home(&d);
+    let (home, trash) = (places.home.clone(), places.trashes[0].clone());
+    let mut v = View::new_in(home.clone(), Some(places), d.join("record"), &ctx);
+    free_up_done(&mut v);
+    let t = v.groups.iter().position(|g| g.group == Group::Trash).unwrap();
+    assert_eq!(v.groups[t].parts[0].note, "1 item");
+    // Trashed after the scan: a big file, and one without its .trashinfo yet.
+    touch(&trash.join("files/movie.mkv"), &"m".repeat(50_000));
+    touch(&trash.join("info/movie.mkv.trashinfo"), "[Trash Info]\nPath=/home/x/movie.mkv\nDeletionDate=2026-10-27T10:00:00\n");
+    touch(&trash.join("files/half"), "h");
+    for g in &mut v.groups {
+        for p in &mut g.parts {
+            p.checked = g.group == Group::Trash;
+        }
+    }
+    let (paths, freed) = v.take_chosen();
+    assert_eq!(paths, [trash.join("files/old"), trash.join("info/old.trashinfo")]);
+    assert!(freed < 50_000, "counted only what was there: {freed}");
+    let j = ops::spawn(1, OpKind::Delete { paths }, ctx);
+    wait_job(&j);
+    assert!(j.progress.lock().unwrap().errors.is_empty());
+    assert!(!trash.join("files/old").exists() && !trash.join("info/old.trashinfo").exists());
+    for kept in ["files/movie.mkv", "info/movie.mkv.trashinfo", "files/half"] {
+        assert!(trash.join(kept).exists(), "{kept} was deleted without being shown");
     }
     let _ = std::fs::remove_dir_all(&d);
 }
