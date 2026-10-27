@@ -233,6 +233,17 @@ fn main() {
                 }
                 return;
             }
+            // "Show in folder" for other apps, started by the session bus: no window
+            // until a call needs one.
+            "--fm1" => {
+                let sock = single::socket_path();
+                let address = std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_default();
+                if !fm1::headless(&address, &sock, |r| fm1::open_window(r, &sock)) {
+                    eprintln!("maia: no session bus, or a window already answers for the file manager");
+                    std::process::exit(1);
+                }
+                return;
+            }
             // One Open or Save dialog: the request on standard input, the answer on output.
             "--pick" => {
                 pick();

@@ -8816,6 +8816,104 @@ fn file_manager1_answers_show_in_folder() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Started by the bus with no window open, Maia opens none for what needs none: a dock
+/// asking for the service's properties at login, an introspection. "Show in folder" goes
+/// to the open window, or starts one when there is none. A window that opens takes the
+/// name over, and the windowless one goes. Against a private bus, with the real gdbus.
+#[test]
+fn file_manager1_without_a_window() {
+    use crate::fm1::{Bus, NAME, headless};
+    use crate::single::Request;
+    // What the bus is told to start: never a window by itself.
+    assert_eq!(crate::fm1::service_file(Path::new("/opt/maia/bin/maia")), "[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec=/opt/maia/bin/maia --fm1\n");
+    if !crate::media::have("dbus-daemon") || !crate::media::have("gdbus") {
+        return;
+    }
+    let d = tmpdir("fm1-headless");
+    let sock = d.join("bus");
+    let conf = d.join("bus.conf");
+    std::fs::write(&conf, format!("<busconfig><type>session</type><listen>unix:path={}</listen><auth>EXTERNAL</auth><policy context=\"default\"><allow send_destination=\"*\" eavesdrop=\"true\"/><allow eavesdrop=\"true\"/><allow own=\"*\"/></policy></busconfig>", sock.display())).unwrap();
+    // Stopped however the test ends: a bus left running would outlive it.
+    struct Daemon(std::process::Child);
+    impl Drop for Daemon {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _daemon = Daemon(std::process::Command::new("dbus-daemon").arg(format!("--config-file={}", conf.display())).arg("--nofork").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap());
+    let start = Instant::now();
+    while !sock.exists() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let addr = format!("unix:path={}", sock.display());
+    let window = d.join("window.sock");
+    let (opened_tx, opened) = std::sync::mpsc::channel::<String>();
+    let (done_tx, done) = std::sync::mpsc::channel();
+    let (a, w) = (addr.clone(), window.clone());
+    std::thread::spawn(move || {
+        let ok = headless(&a, &w, |r| opened_tx.send(format!("{r:?}")).unwrap());
+        let _ = done_tx.send(ok);
+    });
+    let gdbus = |args: &[&str]| std::process::Command::new("gdbus").args(["call", "--address", &addr, "--dest", NAME, "--object-path", "/org/freedesktop/FileManager1", "--method"]).args(args).output().unwrap();
+    wait_for("the name taken", 5, || gdbus(&["org.freedesktop.DBus.Peer.Ping"]).status.success());
+    let props = gdbus(&["org.freedesktop.DBus.Properties.GetAll", NAME]);
+    assert!(props.status.success(), "{}", String::from_utf8_lossy(&props.stderr));
+    assert_eq!(String::from_utf8_lossy(&props.stdout).trim(), "(@a{sv} {},)");
+    let intro = std::process::Command::new("gdbus").args(["introspect", "--address", &addr, "--dest", NAME, "--object-path", "/org/freedesktop/FileManager1"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&intro.stdout).contains("ShowItems"));
+    assert!(opened.recv_timeout(Duration::from_millis(300)).is_err(), "a window opened for nothing to show");
+    // No window: one is started for what is asked.
+    touch(&d.join("Some folder/a b.txt"), "x");
+    let file = d.join("Some folder/a b.txt");
+    let uri = format!("['file://{}']", file.display().to_string().replace(' ', "%20"));
+    assert!(gdbus(&["org.freedesktop.FileManager1.ShowItems", &uri, ""]).status.success());
+    assert_eq!(opened.recv_timeout(Duration::from_secs(5)).unwrap(), format!("{:?}", Request::Show(vec![file.clone()])));
+    // A window listening: what is asked goes to it, and nothing else opens.
+    let (tx, rx) = std::sync::mpsc::channel();
+    crate::single::serve(crate::single::claim_at(&window).unwrap(), tx, || {});
+    assert!(gdbus(&["org.freedesktop.FileManager1.ShowItemProperties", &uri, ""]).status.success());
+    assert!(matches!(rx.recv_timeout(Duration::from_secs(5)), Ok(Request::Properties(p)) if p == [file.clone()]));
+    assert!(opened.recv_timeout(Duration::from_millis(300)).is_err());
+    // The window takes the name, and the windowless service goes.
+    assert!(Bus::connect(&addr).unwrap().own(NAME), "the window gets the name");
+    assert_eq!(done.recv_timeout(Duration::from_secs(5)), Ok(true), "the windowless service stayed");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The call the bus started Maia for can come before the answer to Maia's own request
+/// for the name: it is kept and answered once the name is Maia's, not dropped. And the
+/// single-instance socket carries every kind of request whole.
+#[test]
+fn file_manager1_keeps_the_call_it_was_started_for() {
+    use crate::fm1::{Bus, NAME, answer, build, put_str, read};
+    use crate::single::{Request, encode, parse};
+    let (a, mut b) = std::os::unix::net::UnixStream::pair().unwrap();
+    let mut uris = vec![];
+    put_str(&mut uris, "file:///srv/photos");
+    let mut body = (uris.len() as u32).to_le_bytes().to_vec();
+    body.extend_from_slice(&uris);
+    let early = build(1, 5, &[(1, 'o', "/org/freedesktop/FileManager1"), (2, 's', NAME), (3, 's', "ShowFolders"), (7, 's', ":1.9")], None, "as", &body);
+    let answer_to_ours = build(2, 6, &[(7, 's', "org.freedesktop.DBus")], Some(1), "", &[]);
+    use std::io::Write as _;
+    b.write_all(&early).unwrap();
+    b.write_all(&answer_to_ours).unwrap();
+    let mut bus = Bus::over(a);
+    assert!(bus.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName", "", &[]).is_some());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let t = std::thread::spawn(move || answer(bus, tx, || {}));
+    assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(Request::Open(vec![PathBuf::from("/srv/photos")])));
+    let ours = read(&mut b).unwrap();
+    assert_eq!(ours.member, "RequestName");
+    let reply = read(&mut b).unwrap();
+    assert_eq!((reply.kind, reply.reply_to), (2, Some(5)), "the early call was answered");
+    drop(b);
+    t.join().unwrap();
+    for r in [Request::Focus, Request::Open(vec!["/a b".into()]), Request::Show(vec!["/x/1.jpg".into(), "/x/2.jpg".into()]), Request::Properties(vec!["/y".into()])] {
+        assert_eq!(parse(&encode(&r)), Some(r));
+    }
+}
+
 /// A big file is counted and read a window at a time: lines anywhere in it, the last one
 /// without a line break, long lines cut, and every match found, across chunk seams too.
 #[test]
