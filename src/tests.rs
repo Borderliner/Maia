@@ -13482,7 +13482,8 @@ fn photos_shared_without_their_place_or_camera() {
             assert!(!raw.contains(word), "{ext}: {word:?} still in the bytes");
         }
         assert_eq!(pixels(&out), pixels(&f), "{ext}: the picture itself is the same");
-        let _ = run(&["magick", "identify", &out]);
+        // Still a picture ImageMagick reads (info:, as ImageMagick 6 has no magick identify).
+        let _ = run(&["magick", &out, "info:"]);
     }
     // Pictures without any of it come out as they went in; other kinds need exiftool.
     run(&["magick", "-size", "8x8", "xc:green", "plain.png"]);
