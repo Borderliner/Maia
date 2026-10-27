@@ -2652,7 +2652,8 @@ fn update_control(ui: &mut Ui, app: &mut App, pal: &Palette) {
             dim(ui, "Up to date");
         }
         State::Available(r) => {
-            let notes: String = r.notes.lines().filter(|l| !l.trim().is_empty()).take(8).collect::<Vec<_>>().join("\n");
+            // A release's text is Markdown: its headings shown without their marks.
+            let notes: String = r.notes.lines().map(|l| l.trim_start_matches('#').trim_start()).filter(|l| !l.trim().is_empty()).take(8).collect::<Vec<_>>().join("\n");
             let b = button(ui, &format!("Update to {}", r.version.trim_start_matches('v')), true);
             let b = if notes.is_empty() { b } else { b.on_hover_text(notes) };
             if b.clicked() {
