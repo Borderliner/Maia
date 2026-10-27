@@ -36,6 +36,8 @@
 /vendor/**
 !/vendor/vello_cpu/
 !/vendor/vello_cpu/**
+# Its README is upstream's page on crates.io, which nothing here builds from.
+/vendor/vello_cpu/README.md
 
 # What the packages install besides the program.
 !/packaging/
