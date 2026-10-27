@@ -102,7 +102,7 @@ pub fn other(app: &App) -> Option<u64> {
 
 fn build(app: &App, a: u64, b: u64) -> Option<Pair> {
     let (ta, tb) = (app.panels.get(&a)?.tab(), app.panels.get(&b)?.tab());
-    if ta.flatten || tb.flatten || crate::tab::is_computer(&ta.path) || crate::tab::is_computer(&tb.path) {
+    if ta.flatten || tb.flatten || crate::tab::is_place(&ta.path) || crate::tab::is_place(&tb.path) {
         return None;
     }
     fn shown(t: &crate::tab::Tab) -> Vec<&Entry> {

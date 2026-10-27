@@ -6816,8 +6816,10 @@ fn palette_finds_commands() {
     assert_eq!(find(&ud, "hid tog"), vec![Cmd::ToggleHidden]);
     assert_eq!(find(&ud, "tohi").first(), Some(&Cmd::ToggleHidden));
     assert_eq!(&find(&ud, "sort size")[..3], &[Cmd::SortSize, Cmd::SortSizeAsc, Cmd::SortSizeDesc]);
+    // GitHub Profile starts with the word too: the git commands follow it in their order.
     let git = find(&ud, "git");
-    assert_eq!(&git[..3], &[Cmd::GitBranches, Cmd::GitHistory, Cmd::GitChanges]);
+    assert_eq!(&git[..4], &[Cmd::GitHubProfile, Cmd::GitBranches, Cmd::GitHistory, Cmd::GitChanges]);
+    assert_eq!(find(&ud, "github").first(), Some(&Cmd::GitHubProfile));
     assert!(!git.contains(&Cmd::Quit), "no G from General and I, T from Quit");
     // Every View command answers to the category's name, after the titles with the word.
     let view = find(&ud, "view");
@@ -12473,17 +12475,18 @@ fn seven_zip_rename_takes_names_literally() {
     if !crate::media::have("7z") {
         return;
     }
-    let d = tmpdir("7zwild");
-    touch(&d.join("src/draft?.txt"), "q");
-    touch(&d.join("src/draft1.txt"), "1");
-    let a = d.join("a.7z");
-    let made = std::process::Command::new("7z").args(["a", "-bso0", "-bsp0", "-spd"]).arg(&a).args(["draft?.txt", "draft1.txt"]).current_dir(d.join("src")).status().unwrap();
+    let d = tmpdir("7z-literal");
+    touch(&d.join("in/a*.txt"), "star");
+    touch(&d.join("in/ab.txt"), "ab");
+    let a = d.join("x.7z");
+    let made = std::process::Command::new("7z").args(["a", "-bso0", "-bsp0", "-spd"]).arg(&a).args(["a*.txt", "ab.txt"]).current_dir(d.join("in")).status().unwrap();
     assert!(made.success());
-    archive_edit(&a, crate::archwrite::Edit::Rename { pairs: vec![(PathBuf::from("draft?.txt"), "renamed.txt".into())] }).unwrap();
-    let out = String::from_utf8_lossy(&std::process::Command::new("7z").args(["l", "-slt", "-ba"]).arg(&a).output().unwrap().stdout).into_owned();
-    let mut paths: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("Path = ")).collect();
-    paths.sort();
-    assert_eq!(paths, ["draft1.txt", "renamed.txt"]);
+    archive_edit(&a, crate::archwrite::Edit::Rename { pairs: vec![(PathBuf::from("a*.txt"), "star.txt".into())] }).unwrap();
+    let listed = std::process::Command::new("7z").args(["l", "-slt", "-ba"]).arg(&a).output().unwrap().stdout;
+    let listed = String::from_utf8_lossy(&listed);
+    let mut names: Vec<&str> = listed.lines().filter_map(|l| l.strip_prefix("Path = ")).collect();
+    names.sort();
+    assert_eq!(names, ["ab.txt", "star.txt"]);
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -13656,4 +13659,456 @@ fn readme_card_follows_the_file() {
     crate::readme::sync(&mut t, &ctx);
     assert!(text(&mut t).contains("New title"), "read again after it changed");
     let _ = std::fs::remove_dir_all(&d);
+}
+
+
+// ------------------------------------------------------------------ GitHub profile
+
+/// What GitHub's GraphQL said for a profile (the viewer query of `github.rs`), captured
+/// and cut to four weeks and three repositories, the names changed.
+pub(crate) const GH_VIEWER: &str = r##"{"data":{"viewer":{"login":"ana-lima","name":"Ana Lima","bio":"Writes small tools\nfor quiet machines.","pronouns":"she/her","location":"Porto","company":null,"websiteUrl":"https://ana.example","createdAt":"2019-04-02T10:00:00Z","avatarUrl":"https://avatars.githubusercontent.com/u/1?v=4","status":{"message":"On a train"},"followers":{"totalCount":1204,"nodes":[{"login":"f0","avatarUrl":"https://avatars.githubusercontent.com/u/10?v=4"},{"login":"f1","avatarUrl":"https://avatars.githubusercontent.com/u/11?v=4"},{"login":"f2","avatarUrl":"https://avatars.githubusercontent.com/u/12?v=4"}]},"following":{"totalCount":12},"organizations":{"nodes":[{"login":"tinyco","avatarUrl":"https://avatars.githubusercontent.com/u/99?v=4"}]},"contributionsCollection":{"contributionCalendar":{"totalContributions":1318,"weeks":[{"contributionDays":[{"date":"2025-10-26","contributionCount":0,"contributionLevel":"NONE","weekday":0},{"date":"2025-10-27","contributionCount":0,"contributionLevel":"NONE","weekday":1},{"date":"2025-10-28","contributionCount":0,"contributionLevel":"NONE","weekday":2},{"date":"2025-10-29","contributionCount":0,"contributionLevel":"NONE","weekday":3},{"date":"2025-10-30","contributionCount":0,"contributionLevel":"NONE","weekday":4},{"date":"2025-10-31","contributionCount":0,"contributionLevel":"NONE","weekday":5},{"date":"2025-11-01","contributionCount":0,"contributionLevel":"NONE","weekday":6}]},{"contributionDays":[{"date":"2025-11-02","contributionCount":0,"contributionLevel":"NONE","weekday":0},{"date":"2025-11-03","contributionCount":0,"contributionLevel":"NONE","weekday":1},{"date":"2025-11-04","contributionCount":0,"contributionLevel":"NONE","weekday":2},{"date":"2025-11-05","contributionCount":0,"contributionLevel":"NONE","weekday":3},{"date":"2025-11-06","contributionCount":0,"contributionLevel":"NONE","weekday":4},{"date":"2025-11-07","contributionCount":0,"contributionLevel":"NONE","weekday":5},{"date":"2025-11-08","contributionCount":0,"contributionLevel":"NONE","weekday":6}]},{"contributionDays":[{"date":"2026-10-18","contributionCount":2,"contributionLevel":"FIRST_QUARTILE","weekday":0},{"date":"2026-10-19","contributionCount":5,"contributionLevel":"FIRST_QUARTILE","weekday":1},{"date":"2026-10-20","contributionCount":9,"contributionLevel":"SECOND_QUARTILE","weekday":2},{"date":"2026-10-21","contributionCount":14,"contributionLevel":"THIRD_QUARTILE","weekday":3},{"date":"2026-10-22","contributionCount":1,"contributionLevel":"FIRST_QUARTILE","weekday":4},{"date":"2026-10-23","contributionCount":0,"contributionLevel":"NONE","weekday":5},{"date":"2026-10-24","contributionCount":0,"contributionLevel":"NONE","weekday":6}]},{"contributionDays":[{"date":"2026-10-25","contributionCount":4,"contributionLevel":"FIRST_QUARTILE","weekday":0},{"date":"2026-10-26","contributionCount":21,"contributionLevel":"FOURTH_QUARTILE","weekday":1},{"date":"2026-10-27","contributionCount":0,"contributionLevel":"NONE","weekday":2}]}]}},"repositories":{"totalCount":3,"nodes":[{"nameWithOwner":"ana-lima/lamp","createdAt":"2026-09-14T09:12:00Z","languages":{"edges":[{"size":4210000,"node":{"name":"Rust","color":"#dea584"}},{"size":18000,"node":{"name":"Shell","color":"#89e051"}},{"size":9000,"node":{"name":"Python","color":"#3572A5"}}]},"releases":{"nodes":[{"name":"Lamp 0.1.0","tagName":"v0.1.0","createdAt":"2026-09-30T10:00:00Z","url":"https://github.com/ana-lima/lamp/releases/v0.1.0"}]},"url":"https://github.com/ana-lima/lamp"},{"nameWithOwner":"ana-lima/notes","createdAt":"2026-05-02T18:40:00Z","languages":{"edges":[{"size":41000,"node":{"name":"Go","color":"#00ADD8"}},{"size":9000,"node":{"name":"HTML","color":"#e34c26"}},{"size":4000,"node":{"name":"CSS","color":"#663399"}}]},"releases":{"nodes":[]},"url":"https://github.com/ana-lima/notes"},{"nameWithOwner":"ana-lima/kettle","createdAt":"2026-08-21T12:05:00Z","languages":{"edges":[{"size":1200000,"node":{"name":"C++","color":"#f34b7d"}},{"size":300000,"node":{"name":"Lua","color":"#000080"}},{"size":90000,"node":{"name":"Python","color":"#3572A5"}},{"size":12000,"node":{"name":"CMake","color":"#DA3434"}},{"size":3000,"node":{"name":"Shell","color":"#89e051"}},{"size":1000,"node":{"name":"C","color":"#555555"}}]},"releases":{"nodes":[]},"url":"https://github.com/ana-lima/kettle"}]},"id":"U_kgDOexample"}}}"##;
+/// Its recent commits query, cut to two repositories of three commits.
+pub(crate) const GH_HISTORY: &str = r##"{"data":{"viewer":{"repositories":{"nodes":[{"defaultBranchRef":{"target":{"history":{"nodes":[{"oid":"abc0000000000000000000000000000000000000","messageHeadline":"Keep the lamp lit","committedDate":"2026-10-12T16:20:05Z","url":"https://github.com/ana-lima/lamp/commit/abc0000000000000000000000000000000000000"},{"oid":"abc0010000000000000000000000000000000000","messageHeadline":"Dim it at night","committedDate":"2026-10-12T16:02:44Z","url":"https://github.com/ana-lima/lamp/commit/abc0010000000000000000000000000000000000"},{"oid":"abc0020000000000000000000000000000000000","messageHeadline":"Start the lamp","committedDate":"2026-10-12T15:41:30Z","url":"https://github.com/ana-lima/lamp/commit/abc0020000000000000000000000000000000000"}]}}},"nameWithOwner":"ana-lima/lamp"},{"defaultBranchRef":{"target":{"history":{"nodes":[{"oid":"abc0100000000000000000000000000000000000","messageHeadline":"Write things down","committedDate":"2026-05-02T19:53:10Z","url":"https://github.com/ana-lima/notes/commit/abc0100000000000000000000000000000000000"},{"oid":"abc0110000000000000000000000000000000000","messageHeadline":"Find old notes","committedDate":"2026-05-02T19:31:27Z","url":"https://github.com/ana-lima/notes/commit/abc0110000000000000000000000000000000000"},{"oid":"abc0120000000000000000000000000000000000","messageHeadline":"Start the notes","committedDate":"2026-05-02T18:58:44Z","url":"https://github.com/ana-lima/notes/commit/abc0120000000000000000000000000000000000"}]}}},"nameWithOwner":"ana-lima/notes"}]}}}}"##;
+/// The badges of a public profile page as GitHub writes them (the sidebar's links).
+pub(crate) const GH_ACHIEVEMENTS: &str = r##"<a href="/ana-lima?achievement=starstruck&amp;tab=achievements" class="position-relative"><img src="https://github.githubassets.com/assets/starstruck-bronze-b71ec4d7766a.png" data-hovercard-type="achievement" data-hovercard-url="/users/ana-lima/achievements/starstruck/detail?hovercard=1" width="64" alt="Achievement: Starstruck" data-view-component="true" class="achievement-badge-sidebar" /><span data-view-component="true" class="Label achievement-tier-label achievement-tier-label--bronze text-small text-bold color-shadow-medium px-2 tmp-px-2 py-0 tmp-py-0 mb-1 tmp-mb-1 position-absolute right-0 bottom-0">x4</span></a><a href="/ana-lima?achievement=quickdraw&amp;tab=achievements" class="position-relative"><img src="https://github.githubassets.com/assets/quickdraw-default-39c6aec8ff89.png" data-hovercard-type="achievement" data-hovercard-url="/users/ana-lima/achievements/quickdraw/detail?hovercard=1" width="64" alt="Achievement: Quickdraw" data-view-component="true" class="achievement-badge-sidebar" /></a><a href="/ana-lima?achievement=pull-shark&amp;tab=achievements" class="position-relative"><img src="https://github.githubassets.com/assets/pull-shark-bronze-a37accb528d1.png" data-hovercard-type="achievement" data-hovercard-url="/users/ana-lima/achievements/pull-shark/detail?hovercard=1" width="64" alt="Achievement: Pull Shark" data-view-component="true" class="achievement-badge-sidebar" /><span data-view-component="true" class="Label achievement-tier-label achievement-tier-label--bronze text-small text-bold color-shadow-medium px-2 tmp-px-2 py-0 tmp-py-0 mb-1 tmp-mb-1 position-absolute right-0 bottom-0">x2</span></a><a href="/ana-lima?achievement=galaxy-brain&amp;tab=achievements" class="position-relative"><img src="https://github.githubassets.com/assets/galaxy-brain-default-0d3f1a7c9e52.png" data-hovercard-type="achievement" data-hovercard-url="/users/ana-lima/achievements/galaxy-brain/detail?hovercard=1" width="64" alt="Achievement: Galaxy Brain" data-view-component="true" class="achievement-badge-sidebar" /></a>"##;
+
+#[test]
+fn github_profile_read_from_its_answer() {
+    use crate::github::{self, Kind};
+    let v: serde_json::Value = serde_json::from_str(GH_VIEWER).unwrap();
+    let p = github::parse_viewer(&v).expect("a profile");
+    assert_eq!((p.login.as_str(), p.name.as_str(), p.pronouns.as_str(), p.location.as_str()), ("ana-lima", "Ana Lima", "she/her", "Porto"));
+    assert_eq!(p.bio, "Writes small tools for quiet machines.", "lines joined, spaces one");
+    assert_eq!((p.status.as_str(), p.website.as_str(), p.company.as_str()), ("On a train", "https://ana.example", ""));
+    assert_eq!((p.followers, p.following, p.repos, p.total), (1204, 12, 3, 1318));
+    assert_eq!(p.faces.len(), 3);
+    assert_eq!(p.orgs, vec![("tinyco".to_string(), "https://avatars.githubusercontent.com/u/99?v=4".to_string())]);
+    // Four weeks of days, the first week's place in it from GitHub's own weekday.
+    let first = &v["data"]["viewer"]["contributionsCollection"]["contributionCalendar"]["weeks"][0]["contributionDays"][0];
+    assert_eq!(p.first_weekday, first["weekday"].as_u64().unwrap() as usize);
+    assert!(p.days.len() > 21 && p.days.len() <= 28, "{}", p.days.len());
+    assert!(p.days.iter().all(|d| d.level <= 4 && d.date.len() == 10));
+    assert!(p.days.iter().any(|d| d.count > 0 && d.level > 0));
+    // Languages by bytes over the repositories, largest first, shares of the whole.
+    assert!(!p.langs.is_empty() && p.langs.windows(2).all(|w| w[0].2 >= w[1].2));
+    let sum: f32 = p.langs.iter().map(|l| l.2).sum();
+    assert!(sum > 0.5 && sum <= 1.0001, "{sum}");
+    // A repository made this year and a release this year are moments of their own.
+    let created: Vec<&str> = p.items.iter().filter(|i| i.kind == Kind::Created).map(|i| i.title.as_str()).collect();
+    assert_eq!(created, ["Created lamp", "Created notes", "Created kettle"]);
+    let released: Vec<&str> = p.items.iter().filter(|i| i.kind == Kind::Release).map(|i| i.title.as_str()).collect();
+    assert_eq!(released, ["Released Lamp 0.1.0"], "the name already says which");
+    assert!(p.items.iter().all(|i| i.url.starts_with("https://github.com/ana-lima/")));
+    // Not a profile: an error answer, or no login.
+    assert!(github::parse_viewer(&serde_json::json!({"errors": [{"message": "Bad credentials"}]})).is_none());
+    assert!(github::parse_viewer(&serde_json::json!({"data": {"viewer": {"login": ""}}})).is_none());
+}
+
+#[test]
+fn github_recent_commits_read_from_their_answer() {
+    let v: serde_json::Value = serde_json::from_str(GH_HISTORY).unwrap();
+    let items = crate::github::parse_history(&v);
+    assert_eq!(items.len(), 6);
+    assert!(items.iter().all(|i| i.kind == crate::github::Kind::Commit && i.sha.as_ref().is_some_and(|s| s.len() == 40)));
+    assert_eq!((items[0].title.as_str(), items[0].repo.as_str()), ("Keep the lamp lit", "ana-lima/lamp"));
+    assert_eq!(items[0].when, crate::github::iso("2026-10-12T16:20:05Z").unwrap());
+    assert!(items.iter().filter(|i| i.repo == "ana-lima/notes").count() == 3);
+    // A repository without a default branch (empty) gives nothing, not an error.
+    assert!(crate::github::parse_history(&serde_json::json!({"data": {"viewer": {"repositories": {"nodes": [{"nameWithOwner": "a/b", "defaultBranchRef": null}]}}}})).is_empty());
+}
+
+#[test]
+fn github_achievements_read_from_the_profile_page() {
+    let a = crate::github::parse_achievements(GH_ACHIEVEMENTS);
+    let got: Vec<(&str, &str, u8, u8)> = a.iter().map(|x| (x.slug.as_str(), x.name.as_str(), x.tier, x.count)).collect();
+    assert_eq!(got, [("starstruck", "Starstruck", 1, 4), ("quickdraw", "Quickdraw", 0, 1), ("pull-shark", "Pull Shark", 1, 2), ("galaxy-brain", "Galaxy Brain", 0, 1)]);
+    // The page shows each badge more than once: the first counts.
+    let twice = format!("{GH_ACHIEVEMENTS}{GH_ACHIEVEMENTS}");
+    assert_eq!(crate::github::parse_achievements(&twice).len(), 4);
+    // A page that changed shape gives none, quietly.
+    assert!(crate::github::parse_achievements("<html><body>Profile</body></html>").is_empty());
+    assert!(crate::github::parse_achievements(r#"alt="Achievement: Broken"#).is_empty());
+}
+
+#[test]
+fn github_times_and_counts_read_plainly() {
+    use crate::github::{iso, thousands};
+    assert_eq!(iso("1970-01-01T00:00:00Z"), Some(0));
+    assert_eq!(iso("2000-03-01T00:00:00Z"), Some(951_868_800), "after a leap day");
+    assert_eq!(iso("2024-02-29T12:00:00Z"), Some(1_709_208_000));
+    assert_eq!(iso("2026-10-27"), Some(1_793_059_200), "a date alone is its midnight");
+    assert_eq!(iso("soon"), None);
+    for (n, s) in [(0, "0"), (999, "999"), (1000, "1,000"), (1442, "1,442"), (1_234_567, "1,234,567")] {
+        assert_eq!(thousands(n), s);
+    }
+}
+
+/// The page's keys: the first arrow shows the cursor, later ones move it; Enter on a
+/// commit whose repository has no clone here asks to open it on GitHub.
+#[test]
+fn github_page_keys_move_through_the_timeline() {
+    use egui::Key;
+    let v: serde_json::Value = serde_json::from_str(GH_VIEWER).unwrap();
+    let mut p = crate::github::parse_viewer(&v).unwrap();
+    p.items.extend(crate::github::parse_history(&serde_json::from_str(GH_HISTORY).unwrap()));
+    let n = p.items.len();
+    let mut page = crate::github::Page::default();
+    page.data = Some(Box::new(p));
+    assert!(page.takes(Key::ArrowDown) && page.takes(Key::O) && !page.takes(Key::A));
+    let mut actions = vec![];
+    page.key(Key::ArrowDown, 1, &mut actions);
+    assert_eq!((page.sel, page.keyed), (0, true), "the first arrow only shows where it is");
+    page.key(Key::ArrowDown, 1, &mut actions);
+    page.key(Key::End, 1, &mut actions);
+    assert_eq!(page.sel, n - 1);
+    page.key(Key::Home, 1, &mut actions);
+    page.key(Key::ArrowUp, 1, &mut actions);
+    assert_eq!(page.sel, 0, "stops at the top");
+    page.key(Key::Enter, 1, &mut actions);
+    assert_eq!(actions.len(), 1, "no clone of it here: opened on GitHub");
+    assert!(crate::github::Page::default().takes(Key::ArrowDown) == false, "nothing to move through");
+}
+
+#[test]
+fn github_is_a_place_not_a_folder() {
+    let ctx = egui::Context::default();
+    let gh = PathBuf::from(tab::GITHUB);
+    assert!(tab::is_github(&gh) && tab::is_place(&gh) && !tab::is_computer(&gh));
+    assert!(tab::is_place(Path::new(tab::COMPUTER)) && !tab::is_place(Path::new("/tmp")));
+    let mut t = Tab::new(1, gh.clone(), ViewSettings::default(), ctx);
+    assert!(!t.is_loading() && t.entries.is_empty(), "nothing is read for it");
+    assert_eq!(t.title(), "GitHub");
+    t.up(|_| None);
+    assert!(tab::is_computer(&t.path), "up from GitHub is Computer");
+}
+
+// ------------------------------------------------------------------ colours of pictures
+
+fn flat_image(w: usize, h: usize, at: impl Fn(usize, usize) -> [u8; 3]) -> egui::ColorImage {
+    let mut px = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let c = at(x, y);
+            px.extend_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+    }
+    egui::ColorImage::from_rgba_unmultiplied([w, h], &px)
+}
+
+#[test]
+fn a_pictures_colours_and_their_shares() {
+    use crate::colours::{glow, hex, palette};
+    let red = [210, 40, 40];
+    let blue = [30, 70, 200];
+    let img = flat_image(80, 60, |x, _| if x < 60 { red } else { blue });
+    let p = palette(&img, 5);
+    assert_eq!(p.len(), 2, "two colours, however many asked: {p:?}");
+    assert_eq!(hex(p[0].0), "#D22828");
+    assert!((p[0].1 - 0.75).abs() < 0.05 && (p[1].1 - 0.25).abs() < 0.05, "{p:?}");
+    let g = glow(&img);
+    assert!(g[0].r() > g[0].b() && g[3].b() > g[3].r(), "red on the left, blue on the right: {g:?}");
+    assert!(g.iter().all(|c| c.a() == 255));
+    assert!(palette(&flat_image(0, 0, |_, _| red), 5).is_empty());
+    // A transparent picture has nothing to glow with.
+    let clear = egui::ColorImage::from_rgba_unmultiplied([4, 4], &[0u8; 64]);
+    assert!(palette(&clear, 5).is_empty() && glow(&clear).iter().all(|c| c.a() == 0));
+}
+
+#[test]
+fn pictures_sort_red_through_violet_then_grey() {
+    use crate::colours::{palette, sort_number};
+    let n = |c: [u8; 3]| sort_number(&palette(&flat_image(16, 16, |_, _| c), 5));
+    let order = [[220, 30, 40], [230, 140, 30], [220, 210, 40], [40, 180, 60], [40, 170, 200], [40, 60, 210], [140, 50, 200], [235, 235, 235], [120, 120, 120], [15, 15, 15]];
+    let keys: Vec<u64> = order.iter().map(|c| n(*c)).collect();
+    assert!(keys.windows(2).all(|w| w[0] < w[1]), "{keys:?}");
+    // A deep red just short of 360 degrees counts with the reds, not after violet.
+    assert!(n([210, 30, 60]) < n([230, 140, 30]));
+    // A grey picture with a small bright patch sorts by the patch only when it is big
+    // enough to see.
+    let speck = flat_image(40, 40, |x, y| if x < 2 && y < 2 { [230, 30, 30] } else { [128, 128, 128] });
+    assert!(sort_number(&palette(&speck, 5)) >= 1 << 32, "a speck doesn't colour it");
+}
+
+/// Sorted by colour, a folder's real pictures come in hue order as their colours are
+/// read (off the frame, by the colour workers), the rest last.
+#[test]
+fn a_folder_sorted_by_colour() {
+    let d = tmpdir("by-colour");
+    let write = |name: &str, c: [u8; 3]| {
+        let f = std::fs::File::create(d.join(name)).unwrap();
+        let mut e = png::Encoder::new(std::io::BufWriter::new(f), 24, 24);
+        e.set_color(png::ColorType::Rgba);
+        e.set_depth(png::BitDepth::Eight);
+        let px: Vec<u8> = (0..24 * 24).flat_map(|_| [c[0], c[1], c[2], 255]).collect();
+        e.write_header().unwrap().write_image_data(&px).unwrap();
+    };
+    write("a-blue.png", [40, 60, 210]);
+    write("b-grey.png", [128, 128, 128]);
+    write("c-red.png", [220, 30, 40]);
+    write("d-green.png", [40, 180, 60]);
+    touch(&d.join("e-notes.txt"), "no colour");
+    let ctx = egui::Context::default();
+    let mut t = Tab::new(1, d.clone(), ViewSettings::default(), ctx.clone());
+    t.settings.sort = SortKey::Colour;
+    t.settings.desc = false;
+    let stats = HashMap::new();
+    let start = Instant::now();
+    loop {
+        pump(&mut t, &stats);
+        crate::colours::focus(&[d.clone()]);
+        crate::colours::flush(&ctx);
+        if t.entries.iter().filter(|e| crate::colours::sortable(e)).all(|e| crate::colours::sort_key(e).is_some()) {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(20), "colours read");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    pump(&mut t, &stats);
+    let names: Vec<String> = t.view.iter().map(|&i| t.entries[i as usize].name.clone()).collect();
+    assert_eq!(names, ["c-red.png", "d-green.png", "a-blue.png", "b-grey.png", "e-notes.txt"]);
+}
+
+// ------------------------------------------------------------------ the eye candy
+
+#[test]
+fn date_ribbon_years_agree_with_the_calendar() {
+    // In UTC against the calendar's own day arithmetic, and moved by a zone's offset.
+    let mut t = 0i64;
+    while t < 4_000_000_000 {
+        let st = std::time::UNIX_EPOCH + Duration::from_secs(t as u64);
+        let (y, m, _) = crate::calendar::civil(t.div_euclid(86_400));
+        assert_eq!(crate::ribbon::year_month(st, 0), Some((y as i32, m as u32)), "at {t}");
+        let (y, m, _) = crate::calendar::civil((t + 5 * 3600).div_euclid(86_400));
+        assert_eq!(crate::ribbon::year_month(st, 5 * 3600), Some((y as i32, m as u32)), "at {t} +5h");
+        t += 86_400 * 17 + 3_607;
+    }
+    // New Year's Eve, an hour before midnight in UTC, is next year two hours east.
+    let eve = std::time::UNIX_EPOCH + Duration::from_secs(1_798_761_600 - 3_601);
+    assert_eq!(crate::ribbon::year_month(eve, 0), Some((2026, 12)));
+    assert_eq!(crate::ribbon::year_month(eve, 7_200), Some((2027, 1)));
+}
+
+#[test]
+fn rows_glide_only_when_their_order_changes() {
+    use crate::glide::Glide;
+    let (a, b, c) = (Path::new("/x/a"), Path::new("/x/b"), Path::new("/x/c"));
+    let dir = Path::new("/x");
+    let ctx = egui::Context::default();
+    let mut g = Glide::default();
+    let frame = |g: &mut Glide, generation: u64, t: f64, rows: &[&Path]| -> Vec<(egui::Vec2, f32)> {
+        g.begin(dir, 0, generation, false, true, t);
+        let out = rows.iter().enumerate().map(|(i, p)| g.row(p, egui::vec2(0.0, i as f32 * 20.0), 400.0)).collect();
+        g.end(&ctx);
+        out
+    };
+    frame(&mut g, 1, 0.0, &[a, b, c]);
+    // Scrolling or redrawing the same order moves nothing.
+    assert!(frame(&mut g, 1, 0.1, &[a, b, c]).iter().all(|(o, a)| *o == egui::Vec2::ZERO && *a == 1.0));
+    // c rises to the top: it starts where it was (40 lower) and the others step down.
+    let moved = frame(&mut g, 2, 1.0, &[c, a, b]);
+    assert_eq!(moved[0].0, egui::vec2(0.0, 40.0));
+    assert_eq!(moved[1].0, egui::vec2(0.0, -20.0));
+    let half = frame(&mut g, 2, 1.1, &[c, a, b]);
+    assert!(half[0].0.y > 0.0 && half[0].0.y < 40.0, "part way: {half:?}");
+    let done = frame(&mut g, 2, 1.5, &[c, a, b]);
+    assert!(done.iter().all(|(o, _)| *o == egui::Vec2::ZERO), "settled: {done:?}");
+    // A newcomer fades in; another folder, another view, a folder still reading or
+    // motion off move nothing.
+    let d = Path::new("/x/d");
+    let faded = frame(&mut g, 3, 2.0, &[d, c, a, b]);
+    assert!(faded[0].1 < 0.1 && faded[1].0 != egui::Vec2::ZERO);
+    for (path, view, loading, anim) in [(Path::new("/y"), 0, false, true), (dir, 1, false, true), (dir, 0, true, true), (dir, 0, false, false)] {
+        let mut g = Glide::default();
+        g.begin(path, view, 1, false, true, 0.0);
+        g.row(a, egui::vec2(0.0, 0.0), 400.0);
+        g.row(b, egui::vec2(0.0, 20.0), 400.0);
+        g.begin(dir, 0, 2, loading, anim, 1.0);
+        assert_eq!(g.row(b, egui::vec2(0.0, 0.0), 400.0).0, egui::Vec2::ZERO, "{path:?} {view} {loading} {anim}");
+    }
+    // The first frame after a folder finished reading: what was drawn while it read is
+    // no start for a glide, so nothing slides in from the half-read list.
+    let mut g = Glide::default();
+    g.begin(dir, 0, 1, true, true, 0.0);
+    g.row(a, egui::vec2(0.0, 0.0), 400.0);
+    g.row(b, egui::vec2(0.0, 20.0), 400.0);
+    g.begin(dir, 0, 2, false, true, 1.0);
+    assert_eq!(g.row(b, egui::vec2(0.0, 0.0), 400.0), (egui::Vec2::ZERO, 1.0));
+    assert_eq!(g.row(c, egui::vec2(0.0, 20.0), 400.0), (egui::Vec2::ZERO, 1.0), "no fade either");
+}
+
+#[test]
+fn a_folder_at_a_glance_counts_what_fills_it() {
+    let d = tmpdir("glance");
+    for f in ["a.jpg", "b.png", "c.webp", "d.rs", "e.txt", "f.mp4", "sub/x"] {
+        touch(&d.join(f), "x");
+    }
+    let mut t = Tab::new(1, d.clone(), ViewSettings::default(), egui::Context::default());
+    pump(&mut t, &HashMap::new());
+    let s = crate::glance::shares(&mut t);
+    let pics = s.iter().find(|(c, _)| *c == crate::theme::FileCat::Image).map(|x| x.1).unwrap();
+    assert!((pics - 3.0 / 7.0).abs() < 1e-4, "{}", crate::glance::describe(&s));
+    assert!((s.iter().map(|x| x.1).sum::<f32>() - 1.0).abs() < 1e-4);
+    assert!(s[0].0 == crate::theme::FileCat::Image, "largest first");
+    let said = crate::glance::describe(&s);
+    assert!(said.starts_with("Pictures 43%") && said.contains("Folders 14%"), "{said}");
+}
+
+#[test]
+fn a_folder_peeks_with_its_first_pictures_by_name() {
+    let d = tmpdir("peek");
+    for f in ["img10.png", "img2.png", "img1.png", "notes.txt", ".hidden.png", "img3.jpg"] {
+        touch(&d.join(f), "x");
+    }
+    std::fs::create_dir_all(d.join("dir.png")).unwrap();
+    let got: Vec<String> = crate::peek::first_pictures(&d).iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+    assert_eq!(got, ["img1.png", "img2.png", "img3.jpg"], "natural order, no hidden ones, no folders");
+    assert!(crate::peek::first_pictures(&d.join("missing")).is_empty());
+}
+
+#[test]
+fn a_copys_speed_line_samples_twice_a_second() {
+    let id = 9_000_001;
+    assert!(crate::speedline::sample(id, 0, 10.0).is_empty());
+    assert!(crate::speedline::sample(id, 100, 10.2).is_empty(), "too soon for a sample");
+    assert_eq!(crate::speedline::sample(id, 1000, 10.5), vec![2000.0]);
+    assert_eq!(crate::speedline::sample(id, 1000, 11.0), vec![2000.0, 0.0], "a stall shows as nothing copied");
+    crate::speedline::keep_only(&[]);
+    assert!(crate::speedline::sample(id, 5000, 12.0).is_empty(), "forgotten once its card went");
+}
+
+#[test]
+fn a_theme_change_waits_a_frame_for_the_wash() {
+    use crate::wash::Wash;
+    let ctx = egui::Context::default();
+    let mut w = Wash::default();
+    ctx.run_pass(Default::default(), |_| {}).textures_delta.clear();
+    assert!(!w.theme_changing(&ctx, true), "the old theme stays one more frame");
+    assert!(w.wanted());
+    w.copied(Some((egui::TextureId::User(7), [800, 600])));
+    assert!(matches!(w, Wash::Ready(..)));
+    assert!(w.theme_changing(&ctx, true), "then the new theme, under the copy");
+    assert!(matches!(w, Wash::Running { .. }));
+    // A copy that failed, or none made (no runner draws), lets the change through.
+    let mut w = Wash::default();
+    w.theme_changing(&ctx, true);
+    w.copied(None);
+    assert!(w.theme_changing(&ctx, true) && !w.wanted());
+    let mut w = Wash::default();
+    w.theme_changing(&ctx, true);
+    assert!(w.theme_changing(&ctx, true), "asked and not answered");
+    assert!(Wash::default().theme_changing(&ctx, false), "motion off: at once");
+}
+
+#[test]
+fn popups_stay_solid_without_the_blur() {
+    let c = egui::Color32::from_rgb(40, 41, 42);
+    assert_eq!(crate::frost::fill(c), c, "no graphics card here: nothing to blur, no see-through");
+}
+
+#[test]
+fn a_font_file_shows_itself() {
+    let font = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fallback-sans.ttf");
+    let tile = crate::fontview::tile(&font, 96).expect("a tile");
+    assert_eq!((tile.w, tile.h), (96, 96));
+    let at = |x: u32, y: u32| &tile.px[((y * 96 + x) * 4) as usize..((y * 96 + x) * 4 + 4) as usize];
+    assert_eq!(at(0, 0)[3], 0, "rounded corners");
+    assert_eq!(at(48, 4), &[0xf4, 0xf1, 0xea, 255], "paper");
+    // The letters, dark, in the middle of the card, none at its edges.
+    let ink = |x0: u32, x1: u32, y0: u32, y1: u32| (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))).filter(|&(x, y)| at(x, y)[0] < 128).count();
+    assert!(ink(16, 80, 16, 80) > 150, "the letters are drawn: {}", ink(16, 80, 16, 80));
+    assert_eq!(ink(0, 96, 0, 8) + ink(0, 96, 88, 96), 0, "none at the edges");
+    let entry = crate::fsx::Entry::from_path(&font).unwrap();
+    assert!(crate::thumbs::can_thumb(&entry));
+    let d = tmpdir("not-a-font");
+    touch(&d.join("broken.ttf"), "not a font");
+    assert!(crate::fontview::tile(&d.join("broken.ttf"), 96).is_none());
+}
+
+#[test]
+fn a_refused_name_says_why() {
+    let d = tmpdir("say-no");
+    touch(&d.join("a.txt"), "a");
+    touch(&d.join("b.txt"), "b");
+    let mut r = Rename::new(vec![(0, d.join("a.txt"), "a.txt".into())], false);
+    let mut say = |text: &str| {
+        r.select_all();
+        r.insert_all(text);
+        r.reason()
+    };
+    assert_eq!(say("b.txt").as_deref(), Some("“b.txt” is already here"));
+    assert_eq!(say("").as_deref(), Some("A name can't be empty"));
+    assert_eq!(say("..").as_deref(), Some("“..” is the folder itself"));
+    assert_eq!(say("c.txt"), None);
+    assert_eq!(say("a.txt"), None, "its own name is not taken");
+}
+
+/// A picture decoded for the listing comes with its colours: the five it is made of and
+/// the sixteen the glow is drawn from, worked out on the thumbnail workers.
+#[test]
+fn thumbnails_carry_their_colours() {
+    let d = tmpdir("thumb-colours");
+    let png = d.join("sunset.png");
+    {
+        let f = std::fs::File::create(&png).unwrap();
+        let mut e = png::Encoder::new(std::io::BufWriter::new(f), 64, 48);
+        e.set_color(png::ColorType::Rgba);
+        e.set_depth(png::BitDepth::Eight);
+        // Orange sky over a dark blue sea.
+        let px: Vec<u8> = (0..64 * 48).flat_map(|i| if i / 64 < 30 { [240, 140, 40, 255] } else { [20, 40, 90, 255] }).collect();
+        e.write_header().unwrap().write_image_data(&px).unwrap();
+    }
+    let ctx = egui::Context::default();
+    let mut thumbs = crate::thumbs::Thumbs::new(ctx.clone(), 1);
+    let mtime = std::fs::metadata(&png).unwrap().modified().ok();
+    let t0 = Instant::now();
+    let (palette, glow) = loop {
+        ctx.run_pass(egui::RawInput::default(), |ctx| {
+            thumbs.pump(ctx);
+        }).drop_without_applying_deltas();
+        if let Some(l) = thumbs.get(&png, mtime, 64.0) {
+            break (l.palette.clone(), l.glow);
+        }
+        assert!(t0.elapsed() < Duration::from_secs(10) && !thumbs.failed(&png), "never decoded");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(palette.len(), 2, "{palette:?}");
+    assert_eq!(crate::colours::hex(palette[0].0), "#F08C28", "the sky, the larger share");
+    assert!((palette[0].1 - 30.0 / 48.0).abs() < 0.05);
+    assert!(glow[0].r() > glow[0].b() && glow[15].b() > glow[15].r(), "sky above, sea below");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The glow behind a picture: one mesh of six by six points around it, clear at its
+/// outer edge, nothing at all for a picture with no colour or no size.
+#[test]
+fn a_glow_fades_to_nothing_at_its_edge() {
+    let ctx = egui::Context::default();
+    let cells = [egui::Color32::from_rgb(200, 80, 40); 16];
+    let pic = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(200.0, 100.0));
+    let mut out = ctx.run_pass(egui::RawInput::default(), |ctx| {
+        let p = ctx.layer_painter(egui::LayerId::background());
+        crate::colours::paint_glow(&p, pic, &cells, 0.5);
+        crate::colours::paint_glow(&p, pic, &[egui::Color32::TRANSPARENT; 16], 0.5);
+        crate::colours::paint_glow(&p, egui::Rect::from_min_size(pic.min, egui::Vec2::ZERO), &cells, 0.5);
+    });
+    out.textures_delta.clear();
+    let meshes: Vec<&egui::epaint::Mesh> = out.shapes.iter().filter_map(|s| if let egui::Shape::Mesh(m) = &s.shape { Some(&**m) } else { None }).collect();
+    assert_eq!(meshes.len(), 1, "only the picture with colour and size glows");
+    let m = meshes[0];
+    assert_eq!((m.vertices.len(), m.indices.len()), (36, 5 * 5 * 6));
+    let outer = m.vertices.iter().filter(|v| !pic.expand(1.0).contains(v.pos));
+    assert!(outer.clone().count() == 20 && outer.clone().all(|v| v.color.a() == 0), "the ring outside the picture is clear");
+    assert!(m.vertices.iter().filter(|v| pic.expand(1.0).contains(v.pos)).all(|v| v.color.a() > 100));
+    let spread = m.vertices.iter().map(|v| v.pos.x).fold(f32::MAX, f32::min);
+    assert!(spread < pic.left() - 20.0 && spread > pic.left() - 240.0, "a soft edge, not the whole window: {spread}");
+}
+
+#[test]
+fn fonts_it_cannot_read_show_their_icon() {
+    let d = tmpdir("fonts-odd");
+    touch(&d.join("web.woff2"), "wOF2 not really");
+    touch(&d.join("empty.otf"), "");
+    for f in ["web.woff2", "empty.otf"] {
+        assert!(crate::fontview::tile(&d.join(f), 64).is_none(), "{f}");
+    }
 }

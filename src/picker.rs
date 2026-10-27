@@ -350,7 +350,7 @@ fn selected_folders(app: &mut App) -> Vec<PathBuf> {
 /// The folder shown, when it is a real one (not Computer, not inside an archive).
 fn real_folder(app: &mut App) -> Option<PathBuf> {
     let t = app.tab();
-    (t.archive.is_none() && !crate::tab::is_computer(&t.path) && t.path.is_dir()).then(|| t.path.clone())
+    (t.archive.is_none() && !crate::tab::is_place(&t.path) && t.path.is_dir()).then(|| t.path.clone())
 }
 
 fn uri(p: &Path) -> String {
