@@ -38,7 +38,7 @@ jobs:
                 "GPT / Codex": "model: GPT / Codex",
                 "Gemini": "model: Gemini",
                 "Grok": "model: Grok",
-                "Open model (Llama, Qwen, DeepSeek...)": "model: open (Llama, Qwen, DeepSeek)",
+                "Open model (Llama, Qwen, DeepSeek...)": "model: open model",
                 "Other": "model: other",
               }),
               pick("Checked by a person", { "No": "found by: AI", "Yes, a person checked it": "found by: AI + person" }),

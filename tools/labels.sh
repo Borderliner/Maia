@@ -32,7 +32,7 @@ model: Claude|d97757|The AI was a Claude model.
 model: GPT / Codex|10a37f|The AI was a GPT or Codex model.
 model: Gemini|4285f4|The AI was a Gemini model.
 model: Grok|444444|The AI was a Grok model.
-model: open (Llama, Qwen, DeepSeek)|6e7781|The AI was an open model.
+model: open model|6e7781|The AI was an open model: Llama, Qwen, DeepSeek and the like.
 model: other|bfbfbf|Another AI; the report names it.
 proof: steps|c2e0c6|Comes with steps that make it happen again.
 proof: screenshots / video|bfdadc|Comes with screenshots or a video.
@@ -42,7 +42,7 @@ status: needs triage|fbca04|Not looked at yet.
 status: needs info|d876e3|Waiting for more from the reporter.
 status: confirmed|0e8a16|Reproduced by the maintainer.
 status: can't reproduce|cfd3d7|Didn't happen when the maintainer tried it.
-status: fixed, next release|1d76db|Fixed; ships in the next release.
+status: fixed in next release|1d76db|Fixed; ships in the next release.
 status: won't fix|ffffff|Won't be worked on.
 status: duplicate|cccccc|Already reported.
 claim: held up|2da44e|Checked: what the report said was true.
