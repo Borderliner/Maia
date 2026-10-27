@@ -222,10 +222,13 @@ pub struct State {
     /// The app's icon, decoded on a thread the first time it is shown.
     icon: Option<egui::TextureHandle>,
     icon_rx: Option<Receiver<egui::ColorImage>>,
+    /// How tall the page's words stood last frame (with the button, on the opening
+    /// page): they are centred in their column by it.
+    block_h: f32,
 }
 
 pub fn open(kind: Kind, auto: bool) -> Popup {
-    Popup::Tour(Box::new(State { kind, page: 0, auto, film: None, turned: None, opened: None, dither: None, icon: None, icon_rx: None }))
+    Popup::Tour(Box::new(State { kind, page: 0, auto, film: None, turned: None, opened: None, dither: None, icon: None, icon_rx: None, block_h: 0.0 }))
 }
 
 impl State {
@@ -448,30 +451,33 @@ fn dots(ui: &mut Ui, foot: Rect, n: usize, page: usize, pal: &Palette, go: &mut 
 }
 
 /// The commands that reach a page, as key chips with what they do; a command with no
-/// keys shows its name, which is how the palette finds it.
+/// keys is a chip of its name, with the palette's magnifier, as the palette finds it.
 fn keys_row(ui: &mut Ui, app: &App, keys: &[Cmd], pal: &Palette) {
     if keys.is_empty() {
         return;
     }
+    let fs = ui.style().text_styles.get(&egui::TextStyle::Body).map_or(13.0, |f| f.size);
+    let chip_fs = (fs - 2.0).max(10.5);
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
         for &c in keys {
             let what = c.info().title.trim_end_matches('…');
-            match app.keymap.label(c) {
-                Some(k) => {
-                    let g = ui.painter().layout_no_wrap(k, FontId::proportional(10.5), pal.text_dim);
-                    let (r, _) = ui.allocate_exact_size(g.size() + vec2(10.0, 6.0), Sense::hover());
-                    ui.painter().rect(r, CornerRadius::same(4), pal.bg, Stroke::new(1.0, pal.border), StrokeKind::Inside);
-                    ui.painter().galley(r.min + vec2(5.0, 3.0), g, pal.text_dim);
-                    crate::ui::note_control(ui, r, "key hint");
-                    ui.label(egui::RichText::new(what).size(11.0).color(pal.text_dim));
-                }
-                None => {
-                    ui.label(egui::RichText::new(what).size(11.0).color(pal.text));
-                }
+            let key = app.keymap.label(c);
+            let g = ui.painter().layout_no_wrap(key.clone().unwrap_or_else(|| what.to_string()), FontId::proportional(chip_fs), pal.text_dim);
+            let icon = if key.is_none() { (chip_fs * 0.85).round() } else { 0.0 };
+            let lead = if icon > 0.0 { icon + 5.0 } else { 0.0 };
+            let (r, _) = ui.allocate_exact_size(g.size() + vec2(16.0 + lead, 8.0), Sense::hover());
+            ui.painter().rect(r, CornerRadius::same(5), pal.bg, Stroke::new(1.0, pal.border), StrokeKind::Inside);
+            if icon > 0.0 {
+                crate::theme::paint_symbol(ui.painter(), Rect::from_center_size(pos2(r.left() + 8.0 + icon / 2.0, r.center().y), Vec2::splat(icon)), "search", pal.text_dim);
             }
-            ui.add_space(8.0);
+            ui.painter().galley(pos2(r.left() + 8.0 + lead, r.center().y - g.size().y / 2.0), g, pal.text_dim);
+            crate::ui::note_control(ui, r, "key hint");
+            if key.is_some() {
+                ui.label(egui::RichText::new(what).size(fs - 1.0).color(pal.text_dim));
+            }
+            ui.add_space(10.0);
         }
     });
 }
@@ -595,44 +601,61 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         // Side by side, or the picture over the words in a narrow window.
         let stacked = cw < 760.0;
         let pad = (24.0 + (cw - 760.0).max(0.0) * 0.04).round().min(40.0);
+        let foot_h = 34.0;
         let (words_r, visual) = if stacked {
             // The choices and the list need the room; a film or the opening picture less.
+            // The words keep what they took last frame, whole, with the way on below.
             let choose = matches!(page.body, Body::Look | Body::Size | Body::Clicks | Body::Show | Body::Extras | Body::List);
-            let vh = (ch * if choose { 0.62 } else { 0.44 }).round();
-            (Rect::from_min_max(pos2(card.left() + pad, card.top() + vh + 12.0), pos2(card.right() - pad, card.bottom() - pad)), Rect::from_min_size(card.min + vec2(10.0, 10.0), vec2(cw - 20.0, vh - 10.0)))
+            let need = st.block_h + 12.0 + foot_h + 2.0 * pad;
+            let vh = (ch - need).min(ch * if choose { 0.62 } else { 0.44 }).max(ch * 0.3).round();
+            (Rect::from_min_max(pos2(card.left() + pad, card.top() + vh + pad), pos2(card.right() - pad, card.bottom() - pad)), Rect::from_min_size(card.min + vec2(10.0, 10.0), vec2(cw - 20.0, vh - 10.0)))
         } else {
-            let lw = (cw * 0.4).clamp(320.0, 440.0).round();
-            (Rect::from_min_max(card.min + vec2(pad, pad), pos2(card.left() + lw, card.bottom() - pad)), Rect::from_min_max(pos2(card.left() + lw + 8.0, card.top() + 10.0), card.max - vec2(10.0, 10.0)))
+            // The words keep the same margin from the picture as from the card's edge.
+            let lw = (cw * 0.42).clamp(340.0, 480.0).round();
+            (Rect::from_min_max(card.min + vec2(pad, pad), pos2(card.left() + lw - pad, card.bottom() - pad)), Rect::from_min_max(pos2(card.left() + lw, card.top() + 10.0), card.max - vec2(10.0, 10.0)))
         };
         let vrad = if app.cfg.round_corners { 12 } else { 0 };
         p.rect_filled(visual, CornerRadius::same(vrad), pal.bg);
         // The page's words, the way on at their foot.
         let shift = (1.0 - fade) * 10.0;
-        let foot_h = 34.0;
         let foot = Rect::from_min_max(pos2(words_r.left(), words_r.bottom() - foot_h), words_r.max);
+        let hero = page.body == Body::Hero;
+        // The words stand in the middle of their column, level with the picture beside
+        // them (a little above, where the eye expects the middle); the opening page's
+        // button stands under its words and is centred with them, the others' keep to
+        // the foot.
+        let hero_gap = 28.0;
+        let room = if hero { words_r.height() } else { foot.top() - 12.0 - words_r.top() };
+        let top = if stacked { 0.0 } else { ((room - st.block_h) * 0.46).max(0.0).round() };
         let hero_foot: f32;
+        let words_h: f32;
         {
             let body = Rect::from_min_max(words_r.min + vec2(shift, 0.0), pos2(words_r.right() + shift, foot.top() - 12.0));
             let mut wui = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(egui::Layout::top_down(egui::Align::Min)));
             wui.set_clip_rect(body.expand(2.0).intersect(ui.clip_rect()));
             wui.multiply_opacity(fade);
-            // Centred in its room on the opening page; from the top on the others.
-            if page.body == Body::Hero && !stacked {
-                wui.add_space((body.height() * 0.28).round());
-            } else if !stacked {
-                wui.add_space(8.0);
+            wui.add_space(top);
+            wui.spacing_mut().item_spacing.y = 0.0;
+            wui.label(egui::RichText::new(format!("{} of {n}", st.page + 1)).size((fs - 2.0).max(10.5)).color(pal.text_dim));
+            wui.add_space(10.0);
+            let title = (if hero { fs * 2.3 } else { fs * 1.8 }).round();
+            wui.add(egui::Label::new(egui::RichText::new(page.title).strong().size(title).color(pal.text).line_height(Some((title * 1.2).round()))).wrap());
+            wui.add_space(if hero { 16.0 } else { 12.0 });
+            // A comfortable measure: a line much longer than this is hard to follow back.
+            let text = fs + 0.5;
+            let measure = wui.available_width().min((text * 34.0).round());
+            wui.allocate_ui(vec2(measure, 0.0), |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(page.text).size(text).color(pal.text_dim).line_height(Some((text * 1.5).round()))).wrap());
+            });
+            if !page.keys.is_empty() {
+                wui.add_space(10.0);
+                keys_row(&mut wui, app, page.keys, &pal);
             }
-            wui.label(egui::RichText::new(format!("{} of {n}", st.page + 1)).size(fs - 1.5).color(pal.text_dim));
-            wui.add_space(6.0);
-            let title = if page.body == Body::Hero { fs * 2.3 } else { fs * 1.8 };
-            wui.add(egui::Label::new(egui::RichText::new(page.title).strong().size(title.round()).color(pal.text)).wrap());
-            wui.add_space(8.0);
-            wui.add(egui::Label::new(egui::RichText::new(page.text).size(fs + 0.5).color(pal.text_dim).line_height(Some(((fs + 0.5) * 1.45).round()))).wrap());
-            keys_row(&mut wui, app, page.keys, &pal);
-            hero_foot = (wui.min_rect().bottom() + 24.0).round();
+            hero_foot = (wui.min_rect().bottom() + hero_gap).round();
+            words_h = (wui.min_rect().bottom() - words_r.top() - top).round();
         }
         // The opening page's button stands under its words; the others' at the foot.
-        let foot = if page.body == Body::Hero { Rect::from_min_size(pos2(foot.left(), hero_foot.min(foot.top())), foot.size()) } else { foot };
+        let foot = if hero { Rect::from_min_size(pos2(foot.left(), hero_foot.min(foot.top())), foot.size()) } else { foot };
         let mut fui = ui.new_child(egui::UiBuilder::new().max_rect(foot).layout(egui::Layout::left_to_right(egui::Align::Center)));
         fui.spacing_mut().item_spacing.x = 8.0;
         let last = st.page + 1 == n;
@@ -653,6 +676,13 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         }
         let b = pp::primary_button(&mut fui, label, true, &pal);
         crate::ui::note_control(&fui, b.rect, "welcome next");
+        {
+            let h = if hero && !stacked { (b.rect.bottom() - words_r.top() - top).round() } else { words_h };
+            if (h - st.block_h).abs() > 0.5 {
+                st.block_h = h;
+                ctx.request_repaint();
+            }
+        }
         if b.clicked() {
             if last {
                 close = true;
@@ -905,7 +935,7 @@ fn step_look(ui: &mut Ui, app: &mut App, area: Rect) -> bool {
     let gap = 14.0;
     let cw = ((area.width() - gap * (cols as f32 - 1.0)) / cols as f32).floor();
     let wh = words_h(ui, false);
-    let ch = (cw * 0.62 + wh + 26.0).min(((area.height() - 78.0 - gap * (rows as f32 - 1.0)) / rows as f32).floor()).max(wh + 40.0);
+    let ch = (cw * 0.62 + wh + 26.0).min(((area.height() - 78.0 - gap * (rows as f32 - 1.0)) / rows as f32).floor()).max(wh + 22.0);
     let area = middle(area, 78.0 + rows as f32 * ch + (rows as f32 - 1.0) * gap);
     let row = Rect::from_min_size(area.min, vec2(area.width(), 60.0));
     let mut follow = app.cfg.follow_system_theme;
@@ -918,8 +948,11 @@ fn step_look(ui: &mut Ui, app: &mut App, area: Rect) -> bool {
         let r = Rect::from_min_size(pos2(grid.left() + (i % cols) as f32 * (cw + gap), grid.top() + (i / cols) as f32 * (ch + gap)), vec2(cw, ch));
         let on = !app.cfg.follow_system_theme && app.cfg.theme == *t;
         let resp = card(ui, r, on, Id::new(("welcome theme", i)), "tour theme", &pal);
+        // Too short for a picture of the window that reads, the card is its name alone.
         let pic = Rect::from_min_max(r.min + vec2(10.0, 10.0), pos2(r.right() - 10.0, r.bottom() - wh - 16.0));
-        pp::theme_card(ui.painter(), pic, crate::theme::palette(*t), 7);
+        if pic.height() >= 36.0 {
+            pp::theme_card(ui.painter(), pic, crate::theme::palette(*t), 7);
+        }
         card_words(ui, pos2(r.left() + 12.0, r.bottom() - wh - 9.0), r.width() - 24.0, t.label(), "", &pal);
         if on {
             mark(ui, r, Id::new(("welcome theme", i)), &pal);
