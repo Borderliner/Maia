@@ -58,6 +58,12 @@ pub enum Drag {
     Bookmark { idx: usize },
 }
 
+/// The window's title for the folder shown: "Invoices · Maia", plain "Maia" for nothing.
+pub fn window_title(shown: &str) -> String {
+    let shown: String = shown.chars().filter(|c| *c != '\0').collect();
+    if shown.is_empty() { "Maia".to_string() } else { format!("{shown} · Maia") }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct UndoEntry {
     pub label: String,
@@ -242,8 +248,17 @@ pub struct App {
     pub clip_files: Vec<crate::clipfile::Pending>,
     pub popup: Popup,
     pub sidebar: bool,
+    /// The last press was in the sidebar: typing while pointing at it filters it.
+    pub side_focus: bool,
     pub sidebar_width: f32,
     pub toast: Option<(String, Instant)>,
+    /// The helper program the toast says is missing: it offers how to install it.
+    pub toast_tool: Option<&'static str>,
+    /// The toast reports a change Undo can take back: the undo stack's generation right
+    /// after it, so its Undo shows only while that change is still the latest.
+    pub toast_undo: Option<u64>,
+    /// The window title last sent, so it is sent again only when it changes.
+    pub(crate) window_title: String,
     pub seq: Vec<Chord>,
     pub seq_time: Instant,
     pub drag: Option<Drag>,
@@ -278,6 +293,8 @@ pub struct App {
     pub shown_rects: std::collections::HashMap<u64, egui::Rect>,
     /// Panels along the top edge: their tab strips live in the title bar.
     pub title_tab_panels: Vec<u64>,
+    /// What tells same-named tabs apart, by tab id, and the tabs it was worked out for.
+    pub tab_hints: (u64, std::sync::Arc<HashMap<u64, String>>),
     /// Closed tabs whose slot is still collapsing: (panel, index, width, when).
     pub tab_ghosts: Vec<(u64, usize, f32, std::time::Instant)>,
     /// When background work last produced results; memory is handed back once things settle.
@@ -412,8 +429,12 @@ impl App {
             clip_files: vec![],
             popup: Popup::None,
             sidebar: if session.sidebar_width > 0.0 { session.sidebar } else { true },
+            side_focus: false,
             sidebar_width: if session.sidebar_width > 0.0 { session.sidebar_width } else { 176.0 },
             toast: None,
+            toast_tool: None,
+            toast_undo: None,
+            window_title: String::new(),
             seq: vec![],
             seq_time: Instant::now(),
             drag: None,
@@ -441,6 +462,7 @@ impl App {
             font_applied: format!("{}\u{1f}{}", font_family, cfg_mono),
             shown_rects: Default::default(),
             title_tab_panels: vec![],
+            tab_hints: (0, Default::default()),
             tab_ghosts: vec![],
             trim_after: None,
             trim_pending_since: None,
@@ -587,7 +609,65 @@ impl App {
 
     pub fn toast(&mut self, s: impl Into<String>) {
         let s: String = s.into();
+        self.toast_tool = crate::needs::tool_in(&s);
+        self.toast_undo = None;
+        if self.toast_tool.is_some() {
+            crate::needs::warm();
+        }
         self.toast = Some((fsx::plain_error(&s).to_string(), Instant::now()));
+    }
+
+    /// For tabs whose titles another tab in the window shares, the name of the first folder
+    /// up their paths that differs ("src" in maia and in notes: "maia", "notes"). Worked out
+    /// again only when the tabs change. Smart folders and places keep their own names.
+    pub fn tab_hints(&mut self) -> std::sync::Arc<HashMap<u64, String>> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let tabs: Vec<&tab::Tab> = self.panels.values().flat_map(|p| p.tabs.iter()).filter(|t| t.smart.is_none() && !tab::is_place(&t.path)).collect();
+        for t in &tabs {
+            (t.id, &t.path, t.flatten || t.expand_all_on).hash(&mut h);
+        }
+        let key = h.finish();
+        if key == self.tab_hints.0 {
+            return self.tab_hints.1.clone();
+        }
+        let mut by_title: HashMap<String, Vec<&tab::Tab>> = HashMap::new();
+        for t in tabs {
+            by_title.entry(t.title()).or_default().push(t);
+        }
+        // The name `up` folders above `p`'s own; "/" past the top.
+        let above = |p: &Path, up: usize| -> String {
+            p.ancestors().nth(up + 1).map(|a| a.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "/".into())).unwrap_or_else(|| "/".into())
+        };
+        let mut hints = HashMap::new();
+        for group in by_title.values().filter(|g| g.len() > 1) {
+            for t in group {
+                // Tabs on the same folder can't be told apart by it: they are left alone.
+                let others: Vec<&&tab::Tab> = group.iter().filter(|o| o.path != t.path).collect();
+                if others.is_empty() {
+                    continue;
+                }
+                let depth = t.path.components().count();
+                if let Some(up) = (0..depth).find(|&up| others.iter().all(|o| above(&o.path, up) != above(&t.path, up))) {
+                    hints.insert(t.id, above(&t.path, up));
+                }
+            }
+        }
+        self.tab_hints = (key, std::sync::Arc::new(hints));
+        self.tab_hints.1.clone()
+    }
+
+    /// Whether the toast's Undo still takes back the change it reports: nothing else has
+    /// been done or undone since.
+    pub fn toast_undo_live(&self) -> bool {
+        self.toast_undo == Some(self.undo.generation)
+    }
+
+    /// A toast for a change just made, offering to take it back: Undo acts as Ctrl+Z does,
+    /// for as long as the change is the newest.
+    pub fn toast_undoable(&mut self, s: impl Into<String>) {
+        self.toast(s);
+        self.toast_undo = Some(self.undo.generation);
     }
 
     /// Drag and drop with other apps: a drag over the window becomes an ordinary file
@@ -824,7 +904,7 @@ impl App {
         let mut i = 0;
         while i < self.shares.len() {
             match self.shares[i].try_recv() {
-                Ok(done) => {
+                Ok(mut done) => {
                     self.shares.remove(i);
                     if let Some(t) = done.copy {
                         ctx.copy_text(t);
@@ -845,8 +925,11 @@ impl App {
                             t.pending_restore = Some(tab::HistState { path: t.path.clone(), cursor: new.first().cloned(), selected: new, scroll: t.current_scroll });
                             t.reload();
                         }
+                        let n = pairs.len();
                         self.follow_pins(&pairs);
                         self.undo.push(UndoEntry { label, kind: UndoKind::Rename(pairs) });
+                        // Its own words when it has some, with the Undo added.
+                        self.toast_undoable(if done.toast.is_empty() { format!("Renamed {n} item{}", if n == 1 { "" } else { "s" }) } else { std::mem::take(&mut done.toast) });
                     }
                     if !done.toast.is_empty() {
                         self.toast(done.toast);
@@ -1368,6 +1451,15 @@ impl App {
         self.draw(&ctx);
         self.wash.paint(&ctx);
         self.process_actions(&ctx);
+        // The task bar and Alt+Tab name the folder shown: sent only when it changes. The
+        // Open and Save dialog keeps the title it was given.
+        if self.picker.is_none() {
+            let title = window_title(&self.panels.get(&self.active).map(|p| p.tab().title()).unwrap_or_default());
+            if title != self.window_title {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+                self.window_title = title;
+            }
+        }
         self.ext_drop = None;
         // Tests share one home and run side by side: saving on its own, one test's Show
         // Hidden reached the tests started after it. Those that check saving ask for it.
@@ -1655,10 +1747,14 @@ impl App {
         // Jobs: mark finished, drop after a moment.
         let mut changes: Vec<ops::Changed> = vec![];
         let mut pw_job = None;
+        // The newest finished trash, move or copy with an Undo: said in a toast, and its
+        // card let go when nothing went wrong (the toast says it instead).
+        let mut said: Option<(String, Option<u64>)> = None;
         for j in &mut self.jobs {
             if j.finished_at.is_none() && j.progress.lock().unwrap().finished {
                 j.finished_at = Some(Instant::now());
                 let p = j.progress.lock().unwrap();
+                let before = self.undo.generation;
                 changes.push(ops::Changed::of(&j.kind, &p));
                 if let Some((archive, wrong)) = &p.password {
                     pw_job = Some((archive.clone(), *wrong, j.kind.clone(), j.id));
@@ -1704,6 +1800,15 @@ impl App {
                 if let Some(step) = self.job_steps.remove(&j.id) {
                     crate::redo::placed(&mut self.undo, step, &p);
                 }
+                if self.undo.generation != before {
+                    said = crate::ui::undo_note(&j.kind, &p).map(|s| (s, p.errors.is_empty().then_some(j.id)));
+                }
+            }
+        }
+        if let Some((s, quiet)) = said {
+            self.toast_undoable(s);
+            if let Some(id) = quiet {
+                self.jobs.retain(|j| j.id != id);
             }
         }
         // An extraction refused for want of a password: ask, and run it again.
@@ -2029,7 +2134,9 @@ impl App {
                     if mods.ctrl || mods.alt || t.trim().is_empty() {
                         continue;
                     }
+                    let at_side = self.sidebar && self.side_focus && ctx.pointer_hover_pos().is_some_and(|p| p.x < self.sidebar_width);
                     match self.cfg.char_key_action {
+                        _ if at_side => crate::sidebar::type_into(t),
                         config::CharKeyAction::Jump => self.jump_to(t),
                         _ => {
                             let id = self.active;
@@ -2593,6 +2700,10 @@ impl App {
                 self.set_config_changed();
             }
             Cmd::ToggleSidebar => self.sidebar = !self.sidebar,
+            Cmd::FilterSidebar => {
+                self.sidebar = true;
+                crate::sidebar::type_into("");
+            }
             // Columns sits beside the zoom axis: there is nothing in it to grow.
             Cmd::ZoomIn | Cmd::ZoomOut if self.tab().settings.column_view || self.tab().settings.stack_view => {}
             Cmd::ZoomIn | Cmd::ZoomOut => {
@@ -3066,7 +3177,9 @@ impl App {
                 let r = if cmd == Cmd::NewFolder { std::fs::create_dir(&dest) } else { std::fs::File::create_new(&dest).map(|_| ()) };
                 match r {
                     Ok(()) => {
-                        self.undo.push(UndoEntry { label: format!("Create {}", dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()), kind: UndoKind::Created(vec![dest.clone()]) });
+                        let made = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        self.undo.push(UndoEntry { label: format!("Create {made}"), kind: UndoKind::Created(vec![dest.clone()]) });
+                        self.toast_undoable(format!("Created {made}"));
                         let t = self.tab();
                         t.filter.clear();
                         t.pending_rename = Some(dest);
@@ -4207,6 +4320,12 @@ impl App {
         if !done.is_empty() {
             self.follow_pins(&done);
             self.undo.push(UndoEntry { label, kind: UndoKind::Rename(done.clone()) });
+            let note = match done.as_slice() {
+                _ if done.len() < pairs.len() => format!("Renamed {} of {}", done.len(), pairs.len()),
+                [(_, to)] => format!("Renamed to {}", name(to)),
+                _ => format!("Renamed {} items", done.len()),
+            };
+            self.toast_undoable(note);
             // Other tabs on the same folder show the new names too.
             self.show_changed(&ops::Changed::moved(&done));
         }

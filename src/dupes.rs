@@ -375,7 +375,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                     let cb = Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), Vec2::splat(14.0));
                     crate::popups::checkbox_glyph(ui.painter(), cb, st.checked.contains(&c.path), &pal);
                     crate::ui::note_control(ui, cb, "duplicate check");
-                    let when = c.modified.map(|m| crate::timefmt::format(m, &app.cfg.date_format)).unwrap_or_default();
+                    let when = c.modified.map(|m| crate::timefmt::date(m, &app.cfg.date_format)).unwrap_or_default();
                     let wg = ui.painter().layout_no_wrap(when, FontId::proportional(small), dc);
                     let ww = wg.size().x;
                     ui.painter().galley(pos2(r.right() - 12.0 - ww, r.center().y - wg.size().y / 2.0), wg, dc);

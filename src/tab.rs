@@ -131,6 +131,8 @@ pub struct Tab {
     pub rename: Option<Rename>,
     /// Counts for the footer: (visible folders, total folders, visible files, total files).
     pub counts: (usize, usize, usize, usize),
+    /// Bytes in the files shown (folders' own sizes arrive later, from the stats).
+    pub shown_bytes: u64,
     pub hidden_count: usize,
     /// What git ignores here, left out of the view (the Ignored files option is Hide).
     pub git_hide: Option<std::sync::Arc<HashSet<std::ffi::OsString>>>,
@@ -264,6 +266,7 @@ impl Tab {
             collapsed_groups: HashSet::new(),
             rename: None,
             counts: (0, 0, 0, 0),
+            shown_bytes: 0,
             hidden_count: 0,
             git_hide: None,
             only_changed: false,
@@ -1303,6 +1306,7 @@ impl Tab {
                 SortKey::Tags => Some(crate::tags::sort_keys(top.iter().map(|&i| entries[i as usize].path.as_path()))),
                 SortKey::Taken | SortKey::Dimensions | SortKey::Duration => Some(top.iter().map(|&i| crate::facts::sort_key(&entries[i as usize], s.sort)).collect()),
                 SortKey::Colour => Some(top.iter().map(|&i| crate::colours::sort_key(&entries[i as usize])).collect()),
+                SortKey::Type => Some(type_keys(top.iter().map(|&i| &entries[i as usize]))),
                 _ => None,
             };
             let by_name = |a: &u32, b: &u32| compare(&entries[*a as usize], &entries[*b as usize], SortKey::Name, s.desc, c, tm);
@@ -1396,15 +1400,21 @@ impl Tab {
         self.build_rows(top, &kids, c.stats);
         // Shown out of the folder's own items, as the totals count them: unfolded tree
         // rows are not in the totals (a folder of 1 showed "3/1" with two kids open).
-        let (mut vf, mut vfi) = (0, 0);
+        let (mut vf, mut vfi, mut bytes) = (0, 0, 0u64);
         for &i in &self.view {
             let e = &self.entries[i as usize];
             if e.depth > 0 {
                 continue;
             }
-            if e.is_dir { vf += 1 } else { vfi += 1 }
+            if e.is_dir {
+                vf += 1
+            } else {
+                vfi += 1;
+                bytes += e.size;
+            }
         }
         self.counts = (vf, tf, vfi, tfi);
+        self.shown_bytes = bytes;
         self.last_filter = self.filter.clone();
         self.index_view();
         // Apply a pending restore once results are complete.
@@ -1539,6 +1549,43 @@ impl Tab {
         v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         v
     }
+}
+
+/// Sort keys for the Type column: each item's place among the kinds shown, in their
+/// alphabetical order, so the column reads in order. The kind is asked once per
+/// extension, not once per item.
+fn type_keys<'a>(items: impl Iterator<Item = &'a Entry>) -> Vec<Option<u64>> {
+    let db = crate::mime::mime_db();
+    let mut kinds: Vec<String> = vec![];
+    let mut by_ext: HashMap<(&'a str, bool, bool), usize> = HashMap::new();
+    let mut place = |kinds: &mut Vec<String>, k: String| kinds.iter().position(|x| *x == k).unwrap_or_else(|| {
+        kinds.push(k);
+        kinds.len() - 1
+    });
+    let idx: Vec<usize> = items
+        .map(|e| {
+            let short = || db.short(&e.name, e.ext(), e.is_dir, e.is_executable());
+            if db.named(&e.name) {
+                return place(&mut kinds, short());
+            }
+            match by_ext.get(&(e.ext(), e.is_dir, e.is_executable())) {
+                Some(&k) => k,
+                None => {
+                    let k = place(&mut kinds, short());
+                    by_ext.insert((e.ext(), e.is_dir, e.is_executable()), k);
+                    k
+                }
+            }
+        })
+        .collect();
+    // Few kinds: their alphabetical order is a small sort.
+    let mut order: Vec<usize> = (0..kinds.len()).collect();
+    order.sort_by(|a, b| kinds[*a].cmp(&kinds[*b]));
+    let mut rank = vec![0u64; kinds.len()];
+    for (r, &k) in order.iter().enumerate() {
+        rank[k] = r as u64;
+    }
+    idx.into_iter().map(|k| Some(rank[k])).collect()
 }
 
 pub fn volume_label(device: &str, mount: &Path) -> String {
@@ -1800,7 +1847,7 @@ fn group_label(e: &Entry, g: GroupBy, c: &GroupCtx) -> String {
             _ => "Other".into(),
         },
         // Same labels as the Type column.
-        GroupBy::Type => crate::mime::mime_db().label(&e.name, &e.ext(), e.is_dir, e.is_executable()),
+        GroupBy::Type => crate::mime::mime_db().short(&e.name, &e.ext(), e.is_dir, e.is_executable()),
         GroupBy::Modified => date_group(e.modified),
         GroupBy::Created => date_group(e.created),
         GroupBy::Accessed => date_group(e.accessed),
@@ -1812,10 +1859,10 @@ fn group_label(e: &Entry, g: GroupBy, c: &GroupCtx) -> String {
             }
             match e.size {
                 0 => "Empty".into(),
-                s if s < 16 << 10 => "Tiny (< 16 KB)".into(),
-                s if s < 1 << 20 => "Small (< 1 MB)".into(),
-                s if s < 128 << 20 => "Medium (< 128 MB)".into(),
-                s if s < 1 << 30 => "Large (< 1 GB)".into(),
+                s if s < 16_000 => "Tiny (< 16 KB)".into(),
+                s if s < 1_000_000 => "Small (< 1 MB)".into(),
+                s if s < 128_000_000 => "Medium (< 128 MB)".into(),
+                s if s < 1_000_000_000 => "Large (< 1 GB)".into(),
                 _ => "Huge (≥ 1 GB)".into(),
             }
         }
@@ -1847,9 +1894,9 @@ fn group_label(e: &Entry, g: GroupBy, c: &GroupCtx) -> String {
         GroupBy::FreeSpace | GroupBy::PercentFull if c.vols.get(&e.path).is_some_and(|v| !v.mounted) => "Not mounted".into(),
         GroupBy::FreeSpace => match c.vols.get(&e.path) {
             Some(v) => match v.free {
-                f if f < 1 << 30 => "Under 1 GB free".into(),
-                f if f < 10 << 30 => "1 – 10 GB free".into(),
-                f if f < 100 << 30 => "10 – 100 GB free".into(),
+                f if f < 1_000_000_000 => "Under 1 GB free".into(),
+                f if f < 10_000_000_000 => "1 – 10 GB free".into(),
+                f if f < 100_000_000_000 => "10 – 100 GB free".into(),
                 _ => "Over 100 GB free".into(),
             },
             None => "Unknown".into(),

@@ -224,6 +224,7 @@ commands! {
     ToggleReadme, "toggle_readme", View, "Toggle Folder README", "Show a folder's README above its files.", [];
     ToggleRecentsOnTop, "toggle_recents_on_top", View, "Toggle Recents On Top", "Sort recently used items above the rest.", [];
     ToggleSidebar, "toggle_sidebar", View, "Toggle Sidebar", "Show or hide the quick access sidebar.", ["Ctrl+B"];
+    FilterSidebar, "filter_sidebar", View, "Filter Sidebar", "Narrow the sidebar's places by name. Typing while pointing at the sidebar does it too.", [];
     ZoomIn, "zoom_in", View, "Zoom In", "Step toward bigger icons (also Ctrl+wheel).", ["Ctrl+Equals", "Ctrl+Plus"];
     ZoomOut, "zoom_out", View, "Zoom Out", "Step toward denser views (also Ctrl+wheel).", ["Ctrl+Minus"];
     ViewDetails, "view_details", View, "View Details", "A table with sortable columns.", ["Ctrl+Shift+1", "Ctrl+0"];

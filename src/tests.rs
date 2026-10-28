@@ -1508,7 +1508,7 @@ PATH="/dev/sdw1" PKNAME="sdw" LABEL="Diary" FSTYPE="crypto_LUKS" SIZE="640222085
     let offered: Vec<&str> = d.iter().filter(|x| x.offer_mount()).map(|x| x.dev.as_str()).collect();
     assert_eq!(offered, ["/dev/nvme0n1p3", "/dev/sdw1"], "locked volumes; not the open ones, nor what is mounted");
     assert_eq!(get("/dev/nvme0n1p3").crypt, Crypt::Locked);
-    assert_eq!(get("/dev/nvme0n1p3").title(), "Encrypted 200 GB");
+    assert_eq!(get("/dev/nvme0n1p3").title(), "Encrypted 215 GB", "in thousands, as the drive's label says");
     assert_eq!(get("/dev/sdw1").title(), "Diary", "a LUKS2 label is its name");
     assert_eq!(get("/dev/sdv1").crypt, Crypt::Plain, "unlocked: what's inside stands for it");
     let vault = get("/dev/mapper/luks-3f6c0e5a-8d2b-4c1e-9a7f-2b5d8e1c4a90");
@@ -2447,7 +2447,8 @@ fn filter_conditions_by_size_and_date() {
     };
     assert_eq!(shown(&mut t, &stats, "size>1M"), ["movie.mkv", "photo.jpg"]);
     assert_eq!(shown(&mut t, &stats, "size<2k"), ["empty.log", "tiny.txt"]);
-    assert_eq!(shown(&mut t, &stats, "size<3k"), ["empty.log", "page.html", "tiny.txt"], "k is 1024");
+    assert_eq!(shown(&mut t, &stats, "size<3k"), ["empty.log", "tiny.txt"], "k is 1000: 3000 bytes are not under 3k");
+    assert_eq!(shown(&mut t, &stats, "size<=3k"), ["empty.log", "page.html", "tiny.txt"], "but they are 3k");
     assert_eq!(shown(&mut t, &stats, "size<=3000"), ["empty.log", "page.html", "tiny.txt"]);
     assert_eq!(shown(&mut t, &stats, "size:0"), ["empty.log"]);
     assert_eq!(shown(&mut t, &stats, "SIZE>1.5mb size<100MiB"), ["photo.jpg"]);
@@ -2545,7 +2546,8 @@ fn filter_language_or_not_types_patterns_owners() {
         assert_eq!(shown(&mut t, q), ["report-2026.pdf"], "{q}");
     }
     assert_eq!(shown(&mut t, "ext:md,pdf -ext:pdf"), ["report-draft.md"]);
-    assert_eq!(shown(&mut t, "-size<1k -type:folder"), ["IMG_0001.jpg", "IMG_0002.png", "archive.tar.gz", "photo (1).jpg", "report-2026.pdf"]);
+    // 1000 bytes are 1k, not under it.
+    assert_eq!(shown(&mut t, "-size<1k -type:folder"), ["IMG_0001.jpg", "IMG_0002.png", "archive.tar.gz", "photo (1).jpg", "report-2026.pdf", "report-draft.md"]);
     // A hyphen inside a word is part of it; a lone one is a word too.
     assert_eq!(shown(&mut t, "my-file"), ["my-file.txt"]);
     assert_eq!(shown(&mut t, "-"), ["my-file.txt", "report-2026.pdf", "report-draft.md"]);
@@ -6420,7 +6422,8 @@ fn email_attaches_files() {
     email(&f).unwrap();
     assert!(crate::mime::LAUNCHED.lock().unwrap()[n..].iter().any(|l| l.starts_with("\"thunderbird\" \"-compose\"")));
     MAIL_APP.with(|m| *m.borrow_mut() = Some("firefox %u".into()));
-    assert_eq!(email(&f).unwrap_err(), "Install xdg-utils to attach files to an email");
+    assert_eq!(email(&f).unwrap_err(), "Attaching files to an email needs xdg-email");
+    assert_eq!(crate::needs::tool_in(&email(&f).unwrap_err()), Some("xdg-email"), "the toast offers how to install it");
     MAIL_APP.with(|m| *m.borrow_mut() = None);
     crate::drives::FAKE.with(|x| *x.borrow_mut() = None);
     let _ = std::fs::remove_dir_all(&d);
@@ -7192,12 +7195,13 @@ fn smart_folders_find_what_they_say() {
     }
     // An older smart folder's fields, translated into the query they amount to: the
     // same files as above, and what the dialog shows.
-    let old = sf("invoice", &["pdfs", "holograms"], Some(30), Some(1 << 20));
+    let old = sf("invoice", &["pdfs", "holograms"], Some(30), Some(1_000_000));
     assert_eq!(old.query_text(), "name:invoice type:pdfs modified<30d size>1M");
     assert_eq!(found(&old), ["Invoices/2026/invoice-031.pdf"]);
     assert_eq!(sf("IMG_*", &[], None, Some(1500)).query_text(), "name:IMG_* size>1500");
     assert_eq!(SmartFolder { query: "a | b".into(), ..sf("my scan", &[], Some(2), None) }.query_text(), r#"name:"my scan" modified<2d (a | b)"#);
-    assert_eq!(sf("", &[], None, Some(1_000_000)).query_text(), "size>1000000");
+    assert_eq!(sf("", &[], None, Some(1_048_576)).query_text(), "size>1048576", "not a whole number of thousands: the bytes");
+    assert_eq!(sf("", &[], None, Some(3_000_000_000)).query_text(), "size>3G");
     assert!(old.summary().ends_with("“name:invoice type:pdfs modified<30d size>1M”"), "{}", old.summary());
     // The dialog's fields: what it saves is the query alone.
     let crate::popups::Popup::SmartEdit(mut e) = crate::smart::edit(&old, true) else { panic!() };
@@ -9891,7 +9895,7 @@ fn photos_through_external_tools() {
     assert_eq!(img.px, [128, 128, 128, 64]);
     assert!(pnm(b"P6\n2 1\n65535\n\x00\x00").is_none(), "16 bits");
     assert!(pnm(b"P6\n2 1\n255\n\x00").is_none(), "cut short");
-    assert_eq!(install_note("heic"), Some("Install ImageMagick to see HEIC photos"));
+    assert_eq!(install_note("heic"), Some("Showing HEIC photos needs ImageMagick"));
     assert_eq!(install_note("png"), None);
     let d = tmpdir("extpic");
     struct Reset;
@@ -12229,7 +12233,7 @@ fn locked_archives_change_and_stay_locked() {
             if without7 && name.ends_with(".7z") {
                 set_password(&a, "hunter2".into());
                 let r = archive_edit(&a, add);
-                assert!(r.as_ref().is_err_and(|e| e.contains("7z command")), "{name}: {r:?}");
+                assert!(r.as_ref().is_err_and(|e| e.ends_with("need 7z")), "{name}: {r:?}");
                 continue;
             }
             let bytes = std::fs::read(&a).unwrap();
@@ -14391,5 +14395,303 @@ fn fonts_it_cannot_read_show_their_icon() {
     touch(&d.join("empty.otf"), "");
     for f in ["web.woff2", "empty.otf"] {
         assert!(crate::fontview::tile(&d.join(f), 64).is_none(), "{f}");
+    }
+}
+
+
+// ------------------------------------------------------------------ the redesign
+
+/// Dates said against today, on this machine's clock and time zone; and a saved config
+/// from before version 2 gives up the old default pattern but keeps one chosen on purpose.
+#[test]
+fn dates_said_against_today_and_the_old_default_migrated() {
+    use crate::timefmt::{parse_local, relative};
+    let now = parse_local("2026-10-28T17:10:00").unwrap();
+    let at = |s: &str| relative(parse_local(s).unwrap(), now);
+    assert_eq!(at("2026-10-28T09:05:00"), "Today 09:05");
+    assert_eq!(at("2026-10-27T23:59:00"), "Yesterday 23:59");
+    // Wednesday the 22nd, within the week: its weekday (C locale names).
+    assert_eq!(at("2026-10-22T22:57:00"), format!("{} 22:57", crate::timefmt::format(parse_local("2026-10-22T12:00:00").unwrap(), "%a")));
+    assert_eq!(at("2026-10-21T08:00:00"), format!("21 {}", crate::timefmt::format(parse_local("2026-10-21T12:00:00").unwrap(), "%b")), "a week ago: the day and month");
+    assert_eq!(at("2026-03-12T08:00:00"), format!("12 {}", crate::timefmt::format(parse_local("2026-03-12T12:00:00").unwrap(), "%b")));
+    assert_eq!(at("2025-03-12T08:00:00"), format!("12 {} 2025", crate::timefmt::format(parse_local("2025-03-12T12:00:00").unwrap(), "%b")), "another year says it");
+    // Empty pattern: relative; a pattern: as written.
+    let t = parse_local("2025-03-12T08:00:00").unwrap();
+    assert_eq!(crate::timefmt::date(t, "%Y-%m-%d"), "2025-03-12");
+    assert!(crate::timefmt::date(t, "").starts_with("12 "));
+    assert_eq!(crate::config::Config::default().date_format, "", "relative dates by default");
+    let mut old: crate::config::Config = serde_json::from_str(r#"{"version":1,"date_format":"%x %H:%M"}"#).unwrap();
+    crate::config::migrate(&mut old);
+    assert_eq!((old.date_format.as_str(), old.version), ("", crate::config::CONFIG_VERSION));
+    let mut chosen: crate::config::Config = serde_json::from_str(r#"{"version":1,"date_format":"%Y-%m-%d"}"#).unwrap();
+    crate::config::migrate(&mut chosen);
+    assert_eq!(chosen.date_format, "%Y-%m-%d", "a choice stays");
+    let mut new: crate::config::Config = serde_json::from_str(r#"{"version":2,"date_format":"%x %H:%M"}"#).unwrap();
+    crate::config::migrate(&mut new);
+    assert_eq!(new.date_format, "%x %H:%M", "chosen after the change: kept");
+}
+
+/// Sizes in thousands, as drives and downloads are labelled, one decimal under 100.
+#[test]
+fn sizes_counted_in_thousands() {
+    use crate::fsx::fmt_size;
+    assert_eq!(fmt_size(999), "999 B");
+    assert_eq!(fmt_size(1000), "1.0 KB");
+    assert_eq!(fmt_size(1_500), "1.5 KB");
+    assert_eq!(fmt_size(99_940), "99.9 KB");
+    assert_eq!(fmt_size(123_456), "123 KB");
+    assert_eq!(fmt_size(999_960), "1.0 MB", "not 1000 KB");
+    assert_eq!(fmt_size(4_700_000_000), "4.7 GB", "a 4.7 GB film");
+    assert_eq!(fmt_size(1_000_204_886_016), "1.0 TB", "a 1 TB drive");
+    assert_eq!(crate::query::size("10M"), Some(10_000_000));
+    assert_eq!(crate::query::size("1.5k"), Some(1_500));
+}
+
+/// Lays out `f` in one pass of a real context with Maia's fonts and this machine's.
+fn in_a_frame<R>(f: impl FnOnce(&mut egui::Ui) -> R) -> (R, Vec<egui::epaint::ClippedShape>) {
+    let ctx = egui::Context::default();
+    crate::theme::install_fonts(&ctx, "", "");
+    ctx.run_pass(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+    let mut out = None;
+    let mut f = Some(f);
+    let mut full = ctx.run_pass(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))), ..Default::default() }, |ctx| {
+        ctx.root_ui(|root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                if let Some(f) = f.take() {
+                    out = Some(f(ui));
+                }
+            });
+        });
+    });
+    full.textures_delta.clear();
+    (out.unwrap(), full.shapes)
+}
+
+/// Names in the icon views break at spaces and punctuation, never inside the extension;
+/// a word too long goes before the extension's dot; past the rows, the middle gives way.
+#[test]
+fn names_wrap_between_words() {
+    let font = egui::FontId::proportional(13.0);
+    let ((a, b, c, d, e), _) = in_a_frame(|ui| {
+        let w = |name: &str, width: f32, rows: usize| crate::listing::wrap_name(ui, name, &font, width, rows);
+        let width_of = |s: &str| ui.painter().layout_no_wrap(s.into(), font.clone(), egui::Color32::WHITE).size().x;
+        // Room for "trip سفر" and no more: the break at the space, the extension whole.
+        let room = width_of("trip سفر ").max(width_of("2026.png")) + 2.0;
+        (w("trip سفر 2026.png", room, 2).text.clone(), w("report.pdf", width_of("report.pd") + 1.0, 2).text.clone(), w("a very long report about the quarterly numbers and more.pdf", width_of("a very long rep"), 2).text.clone(), w("letter.odt", 200.0, 2).text.clone(), w("x_y-z_long_name.tar", width_of("x_y-z_lo"), 2).text.clone())
+    });
+    assert_eq!(a, "trip سفر\n2026.png", "broken at the space");
+    assert_eq!(b, "report\n.pdf", "a word too long for the line breaks before the extension's dot");
+    let lines: Vec<&str> = c.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[1].contains('…') && lines[1].ends_with(".pdf") && !lines[1].contains(".p\n"), "the middle gives way, the extension stays: {c:?}");
+    assert_eq!(d, "letter.odt", "room enough: one line");
+    assert!(e.lines().next().is_some_and(|l| l.ends_with('_') || l.ends_with('-')), "breaks after punctuation: {e:?}");
+    assert!(e.ends_with(".tar"));
+}
+
+/// The Type column's kinds, short: from shared-mime-info's descriptions on this machine
+/// by one rule and a few overrides; and sorting by type goes by what is shown.
+#[test]
+fn short_kinds_and_sorting_by_them() {
+    use crate::mime::short_kind;
+    assert_eq!(short_kind("text/plain", "Plain text document"), "Text");
+    assert_eq!(short_kind("text/markdown", "Markdown document"), "Markdown");
+    assert_eq!(short_kind("text/csv", "CSV document"), "Spreadsheet");
+    assert_eq!(short_kind("application/pdf", "PDF document"), "PDF");
+    assert_eq!(short_kind("text/rust", "Rust source code"), "Rust source");
+    assert_eq!(short_kind("image/png", "PNG image"), "PNG image");
+    assert_eq!(short_kind("audio/mpeg", "MP3 audio"), "MP3 audio");
+    assert_eq!(short_kind("x/y", "Disk image (raw)"), "Disk image");
+    let db = crate::mime::mime_db();
+    if db.comment("text/plain").is_empty() {
+        eprintln!("no shared-mime-info here: the real lookups skipped");
+        return;
+    }
+    assert_eq!(db.short("notes.txt", "txt", false, false), "Text");
+    assert_eq!(db.short("Docs", "", true, false), "Folder");
+    let d = tmpdir("kinds");
+    for n in ["notes.txt", "readme.md", "photo.png", "table.csv", "zz.pdf"] {
+        std::fs::write(d.join(n), "x").unwrap();
+    }
+    std::fs::create_dir(d.join("Folder A")).unwrap();
+    let mut t = Tab::new(91, d.clone(), ViewSettings { sort: SortKey::Type, ..Default::default() }, egui::Context::default());
+    pump(&mut t, &HashMap::new());
+    let order: Vec<(String, String)> = t.view.iter().map(|&i| (t.entries[i as usize].name.clone(), crate::listing::type_text(&t.entries[i as usize], &t))).collect();
+    let kinds: Vec<&str> = order.iter().map(|o| o.1.as_str()).collect();
+    assert_eq!(kinds, ["Folder", "Markdown", "PDF", "PNG image", "Spreadsheet", "Text"], "{order:?}");
+}
+
+/// The high-contrast pair: text and borders at full strength, everything that is read at
+/// 7:1 or more against where it sits, the selection's text readable on it.
+#[test]
+fn high_contrast_themes_reach_seven_to_one() {
+    use crate::theme::{ThemeName, palette};
+    assert!(ThemeName::ALL.contains(&ThemeName::HighContrastDark) && ThemeName::ALL.contains(&ThemeName::HighContrastLight));
+    for (t, ink) in [(ThemeName::HighContrastDark, egui::Color32::WHITE), (ThemeName::HighContrastLight, egui::Color32::BLACK)] {
+        let p = palette(t);
+        assert!(p.strong, "{t:?}: a thick cursor ring");
+        assert_eq!((p.text, p.border), (ink, ink), "{t:?}: text and borders at full strength");
+        for (what, c) in [("dim text", p.text_dim), ("danger", p.danger), ("warning", p.warn), ("accent", p.accent), ("keyword", p.syntax.keyword), ("type", p.syntax.kind), ("string", p.syntax.string), ("comment", p.syntax.comment), ("number", p.syntax.number), ("function", p.syntax.function), ("property", p.syntax.property), ("meta", p.syntax.meta)] {
+            for (on, bg) in [("panel", p.panel), ("sidebar", p.sidebar), ("popup", p.raised)] {
+                let r = contrast(c, bg);
+                assert!(r >= 7.0, "{t:?}: {what} on the {on} is {r:.1}:1");
+            }
+        }
+        assert!(contrast(p.on_sel(), p.selected) >= 7.0, "{t:?}: text on the selection");
+        assert!(contrast(p.on_accent(), p.accent) >= 4.5, "{t:?}: text on a main button");
+    }
+    assert_eq!(palette(ThemeName::HighContrastDark).on_sel(), egui::Color32::BLACK, "black on the yellow");
+    assert!(!palette(ThemeName::Midnight).strong);
+}
+
+/// Which package holds a missing tool, by the family /etc/os-release names.
+#[test]
+fn install_commands_by_family() {
+    use crate::needs::{Family, command, family_of, package, tool_in};
+    assert_eq!(family_of("NAME=\"CachyOS Linux\"\nID=cachyos\nID_LIKE=arch\n"), Family::Arch);
+    assert_eq!(family_of("ID=\"ubuntu\"\nID_LIKE=debian\n"), Family::Debian);
+    assert_eq!(family_of("ID=pop\nID_LIKE=\"ubuntu debian\"\n"), Family::Debian, "known by its ID_LIKE");
+    assert_eq!(family_of("ID=fedora\n"), Family::Fedora);
+    assert_eq!(family_of("ID=\"opensuse-tumbleweed\"\nID_LIKE=\"opensuse suse\"\n"), Family::Suse);
+    assert_eq!(family_of("ID=nixos\n"), Family::Other);
+    assert_eq!(family_of(""), Family::Other);
+    assert_eq!(family_of("ID_LIKE=arch\nID=somethingnew\n"), Family::Arch, "ID first, then what it is like");
+    assert_eq!([Family::Arch, Family::Debian, Family::Fedora, Family::Suse].map(|f| package("bsdtar", f)), [Some("libarchive"), Some("libarchive-tools"), Some("bsdtar"), Some("bsdtar")]);
+    assert_eq!(command("bsdtar", Family::Debian).as_deref(), Some("sudo apt install libarchive-tools"));
+    assert_eq!(command("ffmpeg", Family::Fedora).as_deref(), Some("sudo dnf install ffmpeg-free"));
+    assert_eq!(command("exiftool", Family::Suse).as_deref(), Some("sudo zypper install exiftool"));
+    assert_eq!(command("ImageMagick", Family::Arch).as_deref(), Some("sudo pacman -S imagemagick"));
+    assert_eq!(command("bsdtar", Family::Other), None, "unknown system: the name alone");
+    assert_eq!(tool_in("Sending folders needs bsdtar"), Some("bsdtar"));
+    assert_eq!(tool_in("Encrypted 7z archives need 7z"), Some("7z"));
+    assert_eq!(tool_in("Compare needs two panels"), None, "not a tool");
+    assert_eq!(tool_in("Copied notes.txt"), None);
+}
+
+/// Toasts that offer something: how to install what a message says is missing, and an
+/// Undo that goes once another change is made.
+#[test]
+fn toasts_offer_install_and_undo() {
+    let d = tmpdir("toasts");
+    let mut app = crate::app::App::new(&egui::Context::default(), vec![d.clone()]);
+    app.toast("Sending folders needs bsdtar");
+    assert_eq!(app.toast_tool, Some("bsdtar"));
+    app.toast("Copied notes.txt");
+    assert_eq!(app.toast_tool, None, "a plain toast has no action");
+    app.undo.push(crate::app::UndoEntry { label: "Create a".into(), kind: crate::app::UndoKind::Created(vec![d.join("a")]) });
+    app.toast_undoable("Created a");
+    assert!(app.toast_undo_live(), "Undo offered for the newest change");
+    app.undo.push(crate::app::UndoEntry { label: "Create b".into(), kind: crate::app::UndoKind::Created(vec![d.join("b")]) });
+    assert!(!app.toast_undo_live(), "something else since: no Undo, it would take back b");
+    app.toast_undoable("Created b");
+    let _ = app.undo.pop();
+    assert!(!app.toast_undo_live(), "undone already");
+    app.toast("Something else");
+    assert_eq!(app.toast_undo, None);
+    use crate::ops::{OpKind, Progress};
+    let mut p = Progress::default();
+    let src = vec![d.join("a.txt"), d.join("b.txt"), d.join("c.txt")];
+    assert_eq!(crate::ui::undo_note(&OpKind::Trash { paths: src.clone() }, &p).as_deref(), Some("3 items moved to Trash"));
+    p.errors.push("busy".into());
+    assert_eq!(crate::ui::undo_note(&OpKind::Trash { paths: src.clone() }, &p).as_deref(), Some("Moved 2 of 3 to Trash"));
+    p.errors.clear();
+    p.produced = vec![(src[0].clone(), d.join("Invoices/a.txt")), (src[1].clone(), d.join("Invoices/b.txt"))];
+    assert_eq!(crate::ui::undo_note(&OpKind::Move { srcs: src[..2].to_vec(), dest: d.join("Invoices"), decide: Default::default() }, &p).as_deref(), Some("Moved 2 items to Invoices"));
+    assert_eq!(crate::ui::undo_note(&OpKind::Copy { srcs: src.clone(), dest: d.join("Invoices"), decide: Default::default() }, &p).as_deref(), Some("Copied 2 of 3 to Invoices"));
+    assert_eq!(crate::ui::undo_note(&OpKind::Trash { paths: vec![d.join("Beach.jpg")] }, &Progress::default()).as_deref(), Some("Beach.jpg moved to Trash"));
+}
+
+/// Tabs sharing a title say where they are; parents that match too are climbed past;
+/// unique names, smart folders and places stay as they are.
+#[test]
+fn same_named_tabs_tell_themselves_apart() {
+    let d = tmpdir("tabnames");
+    for p in ["maia/src", "notes/src", "a/proj/Downloads", "b/proj/Downloads", "Invoices"] {
+        std::fs::create_dir_all(d.join(p)).unwrap();
+    }
+    let ctx = egui::Context::default();
+    let mut app = crate::app::App::new(&ctx, vec![d.join("maia/src")]);
+    let id = app.active;
+    let mut add = |app: &mut crate::app::App, p: PathBuf, n: u64| {
+        let t = Tab::new(9000 + n, p, ViewSettings::default(), ctx.clone());
+        app.panels.get_mut(&id).unwrap().tabs.push(t);
+    };
+    add(&mut app, d.join("notes/src"), 1);
+    add(&mut app, d.join("a/proj/Downloads"), 2);
+    add(&mut app, d.join("b/proj/Downloads"), 3);
+    add(&mut app, d.join("Invoices"), 4);
+    add(&mut app, d.join("Invoices"), 5);
+    add(&mut app, PathBuf::from(crate::tab::COMPUTER), 6);
+    add(&mut app, PathBuf::from(crate::tab::COMPUTER), 7);
+    let first = app.panels[&id].tabs[0].id;
+    let h = app.tab_hints();
+    assert_eq!(h.get(&first).map(String::as_str), Some("maia"));
+    assert_eq!(h.get(&9001).map(String::as_str), Some("notes"));
+    assert_eq!(h.get(&9002).map(String::as_str), Some("a"), "proj matched: one further up");
+    assert_eq!(h.get(&9003).map(String::as_str), Some("b"));
+    assert!(!h.contains_key(&9004) && !h.contains_key(&9005), "the same folder twice: nothing to tell");
+    assert!(!h.contains_key(&9006) && !h.contains_key(&9007), "Computer keeps its name");
+    assert_eq!(h.len(), 4);
+    // Worked out again only when the tabs change.
+    assert!(std::sync::Arc::ptr_eq(&h, &app.tab_hints()));
+    app.panels.get_mut(&id).unwrap().tabs.remove(1);
+    assert!(!app.tab_hints().contains_key(&first), "the other src gone: maia's src is unique again");
+}
+
+/// The window's title names the folder shown.
+#[test]
+fn window_title_names_the_folder() {
+    assert_eq!(crate::app::window_title("Invoices"), "Invoices · Maia");
+    assert_eq!(crate::app::window_title("Computer"), "Computer · Maia");
+    assert_eq!(crate::app::window_title(""), "Maia");
+    assert_eq!(crate::app::window_title("a\0b"), "ab · Maia", "no NUL for X11's title property");
+    let d = tmpdir("wintitle");
+    let mut app = crate::app::App::new(&egui::Context::default(), vec![d.clone()]);
+    assert_eq!(crate::app::window_title(&app.tab().title()), format!("{} · Maia", d.file_name().unwrap().to_string_lossy()));
+}
+
+/// A drive says it is filling only from 80%, in red from 95%.
+#[test]
+fn drive_meter_thresholds() {
+    use crate::sidebar::fullness;
+    assert_eq!(fullness(0.0), None);
+    assert_eq!(fullness(0.79), None);
+    assert_eq!(fullness(0.80), Some(false));
+    assert_eq!(fullness(0.949), Some(false));
+    assert_eq!(fullness(0.95), Some(true));
+    assert_eq!(fullness(1.0), Some(true));
+}
+
+/// A search row's glyph sits on its letters' middle, with this machine's own font: on the
+/// hint's while it is empty, on what is typed after.
+#[test]
+fn search_row_glyph_on_the_letters_middle() {
+    for size in [13.0f32, 15.0, 16.5, 20.0] {
+        for typed in ["", "Hunt"] {
+            let pal = crate::theme::palette(crate::theme::ThemeName::Midnight);
+            let mut text = typed.to_string();
+            let (_, shapes) = in_a_frame(|ui| crate::ui::search_row(ui, &mut text, "Hunt", egui::FontId::proportional(size), crate::theme::Glyph::Search, 14.0, false, &pal));
+            let mut glyph = None;
+            let mut letters = None;
+            fn walk(s: &egui::Shape, glyph: &mut Option<egui::Rect>, letters: &mut Option<f32>) {
+                match s {
+                    egui::Shape::Vec(v) => v.iter().for_each(|x| walk(x, glyph, letters)),
+                    egui::Shape::Mesh(m) if glyph.is_none() => *glyph = Some(m.calc_bounds()),
+                    egui::Shape::Text(t) if t.galley.text() == "Hunt" => {
+                        // The ink of the capital H: its top and its baseline.
+                        let row = &t.galley.rows[0];
+                        let g = &row.row.glyphs[0];
+                        let top = t.pos.y + row.pos.y + g.pos.y + g.uv_rect.offset.y;
+                        *letters = Some(top + g.uv_rect.size.y / 2.0);
+                    }
+                    _ => {}
+                }
+            }
+            for c in &shapes {
+                walk(&c.shape, &mut glyph, &mut letters);
+            }
+            let (g, mid) = (glyph.expect("the glyph drawn"), letters.expect("the letters drawn"));
+            assert!((g.center().y - mid).abs() <= 1.0, "at {size}, {typed:?} typed: glyph centre {} against the letters' middle {mid}", g.center().y);
+        }
     }
 }

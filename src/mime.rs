@@ -147,6 +147,26 @@ impl MimeDb {
         label
     }
 
+    /// The kind as a row says it: the description cut to its point ("Text", "Markdown",
+    /// "PNG image", "Spreadsheet"). The whole description stays where there is room for
+    /// it, the preview and Properties. Cached per extension, as `label` is.
+    pub fn short(&self, name: &str, ext: &str, is_dir: bool, exec: bool) -> String {
+        if is_dir {
+            return "Folder".into();
+        }
+        let key = format!("short\0{}\0{ext}\0{}", if self.by_name.contains_key(name) { name } else { "" }, exec as u8);
+        if let Some(l) = self.labels.lock().ok().and_then(|m| m.get(&key).cloned()) {
+            return l;
+        }
+        let long = self.label(name, ext, false, exec);
+        let mime = self.for_name(name, false, exec);
+        let short = short_kind(&mime, &long);
+        if let Ok(mut m) = self.labels.lock() {
+            m.insert(key, short.clone());
+        }
+        short
+    }
+
     /// Human readable description ("Shell script"), from the mime XML.
     pub fn comment(&self, mime: &str) -> String {
         if let Some(c) = self.comments.lock().unwrap().get(mime) {
@@ -439,6 +459,42 @@ pub fn launch(app: &App, paths: &[PathBuf], cwd: Option<&Path>) -> Result<(), St
         cmd.current_dir(d);
     }
     spawn_detached(cmd)
+}
+
+/// A description shortened for a row. Office formats go by what they hold, whoever's
+/// format it is; the rest drop the words most descriptions end with ("Markdown document",
+/// "Rust source code") and any aside in brackets.
+pub(crate) fn short_kind(mime: &str, long: &str) -> String {
+    const BY_MIME: &[(&str, &str)] = &[
+        ("text/plain", "Text"),
+        ("application/pdf", "PDF"),
+        ("text/html", "Web page"),
+        ("text/csv", "Spreadsheet"),
+        ("text/tab-separated-values", "Spreadsheet"),
+        ("application/vnd.oasis.opendocument.spreadsheet", "Spreadsheet"),
+        ("application/vnd.ms-excel", "Spreadsheet"),
+        ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Spreadsheet"),
+        ("application/vnd.oasis.opendocument.text", "Document"),
+        ("application/msword", "Document"),
+        ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "Document"),
+        ("application/rtf", "Document"),
+        ("application/vnd.oasis.opendocument.presentation", "Presentation"),
+        ("application/vnd.ms-powerpoint", "Presentation"),
+        ("application/vnd.openxmlformats-officedocument.presentationml.presentation", "Presentation"),
+    ];
+    if let Some((_, s)) = BY_MIME.iter().find(|(m, _)| *m == mime) {
+        return s.to_string();
+    }
+    let mut s = long;
+    if let Some(i) = s.find(" (") {
+        s = &s[..i];
+    }
+    let s = match (s.strip_suffix(" document"), s.strip_suffix(" source code")) {
+        (Some(x), _) if !x.is_empty() => x.to_string(),
+        (_, Some(x)) if !x.is_empty() => format!("{x} source"),
+        _ => s.to_string(),
+    };
+    if s.is_empty() { long.to_string() } else { s }
 }
 
 /// What opening `path` would do: (type label, mime, app name, argv). For diagnostics.

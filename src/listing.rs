@@ -162,6 +162,178 @@ pub fn elided(ui: &Ui, text: &str, font: FontId, width: f32, color: Color32) -> 
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
+thread_local! {
+    /// Each digit's advance at a font size (and pixel density): what `tabular` pads to.
+    static DIGITS: std::cell::RefCell<std::collections::HashMap<(u32, u32), [f32; 10]>> = Default::default();
+    /// Names broken into lines for the icon views, by name, width, size and rows.
+    static WRAPS: std::cell::RefCell<std::collections::HashMap<(String, u32, u32, usize), Arc<Wrapped>>> = Default::default();
+}
+
+/// A single line in which every digit takes the widest digit's room, so sizes, dates and
+/// counts line up down a column. egui's shaper takes no OpenType features (no `tnum`),
+/// so each digit is given that room with space around it instead.
+pub fn tabular(ui: &Ui, text: &str, font: FontId, width: f32, color: Color32) -> Arc<Galley> {
+    let key = (font.size.to_bits(), ui.ctx().pixels_per_point().to_bits());
+    let adv = DIGITS.with(|d| {
+        *d.borrow_mut().entry(key).or_insert_with(|| {
+            let mut a = [0.0; 10];
+            for (k, w) in a.iter_mut().enumerate() {
+                *w = ui.painter().layout_no_wrap(k.to_string(), font.clone(), color).size().x;
+            }
+            a
+        })
+    });
+    let widest = adv.iter().copied().fold(0.0, f32::max);
+    let fmt = egui::TextFormat { font_id: font.clone(), color, ..Default::default() };
+    // Half the pad before a narrow digit and half after it (as the next section's lead),
+    // so it sits in the middle of the widest digit's room.
+    let mut job = LayoutJob::default();
+    let mut run = String::new();
+    let mut carry = 0.0;
+    for ch in text.chars() {
+        match ch.to_digit(10) {
+            Some(d) => {
+                if !run.is_empty() {
+                    job.append(&run, carry, fmt.clone());
+                    run.clear();
+                    carry = 0.0;
+                }
+                let half = (widest - adv[d as usize]) / 2.0;
+                let mut b = [0u8; 4];
+                job.append(ch.encode_utf8(&mut b), carry + half, fmt.clone());
+                carry = half;
+            }
+            None => run.push(ch),
+        }
+    }
+    if !run.is_empty() {
+        job.append(&run, carry, fmt);
+    }
+    job.wrap = egui::text::TextWrapping { max_width: width.max(8.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    ui.fonts_mut(|f| f.layout_job(job))
+}
+
+/// A name set on several lines: the text with its line breaks, and for every character
+/// the one of the name it shows (`usize::MAX` for a break or the "…").
+pub struct Wrapped {
+    pub(crate) text: String,
+    pub(crate) from: Vec<usize>,
+}
+
+/// Breaks a name into at most `rows` lines of `width`: at spaces and punctuation, never
+/// inside the extension; a word too long for a line goes before the extension's dot, then
+/// wherever it must. A name that needs more lines loses the middle of its last line to
+/// "…" and keeps the extension.
+pub(crate) fn wrap_name(ui: &Ui, name: &str, font: &FontId, width: f32, rows: usize) -> Arc<Wrapped> {
+    let key = (name.to_string(), width.to_bits(), font.size.to_bits(), rows);
+    if let Some(w) = WRAPS.with(|c| c.borrow().get(&key).cloned()) {
+        return w;
+    }
+    let chars: Vec<char> = name.chars().collect();
+    let n = chars.len();
+    let w_of = |idx: &[usize]| -> f32 {
+        let s: String = idx.iter().map(|&i| if i == usize::MAX { '…' } else { chars.get(i).copied().unwrap_or(' ') }).collect();
+        ui.painter().layout_no_wrap(s, font.clone(), Color32::WHITE).size().x
+    };
+    // The extension: a short run of letters and digits after the last dot (not a dotfile's).
+    let ext = chars.iter().rposition(|&c| c == '.').filter(|&d| d > 0 && n - d - 1 >= 1 && n - d - 1 <= 8 && chars[d + 1..].iter().all(|c| c.is_alphanumeric()));
+    let limit = ext.unwrap_or(n);
+    let good = |i: usize| -> bool {
+        // A break before character `i`.
+        if i == 0 || i >= n || i > limit {
+            return false;
+        }
+        let p = chars[i - 1];
+        p.is_whitespace() || (matches!(p, '-' | '_' | ',' | ';' | '+' | ')' | ']' | '.') && i != limit + 1) || matches!(chars[i], '(' | '[')
+    };
+    // One line from `s`: the furthest end that fits, then the best break at or before it.
+    let line = |s: usize| -> usize {
+        let fits = |e: usize| w_of(&(s..e).collect::<Vec<_>>()) <= width;
+        if fits(n) {
+            return n;
+        }
+        let (mut lo, mut hi) = (s + 1, n);
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if fits(mid) { lo = mid } else { hi = mid - 1 }
+        }
+        let e = lo;
+        if let Some(b) = (s + 1..=e).rev().find(|&i| good(i)) {
+            return b;
+        }
+        match ext {
+            Some(d) if d > s && d <= e => d,
+            _ => e,
+        }
+    };
+    let mut lines: Vec<Vec<usize>> = vec![];
+    let mut s = 0;
+    while s < n {
+        if lines.len() + 1 == rows {
+            let e = line(s);
+            if e < n {
+                // The last line left: as much as fits of what follows, "…", the end.
+                let tail_from = match ext {
+                    Some(d) => d.saturating_sub(4).max(s),
+                    None => n.saturating_sub(6).max(s),
+                };
+                let mut tail: Vec<usize> = (tail_from..n).collect();
+                if w_of(&tail) > width * 0.7 {
+                    tail = (ext.unwrap_or(n.saturating_sub(3)).max(s)..n).collect();
+                }
+                // The head may run up to where the tail starts, however short the tail got.
+                let (mut lo, mut hi) = (0, tail.first().map_or(0, |&f| f.saturating_sub(s)));
+                while lo < hi {
+                    let mid = (lo + hi).div_ceil(2);
+                    let mut v: Vec<usize> = (s..s + mid).collect();
+                    v.push(usize::MAX);
+                    v.extend(&tail);
+                    if w_of(&v) <= width { lo = mid } else { hi = mid - 1 }
+                }
+                let mut v: Vec<usize> = (s..s + lo).collect();
+                while v.last().is_some_and(|&i| chars[i].is_whitespace()) {
+                    v.pop();
+                }
+                v.push(usize::MAX);
+                v.extend(tail);
+                lines.push(v);
+                break;
+            }
+        }
+        let e = line(s).max(s + 1);
+        let mut v: Vec<usize> = (s..e).collect();
+        while v.len() > 1 && v.last().is_some_and(|&i| chars[i].is_whitespace()) {
+            v.pop();
+        }
+        lines.push(v);
+        s = e;
+        while s < n && chars[s].is_whitespace() {
+            s += 1;
+        }
+    }
+    let mut text = String::new();
+    let mut from = vec![];
+    for (k, l) in lines.iter().enumerate() {
+        if k > 0 {
+            text.push('\n');
+            from.push(usize::MAX);
+        }
+        for &i in l {
+            text.push(if i == usize::MAX { '…' } else { chars[i] });
+            from.push(i);
+        }
+    }
+    let w = Arc::new(Wrapped { text, from });
+    WRAPS.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() > 4000 {
+            c.clear();
+        }
+        c.insert(key, w.clone());
+    });
+    w
+}
+
 pub fn display_name(e: &Entry, cfg: &Config) -> String {
     if !cfg.show_ext && !e.is_dir {
         if let Some(stem) = e.path.file_stem() {
@@ -174,16 +346,22 @@ pub fn display_name(e: &Entry, cfg: &Config) -> String {
 }
 
 /// Name with fuzzy-match highlights, plus an optional dimmed suffix (flattened relative path).
-fn name_job(name: &str, suffix: Option<&str>, q: &fuzzy::Query, font: &FontId, col: Color32, dim: Color32, accent: Color32, width: f32, rows: usize) -> LayoutJob {
+/// Several rows are set by `wrap_name`, which knows where a name may break.
+fn name_job(ui: &Ui, name: &str, suffix: Option<&str>, q: &fuzzy::Query, font: &FontId, col: Color32, dim: Color32, accent: Color32, width: f32, rows: usize) -> LayoutJob {
     let mut job = LayoutJob::default();
     let hits: HashSet<usize> = if q.is_empty() { HashSet::new() } else { fuzzy::positions(q, name).map(|(_, p)| p.into_iter().collect()).unwrap_or_default() };
     let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
+    let wrapped = (rows > 1).then(|| wrap_name(ui, name, font, width.max(8.0), rows));
     if hits.is_empty() {
-        job.append(name, 0.0, fmt(col));
+        job.append(wrapped.as_ref().map_or(name, |w| w.text.as_str()), 0.0, fmt(col));
     } else {
+        let chars: Box<dyn Iterator<Item = (usize, char)>> = match &wrapped {
+            Some(w) => Box::new(w.from.iter().copied().zip(w.text.chars())),
+            None => Box::new(name.chars().enumerate()),
+        };
         let mut buf = String::new();
         let mut buf_hit = false;
-        for (i, ch) in name.chars().enumerate() {
+        for (i, ch) in chars {
             let h = hits.contains(&i);
             if h != buf_hit && !buf.is_empty() {
                 job.append(&buf, 0.0, fmt(if buf_hit { accent } else { col }));
@@ -199,7 +377,10 @@ fn name_job(name: &str, suffix: Option<&str>, q: &fuzzy::Query, font: &FontId, c
     if let Some(s) = suffix {
         job.append(s, 8.0, fmt(dim));
     }
-    job.wrap = egui::text::TextWrapping { max_width: width.max(8.0), max_rows: rows, break_anywhere: true, overflow_character: Some('…') };
+    // A pinch of slack: the lines were measured with the same font, and a rounding
+    // difference must not wrap one of them again.
+    let slack = if wrapped.is_some() { 1.0 } else { 0.0 };
+    job.wrap = egui::text::TextWrapping { max_width: width.max(8.0) + slack, max_rows: rows, break_anywhere: true, overflow_character: Some('…') };
     job
 }
 
@@ -277,6 +458,12 @@ fn paint_dots(p: &egui::Painter, x: f32, y: f32, dots: &[Color32], r: f32, ring:
 /// Secondary text, match highlight and the ring around colour dots on an item: on a
 /// selected one the dim grey and the accent sink into the selection colour, and a blue
 /// dot would vanish without a ring.
+/// A name's colour: the theme's text, but on a high-contrast theme's selection the text
+/// that reads on it (black on its yellow, white on its blue).
+fn name_colour(pal: &theme::Palette, selected: bool) -> Color32 {
+    if selected && pal.strong { pal.on_sel() } else { pal.text }
+}
+
 fn sel_colors(pal: &theme::Palette, selected: bool) -> (Color32, Color32, Color32) {
     if selected { (pal.on_sel_dim(), pal.on_sel(), pal.on_sel()) } else { (pal.text_dim, pal.accent, Color32::TRANSPARENT) }
 }
@@ -520,14 +707,11 @@ pub(crate) fn type_text(e: &Entry, t: &Tab) -> String {
     if e.is_broken_link() {
         return "Broken link".into();
     }
-    let db = crate::mime::mime_db();
-    let m = db.for_name(&e.name, false, e.is_executable());
-    let c = db.comment(&m);
-    if c.is_empty() { e.kind() } else { c }
+    crate::mime::mime_db().short(&e.name, &e.ext(), false, e.is_executable())
 }
 
 pub(crate) fn fmt_date(t: Option<std::time::SystemTime>, cfg: &Config) -> String {
-    t.map(|t| crate::timefmt::format(t, &cfg.date_format)).unwrap_or_default()
+    t.map(|t| crate::timefmt::date(t, &cfg.date_format)).unwrap_or_default()
 }
 
 fn abbrev(n: u64) -> String {
@@ -706,7 +890,11 @@ fn paint_item_bg(p: &egui::Painter, r: Rect, selected: bool, cursor: bool, hover
     if fill != Color32::TRANSPARENT {
         p.rect_filled(r, CornerRadius::same(rad), fill);
     }
-    if cursor && env.active && !selected {
+    // A high-contrast theme rings the cursor thick and in its text colour, over the
+    // selection too, so it is found without looking for it.
+    if pal.strong && cursor && env.active {
+        p.rect_stroke(r, CornerRadius::same(rad), Stroke::new(2.0, pal.text), StrokeKind::Inside);
+    } else if cursor && env.active && !selected {
         p.rect_stroke(r.shrink(0.5), CornerRadius::same(rad), Stroke::new(1.0, pal.accent.gamma_multiply(0.7)), StrokeKind::Inside);
     }
     if drop {
@@ -1059,7 +1247,7 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                     let suffix = rel.as_deref().and_then(|r| std::path::Path::new(r).parent()).filter(|p| !p.as_os_str().is_empty()).map(|p| format!("› {}", p.display()));
                                     let tags = if computer || tag_col { None } else { entry_tags(&e) };
                                     let room = tags.as_ref().map_or(0.0, |tg| tags_width(ui, tg, &font));
-                                    let mut job = name_job(&name, suffix.as_deref(), q, &font, dimc(pal.text), dimc(sub), acc, (name_r.width() - room).max(24.0), 1);
+                                    let mut job = name_job(ui, &name, suffix.as_deref(), q, &font, dimc(name_colour(&pal, selected && !editing)), dimc(sub), acc, (name_r.width() - room).max(24.0), 1);
                                     // The line that matched, after the name (elided with it).
                                     if let Some(line) = t.content.snippet(&e.path) {
                                         append_match(&mut job, line, crate::query::name_part(&t.filter).trim(), &font, dimc(sub), acc);
@@ -1099,7 +1287,7 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                     // Bar with the percentage centered on it.
                                     let bar = Rect::from_min_max(pos2(inner.left(), cell.center().y - 7.0), pos2(inner.right(), cell.center().y + 7.0));
                                     ui.painter().rect_filled(bar, CornerRadius::same(4), pal.raised);
-                                    let col = if computer && frac > 0.9 { pal.danger } else if computer && frac > 0.75 { Color32::from_rgb(0xe8, 0xa3, 0x3d) } else { pal.accent };
+                                    let col = if computer && frac > 0.9 { pal.danger } else if computer && frac > 0.75 { pal.warn } else { pal.accent };
                                     ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * frac.clamp(0.0, 1.0), bar.height())), CornerRadius::same(4), col.gamma_multiply(0.75));
                                     ui.painter().text(bar.center(), Align2::CENTER_CENTER, label, FontId::proportional(env.cfg.font_size - 2.5), pal.text);
                                 }
@@ -1127,7 +1315,8 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
                                     Column::Duration => crate::facts::get(&e).and_then(|f| f.duration).map(crate::media::fmt_time).unwrap_or_default(),
                                     _ => String::new(),
                                 };
-                                let g = elided(ui, &txt, small.clone(), inner.width(), dimc(sub));
+                                let figures = matches!(other, Column::Size | Column::Modified | Column::Created | Column::Accessed | Column::Deleted | Column::Taken | Column::Folders | Column::Files | Column::Dimensions | Column::Duration);
+                                let g = if figures { tabular(ui, &txt, small.clone(), inner.width(), dimc(sub)) } else { elided(ui, &txt, small.clone(), inner.width(), dimc(sub)) };
                                 let gx = if other.right_aligned() { inner.right() - g.size().x } else { inner.left() };
                                 ui.painter().galley(pos2(gx, cell.center().y - g.size().y / 2.0), g, sub);
                             }
@@ -1173,6 +1362,10 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
     let mut new_widths: Option<(usize, f32)> = None;
     let mut toggle_col: Option<Column> = None;
     let mut sort_click: Option<SortKey> = None;
+    // The header steps back behind the rows: smaller, dim, regular weight. Its select-all
+    // box and type funnel wait for the pointer, unless a type filter is on.
+    let head_font = FontId::proportional((env.cfg.font_size * 0.85).round());
+    let over_header = ui.rect_contains_pointer(header);
     for (ci, (c, w)) in cols.iter().enumerate() {
         let w = col_w(*c, *w);
         let cell = Rect::from_min_size(pos2(x, header.top()), vec2(w, header_h));
@@ -1184,11 +1377,11 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
         // Thin separator at each column's right edge (the resize handle).
         painter.line_segment([pos2(cell.right() - 0.5, cell.top() + 6.0), pos2(cell.right() - 0.5, cell.bottom() - 6.0)], Stroke::new(1.0, pal.border));
         let label = c.title();
-        let col = if active_sort { pal.text } else { pal.text_dim };
-        let g = elided(ui, label, theme::semibold(small.size), w - 26.0, col);
+        let col = pal.text_dim;
+        let g = elided(ui, label, head_font.clone(), w - 26.0, col);
         let boxes = env.cfg.selection_boxes && !tab::is_computer(&t.path);
         let gx = if c.right_aligned() { cell.right() - 8.0 - g.size().x - if active_sort { 12.0 } else { 0.0 } } else if *c == Column::Name && boxes { cell.left() + 29.0 } else { cell.left() + 6.0 };
-        if *c == Column::Name && boxes {
+        if *c == Column::Name && boxes && over_header {
             // Select-all checkbox, in line with the rows' icon slot.
             let cb = Rect::from_min_size(pos2(cell.left() + 7.0, cell.center().y - 7.0), Vec2::splat(14.0));
             let all = !t.view.is_empty() && t.selected.len() >= t.view.len() && t.view.iter().all(|i| t.selected.contains(i));
@@ -1214,7 +1407,9 @@ fn details(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query
             if fresp.hovered() || active {
                 painter.rect_filled(fr, CornerRadius::same(3), if active { pal.accent.gamma_multiply(0.3) } else { pal.raised });
             }
-            crate::ui::funnel(&painter, fr.center(), if active { pal.accent } else { pal.text_dim });
+            if active || over_header {
+                crate::ui::funnel(&painter, fr.center(), if active { pal.accent } else { pal.text_dim });
+            }
             if fresp.clicked() {
                 env.actions.push(Action::FocusPanel(env.panel_id));
                 env.actions.push(Action::Open(Popup::types(env.panel_id)));
@@ -1426,7 +1621,7 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                         let tags = entry_tags(&e);
                         let room = tags.as_ref().map_or(0.0, |tg| tags_width(ui, tg, &font));
                         let (sub, acc, ring) = sel_colors(&pal, selected && !editing);
-                        let job = name_job(&display_name(&e, env.cfg), None, q, &font, dimc(pal.text), sub, acc, (name_r.width() - room).max(24.0), 1);
+                        let job = name_job(ui, &display_name(&e, env.cfg), None, q, &font, dimc(name_colour(&pal, selected && !editing)), sub, acc, (name_r.width() - room).max(24.0), 1);
                         let g = ui.fonts_mut(|f| f.layout_job(job));
                         let gw = g.size().x;
                         ui.painter().galley(pos2(name_r.left(), r.center().y - g.size().y / 2.0), g, pal.text);
@@ -1438,12 +1633,19 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                 Mode::Icons(s) => {
                     let rad = if env.cfg.round_corners { 8 } else { 0 };
                     let editing = rename_focus(ui, r, idx, t, env);
-                    paint_item_bg(ui.painter(), r.shrink(2.0), selected && !editing, is_cursor && !editing, resp.hovered() && !editing, drop, env, rad);
+                    // A picked tile keeps its picture: a ring around it and a tint behind its
+                    // name, no filled block. The keyboard's cursor is an outline of the whole
+                    // tile, except on a picked tile, where it would frame the empty room above
+                    // a wide picture; there the cursor's ring is drawn at full strength and the
+                    // other picked tiles' rings softer, as list rows do with their fills.
+                    let picked = selected && !editing;
+                    paint_item_bg(ui.painter(), r.shrink(2.0), false, is_cursor && !editing && !picked, resp.hovered() && !editing && !picked, drop, env, rad);
                     if env.cut.contains(&e.path) {
                         paint_ants(ui, r.shrink(3.0), env);
                     }
                     handle_item(ui, &resp, idx, t, env);
                     let icon_r = Rect::from_min_size(pos2(r.center().x - s / 2.0, r.top() + 8.0), Vec2::splat(s));
+                    let mut art = icon_r;
                     if e.is_dir && resp.hovered() && thumbs_here && !tab::is_computer(&t.path) && viewport_screen.contains(icon_r.center()) {
                         peek_at = Some((e.path.clone(), icon_r));
                     }
@@ -1472,16 +1674,23 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                             };
                             ui.painter().image(l.tex.id(), dst, uv, Color32::WHITE.gamma_multiply(alpha * if faded { 0.45 } else { 1.0 }));
                             t.item_rects.push((idx, dst));
+                            art = dst;
                             drew = true;
                         }
                     }
                     if !drew {
                         t.item_rects.push((idx, icon_r));
                         if tab::is_computer(&t.path) {
-                            paint_drive(ui, icon_r.shrink(s * 0.15), t, &e, dimc(pal.text_dim));
+                            art = icon_r.shrink(s * 0.15);
+                            paint_drive(ui, art, t, &e, dimc(pal.text_dim));
                         } else {
                             paint_entry_icon(ui.painter(), icon_r, &e, cat, &e.ext());
                         }
+                    }
+                    if picked {
+                        // 2 points of the background between the picture and a 2 point ring.
+                        let ring = if is_cursor { pal.accent } else { pal.accent.gamma_multiply(0.55) };
+                        ui.painter().rect_stroke(art.expand(4.0), CornerRadius::same(if env.cfg.round_corners { 7 } else { 0 }), Stroke::new(2.0, ring), StrokeKind::Inside);
                     }
                     crate::gitstatus::paint(ui.painter(), icon_r.shrink(s * 0.1), git.as_deref(), &e.path, &pal);
                     // Colour labels as a badge on the icon's top right corner.
@@ -1494,11 +1703,15 @@ fn grid(ui: &mut Ui, rect: Rect, t: &mut Tab, env: &mut Env, q: &fuzzy::Query, m
                     let name_line = Rect::from_min_size(text_r.min, vec2(text_r.width(), font.size + 6.0));
                     if !rename_field(ui, name_line, idx, t, env, &font) {
                         let rows = if s < 72.0 { 1 } else { 2 };
-                        let (sub, acc, _) = sel_colors(&pal, selected && !editing);
-                        let mut job = name_job(&display_name(&e, env.cfg), None, q, &font, dimc(pal.text), sub, acc, text_r.width(), rows);
+                        let (sub, acc, _) = sel_colors(&pal, false);
+                        let mut job = name_job(ui, &display_name(&e, env.cfg), None, q, &font, dimc(pal.text), sub, acc, text_r.width(), rows);
                         job.halign = egui::Align::Center;
                         let g = ui.fonts_mut(|f| f.layout_job(job));
                         let gh = g.size().y;
+                        if picked {
+                            let back = Rect::from_center_size(pos2(text_r.center().x, text_r.top() + gh / 2.0), vec2((g.size().x + 10.0).min(r.width() - 4.0), gh + 2.0));
+                            ui.painter().rect_filled(back, CornerRadius::same(5), pal.accent.gamma_multiply(if pal.dark { 0.35 } else { 0.22 }));
+                        }
                         ui.painter().galley(pos2(text_r.center().x, text_r.top()), g, pal.text);
                         {
                             let size = entry_size_text(&e, t, env);
@@ -1646,7 +1859,7 @@ fn column_cells(ui: &Ui, r: Rect, ic: Rect, e: &Entry, env: &Env, q: &fuzzy::Que
     let room = tags.as_ref().map_or(0.0, |tg| tags_width(ui, tg, &font));
     let rel = e.rel();
     let suffix = rel.as_deref().and_then(|r| std::path::Path::new(r).parent()).filter(|p| !p.as_os_str().is_empty()).map(|p| format!("› {}", p.display()));
-    let job = name_job(&display_name(e, env.cfg), suffix.as_deref(), q, &font, dimc(pal.text), dimc(sub), acc, (name_r.width() - room).max(24.0), 1);
+    let job = name_job(ui, &display_name(e, env.cfg), suffix.as_deref(), q, &font, dimc(name_colour(&pal, selected)), dimc(sub), acc, (name_r.width() - room).max(24.0), 1);
     let g = ui.fonts_mut(|f| f.layout_job(job));
     let gw = g.size().x;
     ui.painter().galley(pos2(name_r.left(), r.center().y - g.size().y / 2.0), g, pal.text);

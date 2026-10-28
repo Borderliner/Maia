@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::theme::ThemeName;
 
-pub const CONFIG_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 /// Kind of storage a folder lives on (decides folder-size scanning and thumbnails).
@@ -202,6 +202,7 @@ pub struct Config {
     /// Every copy read back from the disk and compared with what was copied.
     pub check_copies: bool,
     pub scroll_beyond: bool,
+    /// A strftime pattern; empty says dates against today ("Yesterday 09:04").
     pub date_format: String,
     // Mouse & keyboard
     pub act_on_press: bool,
@@ -287,7 +288,7 @@ impl Default for Config {
             thumb_fill: false,
             check_copies: false,
             scroll_beyond: false,
-            date_format: "%x %H:%M".into(),
+            date_format: String::new(),
             act_on_press: true,
             single_click: false,
             single_click_folders_only: false,
@@ -740,11 +741,24 @@ pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> T {
 
 pub fn load_config() -> Config {
     let path = config_path();
-    let cfg: Config = load_json(&path);
+    let mut cfg: Config = load_json(&path);
     if path.exists() && cfg.version > CONFIG_VERSION {
         let _ = std::fs::copy(&path, path.with_extension("json.bak"));
     }
+    migrate(&mut cfg);
     cfg
+}
+
+/// Settings written by an older Maia, brought up to this one. Before version 2 the
+/// default date pattern was written out like a choice; left as it was, it gives way to
+/// the relative dates that are now the default. A pattern chosen on purpose stays.
+pub fn migrate(cfg: &mut Config) {
+    if cfg.version < 2 {
+        if cfg.date_format == "%x %H:%M" {
+            cfg.date_format.clear();
+        }
+        cfg.version = CONFIG_VERSION;
+    }
 }
 
 pub fn load_userdata() -> UserData {

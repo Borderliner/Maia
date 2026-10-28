@@ -74,6 +74,7 @@ mod memory;
 mod mime;
 mod musictags;
 mod namefind;
+mod needs;
 mod network;
 mod office;
 mod ollama;

@@ -135,7 +135,7 @@ impl SmartFolder {
             v.push(format!("modified<{d}d"));
         }
         if let Some(b) = self.bigger {
-            let unit = [(1u64 << 40, "T"), (1 << 30, "G"), (1 << 20, "M"), (1 << 10, "K")].into_iter().find(|u| b >= u.0 && b % u.0 == 0);
+            let unit = [(1_000_000_000_000u64, "T"), (1_000_000_000, "G"), (1_000_000, "M"), (1_000, "K")].into_iter().find(|u| b >= u.0 && b % u.0 == 0);
             v.push(unit.map_or_else(|| format!("size>{b}"), |(n, u)| format!("size>{}{u}", b / n)));
         }
         let q = self.query.trim();

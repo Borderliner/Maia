@@ -654,6 +654,8 @@ impl Sim {
         crate::spaceuse::BY_CHANGE.store(false, std::sync::atomic::Ordering::Relaxed);
         // The last window's closing popup fades on its own clock, not this one's.
         crate::popups::FADE.with(|f| *f.borrow_mut() = (Vec::new(), None));
+        // Nor does a filter typed into the last window's sidebar hide this one's places.
+        crate::sidebar::forget_filter();
         let ctx = egui::Context::default();
         let app = App::new(&ctx, vec![path.to_path_buf()]);
         let shots = std::env::var_os("MAIA_SIM_SHOTS").map(|d| Box::new(Shots { dir: PathBuf::from(d), textures: Default::default(), prims: vec![] }));
@@ -911,6 +913,11 @@ impl Sim {
         self.app.panels.get(&self.app.active).map(|p| p.tab()).unwrap_or_else(|| self.fail("no active panel"))
     }
 
+    pub fn tab_mut(&mut self) -> &mut crate::tab::Tab {
+        let id = self.app.active;
+        self.app.panels.get_mut(&id).map(|p| p.tab_mut()).expect("an active panel")
+    }
+
     pub fn popup_open(&self) -> bool {
         !matches!(self.app.popup, Popup::None)
     }
@@ -1131,12 +1138,96 @@ impl Rng {
     }
 }
 
-/// Click the control registered as `what` this frame, when there is one.
+/// Click the control registered as `what` this frame, when there is one; a preview
+/// option that lives in the preview's ⋯ menu is clicked there, as a person finds it.
 pub fn click_control_at(s: &mut Sim, what: &str) {
     let r = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == what).map(|(_, r, _)| *r));
     if let Some(r) = r {
         s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+    } else if let Some(label) = preview_item(what) {
+        if open_preview_menu(s) && s.texts.iter().any(|(_, t)| t == label) {
+            s.click_text(label);
+        } else {
+            close_preview_menu(s);
+        }
+    } else if what == "contents toggle" {
+        contents_from_menu(s);
     }
+}
+
+/// Searching inside files, switched on from the toolbar's ⋮ menu (the filter field shows
+/// its toggle only while it is on).
+pub fn contents_from_menu(s: &mut Sim) -> bool {
+    let Some(r) = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "panel menu").map(|(_, r, _)| *r)) else { return false };
+    s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+    s.idle(2);
+    s.scroll_popup_to("Search File Contents");
+    s.idle(15);
+    if !s.texts.iter().any(|(_, t)| t == "Search File Contents") {
+        s.act("key Escape");
+        return false;
+    }
+    s.click_text("Search File Contents");
+    s.idle(2);
+    true
+}
+
+/// The preview's options are in its ⋯ menu: the menu's words for what was a button.
+pub fn preview_item(what: &str) -> Option<&'static str> {
+    Some(match what {
+        "Wrap lines" => "Wrap lines",
+        "Line numbers" => "Line numbers",
+        "Larger text" => "Larger text",
+        "Smaller text" => "Smaller text",
+        "Source" => "Source",
+        "Rendered" => "Rendered",
+        "Tree" => "Tree",
+        "Table" => "Table",
+        "Show values" | "Hide values" => "Show values",
+        "Follow" => "Follow",
+        "Blame" => "Blame",
+        "Pause" => "Pause",
+        "Play" => "Play",
+        "Find (Ctrl+F)" => "Find",
+        "Zoom to fit" => "Zoom to fit",
+        "Actual pixels (1:1)" => "Actual pixels (1:1)",
+        "Fill the inspector" => "Fill the preview",
+        "Pixel grid at high zoom" => "Pixel grid at high zoom",
+        "Minimap while zoomed" => "Minimap while zoomed",
+        "Previous page" => "Previous page",
+        "Next page" => "Next page",
+        "Place automatically" => "Place automatically",
+        "Dock right" => "Dock right",
+        "Dock bottom" => "Dock bottom",
+        _ => return None,
+    })
+}
+
+/// Opens the preview's ⋯ menu by its button; false when there is none on screen.
+pub fn open_preview_menu(s: &mut Sim) -> bool {
+    let Some(r) = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "preview menu").map(|(_, r, _)| *r)) else { return false };
+    s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+    s.idle(2);
+    true
+}
+
+/// Closes the ⋯ menu by its button again, if it is open.
+pub fn close_preview_menu(s: &mut Sim) {
+    let open = egui::Popup::is_any_open(&s.app.ctx);
+    if let (true, Some(r)) = (open, crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "preview menu").map(|(_, r, _)| *r))) {
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        s.idle(2);
+    }
+}
+
+/// Whether the preview's ⋯ menu offers `label`, looked at by opening it and closing it.
+pub fn preview_menu_has(s: &mut Sim, label: &str) -> bool {
+    if !open_preview_menu(s) {
+        return false;
+    }
+    let has = s.texts.iter().any(|(_, t)| t == label);
+    close_preview_menu(s);
+    has
 }
 
 /// Often enough, into one of the fixture's work trees first (by Go To, as a person
@@ -1170,7 +1261,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(187) {
+    match rng.below(191) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -3012,6 +3103,84 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 s.idle(20);
             }
         }
+        187 => {
+            // The right-click menu's row of icons: by the mouse, or reached with Up and
+            // walked with Left and Right, then Enter or Escape.
+            let list = s.app.panels.get(&s.app.active).map(|p| p.list_rect).unwrap_or(Rect::NOTHING);
+            let names: Vec<Rect> = s.texts.iter().filter(|(r, _)| list.contains(r.center())).map(|(r, _)| *r).collect();
+            if names.is_empty() {
+                return;
+            }
+            let r = *rng.pick(&names);
+            s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+            s.idle(2);
+            let icons = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == "menu action").map(|(_, r, _)| *r).collect::<Vec<_>>());
+            if icons.is_empty() || rng.below(2) == 0 {
+                s.act("key ArrowUp");
+                for _ in 0..rng.below(5) {
+                    s.act(rng.pick(&["key ArrowRight", "key ArrowLeft"]));
+                }
+                s.act(rng.pick(&["key Enter", "key Escape", "key ArrowDown"]));
+            } else {
+                let i = *rng.pick(&icons);
+                s.act(&format!("click {:.0} {:.0}", i.center().x, i.center().y));
+            }
+            s.idle(3);
+            if matches!(s.app.popup, Popup::Ctx(_)) {
+                s.act("key Escape");
+            }
+        }
+        188 => {
+            // The preview's ⋯ menu: something in it, or nothing and away.
+            if !open_preview_menu(s) {
+                s.cmd(Cmd::ToggleInspector);
+                return;
+            }
+            let words = ["Wrap lines", "Line numbers", "Larger text", "Smaller text", "Source", "Rendered", "Find", "Details", "Dock right", "Dock bottom", "Place automatically", "Zoom to fit", "Pixel grid at high zoom", "Next page", "Previous page"];
+            let shown: Vec<&str> = words.iter().copied().filter(|w| s.texts.iter().any(|(_, t)| t == w)).collect();
+            if shown.is_empty() || rng.below(4) == 0 {
+                close_preview_menu(s);
+            } else {
+                s.click_text(rng.pick(&shown));
+            }
+            s.idle(2);
+        }
+        189 => {
+            // Something to the trash, then often taken back by the toast's Undo.
+            s.act("key Delete");
+            for _ in 0..20 {
+                s.idle(2);
+                if crate::ui::CONTROLS.with(|c| c.borrow().iter().any(|(_, _, w)| *w == "toast undo")) {
+                    break;
+                }
+            }
+            if rng.below(3) > 0 {
+                click_control_at(s, "toast undo");
+                s.idle(4);
+            }
+        }
+        190 => {
+            // The sidebar's filter, by typing while pointing at the sidebar after a click in
+            // it; then left with Escape, cleared, or kept.
+            if !s.app.sidebar {
+                return;
+            }
+            let x = (s.app.sidebar_width * 0.5).max(20.0);
+            let y = h - 30.0;
+            s.act(&format!("click {x:.0} {y:.0}"));
+            s.act(&format!("move {x:.0} {y:.0}"));
+            s.act(&format!("text {}", rng.pick(&["ho", "d", "zz", "Tr", "é"])));
+            s.idle(2);
+            match rng.below(3) {
+                0 => s.act("key Escape"),
+                1 => {
+                    for _ in 0..3 {
+                        s.act("key Backspace");
+                    }
+                }
+                _ => {}
+            }
+        }
         _ => {
             s.note("idle".into());
             s.idle(rng.below(20) + 1);
@@ -4050,7 +4219,8 @@ mod journeys {
         // Rubber band from empty space below the rows up across them: several selected.
         let list = s.app.panels[&s.app.active].list_rect;
         let last = s.text_rect("report.md");
-        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", list.center().x + 120.0, list.bottom() - 20.0, list.center().x + 100.0, last.top() - 30.0));
+        // (Left of the middle: the move's Undo toast sits at the bottom right.)
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", list.center().x - 60.0, list.bottom() - 20.0, list.center().x - 80.0, last.top() - 30.0));
         s.settle();
         assert!(s.tab().selected.len() >= 2, "rubber band selected {} items", s.tab().selected.len());
         s.act("key Escape");
@@ -4097,7 +4267,16 @@ mod journeys {
         let t = s.tab();
         let name = crate::listing::display_name(&t.entries[t.cursor.unwrap() as usize], &s.app.cfg);
         let list = s.app.panels[&s.app.active].list_rect;
-        let seen = s.texts.iter().any(|(r, txt)| (txt == &name || name.starts_with(txt.trim_end_matches('…'))) && list.contains(r.center()));
+        // A name may be drawn on two lines (icon views break it between words) and
+        // shortened anywhere with "…": what is drawn is the name's start and end.
+        let shows = |txt: &str| {
+            let flat = txt.replace('\n', "");
+            match flat.split_once('…') {
+                Some((head, tail)) => name.starts_with(head) && name.ends_with(tail),
+                None => flat == name,
+            }
+        };
+        let seen = s.texts.iter().any(|(r, txt)| shows(txt) && list.contains(r.center()));
         if !seen {
             s.fail(&format!("{what}: cursor item {name:?} not drawn inside the list"));
         }
@@ -4636,6 +4815,18 @@ mod journeys {
     fn click_control(s: &mut Sim, what: &str) {
         s.idle(1);
         let r = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == what).map(|(_, r, _)| *r));
+        if r.is_none() {
+            // A preview option: in the preview's ⋯ menu, clicked there.
+            if let Some(label) = preview_item(what) {
+                if open_preview_menu(s) && s.texts.iter().any(|(_, t)| t == label) {
+                    s.click_text(label);
+                    return;
+                }
+            }
+            if what == "contents toggle" && contents_from_menu(s) {
+                return;
+            }
+        }
         let r = r.unwrap_or_else(|| s.fail(&format!("no {what} on screen")));
         s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
     }
@@ -4696,22 +4887,22 @@ mod journeys {
         // PDF: page 1, then Page Down with the pointer over the preview.
         select_path(&mut s, &d.join("doc.pdf"));
         wait_until(&mut s, "PDF page 1", 20, |s| inspector(s).pdf_state().is_some_and(|(p, n, shown)| p == 1 && n == Some(3) && shown.is_some_and(|x| x.0 == 1)));
-        assert!(s.texts.iter().any(|(_, t)| t == "1 / 3"), "page counter shown");
+        assert!(preview_menu_has(&mut s, "Page 1 of 3"), "page counter shown, in the preview's menu");
         let list = s.app.panels[&s.app.active].list_rect;
         s.act(&format!("move {:.0} {:.0}", list.right() + 150.0, list.center().y));
         s.act("key PageDown");
         wait_until(&mut s, "PDF page 2", 20, |s| inspector(s).pdf_state().is_some_and(|(p, _, shown)| p == 2 && shown.is_some_and(|x| x.0 == 2)));
         s.idle(2);
-        assert!(s.texts.iter().any(|(_, t)| t == "2 / 3"), "page counter follows");
+        assert!(preview_menu_has(&mut s, "Page 2 of 3"), "page counter follows");
         s.act("move -50 -50");
         look(&mut s, "pdf preview");
-        toolbar_centred(&mut s, "pdf", &["2 / 3"]);
+        toolbar_centred(&mut s, "pdf", &[]);
         // Font size and Spacing change every row's height; the toolbar stays centred.
         for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
             s.app.cfg.font_size = font;
             s.app.cfg.spacing = spacing;
             s.idle(3);
-            toolbar_centred(&mut s, &format!("pdf at font {font}, spacing {spacing}"), &["2 / 3"]);
+            toolbar_centred(&mut s, &format!("pdf at font {font}, spacing {spacing}"), &[]);
             look(&mut s, &format!("pdf at font {font}, spacing {spacing}"));
         }
         // Video.
@@ -4826,12 +5017,12 @@ mod journeys {
         }
         assert!(sidebar_text(&s, "Photo Card").is_some(), "removable card offered in the sidebar");
         assert!(sidebar_text(&s, "Windows").is_none(), "internal disk only in Computer");
-        assert!(s.texts.iter().any(|(_, t)| t == "14.9 GB · Not mounted"), "card marked as not mounted");
+        assert!(s.texts.iter().any(|(_, t)| t == "16.0 GB · Not mounted"), "card marked as not mounted");
         // Inspector on an unmounted drive.
         s.cmd(ToggleInspector);
         select_name(&mut s, "Windows");
         s.idle(3);
-        assert!(s.texts.iter().any(|(_, t)| t == "200 GB · Not mounted"), "inspector shows the drive");
+        assert!(s.texts.iter().any(|(_, t)| t == "215 GB · Not mounted"), "inspector shows the drive");
         look(&mut s, "inspector on an unmounted drive");
         s.cmd(ToggleInspector);
 
@@ -4868,7 +5059,7 @@ mod journeys {
         s.settle();
         assert!(s.tab().entries.iter().any(|e| e.name == "readme.txt"), "card's files listed");
         assert!(drive_log(&d).contains("udisksctl mount -b /dev/sdz1"));
-        wait_until(&mut s, "card mounted in the sidebar", 10, |s| sidebar_text(s, "Photo Card").is_some() && !s.texts.iter().any(|(_, t)| t == "14.9 GB · Not mounted"));
+        wait_until(&mut s, "card mounted in the sidebar", 10, |s| sidebar_text(s, "Photo Card").is_some() && !s.texts.iter().any(|(_, t)| t == "16.0 GB · Not mounted"));
         look(&mut s, "inside the card");
 
         // Eject from the sidebar: the tab leaves first, then the disk powers off.
@@ -4971,23 +5162,23 @@ mod journeys {
             s.idle(2);
         };
         s.cmd(Computer);
-        wait_until(&mut s, "locked drive listed", 10, |s| s.tab().entries.iter().any(|e| e.name == "Encrypted 500 GB"));
-        assert!(sidebar_text(&s, "Encrypted 500 GB").is_some(), "offered in the sidebar");
-        assert!(some_text(&s, "500 GB · Locked"), "marked as locked");
+        wait_until(&mut s, "locked drive listed", 10, |s| s.tab().entries.iter().any(|e| e.name == "Encrypted 537 GB"));
+        assert!(sidebar_text(&s, "Encrypted 537 GB").is_some(), "offered in the sidebar");
+        assert!(some_text(&s, "537 GB · Locked"), "marked as locked");
         look(&mut s, "a locked drive");
         shots(&mut s, "encrypted-locked");
-        let r = list_text(&s, "Encrypted 500 GB");
+        let r = list_text(&s, "Encrypted 537 GB");
         s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
         s.idle(20);
         assert!(some_text(&s, "Unlock…") && some_text(&s, "Eject") && !some_text(&s, "Mount") && !some_text(&s, "Lock"), "a locked drive unlocks");
         s.act("key Escape");
 
         // Opened: the passphrase is asked; a wrong one is refused in the dialog.
-        select_name(&mut s, "Encrypted 500 GB");
+        select_name(&mut s, "Encrypted 537 GB");
         s.act("key Enter");
         s.idle(2);
         assert!(matches!(s.app.popup, Popup::Unlock(_)), "passphrase asked");
-        assert!(some_text(&s, "Unlock “Encrypted 500 GB”"));
+        assert!(some_text(&s, "Unlock “Encrypted 537 GB”"));
         s.act("text battery staple");
         shots(&mut s, "encrypted-passphrase");
         s.act("key Enter");
@@ -8118,7 +8309,10 @@ mod journeys {
 
     /// The colour `label` was last drawn in.
     fn color_of(s: &Sim, label: &str) -> egui::Color32 {
-        let i = s.texts.iter().rposition(|(_, t)| t == label).unwrap_or_else(|| s.fail(&format!("no {label:?} on screen")));
+        // An icon view sets a long name on two lines, broken at a space or after "_": the
+        // same characters, across the break.
+        let bare = |t: &str| t.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        let i = s.texts.iter().rposition(|(_, t)| t == label || (t.contains('\n') && bare(t) == bare(label))).unwrap_or_else(|| s.fail(&format!("no {label:?} on screen")));
         s.text_colors[i]
     }
 
@@ -10117,7 +10311,7 @@ mod journeys {
         assert_eq!(sets[0].files[0].path, d.join("beach.jpg"), "the oldest copy first");
         assert_eq!(sets[1].files[0].path, d.join("notes.txt"));
         assert!(s.texts.iter().any(|(_, t)| t.starts_with("2 sets of duplicates; ")), "what could be freed");
-        assert!(some_text(&s, "beach.jpg · 3 copies · 488 KB each"), "{:?}", s.texts.iter().filter(|t| t.1.contains("copies")).collect::<Vec<_>>());
+        assert!(some_text(&s, "beach.jpg · 3 copies · 500 KB each"), "{:?}", s.texts.iter().filter(|t| t.1.contains("copies")).collect::<Vec<_>>());
         look(&mut s, "duplicates");
         s.shot("duplicates");
         // Both notes checked: refused, the file would be gone.
@@ -10917,8 +11111,8 @@ mod journeys {
         inspector_mut(s).rich_state()
     }
 
-    fn has_control(_s: &Sim, what: &str) -> bool {
-        crate::ui::CONTROLS.with(|c| c.borrow().iter().any(|(_, _, w)| *w == what))
+    fn has_control(s: &mut Sim, what: &str) -> bool {
+        crate::ui::CONTROLS.with(|c| c.borrow().iter().any(|(_, _, w)| *w == what)) || preview_item(what).is_some_and(|l| preview_menu_has(s, l))
     }
 
     fn inspector_texts(s: &Sim) -> Vec<String> {
@@ -10987,7 +11181,7 @@ mod journeys {
         s.cmd(ToggleInspector);
         s.settle();
         assert!(s.app.cfg.source_views.markdown);
-        assert!(has_control(&s, "Rendered"), "Rendered offered beside Source");
+        assert!(has_control(&mut s, "Rendered"), "Rendered offered beside Source");
         click_control(&mut s, "Rendered");
         s.idle(2);
         assert!(!s.app.cfg.source_views.markdown);
@@ -11103,7 +11297,7 @@ mod journeys {
         select_path(&mut s, &d.join("app.log"));
         wait_until(&mut s, "log", 10, |s| inspector(s).text_lines().is_some_and(|l| l.0.len() == 40));
         s.idle(2);
-        assert!(has_control(&s, "line filter"), "a log has its filter");
+        assert!(has_control(&mut s, "line filter"), "a log has its filter");
         click_control(&mut s, "Follow");
         wait_until(&mut s, "following", 5, |s| inspector(s).text_lines().is_some_and(|l| l.1));
         {
@@ -11147,9 +11341,13 @@ mod journeys {
         select_path(&mut s, &d.join("notes.md"));
         click_control(&mut s, "Source");
         wait_until(&mut s, "notes", 10, |s| inspector(s).text_lines().is_some());
-        assert!(!has_control(&s, "Follow"));
+        assert!(!has_control(&mut s, "Follow"));
         std::fs::write(d.join("notes.md"), "# Notes\nmore\nand more\n").unwrap();
-        wait_until(&mut s, "Follow offered", 10, |s| has_control(s, "Follow"));
+        let t0 = std::time::Instant::now();
+        while !has_control(&mut s, "Follow") {
+            assert!(t0.elapsed().as_secs() < 10, "Follow offered");
+            s.idle(5);
+        }
         click_control(&mut s, "Rendered");
         // Blame: who and when beside each line; the summary on hover; a click opens it.
         if git {
@@ -11299,7 +11497,8 @@ mod journeys {
         let e = s.tab().entries.iter().find(|e| e.name == "Q3 report.docx").unwrap().clone();
         assert_eq!(inspector(&s).pdf_path(), Some(crate::office::cached(&e.path, e.size, e.modified).as_path()));
         assert!(!some_text(&s, "Preparing preview…"));
-        toolbar_centred(&mut s, "office", &["1 / 2"]);
+        toolbar_centred(&mut s, "office", &[]);
+        assert!(preview_menu_has(&mut s, "Page 1 of 2"), "the page count, in the preview's menu");
         look(&mut s, "office preview");
         s.shot("office-preview");
         let list = s.app.panels[&s.app.active].list_rect;
@@ -11330,7 +11529,7 @@ mod journeys {
             s.app.cfg.font_size = font;
             s.app.cfg.spacing = spacing;
             s.idle(3);
-            toolbar_centred(&mut s, &format!("office at font {font}, spacing {spacing}"), &["1 / 2"]);
+            toolbar_centred(&mut s, &format!("office at font {font}, spacing {spacing}"), &[]);
             look(&mut s, &format!("office at font {font}, spacing {spacing}"));
         }
         // No LibreOffice: as before, nothing converted.
@@ -12048,7 +12247,7 @@ mod journeys {
         select_path(&mut s, &d.join("Harbour.cbz"));
         wait_until(&mut s, "the comic's first page", 15, |s| inspector(s).comic_pages() == Some(10) && inspector(s).pdf_state().is_some_and(|p| p.2.is_some_and(|x| x.0 == 1)));
         s.idle(2);
-        in_inspector(&s, "1 / 10");
+        assert!(preview_menu_has(&mut s, "Page 1 of 10"), "the comic's page count, in the preview's menu");
         look(&mut s, "a comic");
         s.shot("preview-comic");
         let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
@@ -12271,7 +12470,7 @@ mod journeys {
         menu_pick(&mut s, "Format…");
         s.idle(2);
         assert!(matches!(s.app.popup, Popup::FormatDrive(_)));
-        for t in ["Format “Photo Card”", "14.9 GB removable drive · /dev/sdz", "Type Photo Card to confirm", "Everything on this 14.9 GB drive is erased: every partition and every file on it."] {
+        for t in ["Format “Photo Card”", "16.0 GB removable drive · /dev/sdz", "Type Photo Card to confirm", "Everything on this 16.0 GB drive is erased: every partition and every file on it."] {
             assert!(some_text(&s, t), "{t:?} shown");
         }
         s.act("key Enter");
@@ -13825,9 +14024,9 @@ mod journeys {
         wait_until(&mut s, "every size counted", 10, |s| !space(s).counting());
         s.idle(3);
         assert_eq!(space_names(&s), ["Big", "movie.mkv", "Small", "big-link", "Empty"]);
-        assert!(some_text(&s, "488 KB") && some_text(&s, "391 KB") && some_text(&s, "10 B"), "each size beside its bar");
+        assert!(some_text(&s, "500 KB") && some_text(&s, "400 KB") && some_text(&s, "10 B"), "each size beside its bar");
         assert!(s.texts.iter().any(|(_, t)| t.ends_with("Disk") || t.contains("Disk · ")), "where");
-        assert!(some_text(&s, "879 KB"), "how much in all, in the ring");
+        assert!(some_text(&s, "900 KB"), "how much in all, in the ring");
         look(&mut s, "space used");
         s.shot("space-used-graphite");
         s.app.cfg.theme = crate::theme::ThemeName::Paper;
@@ -13867,7 +14066,7 @@ mod journeys {
         assert_eq!(space(&s).checked.len(), 2);
         s.act("key Delete");
         assert!(space(&s).confirm, "asks first");
-        assert!(some_text(&s, "Move 2 items (391 KB) to the trash?"), "{:?}", s.texts.iter().filter(|t| t.1.starts_with("Move")).collect::<Vec<_>>());
+        assert!(some_text(&s, "Move 2 items (400 KB) to the trash?"), "{:?}", s.texts.iter().filter(|t| t.1.starts_with("Move")).collect::<Vec<_>>());
         look(&mut s, "space used asking");
         s.shot("space-used-confirm-graphite");
         s.act("key Enter");
@@ -16358,7 +16557,7 @@ mod journeys {
         wait_until(&mut s, "a decoded", 10, |s| s.app.thumbs.dims(&d.join("a.png")).is_some());
         s.idle(2);
         for b in ["viewer trash", "viewer rotate right", "viewer rotate left", "viewer tags", "viewer compare", "viewer close"] {
-            assert!(has_control(&s, b), "{b} shown with the name");
+            assert!(has_control(&mut s, b), "{b} shown with the name");
         }
         shot_still(&mut s, "viewer-tools-graphite");
         // Delete: to the trash, the next one shown; Ctrl+Z here brings it back.
@@ -16887,7 +17086,6 @@ mod journeys {
         let top = crate::fsx::home();
         assert_eq!(strip(&s).chain, vec![top.clone(), home.clone()], "the strip starts at the home folder");
         look(&mut s, "Documents in columns");
-        assert!(some_text(&s, "Columns"), "the status chip names the view");
         assert!(!s.texts.iter().any(|(_, t)| t.ends_with('%')), "no zoom chip: Columns has no zoom");
         assert!(in_list(&s, "Documents").right() < in_list(&s, "notes.txt").left(), "home's column is left of Documents'");
         s.shot("columns-documents");
@@ -17122,10 +17320,19 @@ mod journeys {
         s.shot("columns-paper");
         s.app.cfg.theme = crate::theme::ThemeName::Midnight;
         look(&mut s, "after the themes");
-        // The view chip's popup: Columns marked under the zoom axis; a stop leaves it, the
-        // Columns row goes back.
-        s.click_text("Columns");
-        s.idle(3);
+        // The views popup, from the toolbar's ⋮ menu: Columns marked under the zoom axis; a
+        // stop leaves it, the Columns row goes back.
+        let views = |s: &mut Sim| {
+            let m = controls_named("panel menu")[0];
+            s.act(&format!("click {:.0} {:.0}", m.center().x, m.center().y));
+            s.idle(2);
+            // Further down a long menu: scrolled to, and let come to rest before the click.
+            s.scroll_popup_to("View and size…");
+            s.idle(15);
+            s.click_text("View and size…");
+            s.idle(3);
+        };
+        views(&mut s);
         assert!(matches!(s.app.popup, Popup::Zoom { .. }), "the chip opens the views");
         std::thread::sleep(std::time::Duration::from_millis(300));
         s.idle(10);
@@ -17134,8 +17341,7 @@ mod journeys {
         s.idle(2);
         assert!(!s.tab().settings.column_view && (s.tab().settings.zoom - 0.2).abs() < 1e-3, "a named stop leaves Columns");
         if !s.popup_open() {
-            s.click_text("List");
-            s.idle(3);
+            views(&mut s);
         }
         let row = s.texts.iter().rev().find(|(_, t)| t == "Columns").map(|(r, _)| *r).unwrap_or_else(|| s.fail("the popup's Columns row"));
         s.act(&format!("click {:.0} {:.0}", row.center().x, row.center().y));
@@ -17493,19 +17699,32 @@ mod journeys {
         s.act("key alt+ArrowUp");
         s.act("key alt+ArrowUp");
         assert_eq!(s.app.queue.waiting(), [ids[2], ids[0], ids[1], ids[3]], "moved up twice");
-        // The second (two.txt) started now by its button; the first cancelled.
-        let rows = controls_named("transfer start now");
-        assert_eq!(rows.len(), 4);
-        click_rect(&mut s, rows[2]);
+        // A waiting row's buttons show on the row pointed at (and the keyboard's row) only:
+        // the second (two.txt) started now by its button, pointed at first.
+        assert_eq!(controls_named("transfer start now").len(), 1, "only the keyboard's row shows its buttons");
+        let rows = controls_named("transfer waiting");
+        s.act(&format!("move {:.0} {:.0}", rows[2].center().x, rows[2].center().y));
+        s.idle(2);
+        let starts = controls_named("transfer start now");
+        assert_eq!(starts.len(), 2, "the row pointed at shows its buttons too");
+        let start = *starts.iter().find(|b| (b.center().y - rows[2].center().y).abs() < 2.0).unwrap_or_else(|| s.fail("Start now on the row pointed at"));
+        click_rect(&mut s, start);
         wait_until(&mut s, "two.txt copied past the paused film", 10, |_| dest.join("two.txt").exists());
         s.idle(2);
-        let cancel = controls_named("transfer cancel");
-        // The running film's cancel comes first; the waiting ones' after.
-        click_rect(&mut s, cancel[cancel.len() - 2]);
+        // The first (one.txt, now second in line) cancelled by its ✕, pointed at first.
+        let rows = controls_named("transfer waiting");
+        s.act(&format!("move {:.0} {:.0}", rows[1].center().x, rows[1].center().y));
+        s.idle(2);
+        let cancel = *controls_named("transfer cancel").iter().find(|b| (b.center().y - rows[1].center().y).abs() < 2.0).unwrap_or_else(|| s.fail("✕ on the row pointed at"));
+        click_rect(&mut s, cancel);
         wait_until(&mut s, "one.txt cancelled", 10, |s| s.app.queue.waiting().len() == 2);
-        // Space resumes the film; its button pauses it again, and again resumes.
+        // Space resumes the film; its button, shown while it is pointed at, pauses it again,
+        // and again resumes.
         s.act("key space");
         assert!(!s.app.jobs.iter().find(|j| j.id == film).unwrap().pause.load(Relaxed), "resumed by Space");
+        let title = s.text_rect("Copying film.mkv");
+        s.act(&format!("move {:.0} {:.0}", title.center().x, title.center().y));
+        s.idle(2);
         click_control(&mut s, "transfer pause");
         assert!(s.app.jobs.iter().find(|j| j.id == film).unwrap().pause.load(Relaxed), "paused by its button");
         click_control(&mut s, "transfer pause");
@@ -18162,10 +18381,11 @@ mod journeys {
         select_name(&mut s, "maia");
         s.cmd(ToggleInspector);
         s.idle(4);
-        // The details card, from the name's pill in the inspector's header.
-        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("no inspector"));
-        let pill = s.texts.iter().find(|(r, t)| t == "maia" && ir.contains(r.center())).map(|x| x.0).unwrap_or_else(|| s.fail("no name pill"));
+        // The details card, from the name in the preview's header (found once the preview
+        // has slid open: the name sits at its left and moves with it).
         look(&mut s, "a project in the inspector");
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("no inspector"));
+        let pill = s.texts.iter().find(|(r, t)| t == "maia" && ir.contains(r.center())).map(|x| x.0).unwrap_or_else(|| s.fail("no name in the header"));
         click_rect(&mut s, pill);
         wait_until(&mut s, "the languages counted", 15, |s| some_text(s, "Rust") && some_text(s, "Python"));
         s.idle(4);
@@ -18797,4 +19017,279 @@ mod journeys {
         settles_idle(&mut s, "themes");
         report("themes", &s);
     }
+
+    fn ctl(what: &str) -> Option<Rect> {
+        crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == what).map(|(_, r, _)| *r))
+    }
+
+    fn click_on(s: &mut Sim, r: Rect) {
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+    }
+
+    /// The redesigned window, worked as a person would: the status bar's words, the
+    /// toolbar's filter by Ctrl+F, the right-click menu's row of icons by mouse and by
+    /// keys, "Open in ›", the preview's ⋯ menu, the sidebar's filter appearing on typing,
+    /// trash and the toast's Undo, a dialog's quiet Cancel and red main button, same-named
+    /// tabs, the window's title and a picked tile under the cursor.
+    #[test]
+    fn redesigned_window_by_hand() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("redesign");
+        let dir = home.join("maia/src");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(home.join("notes/src")).unwrap();
+        for (n, len) in [("one.txt", 1_500usize), ("two.txt", 2_500), ("three.txt", 500)] {
+            std::fs::write(dir.join(n), "x".repeat(len)).unwrap();
+        }
+        let mut s = Sim::new(&dir, vec2(1280.0, 800.0));
+        s.settle();
+        // The status bar says it in words; Ctrl+F puts the keys in the toolbar's filter.
+        assert!(some_text(&s, "3 files · 4.5 KB"), "the summary: {:?}", s.texts.iter().rev().take(6).collect::<Vec<_>>());
+        s.act("key ctrl+f");
+        s.idle(2);
+        assert!(s.app.panels[&s.app.active].filter_has_focus, "Ctrl+F focuses the toolbar's filter");
+        s.act("text one");
+        s.settle();
+        assert!(some_text(&s, "1 of 3 files · 1.5 KB"), "filtered, said so");
+        let field = ctl("panel menu").unwrap_or_else(|| s.fail("the ⋮ menu"));
+        assert!(s.texts.iter().any(|(r, t)| t == "one" && r.center().y < field.bottom() + 4.0), "the filter, in the toolbar");
+        s.act("key Escape");
+        s.settle();
+        look(&mut s, "status bar");
+        s.shot("redesign-status");
+        // The right-click menu: Cut, Copy, Rename, Duplicate and Delete across its top.
+        let one = s.text_rect("one.txt");
+        s.act(&format!("click {:.0} {:.0}", one.center().x, one.center().y));
+        s.act(&format!("click {:.0} {:.0} right", one.center().x, one.center().y));
+        s.idle(4);
+        let icons = controls_named("menu action");
+        assert_eq!(icons.len(), 5, "five icons across the menu's top");
+        look_popup(&mut s, "menu with icons");
+        s.shot("redesign-menu");
+        assert!(!s.texts.iter().any(|(_, t)| t == "Cut" || t == "Duplicate" || t == "Move To Trash"), "not repeated as rows");
+        click_on(&mut s, icons[1]);
+        s.idle(2);
+        assert!(matches!(&s.app.clipboard, Some((p, false)) if p == &vec![dir.join("one.txt")]), "Copy by its icon");
+        // By the keys: Up from the first row onto the icons, Right to Cut's neighbour Copy
+        // and on to Rename, Enter.
+        s.act("key shift+F10");
+        s.idle(3);
+        s.act("key ArrowUp");
+        s.act("key ArrowRight");
+        s.act("key ArrowRight");
+        s.shot("redesign-menu-keys");
+        s.act("key Enter");
+        s.idle(3);
+        assert!(s.tab().rename.is_some(), "Rename, reached with the keys");
+        s.act("key Escape");
+        s.idle(2);
+        // Open in › New Tab.
+        let tabs = s.app.panels[&s.app.active].tabs.len();
+        let one = s.text_rect("one.txt");
+        s.act(&format!("click {:.0} {:.0} right", one.center().x, one.center().y));
+        s.idle(3);
+        s.click_text("Open in");
+        s.idle(2);
+        assert!(some_text(&s, "Right Split") && some_text(&s, "New Window"), "the four places, under one");
+        s.shot("redesign-open-in");
+        s.click_text("New Tab");
+        s.settle();
+        assert_eq!(s.app.panels[&s.app.active].tabs.len(), tabs + 1, "opened in a new tab");
+        s.act("key ctrl+w");
+        s.settle();
+        // The preview's ⋯ menu.
+        select_path(&mut s, &dir.join("two.txt"));
+        s.cmd(ToggleInspector);
+        s.settle();
+        assert!(ctl("preview menu").is_some() && ctl("Edit (Shift+F4)").is_some(), "name, Edit, ⋯ and ✕");
+        let wraps = inspector(&s).wraps();
+        assert!(open_preview_menu(&mut s), "the ⋯ button");
+        s.idle(4);
+        s.shot("redesign-preview-menu");
+        s.click_text("Wrap lines");
+        s.idle(2);
+        assert_ne!(inspector(&s).wraps(), wraps, "Wrap lines from the menu");
+        s.cmd(ToggleInspector);
+        s.settle();
+        // The sidebar's filter: hidden, then there as soon as one types at the sidebar.
+        assert!(!some_text(&s, "Filter sidebar…"), "no filter row until typed into");
+        let side = (s.app.sidebar_width * 0.5, 760.0);
+        s.act(&format!("click {:.0} {:.0}", side.0, side.1));
+        s.act(&format!("move {:.0} {:.0}", side.0, side.1));
+        s.act("text tra");
+        s.idle(3);
+        assert!(sidebar_text(&s, "Trash").is_some() && sidebar_text(&s, "Home").is_none(), "the sidebar narrowed");
+        assert!(s.tab().filter.is_empty(), "the list's filter untouched");
+        s.shot("redesign-sidebar-filter");
+        for _ in 0..3 {
+            s.act("key Backspace");
+        }
+        let list = s.app.panels[&s.app.active].list_rect;
+        click_on(&mut s, list);
+        s.idle(3);
+        assert!(!some_text(&s, "Filter sidebar…"), "empty and left: gone again");
+        // Trash with Delete; the toast says so and its Undo brings it back.
+        select_path(&mut s, &dir.join("three.txt"));
+        s.act("key Delete");
+        wait_until(&mut s, "the toast's Undo", 10, |_| ctl("toast undo").is_some());
+        assert!(!dir.join("three.txt").exists());
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0 == "three.txt moved to Trash"));
+        s.idle(3);
+        s.shot("redesign-undo-toast");
+        click_on(&mut s, ctl("toast undo").unwrap());
+        wait_until(&mut s, "three.txt back", 10, |_| dir.join("three.txt").exists());
+        s.idle(3);
+        // Another change: the earlier toast's Undo would take back the wrong thing.
+        select_path(&mut s, &dir.join("three.txt"));
+        s.act("key Delete");
+        wait_until(&mut s, "the toast's Undo again", 10, |_| ctl("toast undo").is_some());
+        s.cmd(NewFolder);
+        s.idle(3);
+        s.act("key Escape");
+        s.idle(2);
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0.starts_with("Created ")), "a new folder says so too");
+        s.act("key ctrl+z");
+        s.idle(3);
+        assert!(ctl("toast undo").is_none(), "undone by the keys: the Undo goes");
+        s.act("key ctrl+z");
+        wait_until(&mut s, "three.txt back by the keys", 10, |_| dir.join("three.txt").exists());
+        s.app.toast = None;
+        // A dialog's way out: quiet Cancel, Esc and Enter, and the red main button.
+        select_path(&mut s, &dir.join("three.txt"));
+        s.act("key shift+Delete");
+        s.idle(3);
+        assert!(s.popup_open() && some_text(&s, "Cancel"), "asked first");
+        look_popup(&mut s, "delete for good");
+        s.shot("redesign-dialog");
+        s.act("key Escape");
+        s.idle(2);
+        assert!(!s.popup_open() && dir.join("three.txt").exists(), "Esc is the way out");
+        s.act("key shift+Delete");
+        s.idle(3);
+        s.click_text("Cancel");
+        s.idle(2);
+        assert!(!s.popup_open() && dir.join("three.txt").exists(), "so is Cancel");
+        s.act("key shift+Delete");
+        s.idle(3);
+        s.act("key Enter");
+        wait_until(&mut s, "deleted for good", 10, |_| !dir.join("three.txt").exists());
+        // Same-named tabs, and the window's title.
+        s.settle();
+        assert_eq!(s.app.window_title, "src · Maia");
+        let id = s.app.active;
+        s.app.actions.push(crate::app::Action::NewTab { panel: id, path: home.join("notes/src"), select: None, focus: true });
+        s.settle();
+        // A new tab grows in over a tenth of a second of the clock.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        s.idle(4);
+        s.shot("redesign-same-name-tabs");
+        assert!(some_text(&s, "· maia") && some_text(&s, "· notes"), "the parents tell them apart: {:?}", s.texts.iter().filter(|t| t.0.top() < 40.0).map(|t| t.1.clone()).collect::<Vec<_>>());
+        assert_eq!(s.app.window_title, "src · Maia", "the title follows the tab shown");
+        s.app.actions.push(crate::app::Action::Navigate { panel: id, path: home.clone() });
+        s.settle();
+        assert_eq!(s.app.window_title, format!("{} · Maia", home.file_name().unwrap().to_string_lossy()));
+        assert!(!some_text(&s, "· maia"), "no longer shared: plain again");
+        s.cmd(Computer);
+        s.settle();
+        assert_eq!(s.app.window_title, "Computer · Maia");
+        s.act("key ctrl+w");
+        s.settle();
+        // A picked tile under the cursor, another picked beside it.
+        s.cmd(ViewLarge);
+        s.settle();
+        {
+            let t = s.tab_mut();
+            let picked: Vec<u32> = t.entries.iter().enumerate().filter(|(_, e)| e.name.ends_with(".txt")).map(|(i, _)| i as u32).collect();
+            t.selected = picked.iter().copied().collect();
+            t.cursor = picked.first().copied();
+        }
+        look(&mut s, "picked tiles");
+        s.shot("redesign-tiles");
+        report("redesign", &s);
+    }
+
+    /// Something missing, explained once: the toast's "How to install" gives the command
+    /// for the family a (fake) os-release names, with Copy; the name alone elsewhere.
+    #[test]
+    fn missing_tool_how_to_install() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("howto");
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        for (release, want) in [("ID=pop\nID_LIKE=\"ubuntu debian\"\n", Some("sudo apt install libarchive-tools")), ("ID=cachyos\nID_LIKE=arch\n", Some("sudo pacman -S libarchive")), ("ID=nixos\n", None)] {
+            crate::needs::fake(release);
+            s.app.toast("Sending folders needs bsdtar");
+            s.idle(2);
+            let b = ctl("toast how to install").unwrap_or_else(|| s.fail("How to install on the toast"));
+            click_on(&mut s, b);
+            wait_until(&mut s, "the system known", 10, |_| crate::needs::family().is_some());
+            s.idle(3);
+            assert!(matches!(s.app.popup, Popup::Install { tool: "bsdtar" }));
+            look_popup(&mut s, "how to install");
+            match want {
+                Some(c) => {
+                    assert!(some_text(&s, c), "{c}");
+                    s.shot("howto-install");
+                    s.click_text("Copy");
+                    s.idle(2);
+                    assert!(!s.popup_open() && s.app.toast.as_ref().is_some_and(|t| t.0 == "Copied the install command"));
+                }
+                None => {
+                    assert!(s.texts.iter().any(|(_, t)| t.contains("Install the bsdtar package")), "the name alone");
+                    assert!(!some_text(&s, "Copy"), "nothing to copy");
+                    s.act("key Escape");
+                    s.idle(2);
+                }
+            }
+        }
+        report("howto", &s);
+    }
+
+    /// Both high-contrast themes through the list, the sidebar, a dialog, the preview and
+    /// a code preview, under the overlap checks.
+    #[test]
+    fn high_contrast_themes_through_the_window() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("contrast");
+        let dir = home.join("Documents");
+        std::fs::write(dir.join("main.rs"), "// a comment\nfn main() {\n    let x: u32 = 42;\n    println!(\"{x}\");\n}\n").unwrap();
+        let mut s = Sim::new(&dir, vec2(1280.0, 800.0));
+        for t in [crate::theme::ThemeName::HighContrastDark, crate::theme::ThemeName::HighContrastLight] {
+            s.app.cfg.theme = t;
+            s.settle();
+            let tag = if t == crate::theme::ThemeName::HighContrastDark { "dark" } else { "light" };
+            {
+                let tb = s.tab_mut();
+                let n = tb.entries.len().min(2) as u32;
+                tb.selected = (0..n).collect();
+                tb.cursor = Some(0);
+            }
+            look(&mut s, &format!("{tag}: list"));
+            s.shot(&format!("contrast-{tag}-list"));
+            select_path(&mut s, &dir.join("main.rs"));
+            s.cmd(ToggleInspector);
+            s.settle();
+            look(&mut s, &format!("{tag}: code preview"));
+            s.shot(&format!("contrast-{tag}-code"));
+            s.cmd(ToggleInspector);
+            s.settle();
+            s.act("key shift+Delete");
+            s.idle(3);
+            look_popup(&mut s, &format!("{tag}: dialog"));
+            s.shot(&format!("contrast-{tag}-dialog"));
+            s.act("key Escape");
+            s.cmd(Options);
+            s.idle(4);
+            look_popup(&mut s, &format!("{tag}: options"));
+            s.act("key Escape");
+            s.idle(2);
+        }
+        report("contrast", &s);
+    }
+
 }

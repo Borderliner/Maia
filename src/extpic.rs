@@ -54,11 +54,11 @@ pub fn can(t: &Tools, ext: &str) -> bool {
 /// What to install to see such a picture, when nothing here reads it.
 pub fn install_note(ext: &str) -> Option<&'static str> {
     Some(match kind(ext)? {
-        Kind::Heif => "Install ImageMagick to see HEIC photos",
-        Kind::Avif => "Install ImageMagick to see AVIF pictures",
-        Kind::Tiff => "Install ImageMagick to see TIFF pictures",
-        Kind::Jxl => "Install ImageMagick or libjxl to see JPEG XL pictures",
-        Kind::Raw => "Install ImageMagick to see camera RAW photos",
+        Kind::Heif => "Showing HEIC photos needs ImageMagick",
+        Kind::Avif => "Showing AVIF pictures needs ImageMagick",
+        Kind::Tiff => "Showing TIFF pictures needs ImageMagick",
+        Kind::Jxl => "Showing JPEG XL pictures needs ImageMagick or libjxl",
+        Kind::Raw => "Showing camera RAW photos needs ImageMagick",
     })
 }
 

@@ -399,7 +399,7 @@ fn status_color(s: u8, pal: &Palette) -> Color32 {
         b'A' => crate::gitstatus::GREEN,
         b'D' => pal.danger,
         b'R' | b'C' => crate::gitstatus::BLUE,
-        _ => crate::gitstatus::AMBER,
+        _ => pal.warn,
     }
 }
 

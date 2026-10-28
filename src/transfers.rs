@@ -81,8 +81,10 @@ struct Snap {
     id: u64,
     label: String,
     frac: f32,
+    /// How much is done: "15.6 of 45.8 MB · 3 of 12 files", and "paused" when it is.
     line: String,
-    speed: String,
+    /// When it will be done and how fast it goes: "2 min left · 38 MB/s".
+    pace: String,
     current: String,
     paused: bool,
     waiting: bool,
@@ -104,7 +106,7 @@ fn snap(j: &Job) -> Option<Snap> {
     };
     let el = p.since.unwrap_or(j.started).elapsed().saturating_sub(p.held).as_secs_f64().max(0.001);
     let mut parts = vec![];
-    let mut speed = String::new();
+    let mut pace = String::new();
     if p.total_bytes > 0 {
         parts.push(of_size(p.done_bytes, p.total_bytes));
     }
@@ -119,12 +121,11 @@ fn snap(j: &Job) -> Option<Snap> {
         parts.push("waiting for you".into());
     } else if p.total_bytes > 0 && p.done_bytes > 0 {
         let s = p.done_bytes as f64 / el;
-        speed = format!("{}/s", crate::fsx::fmt_size(s as u64));
-        parts.push(format!("{} left", crate::ui::time_left(p.total_bytes.saturating_sub(p.done_bytes) as f64 / s)));
+        pace = format!("{} left · {}/s", crate::ui::time_left(p.total_bytes.saturating_sub(p.done_bytes) as f64 / s), crate::fsx::fmt_size(s as u64));
     } else if p.within.is_some() {
-        parts.push(format!("{:.0}%", frac * 100.0));
+        pace = format!("{:.0}%", frac * 100.0);
     }
-    Some(Snap { id: j.id, label: j.label.clone(), frac, line: parts.join(" · "), speed, current: p.current.clone(), paused, waiting: p.waiting.is_some(), clash: p.clash.clone(), same: p.same })
+    Some(Snap { id: j.id, label: j.label.clone(), frac, line: parts.join(" · "), pace, current: p.current.clone(), paused, waiting: p.waiting.is_some(), clash: p.clash.clone(), same: p.same })
 }
 
 /// A name already taken, asked inside its job: Keep both, Replace, Skip (Merge for two
@@ -261,33 +262,56 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         crate::frost::behind(ui, 10);
         pp::popup_frame(&pal).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
             ui.set_width(width - 24.0);
-            egui::ScrollArea::vertical().max_height(room).auto_shrink([false, true]).show(ui, |ui| {
+            // The key hints stay under the list, outside its scrolling: inside, the last
+            // row of them was cut in half at larger Spacing.
+            let hints = !waiting.is_empty();
+            let hint_h = if hints { 30.0 * app.cfg.spacing.max(1.0) + 8.0 } else { 0.0 };
+            egui::ScrollArea::vertical().max_height((room - hint_h).max(60.0)).auto_shrink([false, true]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 for (n, s) in running.iter().enumerate() {
                     if n > 0 {
-                        ui.add_space(8.0);
+                        ui.add_space(10.0);
                     }
+                    let top = ui.cursor().top();
                     let h = ui.text_style_height(&egui::TextStyle::Body).max(22.0);
                     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
-                    // The buttons at the right, the title in what they leave, cut with "…".
-                    let x_r = Rect::from_center_size(pos2(row.right() - 11.0, row.center().y), Vec2::splat(22.0));
-                    let p_r = Rect::from_center_size(pos2(x_r.left() - 13.0, row.center().y), Vec2::splat(22.0));
-                    if icon_button(ui, x_r, "x", "Cancel", "transfer cancel", &pal) {
-                        cancel = Some(s.id);
+                    // Pause and cancel show while the job is pointed at; a paused one keeps
+                    // its play button, the way back.
+                    let block = Rect::from_min_max(pos2(row.left(), top), pos2(row.right(), top + h + 40.0));
+                    let near = ui.rect_contains_pointer(block);
+                    let mut right = row.right();
+                    if near || s.paused {
+                        let x_r = Rect::from_center_size(pos2(row.right() - 11.0, row.center().y), Vec2::splat(22.0));
+                        let p_r = Rect::from_center_size(pos2(x_r.left() - 13.0, row.center().y), Vec2::splat(22.0));
+                        if near && icon_button(ui, x_r, "x", "Cancel", "transfer cancel", &pal) {
+                            cancel = Some(s.id);
+                        }
+                        if icon_button(ui, p_r, if s.paused { "play" } else { "pause" }, if s.paused { "Resume (Space)" } else { "Pause (Space)" }, "transfer pause", &pal) {
+                            pause_flip = Some(s.id);
+                        }
+                        right = p_r.left() - 6.0;
                     }
-                    if icon_button(ui, p_r, if s.paused { "play" } else { "pause" }, if s.paused { "Resume" } else { "Pause (Space)" }, "transfer pause", &pal) {
-                        pause_flip = Some(s.id);
+                    // The name on the left; when it will be done and how fast, on the right.
+                    let pg = ui.painter().layout_no_wrap(s.pace.clone(), small.clone(), pal.text_dim);
+                    let pw = if s.pace.is_empty() { 0.0 } else { pg.size().x + 12.0 };
+                    if pw > 0.0 {
+                        ui.painter().galley(pos2(right - pg.size().x, row.center().y - pg.size().y / 2.0), pg, pal.text_dim);
                     }
-                    let title = crate::listing::elided(ui, &s.label, crate::theme::semibold(fs), p_r.left() - 8.0 - row.left(), pal.text);
+                    let title = crate::listing::elided(ui, &s.label, crate::theme::semibold(fs), (right - pw - row.left()).max(20.0), pal.text);
                     ui.painter().galley(pos2(row.left(), row.center().y - title.size().y / 2.0), title, pal.text);
-                    ui.add(egui::ProgressBar::new(s.frac).desired_height(5.0).fill(if s.paused { pal.text_dim } else { pal.accent }));
-                    let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width(), fs + 4.0), Sense::hover());
-                    let sg = ui.painter().layout_no_wrap(s.speed.clone(), small.clone(), pal.text_dim);
-                    let sw = sg.size().x;
-                    ui.painter().galley(pos2(lr.right() - sw, lr.center().y - sg.size().y / 2.0), sg, pal.text_dim);
-                    let lg = crate::listing::elided(ui, &s.line, small.clone(), lr.width() - sw - 10.0, pal.text_dim);
-                    ui.painter().galley(pos2(lr.left(), lr.center().y - lg.size().y / 2.0), lg, pal.text_dim);
-                    if !s.current.is_empty() && s.clash.is_none() {
+                    ui.add_space(3.0);
+                    let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 5.0), Sense::hover());
+                    ui.painter().rect_filled(bar, CornerRadius::same(3), pal.raised.lerp_to_gamma(pal.text, if pal.dark { 0.12 } else { 0.1 }));
+                    let fill = Rect::from_min_size(bar.min, vec2((bar.width() * s.frac.clamp(0.0, 1.0)).max(5.0), bar.height()));
+                    ui.painter().rect_filled(fill, CornerRadius::same(3), if s.paused { pal.text_dim } else { pal.accent });
+                    ui.add_space(1.0);
+                    if !s.line.is_empty() {
+                        let lg = crate::listing::tabular(ui, &s.line, small.clone(), ui.available_width(), pal.text_dim);
+                        let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width(), lg.size().y), Sense::hover());
+                        ui.painter().galley(lr.min, lg, pal.text_dim);
+                    }
+                    // The file at hand, when the title does not already name it.
+                    if !s.current.is_empty() && s.clash.is_none() && !s.label.contains(s.current.as_str()) {
                         ui.add(egui::Label::new(egui::RichText::new(&s.current).font(small.clone()).color(pal.text_dim)).truncate());
                     }
                     if let Some(c) = &s.clash {
@@ -299,11 +323,11 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                 }
                 if !waiting.is_empty() {
                     if !running.is_empty() {
-                        ui.add_space(8.0);
-                        let y = ui.cursor().top();
-                        ui.painter().line_segment([pos2(ui.min_rect().left(), y), pos2(ui.min_rect().right(), y)], Stroke::new(1.0, pal.border));
-                        ui.add_space(6.0);
+                        ui.add_space(12.0);
                     }
+                    let lf = crate::theme::semibold((fs * 0.8).round());
+                    let (lr, _) = ui.allocate_exact_size(vec2(ui.available_width(), lf.size + 6.0), Sense::hover());
+                    ui.painter().text(pos2(lr.left(), lr.center().y), Align2::LEFT_CENTER, "Waiting", lf, pal.text_dim);
                     let row_h = (fs * 1.35 + 8.0).round();
                     let mut rects: Vec<(u64, Rect)> = vec![];
                     for s in &waiting {
@@ -311,13 +335,13 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                         rects.push((s.id, r));
                         let on = st.sel == Some(s.id);
                         let dragged = st.drag == Some(s.id);
-                        if on || dragged {
-                            ui.painter().rect_filled(r, CornerRadius::same(6), pal.selected);
-                        } else if resp.hovered() {
+                        // A plain list: the handle and the row's buttons only on the row
+                        // pointed at or under the keyboard's cursor.
+                        let hot = ui.rect_contains_pointer(r) && st.drag.is_none();
+                        let shown = on || dragged || hot;
+                        if shown {
                             ui.painter().rect_filled(r, CornerRadius::same(6), pal.hover);
                         }
-                        let (tc, dc) = if on || dragged { (pal.on_sel(), pal.on_sel_dim()) } else { (pal.text, pal.text_dim) };
-                        grip(ui.painter(), pos2(r.left() + 10.0, r.center().y), dc);
                         if resp.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                         }
@@ -328,25 +352,30 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                         if resp.clicked() {
                             st.sel = Some(s.id);
                         }
-                        let x_r = Rect::from_center_size(pos2(r.right() - 13.0, r.center().y), Vec2::splat(22.0));
-                        if icon_button(ui, x_r, "x", "Cancel", "transfer cancel", &pal) {
-                            cancel = Some(s.id);
-                        }
-                        let g = ui.painter().layout_no_wrap("Start now".into(), small.clone(), dc);
-                        let b = Rect::from_min_max(pos2(x_r.left() - 8.0 - g.size().x - 12.0, r.center().y - 10.0), pos2(x_r.left() - 6.0, r.center().y + 10.0));
-                        let br = ui.interact(b, Id::unique(("start now", s.id)), Sense::click());
-                        crate::ui::note_control(ui, b, "transfer start now");
-                        if br.hovered() {
-                            ui.painter().rect(b, CornerRadius::same(5), pal.hover, Stroke::new(1.0, pal.card_line()), StrokeKind::Inside);
-                        }
-                        ui.painter().galley(pos2(b.center().x - g.size().x / 2.0, b.center().y - g.size().y / 2.0), g, if br.hovered() { tc } else { dc });
-                        if br.on_hover_text("Start without waiting its turn (Enter)").clicked() {
-                            start_now = Some(s.id);
+                        let mut text_right = r.right() - 8.0;
+                        if shown {
+                            grip(ui.painter(), pos2(r.left() + 10.0, r.center().y), pal.text_dim);
+                            let x_r = Rect::from_center_size(pos2(r.right() - 13.0, r.center().y), Vec2::splat(22.0));
+                            if icon_button(ui, x_r, "x", "Cancel", "transfer cancel", &pal) {
+                                cancel = Some(s.id);
+                            }
+                            let g = ui.painter().layout_no_wrap("Start now".into(), small.clone(), pal.text_dim);
+                            let b = Rect::from_min_max(pos2(x_r.left() - 8.0 - g.size().x - 12.0, r.center().y - 10.0), pos2(x_r.left() - 6.0, r.center().y + 10.0));
+                            let br = ui.interact(b, Id::unique(("start now", s.id)), Sense::click());
+                            crate::ui::note_control(ui, b, "transfer start now");
+                            if br.hovered() {
+                                ui.painter().rect(b, CornerRadius::same(5), pal.raised, Stroke::new(1.0, pal.card_line()), StrokeKind::Inside);
+                            }
+                            ui.painter().galley(pos2(b.center().x - g.size().x / 2.0, b.center().y - g.size().y / 2.0), g, if br.hovered() { pal.text } else { pal.text_dim });
+                            if br.on_hover_text("Start without waiting its turn (Enter)").clicked() {
+                                start_now = Some(s.id);
+                            }
+                            text_right = b.left() - 8.0;
                         }
                         // The row's own part, where it is picked up: its buttons are theirs.
-                        crate::ui::note_control(ui, Rect::from_min_max(r.min, pos2(b.left() - 4.0, r.max.y)), "transfer waiting");
-                        let lg = crate::listing::elided(ui, &s.label, FontId::proportional(fs), b.left() - 8.0 - (r.left() + 24.0), tc);
-                        ui.painter().galley(pos2(r.left() + 24.0, r.center().y - lg.size().y / 2.0), lg, tc);
+                        crate::ui::note_control(ui, Rect::from_min_max(r.min, pos2(text_right + 4.0, r.max.y)), "transfer waiting");
+                        let lg = crate::listing::elided(ui, &s.label, FontId::proportional(fs), text_right - (r.left() + 24.0), pal.text);
+                        ui.painter().galley(pos2(r.left() + 24.0, r.center().y - lg.size().y / 2.0), lg, pal.text);
                     }
                     // A drag: a line where it would go, and the move once let go.
                     if let Some(d) = st.drag {
@@ -366,10 +395,12 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                             }
                         }
                     }
-                    ui.add_space(4.0);
-                    pp::hint_chips(ui, &[("Alt+↑↓", "reorder"), ("Enter", "start now"), ("Space", "pause"), ("Esc", "close")], &pal);
                 }
             });
+            if hints {
+                ui.add_space(8.0);
+                pp::hint_chips(ui, &[("Alt+↑↓", "reorder"), ("Enter", "start now"), ("Space", "pause"), ("Esc", "close")], &pal);
+            }
         });
     });
     crate::ui::note_popup(r.response.rect);

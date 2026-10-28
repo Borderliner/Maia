@@ -455,13 +455,19 @@ pub fn plain_error(e: &str) -> &str {
 
 pub fn fmt_size(n: u64) -> String {
     const U: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
-    if n < 1024 {
+    // In thousands, as drives and downloads are labelled: a 4.7 GB film reads 4.7 GB.
+    if n < 1000 {
         return format!("{n} B");
     }
     let mut v = n as f64;
     let mut i = 0;
-    while v >= 1024.0 && i < U.len() - 1 {
-        v /= 1024.0;
+    while v >= 1000.0 && i < U.len() - 1 {
+        v /= 1000.0;
+        i += 1;
+    }
+    // 999.96 KB rounds up to "1000 KB": say it in the next unit instead.
+    if v >= 999.5 && i < U.len() - 1 {
+        v /= 1000.0;
         i += 1;
     }
     if v >= 100.0 { format!("{v:.0} {}", U[i]) } else { format!("{v:.1} {}", U[i]) }

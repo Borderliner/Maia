@@ -220,6 +220,8 @@ pub enum Popup {
     NewRef(NewRef),
     /// Something that went wrong, said in full (git's own words).
     Notice { title: String, text: String },
+    /// How to install a helper program a message said is missing.
+    Install { tool: &'static str },
     DropMenu { paths: Vec<PathBuf>, dest: PathBuf, pos: Pos2 },
     Connect(ConnectState),
     ArchivePassword(PasswordState),
@@ -521,6 +523,7 @@ impl Popup {
             Popup::GitCommit(..) => "GitCommit",
             Popup::NewRef(..) => "NewRef",
             Popup::Notice { .. } => "Notice",
+            Popup::Install { .. } => "Install",
             Popup::DropMenu { .. } => "DropMenu",
         }
     }
@@ -739,7 +742,7 @@ pub(crate) fn dialog_frame(pal: &Palette) -> egui::Frame {
     popup_frame(pal)
         .corner_radius(CornerRadius::same(DIALOG_RADIUS))
         .inner_margin(egui::Margin::same(DIALOG_PAD as i8))
-        .shadow(egui::epaint::Shadow { offset: [0, 12], blur: 36, spread: 0, color: Color32::from_black_alpha(if pal.dark { 110 } else { 40 }) })
+        .shadow(egui::epaint::Shadow { offset: [0, 10], blur: 32, spread: 0, color: Color32::from_black_alpha(if pal.dark { 80 } else { 30 }) })
 }
 
 /// A path with the home folder written as ~.
@@ -861,15 +864,43 @@ pub(crate) fn dialog_buttons(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     });
 }
 
-/// The main button of a dialog, in the accent.
+/// The main button of a dialog, in the accent; in the danger red when what it does can't
+/// be taken back (deleting for good, discarding, writing over).
 pub(crate) fn primary_button(ui: &mut Ui, label: &str, enabled: bool, pal: &Palette) -> egui::Response {
-    ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(label).color(pal.on_accent())).fill(pal.accent).min_size(vec2(80.0, 0.0)))
+    let destroys = ["Delete", "Discard", "Overwrite", "Erase", "Format", "Empty Trash"].iter().any(|w| label.starts_with(w));
+    let (fill, text) = if destroys { (pal.danger, Color32::WHITE) } else { (pal.accent, pal.on_accent()) };
+    ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(label).color(text)).fill(fill).min_size(vec2(80.0, 0.0)))
 }
 
 /// A dialog's other buttons: a quiet fill and outline, so they read as buttons and not
-/// as text beside the accent one.
+/// as text beside the accent one. The way out (Cancel, Close) is plainer still.
 pub(crate) fn plain_button(ui: &mut Ui, label: &str, pal: &Palette) -> egui::Response {
+    if matches!(label, "Cancel" | "Close") {
+        return quiet_button(ui, label, pal);
+    }
     ui.add(egui::Button::new(label).fill(pal.card()).stroke(Stroke::new(1.0, pal.card_line())).min_size(vec2(80.0, 0.0)))
+}
+
+/// The way out of a dialog: its words alone, tinted while pointed at or focused, so the
+/// eye goes to the main button beside it. Keys reach it as any button.
+pub(crate) fn quiet_button(ui: &mut Ui, label: &str, pal: &Palette) -> egui::Response {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let g = ui.painter().layout_no_wrap(label.to_string(), font, pal.text_dim);
+    let s = ui.spacing();
+    let size = vec2(g.size().x + 2.0 * s.button_padding.x + 8.0, (g.size().y + 2.0 * s.button_padding.y).max(s.interact_size.y));
+    let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let hot = resp.hovered() || resp.has_focus();
+    if ui.is_rect_visible(r) {
+        if hot {
+            ui.painter().rect_filled(r, CornerRadius::same(6), pal.hover);
+        }
+        if resp.has_focus() {
+            ui.painter().rect_stroke(r, CornerRadius::same(6), Stroke::new(1.0, pal.accent.gamma_multiply(0.7)), StrokeKind::Inside);
+        }
+        ui.painter().galley(r.center() - g.size() / 2.0, g, if hot { pal.text } else { pal.text_dim });
+    }
+    resp
 }
 
 /// Top-centered popup. Returns (inner, rect).
@@ -950,13 +981,7 @@ pub(crate) fn clicked_outside(ctx: &egui::Context, rect: Rect) -> bool {
 }
 
 pub(crate) fn search_field(ui: &mut Ui, text: &mut String, hint: &str, focus: &mut bool, pal: &Palette, glyph: Glyph) -> egui::Response {
-    let resp = ui
-        .horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(vec2(20.0, 22.0), Sense::hover());
-            paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(14.0)), glyph, pal.text_dim);
-            ui.add(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(ui.available_width() - 8.0).font(FontId::proportional(15.0)))
-        })
-        .inner;
+    let resp = crate::ui::search_row(ui, text, hint, FontId::proportional(15.0), glyph, 14.0, false, pal).0;
     if *focus {
         resp.request_focus();
         *focus = false;
@@ -1195,6 +1220,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::GitCommit(m) => commit_menu(app, ctx, m),
         Popup::NewRef(st) => new_ref(app, ctx, st),
         Popup::Notice { title, text } => notice(app, ctx, title, text),
+        Popup::Install { tool } => install_hint(app, ctx, tool),
         Popup::DropMenu { paths, dest, pos } => drop_menu(app, ctx, paths, dest, *pos),
     };
     if keep && matches!(app.popup, Popup::None) {
@@ -1838,7 +1864,7 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
                     add_binding(app, cmd, binding.clone());
                     st.conflict = None;
                 }
-                if ui.button("Cancel").clicked() {
+                if quiet_button(ui, "Cancel", &pal).clicked() {
                     st.conflict = None;
                 }
             });
@@ -2526,7 +2552,7 @@ pub(crate) const OPTS: &[(Opt, Section, &str, &str, &str)] = &[
     (Opt::ShowSystem, Section::Files, "List", "Show system files", "Backups (*~, *.bak), sockets and devices."),
     (Opt::ShowExt, Section::Files, "List", "Show file extensions", "Display .txt, .png and so on."),
     (Opt::FoldersFirst, Section::Files, "List", "Folders first", "List folders before files."),
-    (Opt::DateFormat, Section::Files, "List", "Date format", "A strftime pattern, like %Y-%m-%d %H:%M."),
+    (Opt::DateFormat, Section::Files, "List", "Date format", "Empty says Yesterday 09:04; or a pattern like %Y-%m-%d."),
     (Opt::CalcSizes, Section::Files, "Folder sizes", "Calculate folder sizes", "Count sizes and items in the background."),
     (Opt::SizesSsd, Section::Files, "Folder sizes", "Solid-state drives", "SSDs and other fast storage."),
     (Opt::SizesHdd, Section::Files, "Folder sizes", "Spinning hard drives", "Rotational disks: slower and noisier."),
@@ -2722,7 +2748,7 @@ pub(crate) fn switch(ui: &mut Ui, on: &mut bool, pal: &Palette) -> bool {
     toggle(ui, on, pal)
 }
 
-/// Switch: a pill whose knob carries a check (on) or a cross (off).
+/// Switch: a pill whose colour and knob side say it, with no mark on the knob.
 fn toggle(ui: &mut Ui, on: &mut bool, pal: &Palette) -> bool {
     let (r, resp) = ui.allocate_exact_size(vec2(32.0, 16.0), Sense::click());
     crate::ui::note_control(ui, r, "switch");
@@ -2733,13 +2759,6 @@ fn toggle(ui: &mut Ui, on: &mut bool, pal: &Palette) -> bool {
     let x = egui::lerp(r.left() + 8.0..=r.right() - 8.0, t);
     let c = pos2(x, r.center().y);
     ui.painter().circle_filled(c, 6.0, lerp_c(pal.bg, Color32::from_rgb(0xe8, 0xf4, 0xfa)));
-    let st = Stroke::new(1.3, lerp_c(pal.text_dim, pal.accent));
-    if t > 0.5 {
-        ui.painter().add(egui::Shape::line(vec![c + vec2(-2.6, 0.2), c + vec2(-0.8, 2.0), c + vec2(2.8, -1.8)], st));
-    } else {
-        ui.painter().line_segment([c + vec2(-2.0, -2.0), c + vec2(2.0, 2.0)], st);
-        ui.painter().line_segment([c + vec2(-2.0, 2.0), c + vec2(2.0, -2.0)], st);
-    }
     if resp.clicked() {
         *on = !*on;
         return true;
@@ -2972,7 +2991,7 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         Opt::ThumbFill => toggle(ui, &mut c.thumb_fill, &pal),
         Opt::CheckCopies => toggle(ui, &mut c.check_copies, &pal),
         Opt::ScrollBeyond => toggle(ui, &mut c.scroll_beyond, &pal),
-        Opt::DateFormat => ui.add(egui::TextEdit::singleline(&mut c.date_format).desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).changed(),
+        Opt::DateFormat => ui.add(egui::TextEdit::singleline(&mut c.date_format).hint_text("Today 17:10").desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).changed(),
         Opt::ActOnPress => toggle(ui, &mut c.act_on_press, &pal),
         Opt::SingleClick => toggle(ui, &mut c.single_click, &pal),
         Opt::SingleClickFolders => toggle(ui, &mut c.single_click_folders_only, &pal),
@@ -3539,9 +3558,15 @@ fn tab_search(app: &mut App, ctx: &egui::Context, query: &mut String, sel: &mut 
     let mut rows: Vec<(String, PathBuf, Option<(u64, usize)>)> = vec![];
     let mut leaves = vec![];
     app.tree.leaves(&mut leaves);
+    // Same-named tabs say where they are, as on the tab strip.
+    let hints = app.tab_hints();
+    let mut hint_of: HashMap<(u64, usize), String> = HashMap::new();
     for pid in leaves {
         for (i, t) in app.panels[&pid].tabs.iter().enumerate() {
             rows.push((t.title(), t.path.clone(), Some((pid, i))));
+            if let Some(h) = hints.get(&t.id) {
+                hint_of.insert((pid, i), h.clone());
+            }
         }
     }
     for c in app.closed_tabs.iter().rev().take(20) {
@@ -3565,6 +3590,9 @@ fn tab_search(app: &mut App, ctx: &egui::Context, query: &mut String, sel: &mut 
                 }
                 let resp = row(ui, 30.0, i == *sel, &pal, |ui, r| {
                     let mut job = highlight_job(label, &q, FontId::proportional(13.5), pal.text, pal.accent);
+                    if let Some(h) = loc.and_then(|l| hint_of.get(&l)) {
+                        job.append(&format!(" · {h}"), 0.0, egui::TextFormat { font_id: FontId::proportional(13.5), color: pal.text_dim, ..Default::default() });
+                    }
                     // A tab named after a long folder is cut, not drawn past the window.
                     job.wrap = egui::text::TextWrapping { max_width: (r.width() - 20.0).max(8.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
                     let g = ui.fonts_mut(|f| f.layout_job(job));
@@ -5302,7 +5330,7 @@ fn properties(app: &mut App, ctx: &egui::Context, st: &mut PropState) -> bool {
             let p = st.paths[0].clone();
             let Some((m, e)) = snap.single.clone() else {
                 dialog_title(ui, "Item no longer exists", Some(&p.display().to_string()), &pal);
-                dialog_buttons(ui, |ui| close = plain_button(ui, "Close", &pal).clicked());
+                dialog_buttons(ui, |ui| close = primary_button(ui, "Close", true, &pal).clicked());
                 return;
             };
             // The item: its icon, name and kind.
@@ -5722,7 +5750,7 @@ fn run_exec(app: &mut App, ctx: &egui::Context, path: &mut PathBuf) -> bool {
                 app.actions.push(Action::Open(Popup::open_with(vec![path.clone()])));
                 done = true;
             }
-            if ui.button("Cancel").clicked() {
+            if quiet_button(ui, "Cancel", &pal).clicked() {
                 done = true;
             }
         });
@@ -5784,6 +5812,8 @@ fn quick_menu(app: &mut App, ctx: &egui::Context, panel: Option<(u64, Pos2)>) ->
     let mut run = None;
     let quick: Vec<Cmd> = app.ud.quick.iter().filter_map(|id| Cmd::from_id(id)).collect();
     let group = app.panels.get(&app.active).map(|p| p.tab().settings.group).unwrap_or_default();
+    let mut view_at = None;
+    let mut shown: Option<(bool, bool)> = None;
     let (_, rect) = anchored(ctx, "quickmenu", anchor, 280.0, &pal, |ui| {
         menu_heading(ui, "Quick", &pal);
         for c in &quick {
@@ -5811,6 +5841,27 @@ fn quick_menu(app: &mut App, ctx: &egui::Context, panel: Option<(u64, Pos2)>) ->
                     run = Some(c);
                 }
             }
+            // What the status bar used to switch: the view and its size, and whether
+            // folders and files are listed at all.
+            menu_sep(ui, &pal);
+            menu_heading(ui, "View", &pal);
+            if menu_item(ui, "View and size…", Some("Ctrl+wheel".into()), &pal) {
+                if let Some((p, a)) = panel {
+                    view_at = Some((p, a));
+                }
+            }
+            for c in [Cmd::ToggleFlatten, Cmd::ContentSearch] {
+                if cmd_item(ui, app, c) {
+                    run = Some(c);
+                }
+            }
+            let (folders, files) = app.panels.get(&app.active).map(|p| (p.tab().settings.show_folders, p.tab().settings.show_files)).unwrap_or((true, true));
+            if menu_item(ui, if folders { "Hide folders" } else { "Show folders" }, None, &pal) {
+                shown = Some((true, false));
+            }
+            if menu_item(ui, if files { "Hide files" } else { "Show files" }, None, &pal) {
+                shown = Some((false, true));
+            }
             menu_sep(ui, &pal);
             for c in [Cmd::SavedView, Cmd::ToggleInspector, Cmd::ClosePanel] {
                 if cmd_item(ui, app, c) {
@@ -5821,6 +5872,24 @@ fn quick_menu(app: &mut App, ctx: &egui::Context, panel: Option<(u64, Pos2)>) ->
     });
     if let Some(c) = run {
         app.actions.push(Action::Cmd(c));
+        return false;
+    }
+    if let Some((p, a)) = view_at {
+        // The view chooser hangs from its lower edge (it opened above the status bar):
+        // from the toolbar its lower edge goes about its own height below the button.
+        app.popup = Popup::zoom(p, pos2(a.x + 30.0, a.y + 300.0));
+        return false;
+    }
+    if let Some((folders, files)) = shown {
+        if let Some(t) = app.panels.get_mut(&app.active).map(|p| p.tab_mut()) {
+            if folders {
+                t.settings.show_folders = !t.settings.show_folders;
+            }
+            if files {
+                t.settings.show_files = !t.settings.show_files;
+            }
+            t.dirty = true;
+        }
         return false;
     }
     !clicked_outside(ctx, rect)
@@ -6122,7 +6191,7 @@ fn find_replace(app: &mut App, ctx: &egui::Context, panel: u64) -> bool {
                 r.find_replace();
                 done = true;
             }
-            if ui.button("Cancel").clicked() {
+            if quiet_button(ui, "Cancel", &pal).clicked() {
                 done = true;
             }
         });
@@ -6886,6 +6955,48 @@ fn notice(app: &mut App, ctx: &egui::Context, title: &str, text: &str) -> bool {
         });
     });
     !(close || ok)
+}
+
+/// The command that installs a missing helper, for this system's package manager, with a
+/// button that copies it; the tool's name alone where the system is not one Maia knows.
+fn install_hint(app: &mut App, ctx: &egui::Context, tool: &str) -> bool {
+    let pal = app.pal;
+    let close = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+    crate::needs::warm();
+    let family = crate::needs::family();
+    if family.is_none() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    let command = family.and_then(|f| crate::needs::command(tool, f));
+    let enter = command.is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+    let (mut copy, mut done) = (enter, false);
+    centered(ctx, "install hint", 440.0, &pal, |ui| {
+        ui.add_space(4.0);
+        let sub = match (&command, family) {
+            (Some(_), _) => "Run this in a terminal, then try again.".to_string(),
+            (None, None) => "…".to_string(),
+            (None, Some(_)) => format!("Install the {tool} package from your system's software, then try again."),
+        };
+        dialog_title(ui, &format!("Install {tool}"), Some(&sub), &pal);
+        if let Some(c) = &command {
+            ui.add_space(8.0);
+            card(ui, &pal, |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(c.as_str()).font(FontId::monospace(13.0)).color(pal.text)).selectable(true).wrap());
+            });
+        }
+        dialog_buttons(ui, |ui| {
+            if command.is_some() {
+                copy |= primary_button(ui, "Copy", true, &pal).clicked();
+            }
+            done |= plain_button(ui, "Close", &pal).clicked();
+        });
+    });
+    if let (true, Some(c)) = (copy, &command) {
+        crate::clipboard::set_text(c);
+        app.toast("Copied the install command");
+        return false;
+    }
+    !(close || done)
 }
 
 fn group_menu(app: &mut App, ctx: &egui::Context, panel: u64, label: &str, pos: Pos2) -> bool {

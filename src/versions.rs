@@ -539,7 +539,7 @@ pub fn band(ui: &mut Ui, rect: Rect, pg: &mut Page, env: &mut Env) -> Band {
             let size = ui.painter().layout_no_wrap(crate::fsx::fmt_size(v.entry.size), FontId::proportional(small), dc);
             let sw = size.size().x;
             ui.painter().galley(pos2(r.right() - 10.0 - sw, r.center().y - size.size().y / 2.0), size, dc);
-            let when = v.when.map(|t| crate::timefmt::format(t, &env.cfg.date_format)).unwrap_or_default();
+            let when = v.when.map(|t| crate::timefmt::date(t, &env.cfg.date_format)).unwrap_or_default();
             let room = r.width() - 30.0 - sw;
             let wg = crate::listing::elided(ui, &when, FontId::proportional(fs), room, tc);
             let ww = wg.size().x;
@@ -647,7 +647,7 @@ pub fn restore(from: &Path, file: &Path, when: Option<SystemTime>, as_copy: bool
 
 fn restore_version(app: &mut App, from: PathBuf, file: PathBuf, when: Option<SystemTime>, as_copy: bool) {
     let ctx = app.ctx.clone();
-    let day = when.map(|t| crate::timefmt::format(t, &app.cfg.date_format)).unwrap_or_default();
+    let day = when.map(|t| crate::timefmt::date(t, &app.cfg.date_format)).unwrap_or_default();
     app.errands.run(&ctx, move || {
         let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         match restore(&from, &file, when, as_copy) {

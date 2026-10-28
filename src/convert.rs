@@ -333,7 +333,7 @@ fn magick(t: &Tools, src: &Path, args: &[&str], fmt: &str, out: Option<&Path>) -
 /// A HEIC that ImageMagick can't read, decoded by libheif's own tool into a PNG beside
 /// `near` (removed again by the caller).
 fn heif_png(t: &Tools, src: &Path, near: &Path) -> Result<PathBuf, String> {
-    let tool = ["heif-dec", "heif-convert"].into_iter().find(|n| t.has(n)).ok_or("This picture needs libheif's heif-dec")?;
+    let tool = ["heif-dec", "heif-convert"].into_iter().find(|n| t.has(n)).ok_or("This picture needs heif-dec")?;
     let png = near.with_file_name(format!(".{}.heif.png", name_of(near)));
     let mut c = t.cmd(tool);
     c.arg(src).arg(&png);

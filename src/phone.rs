@@ -576,7 +576,7 @@ pub fn open(app: &mut App) {
         items.push(Item { path: e.path.clone(), name: e.name.clone(), dir: e.is_dir, size: if e.is_dir { 0 } else { e.size } });
     }
     if items.is_empty() {
-        app.toast("Folders can be sent once bsdtar is installed (it zips them)");
+        app.toast("Sending folders needs bsdtar");
         return;
     }
     let ctx = app.ctx.clone();

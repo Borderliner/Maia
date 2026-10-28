@@ -55,7 +55,7 @@ pub fn build_tag(panel: u64, tag: &str, pos: Pos2) -> Popup {
     }
     items.push(it("remove", "Remove From All Files…", TagAct::Remove));
     let key = smart_key(crate::smart::tag_id(tag));
-    Popup::Ctx(CtxState { sidebar: Some(key), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![], focus: true, reveal: None })
+    Popup::Ctx(CtxState { sidebar: Some(key), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![], focus: true, reveal: None, bar: vec![], bar_at: None })
 }
 
 /// "notes.txt", "3 items": what a tag change was made to, for Undo's list.
@@ -85,14 +85,14 @@ pub fn smart_key(id: u64) -> PathBuf {
 pub fn build_smart(panel: u64, id: u64, pos: Pos2) -> Popup {
     let it = |key: &str, label: &str, a: SmartAct| Item { id: format!("smart:{key}"), label: label.into(), act: Act::Smart(a, id, panel), children: vec![] };
     let items = vec![it("open", "Open", SmartAct::Open), it("new_tab", "Open In New Tab", SmartAct::NewTab), Item::sep(), it("edit", "Edit…", SmartAct::Edit), it("rename", "Rename…", SmartAct::Rename), Item::sep(), it("remove", "Remove", SmartAct::Remove)];
-    Popup::Ctx(CtxState { sidebar: Some(smart_key(id)), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![], focus: true, reveal: None })
+    Popup::Ctx(CtxState { sidebar: Some(smart_key(id)), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![], focus: true, reveal: None, bar: vec![], bar_at: None })
 }
 
 /// The menu of a selection in panel `panel`'s preview.
 pub fn build_preview(panel: u64, pos: Pos2) -> Popup {
     let it = |key: &str, label: &str, copy: bool| Item { id: format!("preview:{key}"), label: label.into(), act: Act::Preview(copy, panel), children: vec![] };
     let items = vec![it("copy", "Copy", true), it("select_all", "Select All", false)];
-    Popup::Ctx(CtxState { sidebar: None, pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![], focus: true, reveal: None })
+    Popup::Ctx(CtxState { sidebar: None, pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![], focus: true, reveal: None, bar: vec![], bar_at: None })
 }
 
 #[derive(Clone, Copy)]
@@ -181,6 +181,11 @@ pub struct CtxState {
     focus: bool,
     /// A submenu just opened: scrolled into view on the next frame.
     reveal: Option<String>,
+    /// The everyday actions as icons across the top: the command, its name here, and
+    /// whether it applies.
+    pub bar: Vec<(Cmd, &'static str, bool)>,
+    /// The icon the keys are on, while they are on the row.
+    bar_at: Option<usize>,
 }
 
 pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
@@ -191,6 +196,7 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
     let in_trash = here.starts_with(crate::sidebar::trash_dir());
     let ents: Vec<(PathBuf, bool, bool, String)> = if background { vec![] } else { t.target_entries().iter().map(|e| (e.path.clone(), e.is_dir, e.is_link, e.ext().to_string())).collect() };
     let mut items = vec![];
+    let mut bar = vec![];
     if ents.is_empty() {
         if t.archive.as_deref().is_some_and(|a| crate::archwrite::kind(a).is_ok()) {
             // Inside a zip, 7z or tarball: what can be made in it.
@@ -265,24 +271,22 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
     } else if t.archive.is_some() {
         // Inside an archive: open, copy out, extract; in one Maia can write, rename and
         // delete too.
+        // The row shows what an archive refuses as switched off.
+        let writable = t.archive.as_deref().is_some_and(|a| crate::archwrite::kind(a).is_ok());
+        bar = vec![(Cmd::Cut, "Cut", false), (Cmd::Copy, "Copy", true), (Cmd::Rename, "Rename", writable), (Cmd::Duplicate, "Duplicate", false), (Cmd::Trash, "Delete", writable)];
         items.push(Item::labeled(Cmd::Activate, "Open"));
-        items.push(Item::cmd(Cmd::Copy));
         items.push(Item::cmd(Cmd::CopyTo));
         items.push(Item::cmd(Cmd::ExtractHere));
-        if t.archive.as_deref().is_some_and(|a| crate::archwrite::kind(a).is_ok()) {
-            items.push(Item::sep());
-            items.push(Item::cmd(Cmd::Rename));
-            items.push(Item::labeled(Cmd::Trash, "Delete"));
-        }
     } else if computer {
         let drives: Vec<crate::drives::Drive> = ents.iter().filter_map(|e| app.drive_at(&e.0)).collect();
         let mounted: Vec<&PathBuf> = ents.iter().filter(|e| tab::drive_dev(&e.0).is_none()).map(|e| &e.0).collect();
         items.push(Item::labeled(Cmd::Activate, "Open"));
-        items.push(Item::cmd(Cmd::OpenInNewTab));
-        items.push(Item::cmd(Cmd::OpenInRightSplit));
-        items.push(Item::cmd(Cmd::OpenInBottomSplit));
+        let mut open_in = vec![Item::labeled(Cmd::OpenInNewTab, "New Tab"), Item::labeled(Cmd::OpenInRightSplit, "Right Split"), Item::labeled(Cmd::OpenInBottomSplit, "Bottom Split")];
         if mounted.len() == ents.len() {
-            items.push(Item::cmd(Cmd::OpenInNewWindow));
+            open_in.push(Item::labeled(Cmd::OpenInNewWindow, "New Window"));
+        }
+        items.push(Item::sub("open_in", "Open in", open_in));
+        if mounted.len() == ents.len() {
             if let [m] = mounted.as_slice() {
                 items.push(Item { id: "terminal_here".into(), label: "Open Terminal Here".into(), act: Act::Terminal((*m).clone()), children: vec![] });
             }
@@ -333,10 +337,7 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
                 items.push(Item::cmd(Cmd::SetWallpaper));
             }
         }
-        items.push(Item::cmd(Cmd::OpenInNewTab));
-        items.push(Item::cmd(Cmd::OpenInRightSplit));
-        items.push(Item::cmd(Cmd::OpenInBottomSplit));
-        items.push(Item::cmd(Cmd::OpenInNewWindow));
+        items.push(Item::sub("open_in", "Open in", vec![Item::labeled(Cmd::OpenInNewTab, "New Tab"), Item::labeled(Cmd::OpenInRightSplit, "Right Split"), Item::labeled(Cmd::OpenInBottomSplit, "Bottom Split"), Item::labeled(Cmd::OpenInNewWindow, "New Window")]));
         let term_dir = if single && ents[0].1 { ents[0].0.clone() } else { here.clone() };
         items.push(Item { id: "terminal_here".into(), label: "Open Terminal Here".into(), act: Act::Terminal(term_dir), children: vec![] });
         if single && ents[0].2 {
@@ -357,9 +358,12 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         if !custom.is_empty() {
             items.push(Item::sub("custom", "Custom actions", custom));
         }
+        // Cut, Copy, Rename, Duplicate and Delete are the row of icons at the top.
+        bar = vec![(Cmd::Cut, "Cut", true), (Cmd::Copy, "Copy", true), (Cmd::Rename, if single { "Rename" } else { "Rename All (inline)" }, true), (Cmd::Duplicate, "Duplicate", true)];
+        if !in_trash {
+            bar.push((Cmd::Trash, "Move To Trash", true));
+        }
         items.push(Item::sep());
-        items.push(Item::cmd(Cmd::Cut));
-        items.push(Item::cmd(Cmd::Copy));
         if single && all_dirs {
             items.push(Item::labeled(Cmd::Paste, "Paste Into Folder"));
         }
@@ -387,11 +391,9 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
             }
         }
         items.push(Item::sep());
-        items.push(Item::labeled(Cmd::Rename, if single { "Rename" } else { "Rename All (inline)" }));
         if !single {
             items.push(Item::cmd(Cmd::BatchRename));
         }
-        items.push(Item::cmd(Cmd::Duplicate));
         // Pictures, with ImageMagick to change them.
         if !in_trash && ents.iter().all(|e| !e.1 && crate::picfix::is_picture(&e.3)) && crate::drives::Tools::current().is_some_and(|t| crate::picfix::magick(&t).is_some()) {
             let mut kids = vec![
@@ -447,8 +449,6 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         items.push(Item::cmd(Cmd::CreateLink));
         if in_trash {
             items.push(Item::cmd(Cmd::RestoreTrash));
-        } else {
-            items.push(Item::cmd(Cmd::Trash));
         }
         items.push(Item::cmd(Cmd::DeletePermanent));
         items.push(Item::sep());
@@ -474,7 +474,7 @@ pub fn build(app: &mut App, panel: u64, pos: Pos2, background: bool) -> Popup {
         items.push(Item::cmd(Cmd::Properties));
     }
     let targets = ents.into_iter().map(|e| e.0).collect();
-    Popup::Ctx(CtxState { sidebar: None, pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets, focus: true, reveal: None })
+    Popup::Ctx(CtxState { sidebar: None, pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets, focus: true, reveal: None, bar, bar_at: None })
 }
 
 /// Context menu for a sidebar place (recent, bookmark, drive or standard folder).
@@ -504,7 +504,7 @@ pub fn build_place(panel: u64, path: PathBuf, bookmarked: bool, drive: Option<cr
         // A drive that isn't mounted: opening it mounts it.
         let mut items = vec![place("open", "Open", PlaceAct::Open), place("new_tab", "Open In New Tab", PlaceAct::NewTab), Item::sep()];
         items.extend(Item::drive_items(std::slice::from_ref(d)));
-        return Popup::Ctx(CtxState { sidebar: Some(path.clone()), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![path], focus: true, reveal: None });
+        return Popup::Ctx(CtxState { sidebar: Some(path.clone()), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![path], focus: true, reveal: None, bar: vec![], bar_at: None });
     }
     let computer = tab::is_computer(&path);
     let mut items = vec![
@@ -534,7 +534,7 @@ pub fn build_place(panel: u64, path: PathBuf, bookmarked: bool, drive: Option<cr
         items.push(Item::sep());
         items.push(place("properties", "Properties", PlaceAct::Properties));
     }
-    Popup::Ctx(CtxState { sidebar: Some(path.clone()), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![path], focus: true, reveal: None })
+    Popup::Ctx(CtxState { sidebar: Some(path.clone()), pos, items, query: String::new(), sel: 0, expanded: HashSet::new(), targets: vec![path], focus: true, reveal: None, bar: vec![], bar_at: None })
 }
 
 /// Visible rows: (depth, item, breadcrumb label)
@@ -557,8 +557,11 @@ fn visible(st: &CtxState, pinned: &[String]) -> Vec<(usize, Item, String, bool)>
                 }
             }
         }
+        // The row's actions are found by name like any other.
+        let bar: Vec<Item> = st.bar.iter().filter(|b| b.2).map(|&(c, label, _)| Item::labeled(c, label)).collect();
         let mut found = vec![];
         walk(&st.items, "", &q, &mut found);
+        walk(&bar, "", &q, &mut found);
         found.sort_by(|a, b| b.0.cmp(&a.0));
         return found.into_iter().map(|(_, it, l)| (0, it.clone(), l, false)).collect();
     }
@@ -602,7 +605,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
     let pinned = app.ud.pinned_ctx.clone();
     let rows = visible(st, &pinned);
     let is_sep = |it: &Item| it.id == "-" || it.id.is_empty();
-    let (up, down, enter, esc, right, left) = ctx.input_mut(|i| {
+    let (mut up, mut down, mut enter, esc, mut right, mut left) = ctx.input_mut(|i| {
         (
             i.consume_key(Modifiers::NONE, Key::ArrowUp),
             i.consume_key(Modifiers::NONE, Key::ArrowDown),
@@ -616,6 +619,42 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
         return false;
     }
     let n = rows.len();
+    // The row of icons sits above the first row: Up from there reaches it, Down from the
+    // last wraps to it; Left and Right move along it and Enter acts.
+    let bar_on = st.query.is_empty() && st.bar.iter().any(|b| b.2);
+    let mut bar_run: Option<Cmd> = None;
+    if !bar_on {
+        st.bar_at = None;
+    }
+    let first_row = rows.iter().position(|r| !is_sep(&r.1));
+    let last_row = rows.iter().rposition(|r| !is_sep(&r.1));
+    let next_on = |from: usize, d: isize| -> Option<usize> {
+        let k = st.bar.len() as isize;
+        (1..=k).map(|j| (from as isize + d * j).rem_euclid(k) as usize).find(|&b| st.bar[b].2)
+    };
+    if let Some(b) = st.bar_at {
+        if left {
+            st.bar_at = next_on(b, -1);
+        } else if right {
+            st.bar_at = next_on(b, 1);
+        } else if enter {
+            bar_run = st.bar.get(b).filter(|x| x.2).map(|x| x.0);
+        } else if down {
+            st.bar_at = None;
+            st.sel = first_row.unwrap_or(0);
+        } else if up {
+            st.bar_at = None;
+            st.sel = last_row.unwrap_or(0);
+        }
+        (up, down, enter, left, right) = (false, false, false, false, false);
+    } else if bar_on && ((up && first_row == Some(st.sel.min(n.saturating_sub(1)))) || (down && last_row == Some(st.sel.min(n.saturating_sub(1))))) {
+        st.bar_at = next_on(st.bar.len().saturating_sub(1), 1);
+        (up, down) = (false, false);
+    }
+    if let Some(c) = bar_run {
+        app.actions.push(Action::Cmd(c));
+        return false;
+    }
     if n > 0 {
         let mut s = st.sel.min(n - 1) as isize;
         let d = if down { 1 } else if up { -1 } else { 0 };
@@ -694,10 +733,13 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
     // bottom of the window.
     let gap = ctx.global_style().spacing.item_spacing.y;
     let seps = rows.iter().filter(|r| is_sep(&r.1)).count();
-    let est_h = ((n - seps) as f32 * (row_h + gap) + seps as f32 * (7.0 + gap) + 44.0 + 3.0 * gap).min(screen.height() - 20.0);
+    let bar_h = if bar_on { 34.0 + 9.0 + gap } else { 0.0 };
+    let est_h = ((n - seps) as f32 * (row_h + gap) + seps as f32 * (7.0 + gap) + 44.0 + 3.0 * gap + bar_h).min(screen.height() - 20.0);
     let x = st.pos.x.min(screen.right() - w - 6.0).max(4.0);
     let y = if st.pos.y + est_h > screen.bottom() { (screen.bottom() - est_h - 6.0).max(4.0) } else { st.pos.y };
     let mut close_now = false;
+    let mut bar_click: Option<Cmd> = None;
+    let moved = ctx.input(|i| i.pointer.delta() != Vec2::ZERO);
     let resp = egui::Area::new(Id::new("ctxmenu")).order(egui::Order::Foreground).fixed_pos(pos2(x, y)).show(ctx, |ui| {
         crate::frost::behind(ui, 10);
         egui::Frame::NONE
@@ -708,17 +750,10 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
             .shadow(egui::epaint::Shadow { offset: [0, 6], blur: 22, spread: 0, color: egui::Color32::from_black_alpha(90) })
             .show(ui, |ui| {
                 ui.set_width(w - 10.0);
-                ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
-                    paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(13.0)), Glyph::Search, pal.text_dim);
+                {
                     let before = st.query.clone();
-                    let te = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text(egui::RichText::new("Select a command…").color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(ui.available_width() - 26.0));
-                    let (cr, cresp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
-                    if cresp.hovered() {
-                        ui.painter().rect_filled(cr, CornerRadius::same(4), pal.hover);
-                    }
-                    paint_glyph(ui.painter(), Rect::from_center_size(cr.center(), Vec2::splat(10.0)), Glyph::Close, pal.text_dim);
-                    if cresp.on_hover_text("Close (Esc)").clicked() {
+                    let (te, closed) = crate::ui::search_row(ui, &mut st.query, "Select a command…", egui::TextStyle::Body.resolve(ui.style()), Glyph::Search, 13.0, true, &pal);
+                    if closed {
                         close_now = true;
                     }
                     if st.focus {
@@ -728,17 +763,69 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                     if st.query != before {
                         st.sel = 0;
                     }
-                });
+                }
                 {
                     let yy = ui.cursor().top() + 2.0;
                     let x = ui.min_rect().x_range();
                     ui.painter().line_segment([pos2(x.min - 5.0, yy), pos2(x.max + 5.0, yy)], Stroke::new(1.0, pal.border));
                     ui.add_space(5.0);
                 }
+                if bar_on {
+                    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
+                    let cw = row.width() / st.bar.len() as f32;
+                    for (k, &(c, label, on)) in st.bar.iter().enumerate() {
+                        let cell = Rect::from_min_size(pos2(row.left() + k as f32 * cw, row.top()), vec2(cw, row.height())).shrink2(vec2(2.0, 1.0));
+                        let resp = ui.interact(cell, Id::new(("ctx bar", k)), if on { Sense::click() } else { Sense::hover() });
+                        crate::ui::note_control(ui, cell, "menu action");
+                        let keyed = st.bar_at == Some(k);
+                        if keyed {
+                            ui.painter().rect_filled(cell, CornerRadius::same(6), pal.selected);
+                        } else if on && resp.hovered() {
+                            ui.painter().rect_filled(cell, CornerRadius::same(6), pal.hover);
+                        }
+                        let icon = match c {
+                            Cmd::Cut => "scissors",
+                            Cmd::Copy => "copy",
+                            Cmd::Rename => "pencil",
+                            Cmd::Duplicate => "copy-add",
+                            _ => "trash-2",
+                        };
+                        let col = if !on {
+                            pal.text_dim.gamma_multiply(0.4)
+                        } else if c == Cmd::Trash {
+                            pal.danger
+                        } else if keyed {
+                            pal.on_sel()
+                        } else if resp.hovered() {
+                            pal.text
+                        } else {
+                            pal.text_dim
+                        };
+                        crate::theme::paint_symbol(ui.painter(), Rect::from_center_size(cell.center(), Vec2::splat(18.0)), icon, col);
+                        let keys: Vec<String> = app.keymap.bindings(c).iter().take(1).map(crate::commands::binding_to_string).collect();
+                        let tip = match keys.first() {
+                            Some(k) => format!("{label} ({k})"),
+                            None => label.to_string(),
+                        };
+                        let resp = resp.on_hover_text(if on { tip } else { format!("{label}: not here") });
+                        // Only a moving pointer takes over from the keys: one resting on
+                        // the menu would undo every arrow press.
+                        if resp.hovered() && on && moved {
+                            st.bar_at = None;
+                        }
+                        if on && resp.clicked() {
+                            bar_click = Some(c);
+                        }
+                    }
+                    let yy = ui.cursor().top() + 2.0;
+                    let x = ui.min_rect().x_range();
+                    ui.painter().line_segment([pos2(x.min + 1.0, yy), pos2(x.max - 1.0, yy)], Stroke::new(1.0, pal.border));
+                    ui.add_space(5.0);
+                }
                 // The area holding the menu remembers its last size, which would cap a
                 // longer menu opened after a shorter one: let the list claim its full
                 // height (it still shrinks to fit).
-                egui::ScrollArea::vertical().max_height(screen.height() - 80.0).min_scrolled_height(screen.height() - 80.0).auto_shrink([false, true]).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(screen.height() - 80.0 - bar_h).min_scrolled_height(screen.height() - 80.0 - bar_h).auto_shrink([false, true]).show(ui, |ui| {
                     for (i, (depth, it, label, is_pinned)) in rows.iter().enumerate() {
                         if is_sep(&it) {
                             ui.add_space(3.0);
@@ -756,9 +843,11 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
                             st.reveal = None;
                         }
                         let hovered = resp.hovered();
-                        if hovered && !sel {
+                        if hovered && (!sel || st.bar_at.is_some()) && (moved || st.bar_at.is_none()) {
                             st.sel = i;
+                            st.bar_at = None;
                         }
+                        let sel = sel && st.bar_at.is_none();
                         if sel {
                             ui.painter().rect_filled(r, CornerRadius::same(4), pal.selected);
                         }
@@ -860,6 +949,10 @@ pub fn draw(app: &mut App, ctx: &egui::Context, st: &mut CtxState) -> bool {
     });
     let rect = resp.response.rect;
     if close_now {
+        return false;
+    }
+    if let Some(c) = bar_click {
+        app.actions.push(Action::Cmd(c));
         return false;
     }
     if let Some(id) = toggle {

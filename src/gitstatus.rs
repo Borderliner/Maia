@@ -306,7 +306,7 @@ pub fn parse(root: PathBuf, out: &[u8]) -> Repo {
 pub fn paint(p: &Painter, icon: Rect, repo: Option<&Repo>, path: &Path, pal: &crate::theme::Palette) {
     let Some(&m) = repo.and_then(|r| r.marks.get(path)) else { return };
     let col = match m {
-        Mark::Modified | Mark::Inside => AMBER,
+        Mark::Modified | Mark::Inside => pal.warn,
         Mark::Staged => GREEN,
         Mark::Untracked => pal.text_dim,
         Mark::Deleted => pal.danger,

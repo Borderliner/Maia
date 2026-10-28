@@ -35,7 +35,7 @@ fn cat(archive: &Path) -> Result<Command, String> {
         return Ok(c);
     }
     let n = archive.to_string_lossy().to_lowercase();
-    let t = SINGLE.iter().find(|(e, _)| n.ends_with(e)).map(|x| x.1).filter(|t| crate::media::have(t)).ok_or("bsdcat isn't installed")?;
+    let t = SINGLE.iter().find(|(e, _)| n.ends_with(e)).map(|x| x.1).filter(|t| crate::media::have(t)).ok_or("Opening this archive needs bsdcat")?;
     let mut c = tool(t);
     c.args(["-dc", "--"]).arg(archive);
     Ok(c)
@@ -526,9 +526,9 @@ pub fn read_member(archive: &Path, inner: &Path, cap: usize) -> Result<Vec<u8>, 
 pub(crate) fn seven() -> Result<&'static str, String> {
     #[cfg(test)]
     if NO_SEVEN.with(|n| n.get()) {
-        return Err("Encrypted 7z archives need the 7z command".into());
+        return Err("Encrypted 7z archives need 7z".into());
     }
-    ["7z", "7zz", "7za"].into_iter().find(|t| crate::media::have(t)).ok_or_else(|| "Encrypted 7z archives need the 7z command".to_string())
+    ["7z", "7zz", "7za"].into_iter().find(|t| crate::media::have(t)).ok_or_else(|| "Encrypted 7z archives need 7z".to_string())
 }
 
 #[cfg(test)]

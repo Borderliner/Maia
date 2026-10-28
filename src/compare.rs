@@ -347,7 +347,7 @@ pub fn paint(p: &Painter, r: Rect, path: &Path, pal: &crate::theme::Palette) {
     let col = match d {
         Diff::Only => pal.accent,
         Diff::Newer => crate::gitstatus::GREEN,
-        Diff::Size | Diff::Inside => crate::gitstatus::AMBER,
+        Diff::Size | Diff::Inside => pal.warn,
     };
     p.rect_filled(Rect::from_min_max(pos2(r.left() + 1.0, r.top() + 3.0), pos2(r.left() + 3.5, r.bottom() - 3.0)), 1.0, col);
 }

@@ -128,10 +128,12 @@ pub enum ThemeName {
     MaterialLighter,
     HorizonLight,
     PencilLight,
+    HighContrastDark,
+    HighContrastLight,
 }
 
 impl ThemeName {
-    pub const ALL: [ThemeName; 120] = [
+    pub const ALL: [ThemeName; 122] = [
         ThemeName::Midnight,
         ThemeName::Graphite,
         ThemeName::Lagoon,
@@ -252,6 +254,8 @@ impl ThemeName {
         ThemeName::MaterialLighter,
         ThemeName::HorizonLight,
         ThemeName::PencilLight,
+        ThemeName::HighContrastDark,
+        ThemeName::HighContrastLight,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -375,6 +379,8 @@ impl ThemeName {
             ThemeName::MaterialLighter => "Material Lighter",
             ThemeName::HorizonLight => "Horizon Light",
             ThemeName::PencilLight => "Pencil Light",
+            ThemeName::HighContrastDark => "High Contrast Dark",
+            ThemeName::HighContrastLight => "High Contrast Light",
         }
     }
     /// A line about the theme, under its name in the theme picker.
@@ -500,10 +506,12 @@ impl ThemeName {
             ThemeName::MaterialLighter => "Material on white",
             ThemeName::HorizonLight => "Sunrise pink",
             ThemeName::PencilLight => "Pencil on paper",
+            ThemeName::HighContrastDark => "White on black, yellow selection",
+            ThemeName::HighContrastLight => "Black on white, blue selection",
         }
     }
     pub fn is_light(self) -> bool {
-        matches!(self, ThemeName::Paper | ThemeName::Linen | ThemeName::Latte | ThemeName::SolarizedLight | ThemeName::RosePineDawn | ThemeName::GruvboxLight | ThemeName::AyuLight | ThemeName::EverforestLight | ThemeName::TokyoNightDay | ThemeName::KanagawaLotus | ThemeName::OneLight | ThemeName::LightOwl | ThemeName::Dayfox | ThemeName::FlexokiLight | ThemeName::GitHubLight | ThemeName::Tomorrow | ThemeName::IcebergLight | ThemeName::ModusOperandi | ThemeName::SelenizedLight | ThemeName::QuietLight | ThemeName::PaperColor | ThemeName::LightModern | ThemeName::IntelliJLight | ThemeName::XcodeLight | ThemeName::Dawnfox | ThemeName::VitesseLight | ThemeName::GruvboxMaterialLight | ThemeName::Alabaster | ThemeName::EdgeLight | ThemeName::MonokaiProLight | ThemeName::Alucard | ThemeName::Zenbones | ThemeName::SpacemacsLight | ThemeName::Leuven | ThemeName::DoomOneLight | ThemeName::MelangeLight | ThemeName::BlulocoLight | ThemeName::NoctisLux | ThemeName::MinLight | ThemeName::MaterialLighter | ThemeName::HorizonLight | ThemeName::PencilLight)
+        matches!(self, ThemeName::Paper | ThemeName::Linen | ThemeName::Latte | ThemeName::SolarizedLight | ThemeName::RosePineDawn | ThemeName::GruvboxLight | ThemeName::AyuLight | ThemeName::EverforestLight | ThemeName::TokyoNightDay | ThemeName::KanagawaLotus | ThemeName::OneLight | ThemeName::LightOwl | ThemeName::Dayfox | ThemeName::FlexokiLight | ThemeName::GitHubLight | ThemeName::Tomorrow | ThemeName::IcebergLight | ThemeName::ModusOperandi | ThemeName::SelenizedLight | ThemeName::QuietLight | ThemeName::PaperColor | ThemeName::LightModern | ThemeName::IntelliJLight | ThemeName::XcodeLight | ThemeName::Dawnfox | ThemeName::VitesseLight | ThemeName::GruvboxMaterialLight | ThemeName::Alabaster | ThemeName::EdgeLight | ThemeName::MonokaiProLight | ThemeName::Alucard | ThemeName::Zenbones | ThemeName::SpacemacsLight | ThemeName::Leuven | ThemeName::DoomOneLight | ThemeName::MelangeLight | ThemeName::BlulocoLight | ThemeName::NoctisLux | ThemeName::MinLight | ThemeName::MaterialLighter | ThemeName::HorizonLight | ThemeName::PencilLight | ThemeName::HighContrastLight)
     }
 }
 
@@ -665,6 +673,9 @@ impl Syntax {
             ThemeName::MaterialLighter => (c(0x7c, 0x4d, 0xff), c(0xa8, 0x68, 0x08), c(0x56, 0x7f, 0x24), c(0x8a, 0x9d, 0xa7), c(0xc9, 0x48, 0x1f), c(0x61, 0x82, 0xb8), c(0xe5, 0x39, 0x35), c(0x1b, 0x7f, 0x86)),
             ThemeName::HorizonLight => (c(0x8a, 0x31, 0xb9), c(0xc7, 0x4d, 0x0c), c(0x1d, 0x89, 0x91), c(0x96, 0x8a, 0x87), c(0xdc, 0x33, 0x18), c(0xe9, 0x53, 0x78), c(0xda, 0x10, 0x3f), c(0x2e, 0x8b, 0x57)),
             ThemeName::PencilLight => (c(0x52, 0x3c, 0x79), c(0x7d, 0x72, 0x00), c(0x08, 0x80, 0x5a), c(0x99, 0x99, 0x99), c(0x0f, 0x7f, 0x93), c(0x00, 0x8e, 0xc4), c(0xc3, 0x07, 0x71), c(0x68, 0x55, 0xde)),
+            // Every colour at 7:1 or more against the background, comments included.
+            ThemeName::HighContrastDark => (c(0xd9, 0xa6, 0xff), c(0x5e, 0xe7, 0xff), c(0xa6, 0xf2, 0x8c), c(0xc8, 0xc8, 0xc8), c(0xff, 0xb8, 0x6b), c(0x8c, 0xbc, 0xff), c(0xff, 0xa8, 0xa8), c(0xff, 0xe0, 0x7a)),
+            ThemeName::HighContrastLight => (c(0x5c, 0x00, 0xa3), c(0x00, 0x52, 0x63), c(0x1a, 0x5c, 0x00), c(0x47, 0x47, 0x47), c(0x8a, 0x33, 0x00), c(0x00, 0x3a, 0xa8), c(0x9a, 0x00, 0x1c), c(0x5c, 0x47, 0x00)),
         };
         Syntax { keyword, kind, string, comment, number, function, property, meta }
     }
@@ -693,6 +704,10 @@ pub struct Palette {
     pub row_hover: Color32,
     /// Highlighted code (the theme's own, or the classic set: `Syntax`).
     pub syntax: Syntax,
+    /// Something to mind but not wrong: a drive nearly full, a changed file.
+    pub warn: Color32,
+    /// A high-contrast theme: the keyboard's cursor gets a thicker ring.
+    pub strong: bool,
 }
 
 impl Palette {
@@ -717,7 +732,9 @@ impl Palette {
         };
         let s = self.selected;
         let lum = 0.2126 * lin(s.r()) + 0.7152 * lin(s.g()) + 0.0722 * lin(s.b());
-        if lum < 0.3 { Color32::WHITE } else { self.text }
+        // A high-contrast selection is bright on a dark theme: black on it, not the
+        // theme's white text.
+        if lum < 0.3 { Color32::WHITE } else if self.strong && self.dark { Color32::BLACK } else { self.text }
     }
 
     /// A quiet card inside a popup (a group of rows): a step from the popup towards the
@@ -750,6 +767,23 @@ pub fn palette(t: ThemeName) -> Palette {
         p.alt = mix(p.panel, p.text, if p.dark { 0.035 } else { 0.03 });
     }
     p.row_hover = mix(p.panel, p.selected, if p.dark { 0.35 } else { 0.22 });
+    p.warn = crate::gitstatus::AMBER;
+    // The high-contrast pair sets every field itself: nothing mixed, nothing faint.
+    match t {
+        ThemeName::HighContrastDark => {
+            p.chrome = Color32::from_rgb(0x0a, 0x0a, 0x0a);
+            p.alt = Color32::from_rgb(0x12, 0x12, 0x12);
+            p.row_hover = Color32::from_rgb(0x2e, 0x2e, 0x2e);
+            p.warn = Color32::from_rgb(0xff, 0xc2, 0x3d);
+        }
+        ThemeName::HighContrastLight => {
+            p.chrome = Color32::from_rgb(0xf0, 0xf0, 0xf0);
+            p.alt = Color32::from_rgb(0xf2, 0xf2, 0xf2);
+            p.row_hover = Color32::from_rgb(0xd6, 0xe0, 0xff);
+            p.warn = Color32::from_rgb(0x6b, 0x40, 0x00);
+        }
+        _ => {}
+    }
     p.syntax = Syntax::of(t);
     p
 }
@@ -776,6 +810,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Graphite => Palette {
             dark: true,
@@ -795,6 +831,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Lagoon => Palette {
             dark: true,
@@ -814,6 +852,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Navy => Palette {
             dark: true,
@@ -833,6 +873,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Paper => Palette {
             dark: false,
@@ -852,6 +894,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Linen => Palette {
             dark: false,
@@ -871,6 +915,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Mocha => Palette {
             dark: true,
@@ -890,6 +936,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::TokyoNight => Palette {
             dark: true,
@@ -909,6 +957,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Gruvbox => Palette {
             dark: true,
@@ -928,6 +978,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Latte => Palette {
             dark: false,
@@ -947,6 +999,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Dracula => Palette {
             dark: true,
@@ -966,6 +1020,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Nord => Palette {
             dark: true,
@@ -985,6 +1041,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::OneDark => Palette {
             dark: true,
@@ -1004,6 +1062,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::SolarizedLight => Palette {
             dark: false,
@@ -1023,6 +1083,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::RosePineDawn => Palette {
             dark: false,
@@ -1042,6 +1104,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Everforest => Palette {
             dark: true,
@@ -1061,6 +1125,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Kanagawa => Palette {
             dark: true,
@@ -1080,6 +1146,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::GruvboxLight => Palette {
             dark: false,
@@ -1099,6 +1167,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::AyuLight => Palette {
             dark: false,
@@ -1118,6 +1188,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::RosePine => Palette {
             dark: true,
@@ -1137,6 +1209,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::SolarizedDark => Palette {
             dark: true,
@@ -1156,6 +1230,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::NightOwl => Palette {
             dark: true,
@@ -1175,6 +1251,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::EverforestLight => Palette {
             dark: false,
@@ -1194,6 +1272,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::TokyoNightDay => Palette {
             dark: false,
@@ -1213,6 +1293,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::KanagawaLotus => Palette {
             dark: false,
@@ -1232,6 +1314,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::CatppuccinFrappe => Palette {
             dark: true,
@@ -1251,6 +1335,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::CatppuccinMacchiato => Palette {
             dark: true,
@@ -1270,6 +1356,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Monokai => Palette {
             dark: true,
@@ -1289,6 +1377,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Palenight => Palette {
             dark: true,
@@ -1308,6 +1398,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::AyuDark => Palette {
             dark: true,
@@ -1327,6 +1419,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::AyuMirage => Palette {
             dark: true,
@@ -1346,6 +1440,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::RosePineMoon => Palette {
             dark: true,
@@ -1365,6 +1461,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::TokyoNightStorm => Palette {
             dark: true,
@@ -1384,6 +1482,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::KanagawaDragon => Palette {
             dark: true,
@@ -1403,6 +1503,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Nightfox => Palette {
             dark: true,
@@ -1422,6 +1524,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::FlexokiDark => Palette {
             dark: true,
@@ -1441,6 +1545,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::OneLight => Palette {
             dark: false,
@@ -1460,6 +1566,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::LightOwl => Palette {
             dark: false,
@@ -1479,6 +1587,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Dayfox => Palette {
             dark: false,
@@ -1498,6 +1608,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::FlexokiLight => Palette {
             dark: false,
@@ -1517,6 +1629,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::GitHubDark => Palette {
             dark: true,
@@ -1536,6 +1650,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::GitHubDimmed => Palette {
             dark: true,
@@ -1555,6 +1671,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Zenburn => Palette {
             dark: true,
@@ -1574,6 +1692,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::TomorrowNight => Palette {
             dark: true,
@@ -1593,6 +1713,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::OceanicNext => Palette {
             dark: true,
@@ -1612,6 +1734,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Horizon => Palette {
             dark: true,
@@ -1631,6 +1755,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Cobalt2 => Palette {
             dark: true,
@@ -1650,6 +1776,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Synthwave => Palette {
             dark: true,
@@ -1669,6 +1797,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Moonlight => Palette {
             dark: true,
@@ -1688,6 +1818,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Poimandres => Palette {
             dark: true,
@@ -1707,6 +1839,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Oxocarbon => Palette {
             dark: true,
@@ -1726,6 +1860,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::ModusVivendi => Palette {
             dark: true,
@@ -1745,6 +1881,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Iceberg => Palette {
             dark: true,
@@ -1764,6 +1902,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::GitHubLight => Palette {
             dark: false,
@@ -1783,6 +1923,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Tomorrow => Palette {
             dark: false,
@@ -1802,6 +1944,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::IcebergLight => Palette {
             dark: false,
@@ -1821,6 +1965,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::ModusOperandi => Palette {
             dark: false,
@@ -1840,6 +1986,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::SelenizedLight => Palette {
             dark: false,
@@ -1859,6 +2007,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::QuietLight => Palette {
             dark: false,
@@ -1878,6 +2028,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::PaperColor => Palette {
             dark: false,
@@ -1897,6 +2049,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::DarkModern => Palette {
             dark: true,
@@ -1916,6 +2070,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Darcula => Palette {
             dark: true,
@@ -1935,6 +2091,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::XcodeDark => Palette {
             dark: true,
@@ -1954,6 +2112,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::MaterialDarker => Palette {
             dark: true,
@@ -1973,6 +2133,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::DoomOne => Palette {
             dark: true,
@@ -1992,6 +2154,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Sonokai => Palette {
             dark: true,
@@ -2011,6 +2175,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::GruvboxMaterial => Palette {
             dark: true,
@@ -2030,6 +2196,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Vesper => Palette {
             dark: true,
@@ -2049,6 +2217,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Andromeda => Palette {
             dark: true,
@@ -2068,6 +2238,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::ShadesOfPurple => Palette {
             dark: true,
@@ -2087,6 +2259,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Carbonfox => Palette {
             dark: true,
@@ -2106,6 +2280,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Duskfox => Palette {
             dark: true,
@@ -2125,6 +2301,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::VitesseDark => Palette {
             dark: true,
@@ -2144,6 +2322,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::LightModern => Palette {
             dark: false,
@@ -2163,6 +2343,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::IntelliJLight => Palette {
             dark: false,
@@ -2182,6 +2364,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::XcodeLight => Palette {
             dark: false,
@@ -2201,6 +2385,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         // Its darkest text, and its comment grey a shade deeper for dim text, to read on its base.
         ThemeName::Dawnfox => Palette {
@@ -2221,6 +2407,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::VitesseLight => Palette {
             dark: false,
@@ -2240,6 +2428,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::GruvboxMaterialLight => Palette {
             dark: false,
@@ -2259,6 +2449,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Alabaster => Palette {
             dark: false,
@@ -2278,6 +2470,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::MonokaiPro => Palette {
             dark: true,
@@ -2297,6 +2491,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Everblush => Palette {
             dark: true,
@@ -2316,6 +2512,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Jellybeans => Palette {
             dark: true,
@@ -2335,6 +2533,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Srcery => Palette {
             dark: true,
@@ -2354,6 +2554,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Terafox => Palette {
             dark: true,
@@ -2373,6 +2575,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::EdgeDark => Palette {
             dark: true,
@@ -2392,6 +2596,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Eighties => Palette {
             dark: true,
@@ -2411,6 +2617,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Panda => Palette {
             dark: true,
@@ -2430,6 +2638,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Cyberdream => Palette {
             dark: true,
@@ -2449,6 +2659,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Mariana => Palette {
             dark: true,
@@ -2468,6 +2680,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Embark => Palette {
             dark: true,
@@ -2487,6 +2701,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::SpacemacsDark => Palette {
             dark: true,
@@ -2506,6 +2722,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::MelangeDark => Palette {
             dark: true,
@@ -2525,6 +2743,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::EdgeLight => Palette {
             dark: false,
@@ -2544,6 +2764,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::MonokaiProLight => Palette {
             dark: false,
@@ -2563,6 +2785,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Alucard => Palette {
             dark: false,
@@ -2582,6 +2806,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Zenbones => Palette {
             dark: false,
@@ -2601,6 +2827,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::SpacemacsLight => Palette {
             dark: false,
@@ -2620,6 +2848,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Leuven => Palette {
             dark: false,
@@ -2639,6 +2869,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::DoomOneLight => Palette {
             dark: false,
@@ -2658,6 +2890,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::TokyoNightMoon => Palette {
             dark: true,
@@ -2677,6 +2911,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Nordfox => Palette {
             dark: true,
@@ -2696,6 +2932,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::SelenizedDark => Palette {
             dark: true,
@@ -2715,6 +2953,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Vague => Palette {
             dark: true,
@@ -2734,6 +2974,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Moonfly => Palette {
             dark: true,
@@ -2753,6 +2995,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::MaterialOcean => Palette {
             dark: true,
@@ -2772,6 +3016,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Oldworld => Palette {
             dark: true,
@@ -2791,6 +3037,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::ChallengerDeep => Palette {
             dark: true,
@@ -2810,6 +3058,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Noctis => Palette {
             dark: true,
@@ -2829,6 +3079,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::AuraDark => Palette {
             dark: true,
@@ -2848,6 +3100,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Houston => Palette {
             dark: true,
@@ -2867,6 +3121,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Lackluster => Palette {
             dark: true,
@@ -2886,6 +3142,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::FleetDark => Palette {
             dark: true,
@@ -2905,6 +3163,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::MelangeLight => Palette {
             dark: false,
@@ -2924,6 +3184,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::BlulocoLight => Palette {
             dark: false,
@@ -2943,6 +3205,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::NoctisLux => Palette {
             dark: false,
@@ -2962,6 +3226,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::MinLight => Palette {
             dark: false,
@@ -2981,6 +3247,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::MaterialLighter => Palette {
             dark: false,
@@ -3000,6 +3268,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::HorizonLight => Palette {
             dark: false,
@@ -3019,6 +3289,50 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::HighContrastDark => Palette {
+            dark: true,
+            bg: c(0x00, 0x00, 0x00),
+            panel: c(0x00, 0x00, 0x00),
+            sidebar: c(0x0a, 0x0a, 0x0a),
+            raised: c(0x14, 0x14, 0x14),
+            hover: c(0x33, 0x33, 0x33),
+            selected: c(0xff, 0xd4, 0x00),
+            cursor: c(0xff, 0xe9, 0x5c),
+            accent: c(0x4c, 0xc9, 0xff),
+            text: c(0xff, 0xff, 0xff),
+            text_dim: c(0xc8, 0xc8, 0xc8),
+            border: c(0xff, 0xff, 0xff),
+            danger: c(0xff, 0x7a, 0x7a),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+            warn: z,
+            strong: true,
+        },
+        ThemeName::HighContrastLight => Palette {
+            dark: false,
+            bg: c(0xff, 0xff, 0xff),
+            panel: c(0xff, 0xff, 0xff),
+            sidebar: c(0xf5, 0xf5, 0xf5),
+            raised: c(0xff, 0xff, 0xff),
+            hover: c(0xe0, 0xe0, 0xe0),
+            selected: c(0x00, 0x33, 0xcc),
+            cursor: c(0x00, 0x22, 0x99),
+            accent: c(0x00, 0x33, 0xcc),
+            text: c(0x00, 0x00, 0x00),
+            text_dim: c(0x3d, 0x3d, 0x3d),
+            border: c(0x00, 0x00, 0x00),
+            danger: c(0xa0, 0x00, 0x00),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(false),
+            warn: z,
+            strong: true,
         },
         ThemeName::PencilLight => Palette {
             dark: false,
@@ -3038,6 +3352,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
     }
 }

@@ -26,6 +26,37 @@ pub fn bare_edit() -> egui::Frame {
     egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2))
 }
 
+/// A search row: `glyph`, a one-line field in `font` and, with `close`, a close button.
+/// The glyphs sit halfway up the field's capitals, measured from the baseline its font
+/// reports. Centred on the row's box instead, they rode high or low by however much room
+/// the font keeps above and below its letters, which differs from font to font. Returns
+/// the field's response and whether the close button was clicked.
+#[allow(clippy::too_many_arguments)]
+pub fn search_row(ui: &mut Ui, text: &mut String, hint: &str, font: FontId, glyph: Glyph, glyph_side: f32, close: bool, pal: &Palette) -> (egui::Response, bool) {
+    let probe = ui.painter().layout_no_wrap("H".into(), font.clone(), Color32::WHITE);
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), (probe.size().y + 6.0).max(26.0)), Sense::hover());
+    let field = Rect::from_min_max(pos2(row.left() + 24.0, row.top()), pos2(row.right() - if close { 26.0 } else { 4.0 }, row.bottom()));
+    let out = ui
+        .scope_builder(UiBuilder::new().max_rect(field), |ui| {
+            egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).font(font.clone()).color(pal.text_dim)).font(font.clone()).frame(bare_edit()).vertical_align(egui::Align::Center).desired_width(field.width()).show(ui)
+        })
+        .inner;
+    let baseline = probe.rows.first().and_then(|r| r.glyphs.first().map(|g| r.pos.y + g.pos.y)).unwrap_or(font.size * 0.8);
+    let mid = out.galley_pos.y + baseline - font.size * 0.35;
+    paint_glyph(ui.painter(), Rect::from_center_size(pos2(row.left() + 11.0, mid), Vec2::splat(glyph_side)), glyph, pal.text_dim);
+    let mut closed = false;
+    if close {
+        let cr = Rect::from_center_size(pos2(row.right() - 11.0, mid), vec2(22.0, 22.0));
+        let cresp = ui.interact(cr, ui.id().with("search row close"), Sense::click());
+        if cresp.hovered() {
+            ui.painter().rect_filled(cr, CornerRadius::same(4), pal.hover);
+        }
+        paint_glyph(ui.painter(), Rect::from_center_size(cr.center(), Vec2::splat(10.0)), Glyph::Close, pal.text_dim);
+        closed = cresp.on_hover_text("Close (Esc)").clicked();
+    }
+    (out.response.response, closed)
+}
+
 /// Small square button with a painted glyph.
 /// Test builds: every toolbar/status control drawn this frame, so the user simulations can
 /// catch two controls drawn on top of each other. Compiles to nothing otherwise.
@@ -292,6 +323,33 @@ fn job_title(label: &str, failed: bool) -> String {
     label.to_string()
 }
 
+/// A finished trash, move or copy said in a line, partial results plainly: "3 items moved
+/// to Trash", "Moved 2 of 3 to Invoices". None for the jobs whose card says enough.
+pub fn undo_note(kind: &crate::ops::OpKind, p: &crate::ops::Progress) -> Option<String> {
+    use crate::ops::OpKind;
+    let name = |p: &std::path::Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
+    let (verb, srcs, to) = match kind {
+        OpKind::Trash { paths } => {
+            let n = paths.len();
+            let ok = n.saturating_sub(p.errors.len().min(n));
+            return Some(match (ok, paths.as_slice()) {
+                (k, _) if k < n => format!("Moved {k} of {n} to Trash"),
+                (_, [one]) => format!("{} moved to Trash", name(one)),
+                _ => format!("{n} items moved to Trash"),
+            });
+        }
+        OpKind::Move { srcs, dest, .. } => ("Moved", srcs, dest),
+        OpKind::Copy { srcs, dest, .. } => ("Copied", srcs, dest),
+        _ => return None,
+    };
+    let (n, ok) = (srcs.len(), p.produced.len().min(srcs.len()));
+    Some(match srcs.as_slice() {
+        _ if ok < n => format!("{verb} {ok} of {n} to {}", name(to)),
+        [one] => format!("{verb} {} to {}", name(one), name(to)),
+        _ => format!("{verb} {n} items to {}", name(to)),
+    })
+}
+
 /// What Undo takes back, from the job's title: "Moving notes.txt to the trash" is
 /// "Move notes.txt to the trash".
 pub fn job_undo_label(label: &str) -> String {
@@ -372,7 +430,7 @@ impl App {
             egui::Panel::top("title")
                 .exact_size(TITLE_H)
                 .show_separator_line(false)
-                .frame(egui::Frame::NONE.fill(pal.chrome))
+                .frame(egui::Frame::NONE.fill(pal.panel))
                 .show(root, |ui| self.title_bar(ui))
         });
         // ------------------------------------------------ shelf (only while it holds something)
@@ -527,6 +585,8 @@ impl App {
             let m = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!m));
         }
+        // The tabs sit on the toolbar's own surface; a hairline is all that parts them.
+        ui.painter().line_segment([pos2(rect.left(), rect.bottom() - 0.5), pos2(rect.right(), rect.bottom() - 0.5)], Stroke::new(1.0, pal.border));
         let mut ui = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(vec2(6.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
         // Menu and sidebar toggle live in the sidebar header while it is shown.
         if !self.sidebar {
@@ -578,9 +638,7 @@ impl App {
                 ui.painter().line_segment([pos2(pr.left() - 1.5, rect.top() + 8.0), pos2(pr.left() - 1.5, rect.bottom() - 6.0)], Stroke::new(1.0, pal.border));
             }
             let sr = Rect::from_min_max(pos2(x0, rect.top()), pos2(x1, rect.bottom()));
-            // Bottom-aligned like a panel's own strip, so the active tab joins its panel
-            // (centred, it left a strip of title bar showing between tab and panel).
-            let mut sui = ui.new_child(UiBuilder::new().max_rect(sr).layout(egui::Layout::left_to_right(egui::Align::Max)));
+            let mut sui = ui.new_child(UiBuilder::new().max_rect(sr).layout(egui::Layout::left_to_right(egui::Align::Center)));
             // Too many tabs for the strip: they clip at its edge instead of running under
             // the next strip or the window buttons.
             sui.set_clip_rect(sr.intersect(ui.clip_rect()));
@@ -654,6 +712,7 @@ impl App {
             let f = if p.total_bytes > 0 { p.done_bytes as f32 / p.total_bytes as f32 } else if p.total_items > 0 { p.done_items as f32 / p.total_items as f32 } else { 0.0 };
             Some((dest, f.clamp(0.0, 1.0)))
         }).collect();
+        let hints = self.tab_hints();
         let Some(p) = self.panels.get(&panel_id) else { return };
         let n = p.tabs.len();
         let plus_w = 28.0;
@@ -673,7 +732,6 @@ impl App {
         let active_w = if free > 1 && active_free && per < 120.0 { (avail * 0.4).min(160.0).min(avail - 56.0 * (free - 1) as f32).max(per) } else { per };
         let rest = if active_w > per { ((avail - active_w) / (free - 1) as f32).clamp(56.0, 220.0) } else { per };
         let strip_start = ui.cursor().min;
-        let col_x = self.shown_rects.get(&panel_id).map(|r| r.x_range());
         let dragging_tab = matches!(self.drag, Some(Drag::Tab { .. }));
         let dragging_files = matches!(self.drag, Some(Drag::Files { .. }));
         let pointer = ui.ctx().pointer_hover_pos();
@@ -711,32 +769,12 @@ impl App {
             let (r, resp) = ui.allocate_exact_size(vec2(w, TAB_H - 4.0), Sense::click_and_drag());
             let is_active = i == p.active;
             let hovered = resp.hovered();
-            let fill = if is_active { pal.panel } else if hovered { pal.hover } else { Color32::TRANSPARENT };
+            // The active tab is a pill raised a step off the surface it shares with the
+            // toolbar, not a tab cut from the panel below.
+            let pill = pal.panel.lerp_to_gamma(pal.text, if pal.dark { 0.08 } else { 0.06 });
+            let fill = if is_active { pill } else if hovered { pal.hover } else { Color32::TRANSPARENT };
             let rad = if self.cfg.round_corners { 7 } else { 0 };
-            if is_active {
-                // The active tab is cut from the content below it: rounded top corners and
-                // small flared feet that curve out into the strip.
-                let full = Rect::from_min_max(r.min, pos2(r.right(), r.bottom() + 4.0));
-                ui.painter().rect_filled(full, CornerRadius { nw: rad, ne: rad, sw: 0, se: 0 }, fill);
-                if rad > 0 {
-                    let f = rad as f32;
-                    let strip = pal.chrome;
-                    // The feet stay over their own panel: a first tab sits closer to the
-                    // panel's edge than a foot is wide, and the strip's colour drawn past it
-                    // left a bump on the divider.
-                    let feet = match col_x {
-                        Some(xr) => ui.painter().with_clip_rect(Rect::from_x_y_ranges(xr, ui.clip_rect().y_range()).intersect(ui.clip_rect())),
-                        None => ui.painter().clone(),
-                    };
-                    for (x, dir) in [(full.left(), -1.0f32), (full.right(), 1.0)] {
-                        let foot = Rect::from_min_max(pos2(x.min(x + dir * f), full.bottom() - f), pos2(x.max(x + dir * f), full.bottom()));
-                        feet.rect_filled(foot, CornerRadius::ZERO, fill);
-                        feet.circle_filled(pos2(x + dir * f, full.bottom() - f), f, strip);
-                    }
-                }
-            } else {
-                ui.painter().rect_filled(r.shrink2(vec2(2.0, 3.0)), CornerRadius::same(rad.min(6)), fill);
-            }
+            ui.painter().rect_filled(r.shrink2(vec2(1.0, 0.0)), CornerRadius::same(rad), fill);
             let _ = active_panel;
             // Icon or spinner; a pinned tab is its icon alone.
             let ic = Rect::from_center_size(pos2(if t.pinned { r.center().x } else { r.left() + 15.0 }, r.center().y), Vec2::splat(14.0));
@@ -771,8 +809,20 @@ impl App {
             let text_rect = Rect::from_min_max(pos2(r.left() + 27.0, r.top()), pos2(r.right() - 6.0 - close_w, r.bottom()));
             let title = t.title();
             if !t.pinned {
-                let g = listing::elided(ui, &title, FontId::proportional(self.cfg.font_size - 0.5), text_rect.width(), if is_active { pal.text } else { pal.text_dim });
-                ui.painter().galley(pos2(text_rect.left(), r.center().y - g.size().y / 2.0), g, pal.text);
+                let font = FontId::proportional(self.cfg.font_size - 0.5);
+                let tcol = if is_active { pal.text } else { pal.text_dim };
+                let g = listing::elided(ui, &title, font.clone(), text_rect.width(), tcol);
+                let (gw, gy) = (g.size().x, r.center().y - g.size().y / 2.0);
+                ui.painter().galley(pos2(text_rect.left(), gy), g, pal.text);
+                // A shared name says where it is, dim, after it: that part gives way first,
+                // and goes when there is no room for a few letters of it.
+                if let Some(h) = hints.get(&t.id) {
+                    let room = text_rect.width() - gw;
+                    if room >= 36.0 {
+                        let hg = listing::elided(ui, &format!(" · {h}"), font, room, pal.text_dim.gamma_multiply(if is_active { 1.0 } else { 0.8 }));
+                        ui.painter().galley(pos2(text_rect.left() + gw, gy), hg, pal.text_dim);
+                    }
+                }
             }
             // Close button
             if close_w > 0.0 {
@@ -895,14 +945,17 @@ impl App {
             }
         }
         let rad = if self.cfg.round_corners { 8 } else { 0 };
-        ui.painter().rect_filled(rect, CornerRadius::same(rad), pal.panel);
+        // Under the title bar's tabs the panel runs on from it: square top corners.
+        let top = if tabs_in_title { 0 } else { rad };
+        let corners = CornerRadius { nw: top, ne: top, sw: rad, se: rad };
+        ui.painter().rect_filled(rect, corners, pal.panel);
         let mut y = rect.top();
         // A split squeezed shorter than its tab strip shows none: the strip would be
         // drawn over the panel below it.
         if !tabs_in_title && rect.height() >= TAB_H {
             let r = Rect::from_min_max(pos2(rect.left(), y), pos2(rect.right(), y + TAB_H));
-            ui.painter().rect_filled(r, CornerRadius { nw: rad, ne: rad, sw: 0, se: 0 }, pal.chrome);
-            let mut child = ui.new_child(UiBuilder::new().max_rect(r.shrink2(vec2(4.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Max)));
+            ui.painter().line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0, pal.border));
+            let mut child = ui.new_child(UiBuilder::new().max_rect(r.shrink2(vec2(4.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
             self.tab_strip(&mut child, id, r.width() - 8.0);
             y += TAB_H;
         }
@@ -1099,13 +1152,20 @@ impl App {
         if !is_active && self.panels.len() > 1 {
             let a = ((1.0 - self.cfg.inactive_opacity).clamp(0.0, 0.8) * 255.0) as u8;
             let c = pal.panel;
-            ui.painter().rect_filled(rect.shrink2(vec2(0.0, 0.0)), CornerRadius::same(rad), Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a));
+            ui.painter().rect_filled(rect, corners, Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a));
         }
     }
 
     fn header_ui(&mut self, ui: &mut Ui, id: u64, rect: Rect) {
         let pal = self.pal;
-        let mut child = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(vec2(6.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        // The ⋮ menu keeps its place at the right end whatever the width; everything else
+        // gives way before it (a narrow split ran its buttons into the next panel).
+        let menu_w = 28.0;
+        let menu_r = Rect::from_center_size(pos2(rect.right() - 6.0 - menu_w / 2.0, rect.center().y), vec2(menu_w, 24.0));
+        let left = Rect::from_min_max(pos2(rect.left() + 6.0, rect.top()), pos2((menu_r.left() - 4.0).max(rect.left() + 6.0), rect.bottom()));
+        let outer_clip = rect.intersect(ui.clip_rect());
+        let mut child = ui.new_child(UiBuilder::new().max_rect(left).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        child.set_clip_rect(left.intersect(ui.clip_rect()));
         let ui = &mut child;
         ui.spacing_mut().item_spacing.x = 2.0;
         let (can_back, can_fwd, path, flatten, saved) = {
@@ -1144,11 +1204,14 @@ impl App {
         }
         // Bookmark star
         let bookmarked = self.ud.bookmarks.contains(&path);
-        let (r, resp) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::click());
+        let star_room = !no_room(ui, 24.0);
+        let (r, resp) = ui.allocate_exact_size(if star_room { vec2(24.0, 24.0) } else { Vec2::ZERO }, Sense::click());
         if resp.hovered() {
             ui.painter().rect_filled(r, CornerRadius::same(5), pal.hover);
         }
-        paint_bookmark(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(15.0)), bookmarked, if bookmarked { pal.text } else { pal.text_dim });
+        if star_room {
+            paint_bookmark(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(15.0)), bookmarked, if bookmarked { pal.text } else { pal.text_dim });
+        }
         if cmd_tip(resp, Some(if bookmarked { "Remove bookmark".into() } else { "Bookmark this folder".into() }), Cmd::ToggleBookmark, &self.keymap, &pal).clicked() && !tab::is_place(&path) {
             self.actions.push(Action::FocusPanel(id));
             if bookmarked {
@@ -1158,15 +1221,35 @@ impl App {
             }
         }
         toolbar_sep(ui, &pal);
-        // ⋮ menu reserved at the right
-        let menu_w = 28.0;
-        let crumbs_w = ui.available_width() - menu_w - 4.0;
+        // The filter field at the right end: compact while idle, wider while it is used,
+        // and never taking the path's room below a few segments.
+        let rest = ui.available_width();
+        let (busy, github) = {
+            let p = &self.panels[&id];
+            let t = p.tab();
+            (p.filter_has_focus || p.focus_filter || p_filter_active(t), tab::is_github(&t.path))
+        };
+        let fw = if github { 0.0 } else if busy { (rest * 0.45).clamp(170.0, 340.0) } else { (rest * 0.24).clamp(90.0, 210.0) };
+        let fw = if github { 0.0 } else { fw.min(rest - 110.0).max(64.0f32.min(rest * 0.5)) };
+        let crumbs_w = (rest - fw - if fw > 0.0 { 6.0 } else { 0.0 }).max(0.0);
         let crumbs_rect = Rect::from_min_size(ui.cursor().min, vec2(crumbs_w, 26.0));
         let crumbs_rect = Rect::from_center_size(pos2(crumbs_rect.center().x, rect.center().y), crumbs_rect.size());
         ui.allocate_rect(crumbs_rect, Sense::hover());
         let smart = self.panels[&id].tab().smart.as_ref().map(|s| s.name.clone());
         self.breadcrumbs(ui, id, crumbs_rect, &path, flatten, smart);
-        let (r, resp) = ui.allocate_exact_size(vec2(menu_w, 24.0), Sense::click());
+        if fw > 0.0 {
+            ui.add_space(4.0);
+            // Tall enough for the text at larger font sizes: a taller line than the box hung
+            // below its middle.
+            let fh = (self.cfg.font_size * 1.3 + 6.0).clamp(22.0, HEADER_H - 6.0);
+            let fr = Rect::from_center_size(pos2(ui.cursor().min.x + fw / 2.0, rect.center().y), vec2(fw, fh));
+            ui.allocate_rect(fr, Sense::hover());
+            self.filter_field(ui, id, fr);
+        }
+        let r = menu_r;
+        ui.set_clip_rect(outer_clip);
+        let resp = ui.interact(r, Id::new(("panel menu", id)), Sense::click());
+        note_control(ui, r, "panel menu");
         if resp.hovered() {
             ui.painter().rect_filled(r, CornerRadius::same(5), pal.hover);
         }
@@ -1377,6 +1460,103 @@ impl App {
         }
     }
 
+    /// The filter, a compact field at the toolbar's right end. It widens while it holds
+    /// something or has the keyboard, so a filter in force is always in sight.
+    fn filter_field(&mut self, ui: &mut Ui, id: u64, frame_rect: Rect) {
+        let pal = self.pal;
+        let Some(p) = self.panels.get_mut(&id) else { return };
+        let focus_req = std::mem::take(&mut p.focus_filter);
+        let t = p.tab_mut();
+        let types_on = !t.settings.only_types.is_empty();
+        let (vf, vfi) = (t.counts.0, t.counts.2);
+        let fw = frame_rect.width();
+        ui.painter().rect(frame_rect, CornerRadius::same(6), pal.bg, Stroke::new(1.0, if p_filter_active(t) { pal.accent.gamma_multiply(0.7) } else { pal.border }), StrokeKind::Inside);
+        // Searching inside files shows as the field's own icon, in the accent; a click on it
+        // goes back to names.
+        let ir = Rect::from_center_size(pos2(frame_rect.left() + 12.0, frame_rect.center().y), Vec2::splat(14.0));
+        if t.content.on {
+            let cresp = ui.interact(ir.expand(2.0), Id::new(("fcont", id)), Sense::click()).on_hover_text("Searching inside files · click for names (Ctrl+Shift+F)");
+            note_control(ui, ir, "contents toggle");
+            crate::theme::paint_symbol(ui.painter(), ir, "text-search", pal.accent);
+            if cresp.clicked() {
+                t.content.on = false;
+                t.dirty = true;
+            }
+        } else {
+            paint_glyph(ui.painter(), ir.shrink(1.0), Glyph::Search, pal.text_dim);
+        }
+        let btns = if t.filter.is_empty() { 0.0 } else { 1.0 } + if types_on { 1.0 } else { 0.0 };
+        let nudge = cap_nudge(ui, &egui::TextStyle::Body.resolve(ui.style()));
+        let edit_rect = Rect::from_min_max(pos2(frame_rect.left() + 22.0, frame_rect.top() + 1.0 + nudge), pos2(frame_rect.right() - 22.0 * btns - 4.0, frame_rect.bottom() - 1.0 + nudge));
+        let shown = vf + vfi;
+        // Files when only files are listed; an empty folder has items, not files.
+        let changed = if t.git_only.is_some() { " changed" } else { "" };
+        let hint = format!("Filter {}{changed} {}…", fmt_count(shown), if shown > 0 && (t.flatten || vf == 0) { if shown == 1 { "file" } else { "files" } } else if shown == 1 { "item" } else { "items" });
+        // Short form when the full hint wouldn't fit.
+        let hint = if fw < 170.0 { "Filter…".to_string() } else { hint };
+        let hint = if t.content.on { if fw < 150.0 { "Find…".into() } else { "Find in files…".into() } } else { hint };
+        let before = t.filter.clone();
+        let mut fui = ui.new_child(UiBuilder::new().max_rect(edit_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        // A field is at least a control's height, which grows with Spacing: taller than the
+        // box, it would start at the box's top and centre its text below the box's middle.
+        fui.spacing_mut().interact_size.y = edit_rect.height();
+        // Conditions and operators the filter understands (size>10M, -draft, a | b) show
+        // in the accent, a broken pattern in the danger colour.
+        let (accent, text, danger) = (pal.accent, pal.text, pal.danger);
+        // One line that scrolls, as egui lays out a single-line field itself: a long
+        // query wrapped onto a second line below the box.
+        let mut conds = |ui: &Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
+            let job = crate::query::job(buf.as_str(), egui::TextStyle::Body.resolve(ui.style()), text, accent, danger);
+            ui.fonts_mut(|f| f.layout_job(job))
+        };
+        let mut edit = egui::TextEdit::singleline(&mut t.filter).id(Id::new(("filter field", id))).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 0))).desired_width(edit_rect.width()).font(egui::TextStyle::Body).align(egui::Align2::LEFT_CENTER);
+        if crate::query::marked(&before) {
+            edit = edit.layouter(&mut conds);
+        }
+        let resp = fui.add(edit);
+        if focus_req {
+            resp.request_focus();
+            if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), resp.id) {
+                let c = egui::text::CCursor::new(t.filter.chars().count());
+                st.cursor.set_char_range(Some(egui::text::CCursorRange::one(c)));
+                st.store(ui.ctx(), resp.id);
+            }
+        }
+        let has_focus = resp.has_focus();
+        if t.filter != before {
+            t.dirty = true;
+        }
+        let mut bx = frame_rect.right() - 13.0;
+        if !t.filter.is_empty() {
+            let cr = Rect::from_center_size(pos2(bx, frame_rect.center().y), Vec2::splat(18.0));
+            let cresp = ui.interact(cr, Id::new(("fclr", id)), Sense::click()).on_hover_text("Clear filter (Esc)");
+            if cresp.hovered() {
+                ui.painter().rect_filled(cr, CornerRadius::same(4), pal.hover);
+            }
+            paint_glyph(ui.painter(), cr.shrink(4.0), Glyph::Close, pal.text_dim);
+            if cresp.clicked() {
+                t.filter.clear();
+                t.dirty = true;
+            }
+            bx -= 22.0;
+        }
+        if types_on {
+            let cr = Rect::from_center_size(pos2(bx, frame_rect.center().y), Vec2::splat(18.0));
+            let cresp = ui.interact(cr, Id::new(("tclr", id)), Sense::click()).on_hover_text("Showing only some file types · click to show all");
+            ui.painter().rect_filled(cr, CornerRadius::same(4), if cresp.hovered() { pal.hover } else { pal.accent.gamma_multiply(0.25) });
+            funnel(ui.painter(), cr.center(), pal.accent);
+            ui.painter().line_segment([cr.left_bottom() + vec2(4.0, -4.0), cr.right_top() + vec2(-4.0, 4.0)], Stroke::new(1.3, pal.accent));
+            if cresp.clicked() {
+                t.settings.only_types.clear();
+                t.dirty = true;
+            }
+        }
+        p.filter_has_focus = has_focus;
+    }
+
+    /// The status bar: one line of plain words. What the folder holds (or what is
+    /// selected) on the left with its ring of kinds, the drive's free space on the right,
+    /// and between them only what is going on: jobs, the git branch, a walk's timing.
     fn footer_ui(&mut self, ui: &mut Ui, id: u64, rect: Rect) {
         let pal = self.pal;
         ui.painter().line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, pal.border));
@@ -1387,19 +1567,16 @@ impl App {
             ui.painter().galley(pos2(rect.left() + 12.0, rect.center().y - g.size().y / 2.0), g, pal.text_dim);
             return;
         }
-        let mut child = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(vec2(8.0, 2.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        crate::sidebar::refresh(self, ui.ctx());
+        let mut child = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(vec2(10.0, 2.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
         let ui = &mut child;
-        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().item_spacing.x = 6.0;
         let font_small = FontId::proportional(self.cfg.font_size - 1.5);
-        let p = self.panels.get_mut(&id).unwrap();
-        let focus_req = std::mem::take(&mut p.focus_filter);
+        let Some(p) = self.panels.get_mut(&id) else { return };
         let history = p.inspector.as_ref().is_some_and(|i| i.git.is_some());
         let t = p.tab_mut();
         let (vf, tf, vfi, tfi) = t.counts;
         let glance = crate::glance::shares(t);
-        let types_on = !t.settings.only_types.is_empty();
-        let flatten = t.flatten || t.expand_all_on;
-        let flat_only = t.flatten;
         // Flattened: how long the recursive scan took (live while it runs).
         let walk_label = if t.flatten {
             if t.walk_truncated() {
@@ -1416,46 +1593,52 @@ impl App {
         let mut branch_menu = None;
         let mut chip_at = None;
         let nsel = t.selected.len();
-        let sel_size: u64 = if nsel > 1 && nsel < 200_000 {
-            let stats = &self.stats.map;
-            t.selected.iter().filter_map(|&i| t.entries.get(i as usize)).map(|e| if e.is_dir { stats.get(&e.path).map(|s| s.size).unwrap_or(0) } else { e.size }).sum()
+        let stats = &self.stats.map;
+        let size_of = |e: &crate::fsx::Entry| if e.is_dir { stats.get(&e.path).map(|s| s.size).unwrap_or(0) } else { e.size };
+        let sel_size: u64 = if nsel > 0 && nsel < 200_000 { t.selected.iter().filter_map(|&i| t.entries.get(i as usize)).map(size_of).sum() } else { 0 };
+        // The files' bytes are summed when the view is built; the folders', measured as
+        // the frame goes, are added while there are few enough to add up per frame.
+        let total = t.shown_bytes + if vf <= 2000 { t.view.iter().filter_map(|&i| t.entries.get(i as usize)).filter(|e| e.is_dir && e.depth == 0).map(size_of).sum::<u64>() } else { 0 };
+        let shown = vf + vfi;
+        let plural = |n: usize, one: &str, many: &str| format!("{} {}", fmt_count(n), if n == 1 { one } else { many });
+        let summary = if nsel > 0 {
+            format!("{} of {} selected · {}", fmt_count(nsel), fmt_count(shown), fsx::fmt_size(sel_size))
         } else {
-            0
+            let part = |v: usize, t: usize, one: &str, many: &str| if v == t { plural(v, one, many) } else { format!("{} of {}", fmt_count(v), plural(t, one, many)) };
+            let mut parts = vec![];
+            if tf > 0 && !t.flatten {
+                parts.push(part(vf, tf, "folder", "folders"));
+            }
+            if tfi > 0 {
+                parts.push(part(vfi, tfi, "file", "files"));
+            }
+            let words = if parts.is_empty() { if loading { String::new() } else { "Empty folder".to_string() } } else { parts.join(", ") };
+            if total > 0 { format!("{words} · {}", fsx::fmt_size(total)) } else { words }
         };
-        let zoom = t.settings.zoom;
-        let view_name = listing::view_label(&t.settings);
-        let view_mode = listing::mode_of(&t.settings);
+        let hidden = (!t.settings.show_folders, !t.settings.show_files);
+        let summary = match hidden {
+            (true, false) => format!("{summary} · folders hidden"),
+            (false, true) => format!("{summary} · files hidden"),
+            (true, true) => format!("{summary} · folders and files hidden"),
+            _ => summary,
+        };
         let error = t.error.clone();
-        let (show_folders, show_files) = (t.settings.show_folders, t.settings.show_files);
-        let mut toggle_folders = false;
-        let mut toggle_files = false;
+        let free = if tab::is_place(&t.path) || t.archive.is_some() { None } else { crate::sidebar::free_at(&t.path) };
         let jobs = if id == self.jobs_panel { crate::transfers::summary(&self.jobs) } else { None };
         let jobs_open = matches!(self.popup, Popup::Transfers(_));
         let mut jobs_at = None;
-        // The right-hand group (counts, view, zoom…) is drawn twice: first invisibly to
-        // measure it (no painting, no clicks), then for real once the filter box is sized.
+        // Right to left: free space, the jobs pill, the branch. Whatever the summary leaves.
         let mut right = |ui: &mut Ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            // A small text chip with an optional painted icon; returns its response.
-            let chip = |ui: &mut Ui, icon: Option<&dyn Fn(&egui::Painter, Rect)>, text: &str, col: Color32, active: bool, tip: &str| -> egui::Response {
-                let g = ui.painter().layout_no_wrap(text.to_string(), font_small.clone(), col);
-                let iw = if icon.is_some() { 16.0 } else { 0.0 };
-                // Narrow panel: a chip that doesn't fit is left out rather than drawn on
-                // top of its neighbour.
-                if g.size().x + iw + 12.0 > ui.available_width() {
-                    return ui.allocate_exact_size(Vec2::ZERO, Sense::hover()).1;
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if let Some(f) = free {
+                let s = format!("{} free", fsx::fmt_size(f));
+                let g = ui.painter().layout_no_wrap(s, font_small.clone(), pal.text_dim);
+                if g.size().x + 8.0 <= ui.available_width() {
+                    let (r, resp) = ui.allocate_exact_size(g.size(), Sense::hover());
+                    ui.painter().galley(r.min, g, pal.text_dim);
+                    resp.on_hover_text("Free space on this folder's drive");
                 }
-                let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + iw + 12.0, 20.0), Sense::click());
-                note_control(ui, r, "status chip");
-                if resp.hovered() || active {
-                    ui.painter().rect_filled(r, CornerRadius::same(5), if active { pal.accent.gamma_multiply(0.2) } else { pal.hover });
-                }
-                if let Some(f) = icon {
-                    f(ui.painter(), Rect::from_center_size(pos2(r.left() + 6.0 + 6.0, r.center().y), Vec2::splat(12.0)));
-                }
-                ui.painter().galley(pos2(r.left() + 6.0 + iw, r.center().y - g.size().y / 2.0), g, col);
-                if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
-            };
+            }
             // While jobs run: how many and how far, opening the list of them.
             if let Some((text, frac)) = &jobs {
                 if let Some(r) = crate::transfers::chip(ui, text, *frac, jobs_open, font_small.clone(), &pal) {
@@ -1465,74 +1648,14 @@ impl App {
                     }
                 }
             }
-            // Zoom chip with a fill bar proportional to the zoom (none in Columns, which has
-            // no zoom).
-            let zr = if matches!(view_mode, listing::Mode::Columns | listing::Mode::Stack) { ui.allocate_exact_size(Vec2::ZERO, Sense::hover()).1 } else { chip(ui, None, &format!("{}%", (zoom * 100.0 + 1e-3).floor() as i32), pal.text_dim, false, "View size (Ctrl+wheel)") };
-            if zr.rect.width() > 10.0 {
-                let bar = Rect::from_min_max(pos2(zr.rect.left() + 5.0, zr.rect.bottom() - 4.0), pos2(zr.rect.right() - 5.0, zr.rect.bottom() - 2.5));
-                ui.painter().rect_filled(bar, CornerRadius::same(1), pal.border);
-                ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * zoom, bar.height())), CornerRadius::same(1), pal.accent);
-            }
-            if zr.clicked() {
-                self.popup = Popup::zoom(id, zr.rect.right_top());
-            }
-            let view_icon = move |p: &egui::Painter, r: Rect| listing::paint_view_glyph(p, r, view_mode, pal.text_dim);
-            let vr = chip(ui, Some(&view_icon), view_name, pal.text_dim, false, "Change view");
-            if vr.clicked() {
-                self.popup = Popup::zoom(id, vr.rect.right_top());
-            }
-            // Folders-first / files-first toggle (a box split by a line; the filled half
-            // is the group listed first).
-            let ff = self.cfg.folders_first;
-            let ff_icon = move |p: &egui::Painter, r: Rect| {
-                let b = Rect::from_center_size(r.center(), vec2(12.0, 11.0));
-                p.rect_stroke(b, CornerRadius::same(2), Stroke::new(1.2, pal.text_dim), StrokeKind::Middle);
-                let half = if ff { Rect::from_min_max(b.min, pos2(b.right(), b.center().y)) } else { Rect::from_min_max(pos2(b.left(), b.center().y), b.max) };
-                p.rect_filled(half.shrink(2.0), CornerRadius::same(1), pal.text_dim);
-            };
-            let fr2 = chip(ui, Some(&ff_icon), "", pal.text_dim, false, if ff { "Folders first · click for files first" } else { "Files first · click for folders first" });
-            if fr2.clicked() {
-                self.actions.push(Action::Cmd(Cmd::ToggleFoldersFirst));
-            }
-            // An active type filter shows as a chip (the funnel in the Type header opens it).
-            if types_on {
-                let fun = move |p: &egui::Painter, r: Rect| funnel(p, r.center(), pal.accent);
-                let tr = chip(ui, Some(&fun), "Types", pal.accent, true, "Showing only some file types (Alt+T)");
-                if tr.clicked() {
-                    self.actions.push(Action::FocusPanel(id));
-                    self.popup = Popup::types(id);
+            // Beside the branch while it is being pulled or pushed; the answer is a toast.
+            if let Some(what) = syncing.filter(|_| branch.is_some()) {
+                let g = ui.painter().layout_no_wrap(what.to_string(), font_small.clone(), pal.text_dim);
+                if g.size().x + 8.0 <= ui.available_width() {
+                    let (r, resp) = ui.allocate_exact_size(g.size(), Sense::hover());
+                    ui.painter().galley(r.min, g, pal.text_dim);
+                    resp.on_hover_text("git is talking to the remote");
                 }
-            }
-            // What kinds of file fill the folder, as a ring; pointing at it names them.
-            if !glance.is_empty() && ui.available_width() >= 24.0 {
-                let (r, resp) = ui.allocate_exact_size(vec2(24.0, 20.0), Sense::hover());
-                note_control(ui, r, "folder at a glance");
-                if resp.hovered() {
-                    ui.painter().rect_filled(r, CornerRadius::same(5), pal.hover);
-                }
-                crate::glance::paint_ring(ui, Rect::from_center_size(r.center(), Vec2::splat(13.0)), &glance, &pal);
-                resp.on_hover_text(crate::glance::describe(&glance));
-            }
-            let count = |v: usize, t: usize| if v == t { fmt_count(t) } else { format!("{}/{}", fmt_count(v), fmt_count(t)) };
-            let file_icon = move |p: &egui::Painter, r: Rect| {
-                crate::theme::paint_symbol(p, r.expand(1.0), "file", pal.text_dim);
-            };
-            let fr = chip(ui, Some(&file_icon), &count(vfi, tfi), if show_files { pal.text_dim } else { pal.text_dim.gamma_multiply(0.45) }, !show_files, &format!("{vfi} of {tfi} files shown{} · click to {} files", if tfi > vfi { " (hidden, system or filtered items excluded)" } else { "" }, if show_files { "hide" } else { "show" }));
-            if fr.clicked() {
-                toggle_files = true;
-            }
-            if !flat_only {
-                let dir_icon = move |p: &egui::Painter, r: Rect| {
-                    crate::theme::paint_symbol(p, r.expand(1.0), "folder", pal.text_dim);
-                };
-                let dr = chip(ui, Some(&dir_icon), &count(vf, tf), if show_folders { pal.text_dim } else { pal.text_dim.gamma_multiply(0.45) }, !show_folders, &format!("{vf} of {tf} folders shown · click to {} folders", if show_folders { "hide" } else { "show" }));
-                if dr.clicked() {
-                    toggle_folders = true;
-                }
-            }
-            if let Some(label) = &walk_label {
-                let clock = move |p: &egui::Painter, r: Rect| paint_glyph(p, r, Glyph::Clock, pal.text_dim);
-                chip(ui, Some(&clock), label, pal.text_dim, false, "Time taken to list every subfolder");
             }
             if let Some((b, ahead, behind)) = &branch {
                 // The branch, then what is not yet pushed (up) and not yet pulled (down).
@@ -1577,23 +1700,38 @@ impl App {
                     }
                 }
             }
-            // Beside the branch while it is being pulled or pushed; the answer is a toast.
-            if let Some(what) = syncing.filter(|_| branch.is_some()) {
-                chip(ui, None, what, pal.text_dim, false, "git is talking to the remote");
-            }
-            if nsel > 1 {
-                let layers = move |p: &egui::Painter, r: Rect| {
-                    let st = Stroke::new(1.2, pal.accent);
-                    for k in 0..3 {
-                        let o = k as f32 * 2.5;
-                        p.rect_stroke(Rect::from_min_size(r.min + vec2(o, 5.0 - o), vec2(7.0, 6.0)), CornerRadius::same(1), st, StrokeKind::Middle);
-                    }
-                };
-                chip(ui, Some(&layers), &format!("{} · {}", fmt_count(nsel), fsx::fmt_size(sel_size)), pal.accent, false, "Selected items and their total size");
+        };
+        let right_w = {
+            let mut m = ui.new_child(UiBuilder::new().max_rect(ui.max_rect()).layout(egui::Layout::right_to_left(egui::Align::Center)).invisible());
+            right(&mut m);
+            m.min_rect().width()
+        };
+        let left_room = (ui.available_width() - right_w - 12.0).max(0.0);
+        let left_end = ui.cursor().min.x + left_room;
+        let mut lui = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(ui.cursor().min, pos2(left_end, ui.max_rect().bottom()))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        {
+            let ui = &mut lui;
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+            // What kinds of file fill the folder, as a small ring; pointing at it names them.
+            if !glance.is_empty() && ui.available_width() >= 40.0 {
+                let (r, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                note_control(ui, r, "folder at a glance");
+                crate::glance::paint_ring(ui, r.shrink(0.5), &glance, &pal);
+                resp.on_hover_text(crate::glance::describe(&glance));
             }
             if loading && ui.available_width() >= 16.0 {
-                let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
                 spinner(ui.painter(), r.center(), 5.0, pal.accent, ui.input(|i| i.time));
+            }
+            let mut line = summary;
+            if let Some(w) = &walk_label {
+                line = if line.is_empty() { w.clone() } else { format!("{line} · {w}") };
+            }
+            if !line.is_empty() {
+                let g = listing::elided(ui, &line, font_small.clone(), ui.available_width(), pal.text_dim);
+                let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
+                ui.painter().galley(r.min, g, pal.text_dim);
             }
             if let Some(e) = &error {
                 if ui.available_width() > 24.0 {
@@ -1604,134 +1742,7 @@ impl App {
                 let s: Vec<String> = self.seq.iter().map(|c| c.to_string()).collect();
                 ui.add(egui::Label::new(egui::RichText::new(format!("{} …", s.join(", "))).font(font_small.clone()).color(pal.accent)).truncate());
             }
-        };
-        let right_w = {
-            let mut m = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(vec2(8.0, 2.0))).layout(egui::Layout::right_to_left(egui::Align::Center)).invisible());
-            right(&mut m);
-            m.min_rect().width()
-        };
-        // Filter box
-        // Never wider than the space the right-hand group leaves (narrow split panels).
-        let room = rect.right() - right_w - 10.0 - ui.cursor().min.x;
-        let fw = (rect.width() * 0.36).clamp(140.0, 380.0).min(room).max(64.0);
-        // Tall enough for the text at larger font sizes: a taller line than the box hung
-        // below its middle.
-        let fh = (self.cfg.font_size * 1.3 + 6.0).clamp(22.0, FOOTER_H - 2.0);
-        let frame_rect = Rect::from_min_size(ui.cursor().min, vec2(fw, fh));
-        let frame_rect = Rect::from_center_size(pos2(frame_rect.center().x, rect.center().y), frame_rect.size());
-        ui.allocate_rect(frame_rect, Sense::hover());
-        ui.painter().rect(frame_rect, CornerRadius::same(6), pal.bg, Stroke::new(1.0, if p_filter_active(t) { pal.accent.gamma_multiply(0.7) } else { pal.border }), StrokeKind::Inside);
-        paint_glyph(ui.painter(), Rect::from_center_size(pos2(frame_rect.left() + 12.0, frame_rect.center().y), Vec2::splat(12.0)), Glyph::Search, pal.text_dim);
-        // A narrow box keeps its room for typing; the palette still switches contents mode.
-        let cont_btn = fw >= 110.0;
-        let btns = 1.0 + if cont_btn { 1.0 } else { 0.0 } + if t.filter.is_empty() { 0.0 } else { 1.0 } + if types_on { 1.0 } else { 0.0 };
-        let nudge = cap_nudge(ui, &egui::TextStyle::Body.resolve(ui.style()));
-        let edit_rect = Rect::from_min_max(pos2(frame_rect.left() + 22.0, frame_rect.top() + 1.0 + nudge), pos2(frame_rect.right() - 22.0 * btns - 2.0, frame_rect.bottom() - 1.0 + nudge));
-        let shown = vf + vfi;
-        // Files when only files are listed; an empty folder has items, not files.
-        let changed = if t.git_only.is_some() { " changed" } else { "" };
-        let hint = format!("Filter {}{changed} {}…", fmt_count(shown), if shown > 0 && (t.flatten || vf == 0) { if shown == 1 { "file" } else { "files" } } else if shown == 1 { "item" } else { "items" });
-        // Short form when the full hint wouldn't fit.
-        let hint = if fw < 150.0 { "Filter…".to_string() } else { hint };
-        let hint = if t.content.on { if fw < 150.0 { "Find…".into() } else { "Find in files…".into() } } else { hint };
-        let before = t.filter.clone();
-        let mut fui = ui.new_child(UiBuilder::new().max_rect(edit_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        // A field is at least a control's height, which grows with Spacing: taller than the
-        // box, it would start at the box's top and centre its text below the box's middle.
-        fui.spacing_mut().interact_size.y = edit_rect.height();
-        // Conditions and operators the filter understands (size>10M, -draft, a | b) show
-        // in the accent, a broken pattern in the danger colour.
-        let (accent, text, danger) = (pal.accent, pal.text, pal.danger);
-        // One line that scrolls, as egui lays out a single-line field itself: a long
-        // query wrapped onto a second line below the box.
-        let mut conds = |ui: &Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
-            let job = crate::query::job(buf.as_str(), egui::TextStyle::Body.resolve(ui.style()), text, accent, danger);
-            ui.fonts_mut(|f| f.layout_job(job))
-        };
-        let mut edit = egui::TextEdit::singleline(&mut t.filter).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 0))).desired_width(edit_rect.width()).font(egui::TextStyle::Body).align(egui::Align2::LEFT_CENTER);
-        if crate::query::marked(&before) {
-            edit = edit.layouter(&mut conds);
         }
-        let resp = fui.add(edit);
-        if focus_req {
-            resp.request_focus();
-            if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), resp.id) {
-                let c = egui::text::CCursor::new(t.filter.chars().count());
-                st.cursor.set_char_range(Some(egui::text::CCursorRange::one(c)));
-                st.store(ui.ctx(), resp.id);
-            }
-        }
-        let has_focus = resp.has_focus();
-        if t.filter != before {
-            t.dirty = true;
-        }
-        let mut bx = frame_rect.right() - 12.0;
-        let br = Rect::from_center_size(pos2(bx, frame_rect.center().y), Vec2::splat(18.0));
-        let fresp = ui.interact(br, Id::new(("flat", id)), Sense::click()).on_hover_text("Expand: list every file under this folder (Ctrl+E)");
-        if fresp.hovered() || flatten {
-            ui.painter().rect_filled(br, CornerRadius::same(4), if flatten { pal.accent.gamma_multiply(0.35) } else { pal.hover });
-        }
-        let c = br.center();
-        let st = Stroke::new(1.3, if flatten { pal.accent } else { pal.text_dim });
-        // Three rows evenly apart, as far above the middle as below it.
-        ui.painter().line_segment([c + vec2(-5.0, -4.5), c + vec2(-5.0, 4.5)], st);
-        for dy in [0.0, 4.5] {
-            ui.painter().line_segment([c + vec2(-5.0, dy), c + vec2(0.0, dy)], st);
-            ui.painter().line_segment([c + vec2(2.0, dy), c + vec2(6.0, dy)], st);
-        }
-        ui.painter().line_segment([c + vec2(-5.0, -4.5), c + vec2(6.0, -4.5)], st);
-        if fresp.clicked() {
-            // In Tree view the same button unfolds everything instead of flattening.
-            if t.tree_active() || t.expand_all_on {
-                t.toggle_expand_all();
-            } else {
-                t.set_flatten(!flatten);
-            }
-        }
-        bx -= 22.0;
-        // Contents mode: the filter looks inside files instead of at their names.
-        if cont_btn {
-            let on = t.content.on;
-            let cr = Rect::from_center_size(pos2(bx, frame_rect.center().y), Vec2::splat(18.0));
-            note_control(ui, cr, "contents toggle");
-            let cresp = ui.interact(cr, Id::new(("fcont", id)), Sense::click()).on_hover_text("Search inside files (Ctrl+Shift+F)");
-            if cresp.hovered() || on {
-                ui.painter().rect_filled(cr, CornerRadius::same(4), if on { pal.accent.gamma_multiply(0.35) } else { pal.hover });
-            }
-            crate::theme::paint_symbol(ui.painter(), cr.shrink(3.0), "text-search", if on { pal.accent } else { pal.text_dim });
-            if cresp.clicked() {
-                t.content.on = !on;
-                t.dirty = true;
-                // Back to the text, ready to type, as when switched from the palette.
-                ui.memory_mut(|m| m.request_focus(resp.id));
-            }
-            bx -= 22.0;
-        }
-        if !t.filter.is_empty() {
-            let cr = Rect::from_center_size(pos2(bx, frame_rect.center().y), Vec2::splat(18.0));
-            let cresp = ui.interact(cr, Id::new(("fclr", id)), Sense::click()).on_hover_text("Clear filter (Esc)");
-            if cresp.hovered() {
-                ui.painter().rect_filled(cr, CornerRadius::same(4), pal.hover);
-            }
-            paint_glyph(ui.painter(), cr.shrink(4.0), Glyph::Close, pal.text_dim);
-            if cresp.clicked() {
-                t.filter.clear();
-                t.dirty = true;
-            }
-            bx -= 22.0;
-        }
-        if types_on {
-            let cr = Rect::from_center_size(pos2(bx, frame_rect.center().y), Vec2::splat(18.0));
-            let cresp = ui.interact(cr, Id::new(("tclr", id)), Sense::click()).on_hover_text("Clear type filters");
-            ui.painter().rect_filled(cr, CornerRadius::same(4), if cresp.hovered() { pal.hover } else { pal.accent.gamma_multiply(0.25) });
-            funnel(ui.painter(), cr.center(), pal.accent);
-            ui.painter().line_segment([cr.left_bottom() + vec2(4.0, -4.0), cr.right_top() + vec2(-4.0, 4.0)], Stroke::new(1.3, pal.accent));
-            if cresp.clicked() {
-                t.settings.only_types.clear();
-                t.dirty = true;
-            }
-        }
-        p.filter_has_focus = has_focus;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| right(ui));
         if let Some(p) = self.panels.get_mut(&id) {
             p.branch_chip = chip_at;
@@ -1739,20 +1750,9 @@ impl App {
         if id == self.jobs_panel {
             self.jobs_chip = jobs_at;
         }
-        if let Some(r) = branch_menu {
+        if branch_menu.is_some() {
             self.actions.push(Action::FocusPanel(id));
             self.actions.push(Action::Cmd(Cmd::GitBranches));
-            let _ = r;
-        }
-        if toggle_folders || toggle_files {
-            let t = self.panels.get_mut(&id).unwrap().tab_mut();
-            if toggle_folders {
-                t.settings.show_folders = !t.settings.show_folders;
-            }
-            if toggle_files {
-                t.settings.show_files = !t.settings.show_files;
-            }
-            t.dirty = true;
         }
     }
 
@@ -1852,7 +1852,9 @@ impl App {
 
     fn jobs_overlay(&mut self, ctx: &egui::Context) {
         let pal = self.pal;
-        let has_toast = self.toast.as_ref().map(|t| t.1.elapsed().as_secs_f32() < 3.0).unwrap_or(false);
+        // A toast with something to do stays longer, and while it is pointed at.
+        let life = if self.toast_undo.is_some() { 6.0 } else if self.toast_tool.is_some() { 7.0 } else { 3.0 };
+        let has_toast = self.toast.as_ref().map(|t| t.1.elapsed().as_secs_f32() < life).unwrap_or(false);
         // The transfers list shows the same jobs, above the chip.
         let listed = matches!(self.popup, Popup::Transfers(_));
         if (self.jobs.is_empty() || listed) && !has_toast {
@@ -2008,15 +2010,64 @@ impl App {
                     self.jobs.remove(k);
                 }
                 crate::speedline::keep_only(&self.jobs.iter().map(|j| j.id).collect::<Vec<_>>());
+                let mut hold = false;
+                let mut how = None;
+                let mut undo_now = false;
+                // The Undo goes once anything else has been done or undone since.
+                let undo = self.toast_undo_live().then_some(()).map(|_| self.keymap.bindings(Cmd::Undo).first().map(crate::commands::binding_to_string).unwrap_or_default());
                 if let Some((msg, at)) = &self.toast {
                     let el = at.elapsed().as_secs_f32();
-                    if el < 3.0 {
-                        let a = if el > 2.6 { (3.0 - el) / 0.4 } else { 1.0 };
-                        egui::Frame::popup(ui.style()).fill(pal.raised.gamma_multiply(a)).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
-                            ui.label(egui::RichText::new(msg).color(pal.text.gamma_multiply(a)));
+                    if el < life {
+                        let a = if el > life - 0.4 { (life - el) / 0.4 } else { 1.0 };
+                        let tool = self.toast_tool;
+                        let r = egui::Frame::popup(ui.style()).fill(pal.raised.gamma_multiply(a)).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                            // Only a toast with its action lays out in a row: a long one
+                            // alone wraps within the card's width, as it always has.
+                            match (tool, &undo) {
+                                (_, Some(key)) => {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(msg).color(pal.text.gamma_multiply(a)));
+                                        ui.add_space(6.0);
+                                        let b = crate::popups::quiet_button(ui, "Undo", &pal);
+                                        note_control(ui, b.rect, "toast undo");
+                                        undo_now = b.on_hover_text("Take it back").clicked();
+                                        if !key.is_empty() {
+                                            ui.label(egui::RichText::new(key).color(pal.text_dim.gamma_multiply(a)));
+                                        }
+                                    });
+                                }
+                                (Some(t), None) => {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(msg).color(pal.text.gamma_multiply(a)));
+                                        ui.add_space(8.0);
+                                        let b = crate::popups::quiet_button(ui, "How to install", &pal);
+                                        note_control(ui, b.rect, "toast how to install");
+                                        if b.clicked() {
+                                            how = Some(t);
+                                        }
+                                    });
+                                }
+                                (None, None) => {
+                                    ui.label(egui::RichText::new(msg).color(pal.text.gamma_multiply(a)));
+                                }
+                            }
                         });
+                        hold = (tool.is_some() || undo.is_some()) && r.response.contains_pointer();
                         ctx.request_repaint();
                     }
+                }
+                if hold {
+                    if let Some(t) = self.toast.as_mut() {
+                        t.1 = std::time::Instant::now();
+                    }
+                }
+                if let Some(tool) = how {
+                    self.toast = None;
+                    self.popup = Popup::Install { tool };
+                }
+                if undo_now {
+                    self.toast = None;
+                    self.actions.push(Action::Cmd(Cmd::Undo));
                 }
             });
     }

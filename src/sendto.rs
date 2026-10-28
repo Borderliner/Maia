@@ -74,7 +74,7 @@ pub fn email(files: &[PathBuf]) -> Result<(), String> {
         return Err("No mail app is set up".into());
     }
     // No handler named, but a client installed: xdg-email finds it.
-    let args = email_args(files, tools.has("xdg-email"), app.as_deref()).ok_or("Install xdg-utils to attach files to an email")?;
+    let args = email_args(files, tools.has("xdg-email"), app.as_deref()).ok_or("Attaching files to an email needs xdg-email")?;
     let (prog, rest) = args.split_first().ok_or("No mail app is set up")?;
     let mut c = if prog == "xdg-email" { tools.cmd("xdg-email") } else { std::process::Command::new(prog) };
     c.args(rest);

@@ -54,3 +54,24 @@ pub fn parse_local(s: &str) -> Option<SystemTime> {
     }
     Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(t as u64))
 }
+
+/// A date said against today: "Today 17:10", "Yesterday 09:04", the weekday within the
+/// week ("Wed 22:57"), "12 Mar" earlier this year, "12 Mar 2025" before. Names of days
+/// and months come from strftime, so they follow the locale like the rest.
+pub fn relative(t: SystemTime, now: SystemTime) -> String {
+    let (tm, nm) = (local(t), local(now));
+    let days = local_day(now) - local_day(t);
+    let clock = format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
+    match days {
+        0 => format!("Today {clock}"),
+        1 => format!("Yesterday {clock}"),
+        2..=6 => format!("{} {clock}", format(t, "%a")),
+        _ if tm.tm_year == nm.tm_year => format!("{} {}", tm.tm_mday, format(t, "%b")),
+        _ => format!("{} {} {}", tm.tm_mday, format(t, "%b"), tm.tm_year + 1900),
+    }
+}
+
+/// A date in the user's chosen pattern, or said against today when none is chosen.
+pub fn date(t: SystemTime, pattern: &str) -> String {
+    if pattern.is_empty() { relative(t, SystemTime::now()) } else { format(t, pattern) }
+}

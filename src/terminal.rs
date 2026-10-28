@@ -711,7 +711,7 @@ fn ansi(pal: &Palette) -> [Color32; 16] {
     let s = &pal.syntax;
     let ink = |c: Color32| if pal.dark { c } else { c.lerp_to_gamma(Color32::BLACK, 0.25) };
     let black = if pal.dark { pal.bg.lerp_to_gamma(pal.text, 0.22) } else { pal.text };
-    let base = [black, pal.danger, ink(crate::gitstatus::GREEN), ink(crate::gitstatus::AMBER), pal.accent, s.keyword, s.kind, pal.text_dim];
+    let base = [black, pal.danger, ink(crate::gitstatus::GREEN), ink(pal.warn), pal.accent, s.keyword, s.kind, pal.text_dim];
     let mut c = [Color32::BLACK; 16];
     for (i, b) in base.into_iter().enumerate() {
         c[i] = b;
