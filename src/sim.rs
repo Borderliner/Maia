@@ -19467,4 +19467,60 @@ mod journeys {
         report("contrast", &s);
     }
 
+
+    /// A Persian README in the folder's card: each paragraph, heading and list read from
+    /// where it starts (Persian from the right), the English words in them as written.
+    #[test]
+    fn persian_readme_card() {
+        if !sandboxed() {
+            return;
+        }
+        let d = fixture("readme-fa").join("پروژه");
+        std::fs::create_dir_all(&d).unwrap();
+        let md = "# GapHero AI Agent\n\n> یک دستیار هوشمند برای پاسخ به پرسش‌های مشتریان با Agent و پایگاه داده.\n\n## امکانات\n\n- پاسخ خودکار به پیام‌ها\n- اتصال به Database Consultant برای گزارش‌ها\n- پشتیبانی از ۱۲ زبان\n\n1. نصب **Tracing** و [راهنما](https://example.com/guide)\n2. اجرا\n\n## Agent چیست؟\n\nهر Agent یک برنامه‌ی کوچک است که با SQL کار می‌کند.\n";
+        std::fs::write(d.join("README.md"), md).unwrap();
+        std::fs::write(d.join("notes.txt"), "x").unwrap();
+        let mut s = Sim::new(&d, vec2(1100.0, 1000.0));
+        s.idle(20);
+        wait_until(&mut s, "the card", 10, |s| controls_named("readme edge").len() == 1);
+        s.click_text("Show all");
+        s.idle(20);
+        look(&mut s, "persian readme");
+        s.shot("readme-persian");
+        let find = |s: &Sim, part: &str| s.texts.iter().find(|(_, t)| t.contains(part)).map(|(r, _)| *r);
+        for t in ["tnegA", "tnatlusnoC", "gnicarT", "LQS"] {
+            assert!(find(&s, t).is_none(), "{t} reversed: {:?}", s.texts);
+        }
+        let title = find(&s, "GapHero AI Agent").expect("the title");
+        let para = find(&s, " Agent ").expect("the first paragraph");
+        let item = find(&s, "Database Consultant").expect("the list item");
+        // From the right: against the card's right edge, far from its left.
+        assert!(para.left() > title.right() && para.right() > title.right() + 300.0, "read from the right: {para:?}, title {title:?}");
+        assert!(item.right() > para.right() - 40.0, "the list too: {item:?} vs {para:?}");
+        // "Agent چیست؟" starts in English: from the left, the Persian after it.
+        let mixed = s.texts.iter().find(|(_, t)| t.starts_with("Agent ") && crate::rtl::has_rtl(t)).map(|(r, _)| *r);
+        assert!(mixed.is_some_and(|r| (r.left() - title.left()).abs() < 4.0), "the English-first heading from the left: {mixed:?}, title {title:?}");
+        // In the preview: a triple-click takes a list item, copied as written; a link
+        // in a Persian line still opens.
+        s.cmd(ToggleInspector);
+        s.settle();
+        select_path(&mut s, &d.join("README.md"));
+        wait_until(&mut s, "markdown laid out", 10, |s| inspector(s).markdown().and_then(|m| m.counts()).is_some_and(|c| c.0 > 8));
+        s.idle(3);
+        assert!(find(&s, " SQL ").is_some() && find(&s, "LQS").is_none(), "the last paragraph: {:?}", s.texts);
+        look(&mut s, "persian readme preview");
+        s.shot("readme-persian-preview");
+        let at = inspector(&s).markdown().and_then(|m| m.char_pos("Database", 2)).unwrap_or_else(|| s.fail("the item drawn"));
+        s.idle(40);
+        s.act(&format!("dclick {:.1} {:.1}", at.x, at.y));
+        s.act(&format!("click {:.1} {:.1}", at.x, at.y));
+        s.act("key ctrl+c");
+        assert_eq!(last_copy(&s), "اتصال به Database Consultant برای گزارش‌ها");
+        let at = inspector(&s).markdown().and_then(|m| m.link_pos("https://example.com/guide")).unwrap_or_else(|| s.fail("the link drawn"));
+        let before = crate::mime::LAUNCHED.lock().unwrap().len();
+        s.idle(40);
+        s.act(&format!("click {:.0} {:.0}", at.x, at.y));
+        assert!(crate::mime::LAUNCHED.lock().unwrap().len() > before, "the link followed");
+        report("readme fa", &s);
+    }
 }

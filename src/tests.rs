@@ -12765,6 +12765,58 @@ fn rtl_names_wrap_and_elide_in_reading_order() {
     out.drop_without_applying_deltas();
 }
 
+/// A paragraph of runs in several looks (a README's sentence with an English word in
+/// another colour) reads from the right, the English in its look and as written; it
+/// wraps in reading order, the first words on the first row; a line break starts a row
+/// still read from the right; and every character drawn maps back to the text it shows.
+#[test]
+fn rtl_paragraphs_wrap_in_reading_order_and_read_back() {
+    let ctx = egui::Context::default();
+    crate::theme::install_fonts(&ctx, "", "");
+    ctx.run_pass(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+    let out = ctx.run_pass(egui::RawInput::default(), |ctx| {
+        ctx.root_ui(|root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                let font = egui::FontId::proportional(13.0);
+                let (white, blue) = (egui::Color32::WHITE, egui::Color32::BLUE);
+                let span = |text, color| crate::rtl::Span { text, leading_space: 0.0, format: egui::TextFormat::simple(font.clone(), color), hits: None };
+                let spans = [span("یک دو سه چهار با ", white), span("Agent", blue), span(" و پنج شش هفت\nلا (هشت)", white)];
+                let text: String = spans.iter().map(|s| s.text).collect();
+                let each_once = |p: &crate::rtl::Para| {
+                    assert_eq!(p.shows.len(), p.job.text.chars().count(), "a range for every character drawn");
+                    let mut seen = vec![0; text.chars().count()];
+                    for i in p.shows.iter().flat_map(|r| r.clone()) {
+                        seen[i] += 1;
+                    }
+                    assert!(seen.iter().all(|&n| n == 1), "each character shown once: {seen:?}");
+                };
+                let p = crate::rtl::paragraph(ui, &spans, egui::text::TextWrapping::default());
+                assert!(p.rtl);
+                each_once(&p);
+                let blue_text: String = p.job.sections.iter().filter(|s| s.format.color == blue).map(|s| &p.job.text[s.byte_range.start.0..s.byte_range.end.0]).collect();
+                assert_eq!(blue_text, "Agent", "in its own look, as written");
+                let lines: Vec<&str> = p.job.text.split('\n').collect();
+                assert_eq!(lines.len(), 2, "{:?}", p.job.text);
+                assert!(lines[0].ends_with('\u{fbfe}'), "ی (initial) of the first word on the right: {lines:?}");
+                assert!(lines[1].starts_with('(') && lines[1].ends_with('\u{fefb}'), "the second line from the right too, its brackets mirrored: {lines:?}");
+                // Narrow: the first row holds the first words; egui draws each row as it is.
+                let narrow = crate::rtl::paragraph(ui, &spans, egui::text::TextWrapping { max_width: 70.0, ..Default::default() });
+                each_once(&narrow);
+                let rows: Vec<&str> = narrow.job.text.split('\n').collect();
+                assert!(rows.len() > 3, "{rows:?}");
+                assert!(rows[0].ends_with('\u{fbfe}'), "{rows:?}");
+                assert_eq!(narrow.shows.iter().flat_map(|r| r.clone()).min(), Some(0));
+                let g = ui.fonts_mut(|f| f.layout_job(narrow.job.clone()));
+                assert_eq!(g.rows.iter().map(|r| r.glyphs.len()).collect::<Vec<_>>(), rows.iter().map(|r| r.chars().count()).collect::<Vec<_>>(), "a glyph a character");
+                // One that starts in English reads from the left.
+                let ltr = crate::rtl::paragraph(ui, &[span("Agent یک", white)], egui::text::TextWrapping::default());
+                assert!(!ltr.rtl && ltr.job.text.starts_with("Agent "), "{:?}", ltr.job.text);
+            });
+        });
+    });
+    out.drop_without_applying_deltas();
+}
+
 /// The System theme's colours: a GTK user stylesheet's (its imports followed, names
 /// resolved, comments and rules passed over), kdeglobals' (first on KDE; elsewhere only a
 /// scheme someone chose), else Adwaita's light or dark with the portal's accent.

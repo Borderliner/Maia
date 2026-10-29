@@ -21,7 +21,7 @@ use egui::epaint::text::ByteIndex;
 use egui::text::{CCursor, CCursorRange, LayoutJob, LayoutSection, TextFormat, TextWrapping};
 use egui::text_edit::TextEditOutput;
 use egui::{Color32, Event, FontId, Galley, Id, Key, Rect, TextEdit, Ui, pos2};
-use unicode_bidi::{BidiClass, ParagraphBidiInfo, bidi_class};
+use unicode_bidi::{BidiClass, Level, ParagraphBidiInfo, bidi_class};
 
 use crate::arabic_forms::{FORMS, JOIN_CAUSING, LAM_ALEF, TRANSPARENT};
 
@@ -237,6 +237,99 @@ pub fn layout_job(ui: &Ui, spans: &[Span], wrap: TextWrapping) -> LayoutJob {
     }
     job.wrap = TextWrapping::no_max_width();
     job
+}
+
+/// Whether `text` reads from the right: its first strong letter is a right-to-left one.
+pub fn reads_rtl(text: &str) -> bool {
+    text.chars()
+        .find_map(|c| match bidi_class(c) {
+            BidiClass::L => Some(false),
+            BidiClass::R | BidiClass::AL => Some(true),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+/// A paragraph laid out by [`paragraph`].
+pub struct Para {
+    /// Its rows in display order, one after another.
+    pub job: LayoutJob,
+    /// For each character of the job's text, the paragraph's characters it shows (by
+    /// `chars()` index): a letter itself, a lam-alef ligature two, a row's wrap none.
+    pub shows: Vec<Range<usize>>,
+    /// Whether it reads from the right ([`reads_rtl`]): its rows go against the right edge.
+    pub rtl: bool,
+}
+
+/// `spans` as one paragraph (a sentence with words in bold, a link, some code): laid out
+/// the way `wrap` asks in reading order, then each row put in display order, the spans in
+/// it too. A line break in a span starts a row, in the paragraph's direction still.
+pub fn paragraph(ui: &Ui, spans: &[Span], wrap: TextWrapping) -> Para {
+    let text: String = spans.iter().map(|s| s.text).collect();
+    // Each character's span, and the character each span starts at.
+    let mut span_of = Vec::with_capacity(text.len());
+    let mut starts = Vec::with_capacity(spans.len());
+    for (k, s) in spans.iter().enumerate() {
+        starts.push(span_of.len());
+        span_of.extend(std::iter::repeat_n(k, s.text.chars().count()));
+    }
+    let rtl = reads_rtl(&text);
+    let level = if rtl { Level::rtl() } else { Level::ltr() };
+    let mut out = Para { job: LayoutJob::default(), shows: vec![], rtl };
+    // The line's first character in the paragraph.
+    let mut base = 0;
+    for (l, line) in text.split('\n').enumerate() {
+        let n = line.chars().count();
+        let sh = shape(line);
+        let len = sh.src.len();
+        let offsets: Vec<usize> = sh.text.char_indices().map(|(b, _)| b).chain([sh.text.len()]).collect();
+        let span = |i: usize| span_of[base + sh.src[i]];
+        // A span's room before it goes before its first character, wherever that lands.
+        let lead = |i: usize| if starts[span(i)] == base + sh.src[i] { spans[span(i)].leading_space } else { 0.0 };
+        let mut reading = LayoutJob::default();
+        let mut i = 0;
+        while i < len {
+            let j = (i + 1..len).find(|&j| span(j) != span(i)).unwrap_or(len);
+            append_shown(&mut reading, &sh.text[offsets[i]..offsets[j]], lead(i), &spans[span(i)].format);
+            i = j;
+        }
+        reading.wrap = wrap.clone();
+        let galley = ui.fonts_mut(|f| f.layout_job(reading));
+        let info = ParagraphBidiInfo::new(&sh.text, Some(level));
+        // Every character has its glyph, in order: a row's glyphs are its characters.
+        let mut at = 0;
+        for (r, row) in galley.rows.iter().enumerate() {
+            let end = (at + row.glyphs.len()).min(len);
+            if r > 0 && at < len {
+                append_shown(&mut out.job, "\n", 0.0, &spans[span(at)].format);
+                out.shows.push(base + sh.src[at]..base + sh.src[at]);
+            } else if r == 0 && l > 0 {
+                // The line break itself.
+                append_shown(&mut out.job, "\n", 0.0, &spans[span_of[base - 1]].format);
+                out.shows.push(base - 1..base);
+            }
+            let mut run = String::new();
+            let mut run_at: Option<usize> = None;
+            for (b, mirror) in visual(&info, offsets[at]..offsets[end]) {
+                let ci = offsets.partition_point(|&o| o < b);
+                if let Some(first) = run_at.filter(|&f| span(f) != span(ci)) {
+                    append_shown(&mut out.job, &run, lead(first), &spans[span(first)].format);
+                    run.clear();
+                    run_at = None;
+                }
+                run_at.get_or_insert(ci);
+                run.push(drawn(&sh.text, b, mirror));
+                out.shows.push(base + sh.src[ci]..base + sh.src.get(ci + 1).copied().unwrap_or(n));
+            }
+            if let Some(first) = run_at {
+                append_shown(&mut out.job, &run, lead(first), &spans[span(first)].format);
+            }
+            at = end;
+        }
+        base += n + 1;
+    }
+    out.job.wrap = TextWrapping::no_max_width();
+    out
 }
 
 /// `text` wrapped at `width` for a label, its rows in display order.

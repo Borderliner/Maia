@@ -1082,7 +1082,6 @@ pub fn slug(runs: &[Run]) -> String {
 }
 
 /// Every run's text.
-#[cfg(test)]
 pub fn plain(runs: &[Run]) -> String {
     runs.iter().map(|r| r.text.as_str()).collect()
 }
@@ -1090,8 +1089,9 @@ pub fn plain(runs: &[Run]) -> String {
 // ---------------------------------------------------------------- layout
 
 enum Piece {
-    /// A galley; `bold` the faux-bold pass over its strong parts; links by byte range.
-    Text { pos: Pos2, g: Arc<Galley>, bold: Option<Arc<Galley>>, links: Vec<(std::ops::Range<usize>, u32)> },
+    /// A galley; `bold` the faux-bold pass over its strong parts; links by byte range;
+    /// `order` for one drawn in display order, its text as read.
+    Text { pos: Pos2, g: Arc<Galley>, bold: Option<Arc<Galley>>, links: Vec<(std::ops::Range<usize>, u32)>, order: Option<Arc<Order>> },
     Fill { r: Rect, col: Color32, round: u8, line: Option<Color32> },
     Line { a: Pos2, b: Pos2, col: Color32 },
     Dot { c: Pos2, r: f32, col: Color32, hollow: bool },
@@ -1101,10 +1101,56 @@ enum Piece {
     Math { r: Rect, tex: egui::TextureId },
 }
 
+/// Text with right-to-left letters, drawn in display order (`rtl::paragraph`): the text
+/// in reading order, and the characters of it each drawn one shows.
+struct Order {
+    text: String,
+    shows: Vec<std::ops::Range<usize>>,
+}
+
+impl Order {
+    /// The characters the drawn ones `a..b` show, in reading order.
+    fn read(&self, a: usize, b: usize) -> String {
+        let mut picked = vec![false; self.text.chars().count()];
+        for r in self.shows.get(a..b.min(self.shows.len())).into_iter().flatten() {
+            for i in r.clone() {
+                if let Some(p) = picked.get_mut(i) {
+                    *p = true;
+                }
+            }
+        }
+        self.text.chars().zip(picked).filter_map(|(c, p)| p.then_some(c)).collect()
+    }
+}
+
+/// A paragraph's job as `Writer::job` makes it.
+struct Job {
+    job: LayoutJob,
+    /// Links, by byte range of the job's text.
+    links: Vec<(std::ops::Range<usize>, u32)>,
+    /// Whether some of it is strong: laid out again for `faux_bold`.
+    bold: bool,
+    /// Each typeset formula kept room for: its space's character index, the formula.
+    maths: Vec<(usize, u32)>,
+    /// For text with right-to-left letters, laid out in display order: its text as read.
+    order: Option<Arc<Order>>,
+    /// Whether it reads from the right.
+    rtl: bool,
+}
+
+/// `job` with its rows against the right edge when it reads from the right: the galley
+/// then lies left of where it is drawn.
+fn aligned(mut job: LayoutJob, rtl: bool) -> LayoutJob {
+    if rtl {
+        job.halign = egui::Align::RIGHT;
+    }
+    job
+}
+
 impl Piece {
     fn rect(&self) -> Rect {
         match self {
-            Piece::Text { pos, g, .. } => Rect::from_min_size(*pos, g.size()),
+            Piece::Text { pos, g, .. } => g.rect.translate(pos.to_vec2()),
             Piece::Fill { r, .. } | Piece::Check { r, .. } | Piece::Picture { r, .. } | Piece::Math { r, .. } => *r,
             Piece::Line { a, b, .. } => Rect::from_two_pos(*a, *b).expand(1.0),
             Piece::Dot { c, r, .. } => Rect::from_center_size(*c, Vec2::splat(r * 2.0)),
@@ -1241,7 +1287,7 @@ impl View {
         let ((k0, c0), (k1, c1)) = sel.span();
         let mut out = String::new();
         let mut prev: Option<(f32, &str)> = None;
-        for (k, (pos, g)) in texts(&l.pieces).enumerate().skip(k0) {
+        for (k, (pos, g, order)) in texts(&l.pieces).enumerate().skip(k0) {
             if k > k1 {
                 break;
             }
@@ -1249,10 +1295,13 @@ impl View {
             let n = t.chars().count();
             let (a, b) = (if k == k0 { c0.min(n) } else { 0 }, if k == k1 { c1.min(n) } else { n });
             if let Some((y, pt)) = prev {
-                let number = pt.strip_suffix('.').is_some_and(|d| !d.is_empty() && d.bytes().all(|c| c.is_ascii_digit()));
+                let number = pt.strip_suffix('.').or_else(|| pt.strip_prefix('.')).is_some_and(|d| !d.is_empty() && d.bytes().all(|c| c.is_ascii_digit()));
                 out.push(if (pos.y - y).abs() > 0.5 { '\n' } else if number { ' ' } else { '\t' });
             }
-            out.push_str(&t[byte_of(t, a)..byte_of(t, b)]);
+            match order {
+                Some(o) => out.push_str(&o.read(a, b)),
+                None => out.push_str(&t[byte_of(t, a)..byte_of(t, b)]),
+            }
             prev = Some((pos.y, t));
         }
         out
@@ -1269,7 +1318,7 @@ impl View {
     #[cfg(test)]
     pub fn char_pos(&self, needle: &str, ch: usize) -> Option<Pos2> {
         let l = self.laid.as_ref()?;
-        let (pos, g) = texts(&l.pieces).find(|(_, g)| g.text().contains(needle))?;
+        let (pos, g, _) = texts(&l.pieces).find(|(_, g, _)| g.text().contains(needle))?;
         let ci = g.text()[..g.text().find(needle)?].chars().count() + ch;
         Some(self.origin + pos.to_vec2() + g.pos_from_cursor(egui::text::CCursor::new(ci)).center().to_vec2())
     }
@@ -1331,22 +1380,19 @@ impl Writer<'_, '_> {
         self.ui.fonts_mut(|f| f.row_height(&FontId::proportional(size))) * self.st.spacing.clamp(1.0, 2.0)
     }
 
-    fn job(&self, runs: &[Run], size: f32, color: Color32, w: f32, all_bold: bool, faux: bool) -> (LayoutJob, Vec<(std::ops::Range<usize>, u32)>, bool) {
-        let (job, links, bold, _) = self.job_math(runs, size, color, w, all_bold, faux, false);
-        (job, links, bold)
+    fn job(&self, runs: &[Run], size: f32, color: Color32, w: f32, all_bold: bool, faux: bool) -> Job {
+        self.job_math(runs, size, color, w, all_bold, faux, false)
     }
 
     /// `job`, and with `place` a typeset formula keeps its room in the line as a
-    /// no-break space after a gap its width: (the space's character index, formula).
+    /// no-break space after a gap its width.
     #[allow(clippy::too_many_arguments)]
-    fn job_math(&self, runs: &[Run], size: f32, color: Color32, w: f32, all_bold: bool, faux: bool, place: bool) -> (LayoutJob, Vec<(std::ops::Range<usize>, u32)>, bool, Vec<(usize, u32)>) {
+    fn job_math(&self, runs: &[Run], size: f32, color: Color32, w: f32, all_bold: bool, faux: bool, place: bool) -> Job {
         let pal = self.st.pal;
-        let mut job = LayoutJob::default();
-        job.wrap.max_width = w.max(16.0);
         let lh = self.line_h(size);
-        let mut links = vec![];
-        let mut maths = vec![];
         let mut any_bold = all_bold;
+        // Each run's text, the room before it, its look, its link and its formula.
+        let mut segs: Vec<(String, f32, TextFormat, u32, Option<u32>)> = Vec::with_capacity(runs.len());
         for r in runs {
             if r.st & MATH != 0 {
                 let pic = self.maths.get(r.link as usize - 1).copied().flatten().map(|m| m.inline(size, w));
@@ -1356,8 +1402,7 @@ impl Writer<'_, '_> {
                         let font = FontId::proportional(size);
                         let sp = self.ui.fonts_mut(|f| f.glyph_width(&font, '\u{a0}'));
                         let fmt = TextFormat { font_id: font, color: Color32::TRANSPARENT, line_height: Some(lh.max(m.size.y + 2.0)), ..Default::default() };
-                        maths.push((job.text.chars().count(), r.link));
-                        job.append("\u{a0}", (m.size.x - sp).max(0.0), fmt);
+                        segs.push(("\u{a0}".into(), (m.size.x - sp).max(0.0), fmt, 0, Some(r.link)));
                     }
                     None => {
                         let col = if faux { Color32::TRANSPARENT } else { pal.text_dim };
@@ -1365,7 +1410,7 @@ impl Writer<'_, '_> {
                         if !faux {
                             fmt.background = pal.raised.gamma_multiply(if pal.dark { 0.9 } else { 0.7 });
                         }
-                        job.append(&format!("${}$", r.text), 0.0, fmt);
+                        segs.push((format!("${}$", r.text), 0.0, fmt, 0, None));
                     }
                 }
                 continue;
@@ -1397,13 +1442,45 @@ impl Writer<'_, '_> {
             if faux && !bold {
                 fmt.color = Color32::TRANSPARENT;
             }
+            segs.push((text, 0.0, fmt, r.link, None));
+        }
+        let mut links: Vec<(std::ops::Range<usize>, u32)> = vec![];
+        let mut maths = vec![];
+        let all: String = segs.iter().map(|s| s.0.as_str()).collect();
+        if crate::rtl::has_rtl(&all) {
+            // Wrapped in reading order, each row then put in display order.
+            let spans: Vec<crate::rtl::Span> = segs.iter().map(|s| crate::rtl::Span { text: &s.0, leading_space: s.1, format: s.2.clone(), hits: None }).collect();
+            let wrap = egui::text::TextWrapping { max_width: w.max(16.0), ..Default::default() };
+            let p = crate::rtl::paragraph(self.ui, &spans, wrap);
+            let seg_of: Vec<usize> = segs.iter().enumerate().flat_map(|(k, s)| std::iter::repeat_n(k, s.0.chars().count())).collect();
+            for (j, ((b, c), shows)) in p.job.text.char_indices().zip(&p.shows).enumerate() {
+                let Some(&k) = seg_of.get(shows.start).filter(|_| !shows.is_empty()) else { continue };
+                let (link, end) = (segs[k].3, b + c.len_utf8());
+                match links.last_mut() {
+                    Some((rg, l)) if link > 0 && *l == link && rg.end == b => rg.end = end,
+                    _ if link > 0 => links.push((b..end, link)),
+                    _ => {}
+                }
+                if let Some(m) = segs[k].4 {
+                    maths.push((j, m));
+                }
+            }
+            let order = Some(Arc::new(Order { text: all, shows: p.shows }));
+            return Job { job: p.job, links, bold: any_bold, maths, order, rtl: p.rtl };
+        }
+        let mut job = LayoutJob::default();
+        job.wrap.max_width = w.max(16.0);
+        for (text, lead, fmt, link, math) in segs {
+            if let Some(m) = math {
+                maths.push((job.text.chars().count(), m));
+            }
             let start = job.text.len();
-            job.append(&text, 0.0, fmt);
-            if r.link > 0 {
-                links.push((start..job.text.len(), r.link));
+            job.append(&text, lead, fmt);
+            if link > 0 {
+                links.push((start..job.text.len(), link));
             }
         }
-        (job, links, any_bold, maths)
+        Job { job, links, bold: any_bold, maths, order: None, rtl: false }
     }
 
     /// Lay out a run of text at (x, y) in width `w`; returns its height.
@@ -1411,13 +1488,15 @@ impl Writer<'_, '_> {
         if runs.is_empty() {
             return 0.0;
         }
-        let (job, links, any_bold, maths) = self.job_math(runs, size, color, w, all_bold, false, true);
-        let g = self.ui.fonts_mut(|f| f.layout_job(job));
-        let bold = any_bold.then(|| {
-            let (job, ..) = self.job_math(runs, size, color, w, all_bold, true, true);
-            self.ui.fonts_mut(|f| f.layout_job(job))
+        let Job { job, links, bold, maths, order, rtl } = self.job_math(runs, size, color, w, all_bold, false, true);
+        let g = self.ui.fonts_mut(|f| f.layout_job(aligned(job, rtl)));
+        let bold = bold.then(|| {
+            let j = self.job_math(runs, size, color, w, all_bold, true, true);
+            self.ui.fonts_mut(|f| f.layout_job(aligned(j.job, rtl)))
         });
         let h = g.size().y;
+        // One that reads from the right goes against the right edge.
+        let pos = pos2(if rtl { x + w } else { x }, self.y);
         // Each formula fills the gap before its space, standing on the line's baseline.
         if !maths.is_empty() {
             let mut at = 0;
@@ -1425,7 +1504,7 @@ impl Writer<'_, '_> {
                 for gl in &row.row.glyphs {
                     if let Some(&(_, k)) = maths.iter().find(|m| m.0 == at) {
                         if let Some(m) = self.maths.get(k as usize - 1).copied().flatten().map(|m| m.inline(size, w)) {
-                            let right = x + row.pos.x + gl.pos.x + gl.advance_width;
+                            let right = pos.x + row.pos.x + gl.pos.x + gl.advance_width;
                             let base = self.y + row.pos.y + gl.pos.y;
                             let r = Rect::from_min_max(pos2(right - m.size.x, base + m.depth - m.size.y), pos2(right, base + m.depth));
                             self.pieces.push(Piece::Math { r, tex: m.tex });
@@ -1438,7 +1517,7 @@ impl Writer<'_, '_> {
                 }
             }
         }
-        self.pieces.push(Piece::Text { pos: pos2(x, self.y), g, bold, links });
+        self.pieces.push(Piece::Text { pos, g, bold, links, order });
         h
     }
 
@@ -1525,19 +1604,25 @@ impl Writer<'_, '_> {
                 let g = self.ui.fonts_mut(|f| f.layout_job(job));
                 let r = Rect::from_min_size(pos2(x, self.y), vec2(w, g.size().y.max(lh) + pad * 2.0));
                 self.pieces.push(Piece::Fill { r, col: pal.card(), round: 6, line: Some(pal.card_line()) });
-                self.pieces.push(Piece::Text { pos: pos2(x + pad, self.y + pad), g, bold: None, links: vec![] });
+                self.pieces.push(Piece::Text { pos: pos2(x + pad, self.y + pad), g, bold: None, links: vec![], order: None });
                 self.y = r.bottom();
             }
             Block::Quote(inner) => {
                 let top = self.y;
                 let ind = (size * 1.1).round();
-                self.blocks(inner, x + ind, w - ind, pal.text_dim, tight);
-                self.pieces.push(Piece::Fill { r: Rect::from_min_max(pos2(x + 1.0, top), pos2(x + 4.0, self.y.max(top + 4.0))), col: pal.accent.gamma_multiply(0.45), round: 2, line: None });
+                // The bar on the side the quote starts from.
+                let rtl = starts_rtl(inner);
+                self.blocks(inner, if rtl { x } else { x + ind }, w - ind, pal.text_dim, tight);
+                let bar = if rtl { x + w - 4.0 } else { x + 1.0 };
+                self.pieces.push(Piece::Fill { r: Rect::from_min_max(pos2(bar, top), pos2(bar + 3.0, self.y.max(top + 4.0))), col: pal.accent.gamma_multiply(0.45), round: 2, line: None });
             }
             Block::List { start, items } => {
                 let digits = start.map_or(1, |s| (s + items.len() as u64).to_string().len());
                 let ind = if start.is_some() { (size * (0.9 + 0.6 * digits as f32)).round() } else { (size * 1.5).round() };
                 let first_h = self.line_h(size);
+                // A list that reads from the right has its markers on the right.
+                let rtl = items.first().is_some_and(|(_, b)| starts_rtl(b));
+                let mx = |px: f32| if rtl { 2.0 * x + w - px } else { px };
                 for (n, (task, blocks)) in items.iter().enumerate() {
                     if n > 0 {
                         self.y += (size * 0.3).round();
@@ -1547,19 +1632,21 @@ impl Writer<'_, '_> {
                     match (task, start) {
                         (Some(done), _) => {
                             let s = (size * 0.85).round();
-                            self.pieces.push(Piece::Check { r: Rect::from_center_size(pos2(x + ind - s * 0.9, cy), Vec2::splat(s)), done: *done });
+                            self.pieces.push(Piece::Check { r: Rect::from_center_size(pos2(mx(x + ind - s * 0.9), cy), Vec2::splat(s)), done: *done });
                         }
                         (None, Some(s0)) => {
                             // Laid out as the item's text is, so the two share a baseline.
-                            let run = Run { text: format!("{}.", s0 + n as u64), st: 0, link: 0 };
-                            let (job, ..) = self.job(std::slice::from_ref(&run), size, pal.text_dim, f32::INFINITY, false, false);
+                            // From the right, the full stop is on the number's left.
+                            let k = s0 + n as u64;
+                            let run = Run { text: if rtl { format!(".{k}") } else { format!("{k}.") }, st: 0, link: 0 };
+                            let job = self.job(std::slice::from_ref(&run), size, pal.text_dim, f32::INFINITY, false, false).job;
                             let g = self.ui.fonts_mut(|f| f.layout_job(job));
-                            let pos = pos2(x + ind - 6.0 - g.size().x, self.y);
-                            self.pieces.push(Piece::Text { pos, g, bold: None, links: vec![] });
+                            let pos = pos2(if rtl { mx(x + ind - 6.0) } else { x + ind - 6.0 - g.size().x }, self.y);
+                            self.pieces.push(Piece::Text { pos, g, bold: None, links: vec![], order: None });
                         }
                         (None, None) => {
                             let r = (size * 0.17).max(2.0);
-                            self.pieces.push(Piece::Dot { c: pos2(x + ind * 0.45, cy), r, col: pal.text_dim, hollow: self.lists % 2 == 1 });
+                            self.pieces.push(Piece::Dot { c: pos2(mx(x + ind * 0.45), cy), r, col: pal.text_dim, hollow: self.lists % 2 == 1 });
                         }
                     }
                     if task.is_some() {
@@ -1567,7 +1654,7 @@ impl Writer<'_, '_> {
                     }
                     let before = self.y;
                     self.lists += 1;
-                    self.blocks(blocks, cx, w - (cx - x), color, true);
+                    self.blocks(blocks, if rtl { x } else { cx }, w - (cx - x), color, true);
                     self.lists -= 1;
                     if self.y == before {
                         self.y += first_h;
@@ -1603,7 +1690,7 @@ impl Writer<'_, '_> {
                             // when it is one.
                             let alt = if im.alt.is_empty() { im.src.rsplit('/').next().unwrap_or("picture").to_string() } else { im.alt.clone() };
                             let run = Run { text: alt, st: 0, link };
-                            let (job, links, _) = self.job(std::slice::from_ref(&run), (size * 0.92).round(), pal.text_dim, w, false, false);
+                            let Job { job, links, order, .. } = self.job(std::slice::from_ref(&run), (size * 0.92).round(), pal.text_dim, w, false, false);
                             let g = self.ui.fonts_mut(|f| f.layout_job(job));
                             if row_x > x && row_x + g.size().x + 12.0 > x + w {
                                 self.y += row_h + 4.0;
@@ -1612,7 +1699,7 @@ impl Writer<'_, '_> {
                             }
                             let r = Rect::from_min_size(pos2(row_x, self.y), g.size() + vec2(12.0, 6.0));
                             self.pieces.push(Piece::Fill { r, col: Color32::TRANSPARENT, round: 4, line: Some(pal.card_line()) });
-                            self.pieces.push(Piece::Text { pos: r.min + vec2(6.0, 3.0), g, bold: None, links });
+                            self.pieces.push(Piece::Text { pos: r.min + vec2(6.0, 3.0), g, bold: None, links, order });
                             row_x = r.right() + 4.0;
                             row_h = row_h.max(r.height());
                         }
@@ -1635,7 +1722,7 @@ impl Writer<'_, '_> {
         let natural: Vec<f32> = (0..n)
             .map(|c| {
                 std::iter::once(&head[c]).chain(rows.iter().map(|r| &r[c])).take(200).map(|runs| {
-                    let (mut job, ..) = self.job(runs, size, pal.text, f32::INFINITY, false, false);
+                    let mut job = self.job(runs, size, pal.text, f32::INFINITY, false, false).job;
                     job.wrap.max_width = f32::INFINITY;
                     self.ui.fonts_mut(|f| f.layout_job(job)).size().x + pad * 2.0
                 }).fold(size * 2.0, f32::max)
@@ -1653,27 +1740,28 @@ impl Writer<'_, '_> {
             let mut placed = vec![];
             for (c, runs) in cells.iter().enumerate() {
                 let cw = widths[c];
-                let (job, links, any_bold) = me.job(runs, size, pal.text, cw - pad * 2.0, header, false);
-                let g = me.ui.fonts_mut(|f| f.layout_job(job));
-                let bold = any_bold.then(|| {
-                    let (job, ..) = me.job(runs, size, pal.text, cw - pad * 2.0, header, true);
-                    me.ui.fonts_mut(|f| f.layout_job(job))
+                let Job { job, links, bold, order, rtl, .. } = me.job(runs, size, pal.text, cw - pad * 2.0, header, false);
+                let g = me.ui.fonts_mut(|f| f.layout_job(aligned(job, rtl)));
+                let bold = bold.then(|| {
+                    let j = me.job(runs, size, pal.text, cw - pad * 2.0, header, true);
+                    me.ui.fonts_mut(|f| f.layout_job(aligned(j.job, rtl)))
                 });
-                let gx = match aligns[c] {
-                    Align::Left => cx + pad,
+                // A cell that reads from the right starts at the right, unless centred.
+                let left = match aligns[c] {
+                    Align::Left if !rtl => cx + pad,
                     Align::Center => cx + (cw - g.size().x) / 2.0,
-                    Align::Right => cx + cw - pad - g.size().x,
+                    Align::Left | Align::Right => cx + cw - pad - g.size().x,
                 };
                 h = h.max(g.size().y);
-                placed.push((gx, g, bold, links));
+                placed.push((left - g.rect.min.x, g, bold, links, order));
                 cx += cw;
             }
             let rh = h + pad;
             if header {
                 me.pieces.push(Piece::Fill { r: Rect::from_min_size(pos2(x, y0), vec2(total, rh)), col: pal.card(), round: 0, line: None });
             }
-            for (gx, g, bold, links) in placed {
-                me.pieces.push(Piece::Text { pos: pos2(gx, y0 + pad / 2.0), g, bold, links });
+            for (gx, g, bold, links, order) in placed {
+                me.pieces.push(Piece::Text { pos: pos2(gx, y0 + pad / 2.0), g, bold, links, order });
             }
             me.y = y0 + rh;
             me.pieces.push(Piece::Line { a: pos2(x, me.y), b: pos2(x + total, me.y), col: if header { pal.border } else { pal.card_line() } });
@@ -1686,10 +1774,22 @@ impl Writer<'_, '_> {
     }
 }
 
-/// The laid-out text pieces in reading order: where each was put, and its galley.
-fn texts(pieces: &[Piece]) -> impl Iterator<Item = (Pos2, &Arc<Galley>)> {
+/// Whether `blocks` read from the right: the first strong letter of their first text is a
+/// right-to-left one.
+fn starts_rtl(blocks: &[Block]) -> bool {
+    blocks.first().is_some_and(|b| match b {
+        Block::Para(runs) | Block::Heading(_, runs) => crate::rtl::reads_rtl(&plain(runs)),
+        Block::Quote(inner) => starts_rtl(inner),
+        Block::List { items, .. } => items.first().is_some_and(|(_, b)| starts_rtl(b)),
+        _ => false,
+    })
+}
+
+/// The laid-out text pieces in reading order: where each was put, its galley, and its
+/// text as read when it is drawn in display order.
+fn texts(pieces: &[Piece]) -> impl Iterator<Item = (Pos2, &Arc<Galley>, Option<&Order>)> {
     pieces.iter().filter_map(|p| match p {
-        Piece::Text { pos, g, .. } => Some((*pos, g)),
+        Piece::Text { pos, g, order, .. } => Some((*pos, g, order.as_deref())),
         _ => None,
     })
 }
@@ -1703,8 +1803,8 @@ fn byte_of(t: &str, c: usize) -> usize {
 /// else the end of the last piece above it, else the start of the first.
 fn hit(pieces: &[Piece], q: Pos2) -> crate::textsel::At {
     let (mut best, mut above): (Option<(f32, crate::textsel::At)>, Option<crate::textsel::At>) = (None, None);
-    for (k, (pos, g)) in texts(pieces).enumerate() {
-        let r = Rect::from_min_size(pos, g.size());
+    for (k, (pos, g, _)) in texts(pieces).enumerate() {
+        let r = g.rect.translate(pos.to_vec2());
         if q.y >= r.top() && q.y <= r.bottom() {
             let dx = if q.x < r.left() { r.left() - q.x } else { (q.x - r.right()).max(0.0) };
             if best.is_none_or(|b| dx < b.0) {
@@ -1820,15 +1920,19 @@ pub fn view(ui: &mut Ui, body: Rect, v: &mut View, size: f32, pal: &Palette, spa
         let origin = r.min + vec2(margin, margin);
         v.origin = origin;
         let pieces = &laid.pieces;
-        let piece_text = |k: usize| texts(pieces).nth(k).map(|(_, g)| g.text()).unwrap_or("");
+        let piece_text = |k: usize| texts(pieces).nth(k).map(|(_, g, _)| g.text()).unwrap_or("");
         let word = |(k, c): crate::textsel::At| {
             let t = piece_text(k);
             let (x, y) = crate::textsel::word(t, byte_of(t, c));
             ((k, t[..x].chars().count()), (k, t[..y].chars().count()))
         };
-        // A line of a code block, else the whole paragraph.
+        // A line of a code block, else the whole paragraph (one drawn in display order
+        // breaks its rows with line breaks too).
         let line = |(k, c): crate::textsel::At| {
             let t = piece_text(k);
+            if texts(pieces).nth(k).is_some_and(|(_, _, o)| o.is_some()) {
+                return ((k, 0), (k, t.chars().count()));
+            }
             let b = byte_of(t, c);
             let x = t[..b].rfind('\n').map_or(0, |i| i + 1);
             let y = t[b..].find('\n').map_or(t.len(), |i| b + i);
@@ -1852,7 +1956,7 @@ pub fn view(ui: &mut Ui, body: Rect, v: &mut View, size: f32, pal: &Palette, spa
                 continue;
             }
             match piece {
-                Piece::Text { pos, g, bold, links } => {
+                Piece::Text { pos, g, bold, links, .. } => {
                     let at = origin + pos.to_vec2();
                     if let (Some(((k0, c0), (k1, c1))), Some(tk)) = (sel, tk) {
                         if (k0..=k1).contains(&tk) {
