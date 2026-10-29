@@ -1,4 +1,4 @@
-//! Application state, input routing, command dispatch and persistence.
+//! Application state, input routing, command dispatch and persistence.ggg
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -56,6 +56,12 @@ pub enum Drag {
     Tab { panel: u64, idx: usize, title: String },
     Files { paths: Vec<PathBuf>, from_panel: u64, right: bool },
     Bookmark { idx: usize },
+}
+
+/// The window's title for the folder shown: "Invoices · Maia", plain "Maia" for nothing.
+pub fn window_title(shown: &str) -> String {
+    let shown: String = shown.chars().filter(|c| *c != '\0').collect();
+    if shown.is_empty() { "Maia".to_string() } else { format!("{shown} · Maia") }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -232,15 +238,32 @@ pub struct App {
     pub stats: Stats,
     pub watch: Watch,
     pub jobs: Vec<Job>,
+    /// The status bar's transfers chip as last drawn, and the panel whose bar has it.
+    pub jobs_chip: Option<egui::Rect>,
+    pub jobs_panel: u64,
     pub clipboard: Option<(Vec<PathBuf>, bool)>,
+    /// The sets copied and cut this session, newest first (Paste From Earlier).
+    pub pastes: Vec<crate::pastes::Set>,
+    /// Pictures and text from the clipboard being written as files.
+    pub clip_files: Vec<crate::clipfile::Pending>,
     pub popup: Popup,
     pub sidebar: bool,
+    /// The last press was in the sidebar: typing while pointing at it filters it.
+    pub side_focus: bool,
     pub sidebar_width: f32,
     pub toast: Option<(String, Instant)>,
+    /// The helper program the toast says is missing: it offers how to install it.
+    pub toast_tool: Option<&'static str>,
+    /// The toast reports a change Undo can take back: the undo stack's generation right
+    /// after it, so its Undo shows only while that change is still the latest.
+    pub toast_undo: Option<u64>,
+    /// The window title last sent, so it is sent again only when it changes.
+    pub(crate) window_title: String,
     pub seq: Vec<Chord>,
     pub seq_time: Instant,
     pub drag: Option<Drag>,
     pub recents_set: HashSet<PathBuf>,
+    pub pinned_set: HashSet<PathBuf>,
     pub actions: Vec<Action>,
     pub ud_dirty: bool,
     pub cfg_dirty: bool,
@@ -272,6 +295,8 @@ pub struct App {
     pub shown_rects: std::collections::HashMap<u64, egui::Rect>,
     /// Panels along the top edge: their tab strips live in the title bar.
     pub title_tab_panels: Vec<u64>,
+    /// What tells same-named tabs apart, by tab id, and the tabs it was worked out for.
+    pub tab_hints: (u64, std::sync::Arc<HashMap<u64, String>>),
     /// Closed tabs whose slot is still collapsing: (panel, index, width, when).
     pub tab_ghosts: Vec<(u64, usize, f32, std::time::Instant)>,
     /// When background work last produced results; memory is handed back once things settle.
@@ -304,11 +329,16 @@ pub struct App {
     pw_asked: Option<PathBuf>,
     /// The tag cache's generation last seen.
     tags_gen: u64,
+    /// The origin cache's generation last seen.
+    origin_gen: u64,
     /// Search by meaning, while it is switched on, and the folders it was started for.
     pub semantic: Option<crate::semantic::Engine>,
     semantic_for: Option<String>,
     /// Authors' GitHub pictures for the history (idle while the setting is off).
     pub avatars: crate::avatars::Avatars,
+    pub github: crate::github::Page,
+    /// A new theme washing over the old window (`wash.rs`).
+    pub wash: crate::wash::Wash,
     /// Updates from the project's releases, when asked.
     pub updater: crate::update::Updater,
     /// Network places being mounted.
@@ -370,6 +400,7 @@ impl App {
         };
         theme::install_fonts(&ctx, &font_family, &cfg_mono);
         crate::mime::preload();
+        crate::freeup::note_home_later();
         // Nothing of Maia's on disk yet: a first start (the welcome tour).
         let first = [config::config_path(), config::userdata_path(), config::session_path()].iter().all(|p| !p.exists());
         let cfg = config::load_config();
@@ -393,15 +424,24 @@ impl App {
             stats: Stats::new(ctx.clone()),
             watch: Watch::new(ctx.clone()),
             jobs: vec![],
+            jobs_chip: None,
+            jobs_panel: 0,
             clipboard: None,
+            pastes: vec![],
+            clip_files: vec![],
             popup: Popup::None,
             sidebar: if session.sidebar_width > 0.0 { session.sidebar } else { true },
+            side_focus: false,
             sidebar_width: if session.sidebar_width > 0.0 { session.sidebar_width } else { 176.0 },
             toast: None,
+            toast_tool: None,
+            toast_undo: None,
+            window_title: String::new(),
             seq: vec![],
             seq_time: Instant::now(),
             drag: None,
             recents_set: HashSet::new(),
+            pinned_set: HashSet::new(),
             actions: vec![],
             ud_dirty: false,
             cfg_dirty: false,
@@ -424,6 +464,7 @@ impl App {
             font_applied: format!("{}\u{1f}{}", font_family, cfg_mono),
             shown_rects: Default::default(),
             title_tab_panels: vec![],
+            tab_hints: (0, Default::default()),
             tab_ghosts: vec![],
             trim_after: None,
             trim_pending_since: None,
@@ -439,9 +480,12 @@ impl App {
             pw_asks: Default::default(),
             pw_asked: None,
             tags_gen: 0,
+            origin_gen: 0,
             semantic: None,
             semantic_for: None,
             avatars: crate::avatars::Avatars::new(),
+            github: Default::default(),
+            wash: Default::default(),
             updater: Default::default(),
             net_jobs: vec![],
             trash_aged: None,
@@ -514,7 +558,7 @@ impl App {
 
     pub fn make_tab(&mut self, path: PathBuf) -> Tab {
         let id = self.alloc_id();
-        let path = if tab::is_computer(&path) || path.exists() { path } else { fsx::home() };
+        let path = if tab::is_place(&path) || path.exists() { path } else { fsx::home() };
         let (v, scope) = self.view_for(&path);
         let mut t = Tab::new(id, path.clone(), v, self.ctx.clone());
         t.saved_scope = scope;
@@ -545,13 +589,87 @@ impl App {
         self.panel().tab_mut()
     }
 
+    /// Pinned items keep their pin under a new name in the same folder.
+    pub fn follow_pins(&mut self, pairs: &[(PathBuf, PathBuf)]) {
+        let mut moved = false;
+        for p in &mut self.ud.pinned {
+            if let Some((_, to)) = pairs.iter().find(|(from, _)| from == p) {
+                *p = to.clone();
+                moved = true;
+            }
+        }
+        if moved {
+            self.refresh_recents();
+            self.ud_dirty = true;
+        }
+    }
+
     pub fn refresh_recents(&mut self) {
         self.recents_set = self.ud.recents.iter().take(30).cloned().collect();
+        self.pinned_set = self.ud.pinned.iter().cloned().collect();
     }
 
     pub fn toast(&mut self, s: impl Into<String>) {
         let s: String = s.into();
+        self.toast_tool = crate::needs::tool_in(&s);
+        self.toast_undo = None;
+        if self.toast_tool.is_some() {
+            crate::needs::warm();
+        }
         self.toast = Some((fsx::plain_error(&s).to_string(), Instant::now()));
+    }
+
+    /// For tabs whose titles another tab in the window shares, the name of the first folder
+    /// up their paths that differs ("src" in maia and in notes: "maia", "notes"). Worked out
+    /// again only when the tabs change. Smart folders and places keep their own names.
+    pub fn tab_hints(&mut self) -> std::sync::Arc<HashMap<u64, String>> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let tabs: Vec<&tab::Tab> = self.panels.values().flat_map(|p| p.tabs.iter()).filter(|t| t.smart.is_none() && !tab::is_place(&t.path)).collect();
+        for t in &tabs {
+            (t.id, &t.path, t.flatten || t.expand_all_on).hash(&mut h);
+        }
+        let key = h.finish();
+        if key == self.tab_hints.0 {
+            return self.tab_hints.1.clone();
+        }
+        let mut by_title: HashMap<String, Vec<&tab::Tab>> = HashMap::new();
+        for t in tabs {
+            by_title.entry(t.title()).or_default().push(t);
+        }
+        // The name `up` folders above `p`'s own; "/" past the top.
+        let above = |p: &Path, up: usize| -> String {
+            p.ancestors().nth(up + 1).map(|a| a.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "/".into())).unwrap_or_else(|| "/".into())
+        };
+        let mut hints = HashMap::new();
+        for group in by_title.values().filter(|g| g.len() > 1) {
+            for t in group {
+                // Tabs on the same folder can't be told apart by it: they are left alone.
+                let others: Vec<&&tab::Tab> = group.iter().filter(|o| o.path != t.path).collect();
+                if others.is_empty() {
+                    continue;
+                }
+                let depth = t.path.components().count();
+                if let Some(up) = (0..depth).find(|&up| others.iter().all(|o| above(&o.path, up) != above(&t.path, up))) {
+                    hints.insert(t.id, above(&t.path, up));
+                }
+            }
+        }
+        self.tab_hints = (key, std::sync::Arc::new(hints));
+        self.tab_hints.1.clone()
+    }
+
+    /// Whether the toast's Undo still takes back the change it reports: nothing else has
+    /// been done or undone since.
+    pub fn toast_undo_live(&self) -> bool {
+        self.toast_undo == Some(self.undo.generation)
+    }
+
+    /// A toast for a change just made, offering to take it back: Undo acts as Ctrl+Z does,
+    /// for as long as the change is the newest.
+    pub fn toast_undoable(&mut self, s: impl Into<String>) {
+        self.toast(s);
+        self.toast_undo = Some(self.undo.generation);
     }
 
     /// Drag and drop with other apps: a drag over the window becomes an ordinary file
@@ -732,6 +850,18 @@ impl App {
         });
     }
 
+    /// Email `files`, the photos among them without their place and camera.
+    pub fn email_clean(&mut self, files: Vec<PathBuf>) {
+        let ctx = self.ctx.clone();
+        self.share(&ctx, move || {
+            let toast = match crate::scrub::copies(&files, crate::drives::Tools::current().as_ref()).and_then(|f| crate::sendto::email(&f)) {
+                Ok(()) => "Opening a new email, the photos without their place".to_string(),
+                Err(e) => e,
+            };
+            ShareDone { copy: None, open: vec![], toast, rescan: None, renamed: None }
+        });
+    }
+
     fn share(&mut self, ctx: &egui::Context, work: impl FnOnce() -> ShareDone + Send + 'static) {
         let (tx, rx) = std::sync::mpsc::channel();
         let c = ctx.clone();
@@ -744,11 +874,39 @@ impl App {
         }
     }
 
+    /// Pictures and text pasted as files: named as they land, like a new file.
+    fn pump_clip_files(&mut self) {
+        let mut i = 0;
+        while i < self.clip_files.len() {
+            let Ok(done) = self.clip_files[i].rx.try_recv() else {
+                i += 1;
+                continue;
+            };
+            let p = self.clip_files.remove(i);
+            match done {
+                crate::clipfile::Pasted::File(f) => {
+                    self.undo.push(UndoEntry { label: format!("Paste {}", f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()), kind: UndoKind::Created(vec![f.clone()]) });
+                    let dir = f.parent().map(Path::to_path_buf).unwrap_or_default();
+                    match self.panels.get_mut(&p.panel).and_then(|pn| pn.tabs.iter_mut().find(|t| t.id == p.tab)).filter(|t| t.path == dir) {
+                        Some(t) => {
+                            t.filter.clear();
+                            t.pending_rename = Some(f);
+                            t.reload();
+                        }
+                        None => self.toast(format!("Pasted {}", f.display())),
+                    }
+                }
+                crate::clipfile::Pasted::Nothing => self.paste_own(p.dest),
+                crate::clipfile::Pasted::Failed(e) => self.toast(e),
+            }
+        }
+    }
+
     fn pump_shares(&mut self, ctx: &egui::Context) {
         let mut i = 0;
         while i < self.shares.len() {
             match self.shares[i].try_recv() {
-                Ok(done) => {
+                Ok(mut done) => {
                     self.shares.remove(i);
                     if let Some(t) = done.copy {
                         ctx.copy_text(t);
@@ -769,7 +927,11 @@ impl App {
                             t.pending_restore = Some(tab::HistState { path: t.path.clone(), cursor: new.first().cloned(), selected: new, scroll: t.current_scroll });
                             t.reload();
                         }
+                        let n = pairs.len();
+                        self.follow_pins(&pairs);
                         self.undo.push(UndoEntry { label, kind: UndoKind::Rename(pairs) });
+                        // Its own words when it has some, with the Undo added.
+                        self.toast_undoable(if done.toast.is_empty() { format!("Renamed {n} item{}", if n == 1 { "" } else { "s" }) } else { std::mem::take(&mut done.toast) });
                     }
                     if !done.toast.is_empty() {
                         self.toast(done.toast);
@@ -1086,7 +1248,7 @@ impl App {
             let mut tabs = vec![];
             for ts in &ps.tabs {
                 // A file path opens its folder with the file selected.
-                let (path, select) = if tab::is_computer(&ts.path) || ts.path.is_dir() {
+                let (path, select) = if tab::is_place(&ts.path) || ts.path.is_dir() {
                     (ts.path.clone(), None)
                 } else if ts.path.is_file() {
                     (ts.path.parent().map(Path::to_path_buf).unwrap_or_else(fsx::home), Some(ts.path.clone()))
@@ -1105,6 +1267,7 @@ impl App {
                     _ if ts.flatten => t.set_flatten(true),
                     _ => {}
                 }
+                t.pinned = ts.pinned;
                 tabs.push(t);
             }
             if tabs.is_empty() {
@@ -1166,6 +1329,7 @@ impl App {
             // Session-only (or off): never write the recents list to disk.
             let mut ud = self.ud.clone();
             ud.recents.clear();
+            ud.visits.clear();
             let _ = config::save_json(&config::userdata_path(), &ud);
         }
         self.ud_mtime = config::mtime(&config::userdata_path());
@@ -1219,6 +1383,11 @@ impl App {
     /// leaf has a panel, every panel has a tab and an in-range active index, and the
     /// active panel exists. Cheap (a handful of panels); runs every frame and after each action.
     fn heal(&mut self) {
+        // However a tab got among them (opened beside a pinned one, dragged), pinned
+        // tabs stay together at the left.
+        for p in self.panels.values_mut() {
+            p.settle_pins();
+        }
         let mut leaves = vec![];
         self.tree.leaves(&mut leaves);
         for id in &leaves {
@@ -1273,7 +1442,10 @@ impl App {
             theme::install_fonts(&ctx, &self.cfg.font_family, &self.cfg.inspector_font);
         }
         self.thumbs.budget_bytes = (self.cfg.asset_cache_mb.max(32) as usize) << 20;
-        if t != self.theme_applied {
+        // Only the theme changed: it washes in over a copy of the old window, which the
+        // runner makes after this frame (still drawn in the old one).
+        let only_theme = t.0 != self.theme_applied.0 && (t.1, t.2, t.3, t.4) == (self.theme_applied.1, self.theme_applied.2, self.theme_applied.3, self.theme_applied.4);
+        if t != self.theme_applied && (!only_theme || self.wash.theme_changing(&ctx, self.cfg.animations)) {
             self.pal = theme::palette(t.0);
             if !t.4 {
                 self.pal.syntax = theme::Syntax::classic(self.pal.dark);
@@ -1286,7 +1458,17 @@ impl App {
         crate::picker::keys(self, &ctx);
         self.handle_input(&ctx);
         self.draw(&ctx);
+        self.wash.paint(&ctx);
         self.process_actions(&ctx);
+        // The task bar and Alt+Tab name the folder shown: sent only when it changes. The
+        // Open and Save dialog keeps the title it was given.
+        if self.picker.is_none() {
+            let title = window_title(&self.panels.get(&self.active).map(|p| p.tab().title()).unwrap_or_default());
+            if title != self.window_title {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+                self.window_title = title;
+            }
+        }
         self.ext_drop = None;
         // Tests share one home and run side by side: saving on its own, one test's Show
         // Hidden reached the tests started after it. Those that check saving ask for it.
@@ -1304,6 +1486,7 @@ impl App {
         self.pump_requests(ctx);
         self.pump_net();
         self.pump_shares(ctx);
+        self.pump_clip_files();
         self.age_trash();
         crate::errands::pump(self);
         crate::tags::pump(self);
@@ -1336,17 +1519,43 @@ impl App {
         for f in &changed_files {
             self.thumbs.invalidate(f);
             crate::tags::invalidate(f);
+            crate::origin::invalidate(f);
             crate::facts::invalidate(f);
+            crate::colours::invalidate(f);
+            if let Some(d) = f.parent() {
+                crate::peek::invalidate(d);
+            }
         }
         // Dates taken, sizes and lengths: asked for by last frame's rows, read only for
         // the folders shown; a list sorted or grouped by them looks again as they land.
         let mut shown: Vec<PathBuf> = self.panels.values().map(|p| p.tab().path.clone()).collect();
         shown.sort();
+        crate::colours::focus(&shown);
         crate::facts::focus(shown);
         crate::facts::flush(ctx);
+        // Colours to sort pictures by, likewise.
+        crate::colours::flush(ctx);
+        if crate::colours::changed() {
+            for t in self.panels.values_mut().flat_map(|p| p.tabs.iter_mut()) {
+                if t.settings.sort == SortKey::Colour {
+                    t.stream_dirty = true;
+                }
+            }
+        }
         if crate::facts::changed() {
             for t in self.panels.values_mut().flat_map(|p| p.tabs.iter_mut()) {
                 if matches!(t.settings.sort, SortKey::Taken | SortKey::Dimensions | SortKey::Duration) || t.settings.group == crate::config::GroupBy::Taken {
+                    t.stream_dirty = true;
+                }
+            }
+        }
+        // Origins likewise: a list grouped by them looks again as they land.
+        crate::origin::flush(ctx);
+        let og = crate::origin::generation();
+        if og != self.origin_gen {
+            self.origin_gen = og;
+            for t in self.panels.values_mut().flat_map(|p| p.tabs.iter_mut()) {
+                if t.settings.group == crate::config::GroupBy::Origin {
                     t.stream_dirty = true;
                 }
             }
@@ -1412,7 +1621,7 @@ impl App {
                 if ti == p.active {
                     crate::columns::watch(t, &changed_dirs, &mut want);
                 }
-                if ti == p.active && !tab::is_computer(&t.path) && !t.flatten && t.archive.is_none() {
+                if ti == p.active && !tab::is_place(&t.path) && !t.flatten && t.archive.is_none() {
                     want.insert(t.path.clone());
                     if t.tree_active() {
                         want.extend(t.expanded.iter().filter(|d| d.starts_with(&t.path)).take(64).cloned());
@@ -1473,6 +1682,7 @@ impl App {
             folders_first: self.cfg.folders_first,
             recents_on_top: self.cfg.recents_on_top,
             recents,
+            pinned: &self.pinned_set,
             stats,
         };
         let mut new_renames = vec![];
@@ -1525,7 +1735,7 @@ impl App {
         let mut req = vec![];
         for p in self.panels.values() {
             let t = p.tab();
-            if t.flatten || tab::is_computer(&t.path) || t.archive.is_some() {
+            if t.flatten || tab::is_place(&t.path) || t.archive.is_some() {
                 continue;
             }
             for &i in t.view.iter().take(2000) {
@@ -1546,10 +1756,14 @@ impl App {
         // Jobs: mark finished, drop after a moment.
         let mut changes: Vec<ops::Changed> = vec![];
         let mut pw_job = None;
+        // The newest finished trash, move or copy with an Undo: said in a toast, and its
+        // card let go when nothing went wrong (the toast says it instead).
+        let mut said: Option<(String, Option<u64>)> = None;
         for j in &mut self.jobs {
             if j.finished_at.is_none() && j.progress.lock().unwrap().finished {
                 j.finished_at = Some(Instant::now());
                 let p = j.progress.lock().unwrap();
+                let before = self.undo.generation;
                 changes.push(ops::Changed::of(&j.kind, &p));
                 if let Some((archive, wrong)) = &p.password {
                     pw_job = Some((archive.clone(), *wrong, j.kind.clone(), j.id));
@@ -1595,6 +1809,15 @@ impl App {
                 if let Some(step) = self.job_steps.remove(&j.id) {
                     crate::redo::placed(&mut self.undo, step, &p);
                 }
+                if self.undo.generation != before {
+                    said = crate::ui::undo_note(&j.kind, &p).map(|s| (s, p.errors.is_empty().then_some(j.id)));
+                }
+            }
+        }
+        if let Some((s, quiet)) = said {
+            self.toast_undoable(s);
+            if let Some(id) = quiet {
+                self.jobs.retain(|j| j.id != id);
             }
         }
         // An extraction refused for want of a password: ask, and run it again.
@@ -1703,7 +1926,7 @@ impl App {
             crate::terminal::keys(self, ctx, &events);
             return;
         }
-        let text_focus = ctx.wants_keyboard_input();
+        let text_focus = ctx.egui_wants_keyboard_input();
         let filter_focus = self.panels.get(&self.active).map(|p| p.filter_has_focus).unwrap_or(false);
         // The preview's editor has the keyboard: its own keys, and only a few of Maia's.
         // (Asked of the editor: egui lets go of the focus on Escape before this runs.)
@@ -1724,6 +1947,14 @@ impl App {
                     }
                 }
                 let id = self.active;
+                // The GitHub page moves through its timeline; an open preview keeps its keys.
+                if !text_focus && !modifiers.ctrl && !modifiers.alt && !modifiers.shift && self.github.takes(*key) {
+                    if self.panels.get(&id).is_some_and(|p| tab::is_github(&p.tab().path) && p.inspector.as_ref().is_none_or(|i| i.git.is_none())) {
+                        self.github.key(*key, id, &mut self.actions);
+                        consumed.push(n);
+                        continue;
+                    }
+                }
                 if let Some(p) = self.panels.get_mut(&id).filter(|_| !text_focus && !modifiers.ctrl && !modifiers.alt) {
                     if let Some(h) = p.inspector.as_mut().and_then(|i| i.git.as_mut()).filter(|h| h.takes(*key)) {
                         if !h.key(*key, id, &mut self.actions) {
@@ -1912,7 +2143,9 @@ impl App {
                     if mods.ctrl || mods.alt || t.trim().is_empty() {
                         continue;
                     }
+                    let at_side = self.sidebar && self.side_focus && ctx.pointer_hover_pos().is_some_and(|p| p.x < self.sidebar_width);
                     match self.cfg.char_key_action {
+                        _ if at_side => crate::sidebar::type_into(t),
                         config::CharKeyAction::Jump => self.jump_to(t),
                         _ => {
                             let id = self.active;
@@ -2034,7 +2267,7 @@ impl App {
         let ctx = self.ctx.clone();
         // Drives aren't files: in the Computer view nothing can be cut, deleted, linked or
         // duplicated (a mounted volume's root would take its whole contents with it).
-        if tab::is_computer(&self.panel().path()) && matches!(cmd, Cmd::Cut | Cmd::Trash | Cmd::DeletePermanent | Cmd::Duplicate | Cmd::CreateLink | Cmd::Paste | Cmd::Rename) {
+        if tab::is_place(&self.panel().path()) && matches!(cmd, Cmd::Cut | Cmd::Trash | Cmd::DeletePermanent | Cmd::Duplicate | Cmd::CreateLink | Cmd::Paste | Cmd::PasteEarlier | Cmd::Rename) {
             return;
         }
         // Inside an archive: zip, 7z and tarballs change by a job that rewrites them.
@@ -2045,7 +2278,7 @@ impl App {
             Cmd::GoTo => self.popup = Popup::goto(String::new()),
             Cmd::AddressBar => {
                 let p = self.panel().path();
-                let s = if tab::is_computer(&p) { "/".to_string() } else { format!("{}/", p.display()).replace("//", "/") };
+                let s = if tab::is_place(&p) { "/".to_string() } else { format!("{}/", p.display()).replace("//", "/") };
                 self.popup = Popup::goto(s);
             }
             Cmd::Back => {
@@ -2074,6 +2307,7 @@ impl App {
             }
             Cmd::Home => self.navigate(self.active, fsx::home()),
             Cmd::Computer => self.navigate(self.active, PathBuf::from(COMPUTER)),
+            Cmd::Refresh if tab::is_github(&self.tab().path) => self.github.refresh(&ctx),
             Cmd::Refresh => {
                 let t = self.tab();
                 let entries: Vec<PathBuf> = t.entries.iter().map(|e| e.path.clone()).collect();
@@ -2152,7 +2386,7 @@ impl App {
             Cmd::FindInTerminal => crate::terminal::find(self),
             Cmd::OpenTerminal => {
                 let p = self.panel().path();
-                let dir = if tab::is_computer(&p) { PathBuf::from("/") } else { p };
+                let dir = if tab::is_place(&p) { PathBuf::from("/") } else { p };
                 if let Err(e) = crate::mime::open_terminal(&dir) {
                     self.toast(format!("Couldn't start a terminal: {e}"));
                 }
@@ -2162,7 +2396,7 @@ impl App {
                 let explicit = !self.tab().selected.is_empty();
                 let targets = if explicit && !sel.is_empty() { sel } else { vec![self.panel().path()] };
                 for p in targets {
-                    if tab::is_computer(&p) {
+                    if tab::is_place(&p) {
                         continue;
                     }
                     if let Some(i) = self.ud.bookmarks.iter().position(|b| *b == p) {
@@ -2186,7 +2420,7 @@ impl App {
             }
             Cmd::TabNewOrRecent => {
                 let p = self.panel().path();
-                if !tab::is_computer(&p) {
+                if !tab::is_place(&p) {
                     self.popup = Popup::path_dropdown(self.active, p, None);
                 }
             }
@@ -2205,10 +2439,21 @@ impl App {
                 let (id, idx) = (self.active, self.panel().active);
                 self.close_tab(id, idx);
             }
+            Cmd::PinTab => {
+                let t = self.tab();
+                t.pinned = !t.pinned;
+                // Settled into place at once, so the next command finds it where it shows.
+                self.panel().settle_pins();
+            }
             Cmd::CloseAllTabs => {
                 let id = self.active;
                 let n = self.panel().tabs.len();
+                // Pinned tabs stay, unless they are all there is.
+                let all = self.panel().tabs.iter().all(|t| t.pinned);
                 for i in (0..n).rev() {
+                    if !all && self.panel().tabs.get(i).is_some_and(|t| t.pinned) {
+                        continue;
+                    }
                     self.close_tab(id, i);
                 }
             }
@@ -2216,14 +2461,16 @@ impl App {
                 let id = self.active;
                 let n = self.panel().tabs.len();
                 let keep = self.panel().active.min(n.saturating_sub(1));
+                let kept = self.panel().tabs[keep].id;
                 for i in (0..n).rev() {
-                    if i != keep {
+                    if i != keep && !self.panel().tabs[i].pinned {
                         let p = self.panels.get_mut(&id).unwrap();
                         let t = p.tabs.remove(i);
-                        self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false, smart: None });
+                        self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), ..Default::default() });
                     }
                 }
-                self.panel().active = 0;
+                let p = self.panel();
+                p.active = p.tabs.iter().position(|t| t.id == kept).unwrap_or(0);
             }
             Cmd::ReopenTab => {
                 if let Some(s) = self.closed_tabs.pop() {
@@ -2301,7 +2548,7 @@ impl App {
                 };
                 let dest = self.panels[&o].path();
                 let srcs = self.tab().targets();
-                if !srcs.is_empty() && !tab::is_computer(&dest) {
+                if !srcs.is_empty() && !tab::is_place(&dest) {
                     self.begin_transfer(srcs, dest, cmd == Cmd::MoveToOther);
                 }
             }
@@ -2369,6 +2616,7 @@ impl App {
                 }
             }
             Cmd::RecentProjects => self.popup = crate::projects::open(self, &ctx),
+            Cmd::GitHubProfile => self.navigate(self.active, PathBuf::from(tab::GITHUB)),
             Cmd::QuickOpen => match crate::quickopen::open(self, &ctx) {
                 Some(p) => self.popup = p,
                 None => self.toast("Quick Open needs a folder"),
@@ -2376,7 +2624,7 @@ impl App {
             Cmd::WhatsUsing => {
                 let t = self.tab();
                 let mut paths: Vec<PathBuf> = t.target_entries().iter().filter(|e| tab::drive_dev(&e.path).is_none()).map(|e| e.path.clone()).collect();
-                if paths.is_empty() && !tab::is_computer(&t.path) {
+                if paths.is_empty() && !tab::is_place(&t.path) {
                     paths.push(t.path.clone());
                 }
                 match paths.is_empty() {
@@ -2395,7 +2643,7 @@ impl App {
             }
             Cmd::NewSmart => {
                 let t = self.tab();
-                let root = if tab::is_computer(&t.path) || t.archive.is_some() { fsx::home() } else { t.path.clone() };
+                let root = if tab::is_place(&t.path) || t.archive.is_some() { fsx::home() } else { t.path.clone() };
                 let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 self.popup = crate::smart::edit(&crate::smart::SmartFolder { root, name, ..Default::default() }, false);
             }
@@ -2405,7 +2653,9 @@ impl App {
             },
             Cmd::PreviousVersions => crate::versions::open(self),
             Cmd::SpaceUsed => crate::spaceuse::open(self),
+            Cmd::FreeUpSpace => crate::spaceuse::open_free(self),
             Cmd::ViewPictures => crate::viewer::open(self),
+            Cmd::ViewCalendar => crate::calendar::open(self),
             Cmd::AddToShelf => crate::shelf::add_selection(self),
             Cmd::ShelfMoveHere | Cmd::ShelfCopyHere => crate::shelf::put_here(self, cmd == Cmd::ShelfMoveHere),
             Cmd::ClearShelf => self.shelf.items.clear(),
@@ -2419,7 +2669,7 @@ impl App {
                 if paths.is_empty() {
                     paths = self.tab().target_entries().iter().map(|e| e.path.clone()).collect();
                 }
-                if paths.is_empty() && !tab::is_computer(&self.panel().path()) {
+                if paths.is_empty() && !tab::is_place(&self.panel().path()) {
                     paths = vec![self.panel().path()];
                 }
                 let hint = self.panel().line_hint.clone();
@@ -2459,8 +2709,12 @@ impl App {
                 self.set_config_changed();
             }
             Cmd::ToggleSidebar => self.sidebar = !self.sidebar,
+            Cmd::FilterSidebar => {
+                self.sidebar = true;
+                crate::sidebar::type_into("");
+            }
             // Columns sits beside the zoom axis: there is nothing in it to grow.
-            Cmd::ZoomIn | Cmd::ZoomOut if self.tab().settings.column_view => {}
+            Cmd::ZoomIn | Cmd::ZoomOut if self.tab().settings.column_view || self.tab().settings.stack_view => {}
             Cmd::ZoomIn | Cmd::ZoomOut => {
                 let t = self.tab();
                 t.settings.zoom = crate::listing::zoom_step(t.settings.zoom, if cmd == Cmd::ZoomIn { 1 } else { -1 });
@@ -2478,12 +2732,20 @@ impl App {
                 let t = self.tab();
                 t.settings.zoom = z;
                 // (Groups come back with the other views.)
-                t.dirty |= std::mem::take(&mut t.settings.column_view);
+                t.dirty |= std::mem::take(&mut t.settings.column_view) | std::mem::take(&mut t.settings.stack_view);
                 t.scroll_to_cursor = true;
             }
             Cmd::ViewColumns => {
                 let t = self.tab();
                 t.settings.column_view = true;
+                t.settings.stack_view = false;
+                t.dirty = true;
+                t.scroll_to_cursor = true;
+            }
+            Cmd::ViewStack => {
+                let t = self.tab();
+                t.settings.stack_view = true;
+                t.settings.column_view = false;
                 t.dirty = true;
                 t.scroll_to_cursor = true;
             }
@@ -2503,6 +2765,13 @@ impl App {
             Cmd::SortTaken => self.tab().set_sort(SortKey::Taken),
             Cmd::SortDimensions => self.tab().set_sort(SortKey::Dimensions),
             Cmd::SortDuration => self.tab().set_sort(SortKey::Duration),
+            Cmd::SortColour => self.tab().set_sort(SortKey::Colour),
+            Cmd::GroupOrigin => {
+                let t = self.tab();
+                t.settings.group = crate::config::GroupBy::Origin;
+                t.collapsed_groups.clear();
+                t.dirty = true;
+            }
             Cmd::GroupTaken => {
                 let t = self.tab();
                 t.settings.group = crate::config::GroupBy::Taken;
@@ -2546,6 +2815,15 @@ impl App {
                 t.dirty = true;
                 t.scroll_to_cursor = true;
             }
+            Cmd::ToggleReadme => {
+                // Back on everywhere, the folders it was closed in included.
+                self.cfg.show_readme = !self.cfg.show_readme;
+                if self.cfg.show_readme {
+                    self.ud.readme_hidden.clear();
+                    self.ud_dirty = true;
+                }
+                self.cfg_dirty = true;
+            }
             Cmd::ToggleRecents => {
                 self.cfg.highlight_recents = !self.cfg.highlight_recents;
                 self.set_config_changed();
@@ -2555,13 +2833,17 @@ impl App {
                 let cur = self.panel().active;
                 let n = self.panel().tabs.len();
                 let range: Vec<usize> = if cmd == Cmd::CloseRightTabs { ((cur + 1)..n).rev().collect() } else { (0..cur).rev().collect() };
+                let kept = self.panel().tabs.get(cur).map(|t| t.id);
                 for i in range {
                     let p = self.panels.get_mut(&id).unwrap();
+                    if p.tabs[i].pinned {
+                        continue;
+                    }
                     let t = p.tabs.remove(i);
-                    self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false, smart: None });
+                    self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), ..Default::default() });
                 }
                 let p = self.panel();
-                p.active = if cmd == Cmd::CloseLeftTabs { 0 } else { p.active.min(p.tabs.len().saturating_sub(1)) };
+                p.active = kept.and_then(|k| p.tabs.iter().position(|t| t.id == k)).unwrap_or(0);
             }
             Cmd::OpenTabInWindow => {
                 let p = self.panel().path();
@@ -2683,7 +2965,7 @@ impl App {
                 if t.is_empty() {
                     t = vec![self.panel().path()];
                 }
-                t.retain(|p| !tab::is_computer(p) && tab::drive_dev(p).is_none());
+                t.retain(|p| !tab::is_place(p) && tab::drive_dev(p).is_none());
                 if !t.is_empty() {
                     for p in &t {
                         if p.is_dir() {
@@ -2700,11 +2982,20 @@ impl App {
                     return;
                 }
                 let cut = cmd == Cmd::Cut;
+                let dirs = self.tab().target_entries().iter().filter(|e| e.is_dir && paths.contains(&e.path)).count();
+                let from = self.panel().path();
+                crate::pastes::remember(&mut self.pastes, crate::pastes::Set { paths: paths.clone(), cut, dirs, from, at: crate::jump::now() });
                 crate::clipboard::set_files(&paths, cut);
                 self.toast(format!("{} {} item{}", if cut { "Cut" } else { "Copied" }, paths.len(), if paths.len() == 1 { "" } else { "s" }));
+                if cut {
+                    // Cut files march a moment from now (`listing::paint_ants`).
+                    let now = self.ctx.input(|i| i.time);
+                    self.ctx.data_mut(|d| d.insert_temp(egui::Id::new("maia cut since"), now));
+                }
                 self.clipboard = Some((paths, cut));
             }
             Cmd::Paste => self.paste(),
+            Cmd::PasteEarlier => crate::pastes::open(self),
             Cmd::CopyPathRelative => {
                 let mut paths = self.tab().selected_paths();
                 if paths.is_empty() {
@@ -2873,7 +3164,7 @@ impl App {
                 let t = self.tab();
                 let mut idx: Vec<u32> = if t.selected.is_empty() { t.cursor.into_iter().collect() } else { t.selected.iter().copied().collect() };
                 idx.sort_by_key(|i| t.view_pos(*i));
-                if idx.is_empty() || tab::is_computer(&t.path) {
+                if idx.is_empty() || tab::is_place(&t.path) {
                     return;
                 }
                 let items = idx.iter().map(|&i| (i, t.entries[i as usize].path.clone(), t.entries[i as usize].name.clone())).collect();
@@ -2887,7 +3178,7 @@ impl App {
             }
             Cmd::NewFolder | Cmd::NewFile => {
                 let dir = self.panel().path();
-                if tab::is_computer(&dir) {
+                if tab::is_place(&dir) {
                     return;
                 }
                 let name = if cmd == Cmd::NewFolder { "New folder" } else { "New file.txt" };
@@ -2895,7 +3186,9 @@ impl App {
                 let r = if cmd == Cmd::NewFolder { std::fs::create_dir(&dest) } else { std::fs::File::create_new(&dest).map(|_| ()) };
                 match r {
                     Ok(()) => {
-                        self.undo.push(UndoEntry { label: format!("Create {}", dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()), kind: UndoKind::Created(vec![dest.clone()]) });
+                        let made = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        self.undo.push(UndoEntry { label: format!("Create {made}"), kind: UndoKind::Created(vec![dest.clone()]) });
+                        self.toast_undoable(format!("Created {made}"));
                         let t = self.tab();
                         t.filter.clear();
                         t.pending_rename = Some(dest);
@@ -2950,7 +3243,7 @@ impl App {
                 }
                 let t = self.tab();
                 let srcs = t.targets();
-                if t.archive.is_some() || tab::is_computer(&t.path) || srcs.is_empty() {
+                if t.archive.is_some() || tab::is_place(&t.path) || srcs.is_empty() {
                     self.toast("Select what to compress");
                     return;
                 }
@@ -3117,12 +3410,49 @@ impl App {
                 self.undo_last();
             }
             Cmd::UndoHistory => self.popup = Popup::UndoHistory(crate::undohist::State::new(&self.undo)),
+            Cmd::Transfers => {
+                if crate::transfers::live(self) == 0 {
+                    self.toast("Nothing is being copied or moved");
+                } else {
+                    // Above the chip; in a bar too narrow for it, above the window's corner.
+                    let corner = ctx.content_rect().right_bottom() - egui::vec2(8.0, 6.0);
+                    let at = self.jobs_chip.unwrap_or(egui::Rect::from_min_max(corner - egui::vec2(1.0, crate::ui::FOOTER_H), corner));
+                    self.popup = Popup::Transfers(crate::transfers::State::new(at));
+                }
+            }
             Cmd::Hints => crate::hints::start(self, &ctx),
             Cmd::SetMark => match crate::marks::here(self) {
                 Some(_) => self.popup = Popup::Marks(crate::marks::State { set: true, sel: 0 }),
                 None => self.toast("Nothing here to mark"),
             },
             Cmd::GoToMark => self.popup = Popup::Marks(crate::marks::State { set: false, sel: 0 }),
+            Cmd::Jump => crate::jump::open(self),
+            Cmd::SendToPhone => crate::phone::open(self),
+            Cmd::ToggleSharePlace => {
+                self.cfg.share_without_place = !self.cfg.share_without_place;
+                self.cfg_dirty = true;
+                self.toast(if self.cfg.share_without_place { "Photos are shared without their place and camera" } else { "Photos are shared as they are" });
+            }
+            Cmd::PinToTop => {
+                let sel = self.tab().targets();
+                if sel.is_empty() || tab::is_place(&self.panel().path()) || self.tab().archive.is_some() {
+                    self.toast("Select what to pin");
+                } else {
+                    // All pinned already: the same command takes them off.
+                    let unpin = sel.iter().all(|p| self.pinned_set.contains(p));
+                    self.ud.pinned.retain(|p| !sel.contains(p));
+                    if !unpin {
+                        self.ud.pinned.extend(sel.iter().cloned());
+                    }
+                    self.refresh_recents();
+                    self.ud_dirty = true;
+                    for p in self.panels.values_mut() {
+                        for t in &mut p.tabs {
+                            t.dirty = true;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -3148,7 +3478,11 @@ impl App {
     }
 
     pub(crate) fn track_leave(&mut self, old: &Path) {
-        if self.cfg.track_recents() && !tab::is_computer(old) {
+        if self.cfg.track_recents() && !tab::is_place(old) {
+            // Folders inside archives are not counted, judged by name: no disk in the frame.
+            if old.is_absolute() && !old.ancestors().any(|a| a.file_name().is_some_and(|n| crate::archive::is_archive(&n.to_string_lossy()))) {
+                crate::jump::note(&mut self.ud.visits, old, crate::jump::now());
+            }
             self.ud.push_recent(old);
             self.ud_dirty = true;
             self.refresh_recents();
@@ -3206,7 +3540,7 @@ impl App {
         match ed.save(force) {
             Ok(trashed) => {
                 if trashed {
-                    self.undo.push(UndoEntry { label: format!("Edit {name}"), kind: UndoKind::Replaced(vec![ed.file.clone()]) });
+                    self.undo.push(UndoEntry { label: format!("Edit {name}"), kind: UndoKind::Replaced(vec![ed.target.clone()]) });
                 }
                 self.toast(format!("Saved {name}"));
                 true
@@ -3289,7 +3623,7 @@ impl App {
         if self.cfg.animations && !p.tabs.is_empty() {
             self.tab_ghosts.push((panel, idx, t.shown_tab_w, std::time::Instant::now()));
         }
-        self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false, smart: None });
+        self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), ..Default::default() });
         if self.closed_tabs.len() > 50 {
             self.closed_tabs.remove(0);
         }
@@ -3320,7 +3654,7 @@ impl App {
         }
         if let Some(p) = self.panels.remove(&id) {
             for t in p.tabs {
-                self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: false, smart: None });
+                self.closed_tabs.push(TabSnap { path: t.path.clone(), view: t.settings.clone(), ..Default::default() });
             }
         }
         self.tree.remove(id);
@@ -3332,26 +3666,43 @@ impl App {
     // ---------------------------------------------------------------- file ops
 
     pub fn paste(&mut self) {
-        let (paths, cut) = match crate::clipboard::get_files() {
-            Some(x) => x,
-            None => match &self.clipboard {
-                Some((p, c)) => (p.clone(), *c),
-                None => {
-                    self.toast("Nothing to paste");
-                    return;
-                }
-            },
-        };
         // Paste into the single selected folder, else the current folder.
         let t = self.tab();
         let sel = t.target_entries();
         let dest = if t.selected.len() == 1 && sel.len() == 1 && sel[0].is_dir { sel[0].path.clone() } else { t.path.clone() };
-        if tab::is_computer(&dest) {
+        if tab::is_place(&dest) {
             return;
         }
+        let (paths, cut) = match crate::clipboard::get_files() {
+            Some(x) => x,
+            // Something newer than any files: a picture or text, written as a file.
+            None if crate::clipboard::available() => {
+                let (panel, tab) = (self.active, self.tab().id);
+                let p = crate::clipfile::start(panel, tab, dest, &self.ctx);
+                self.clip_files.push(p);
+                return;
+            }
+            None => return self.paste_own(dest),
+        };
+        self.paste_files(paths, cut, dest);
+    }
+
+    /// The files this app copied, when the system clipboard has nothing of its own.
+    fn paste_own(&mut self, dest: PathBuf) {
+        match &self.clipboard {
+            Some((p, c)) => {
+                let (paths, cut) = (p.clone(), *c);
+                self.paste_files(paths, cut, dest);
+            }
+            None => self.toast("Nothing to paste"),
+        }
+    }
+
+    fn paste_files(&mut self, paths: Vec<PathBuf>, cut: bool, dest: PathBuf) {
         if cut {
             self.clipboard = None;
         }
+        crate::pastes::pasted(&mut self.pastes, &paths, cut);
         self.begin_transfer(paths, dest, cut);
     }
 
@@ -3381,8 +3732,12 @@ impl App {
                 }
             })
             .collect();
-        if conflicts.is_empty() {
-            let kind = if mv { OpKind::Move { srcs, dest, decide: HashMap::new() } } else { OpKind::Copy { srcs, dest, decide: HashMap::new() } };
+        // Behind other transfers it waits its turn: a name taken is asked inside the job when
+        // it comes to it, not now, and anything that lands there meanwhile is asked too.
+        let behind = !conflicts.is_empty() && self.jobs.iter().any(|j| j.finished_at.is_none() && matches!(j.kind, OpKind::Copy { .. } | OpKind::Move { .. } | OpKind::Extract { .. } | OpKind::Sync { .. } | OpKind::Compress { .. } | OpKind::ArchiveEdit { .. } | OpKind::Place { .. }) && !j.progress.lock().is_ok_and(|p| p.finished));
+        if conflicts.is_empty() || behind {
+            let decide: HashMap<PathBuf, ops::Conflict> = if behind { srcs.iter().map(|s| (s.clone(), ops::Conflict::Ask)).collect() } else { HashMap::new() };
+            let kind = if mv { OpKind::Move { srcs, dest, decide } } else { OpKind::Copy { srcs, dest, decide } };
             self.actions.push(Action::StartJob(kind));
         } else {
             self.popup = Popup::conflict(srcs, dest, mv, conflicts);
@@ -3404,6 +3759,13 @@ impl App {
     }
 
     pub fn start_job(&mut self, kind: OpKind) {
+        // A place (Computer, GitHub) is a relative path: written to, it would land in
+        // whatever folder Maia was started from.
+        if let OpKind::Copy { dest, .. } | OpKind::Move { dest, .. } | OpKind::Extract { dest, .. } = &kind {
+            if !dest.is_absolute() {
+                return;
+            }
+        }
         let id = self.alloc_id();
         self.jobs.push(ops::spawn_in(id, kind, self.ctx.clone(), &self.queue, self.cfg.check_copies));
     }
@@ -3507,6 +3869,7 @@ impl App {
                 errs = crate::rename::apply(&plan).len();
                 let back: Vec<(PathBuf, PathBuf)> = pairs.iter().map(|(from, to)| (to.clone(), from.clone())).collect();
                 moved_back = ops::Changed::moved(&back);
+                self.follow_pins(&back);
                 UndoKind::Rename(pairs.iter().filter(|(from, to)| here(from) && !here(to)).cloned().collect())
             }
             UndoKind::Copied(made, replaced) => {
@@ -3869,6 +4232,7 @@ impl App {
         }
         let path = src.tabs[idx].path.clone();
         let settings = src.tabs[idx].settings.clone();
+        let pinned = src.tabs[idx].pinned;
         // Moving a panel's only tab onto its own side is meaningless.
         if from == to && side.is_some() && src.tabs.len() == 1 && !copy {
             return;
@@ -3876,6 +4240,7 @@ impl App {
         let tid = self.alloc_id();
         let mut t = Tab::new(tid, path, settings, self.ctx.clone());
         t.saved_scope = None;
+        t.pinned = pinned;
         let mut removed = None;
         if !copy {
             let Some(p) = self.panels.get_mut(&from) else { return };
@@ -3938,7 +4303,9 @@ impl App {
         let Some(r) = t.rename.as_mut() else { return };
         let bad = r.compute_conflicts();
         if !bad.is_empty() {
-            r.error = Some(if r.is_batch() { format!("{} name(s) are invalid or collide", bad.len()) } else { "That name is invalid or already exists".into() });
+            r.error = Some(if r.is_batch() { format!("{} name(s) are invalid or collide", bad.len()) } else { r.reason().unwrap_or_else(|| "That name can't be used".into()) });
+            r.shake = self.ctx.input(|i| i.time);
+            self.ctx.request_repaint();
             return;
         }
         let plan = r.plan();
@@ -3960,7 +4327,14 @@ impl App {
             _ => format!("Rename {} items", done.len()),
         };
         if !done.is_empty() {
+            self.follow_pins(&done);
             self.undo.push(UndoEntry { label, kind: UndoKind::Rename(done.clone()) });
+            let note = match done.as_slice() {
+                _ if done.len() < pairs.len() => format!("Renamed {} of {}", done.len(), pairs.len()),
+                [(_, to)] => format!("Renamed to {}", name(to)),
+                _ => format!("Renamed {} items", done.len()),
+            };
+            self.toast_undoable(note);
             // Other tabs on the same folder show the new names too.
             self.show_changed(&ops::Changed::moved(&done));
         }

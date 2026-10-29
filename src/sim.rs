@@ -518,12 +518,17 @@ pub struct Sim {
     pub ppp: f32,
     time: f64,
     pointer: Pos2,
+    /// The modifier keys held as of the last frame (egui hears of a change as an event).
+    mods: egui::Modifiers,
     /// CPU time of every frame (ms): app update + tessellation.
     pub frame_ms: Vec<f32>,
     /// What happened, for failure reports.
     pub log: VecDeque<String>,
     /// Check that list text never overlaps (only meaningful with no popup or hover).
     pub check_overlap: bool,
+    /// Check that text inside each popup's frame never overlaps (what is under it is not
+    /// looked at).
+    pub check_popup_overlap: bool,
     /// Frames over `SLOW_MS`, with the step that caused them.
     pub slow: Vec<(f32, String)>,
     /// How many times a popup's text containment was actually checked.
@@ -550,7 +555,8 @@ struct Shots {
 
 impl Shots {
     fn take(&mut self, delta: &egui::TexturesDelta) {
-        for (id, d) in &delta.set {
+        for (id, ds) in &delta.set {
+            for d in ds {
             let egui::ImageData::Color(img) = &d.image;
             match d.pos {
                 None => {
@@ -567,6 +573,7 @@ impl Shots {
                         }
                     }
                 }
+            }
             }
         }
     }
@@ -639,16 +646,28 @@ pub const SLOW_MS: f32 = 50.0;
 impl Sim {
     pub fn new(path: &Path, size: Vec2) -> Sim {
         root();
+        crate::memory::tune();
         // A session that failed while holding a modifier doesn't leave it held for the next.
         crate::testkit::parse("hold none");
+        // Space used's map is chosen for the session: a new one starts on the ring.
+        crate::spaceuse::MAP.store(false, std::sync::atomic::Ordering::Relaxed);
+        crate::spaceuse::BY_CHANGE.store(false, std::sync::atomic::Ordering::Relaxed);
+        // The last window's closing popup fades on its own clock, not this one's.
+        crate::popups::FADE.with(|f| *f.borrow_mut() = (Vec::new(), None));
+        // Nor does a filter typed into the last window's sidebar hide this one's places.
+        crate::sidebar::forget_filter();
         let ctx = egui::Context::default();
         let app = App::new(&ctx, vec![path.to_path_buf()]);
         let shots = std::env::var_os("MAIA_SIM_SHOTS").map(|d| Box::new(Shots { dir: PathBuf::from(d), textures: Default::default(), prims: vec![] }));
-        let mut s = Sim { ctx, app, size, ppp: 1.6, time: 0.0, pointer: pos2(-10.0, -10.0), frame_ms: vec![], log: VecDeque::new(), check_overlap: false, slow: vec![], popup_checks: Default::default(), texts: vec![], text_colors: vec![], shots, repaint: std::time::Duration::MAX, copied: vec![] };
+        let mut s = Sim { ctx, app, size, ppp: 1.6, time: 0.0, pointer: pos2(-10.0, -10.0), mods: egui::Modifiers::NONE, frame_ms: vec![], log: VecDeque::new(), check_overlap: false, check_popup_overlap: false, slow: vec![], popup_checks: Default::default(), texts: vec![], text_colors: vec![], shots, repaint: std::time::Duration::MAX, copied: vec![] };
         // MAIA_SIM_LOOK=FONT,SPACING runs a session at another font size and Spacing.
         if let Some((f, sp)) = std::env::var("MAIA_SIM_LOOK").ok().and_then(|v| v.split_once(',').and_then(|(f, sp)| Some((f.trim().parse().ok()?, sp.trim().parse().ok()?)))) {
             s.app.cfg.font_size = f;
             s.app.cfg.spacing = sp;
+        }
+        // MAIA_SIM_ANIM=off runs it with animations off.
+        if std::env::var("MAIA_SIM_ANIM").as_deref() == Ok("off") {
+            s.app.cfg.animations = false;
         }
         // MAIA_SIM_THEME=Paper runs it in another theme.
         if let Some(t) = std::env::var("MAIA_SIM_THEME").ok().and_then(|t| serde_json::from_str(&format!("\"{t}\"")).ok()) {
@@ -685,14 +704,19 @@ impl Sim {
                 self.pointer = *p;
             }
         }
-        let mut raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)), time: Some(self.time), modifiers: mods, events, focused: true, ..Default::default() };
+        // egui hears of the modifier keys changing as an event of its own.
+        if mods != self.mods {
+            events.insert(0, Event::ModifiersChanged(mods));
+            self.mods = mods;
+        }
+        let mut raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)), time: Some(self.time), events, focused: true, ..Default::default() };
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(self.ppp);
         PROF.with(|p| p.borrow_mut().clear());
         crate::ui::CONTROLS.with(|c| c.borrow_mut().clear());
         crate::ui::POPUPS.with(|c| c.borrow_mut().clear());
         let t0 = Instant::now();
         let app = &mut self.app;
-        let out = self.ctx.run(raw, |ctx| app.frame(ctx));
+        let mut out = self.ctx.run_pass(raw, |ctx| app.frame(ctx));
         let prims = self.ctx.tessellate(out.shapes.clone(), out.pixels_per_point);
         for c in &out.platform_output.commands {
             if let egui::OutputCommand::CopyText(t) = c {
@@ -701,6 +725,10 @@ impl Sim {
         }
         self.repaint = out.viewport_output.get(&egui::ViewportId::ROOT).map_or(std::time::Duration::MAX, |v| v.repaint_delay);
         let ms = t0.elapsed().as_secs_f32() * 1000.0;
+        // As the runner does when nothing is due: after the frame, outside its time.
+        if self.repaint == std::time::Duration::MAX {
+            crate::memory::idle();
+        }
         if let Some(sh) = &mut self.shots {
             sh.take(&out.textures_delta);
             sh.prims = prims.clone();
@@ -708,6 +736,8 @@ impl Sim {
                 sh.textures.remove(id);
             }
         }
+        // A simulation has no GPU to hand the textures to.
+        out.textures_delta.clear();
         self.frame_ms.push(ms);
         if ms > SLOW_MS && self.frame_ms.len() > 3 {
             let traced = self.slow.iter().any(|x| x.0 > 1000.0);
@@ -766,7 +796,8 @@ impl Sim {
         let mut quiet = 0;
         for _ in 0..400 {
             self.frame(vec![]);
-            let busy = self.app.panels.values().any(|p| p.tabs.iter().any(|t| t.is_loading())) || !self.app.stats.idle();
+            // Rows still gliding to their places count as busy: nothing rests until they do.
+            let busy = self.app.panels.values().any(|p| p.tabs.iter().any(|t| t.is_loading() || t.glide.moving() > 0)) || !self.app.stats.idle();
             if busy {
                 quiet = 0;
                 std::thread::sleep(std::time::Duration::from_millis(3));
@@ -805,9 +836,28 @@ impl Sim {
         self.texts.iter().rev().find(|(_, s)| s == label).map(|(r, _)| *r).unwrap_or_else(|| self.fail(&format!("no {label:?} on screen")))
     }
 
+    /// Scroll the open popup (a long menu) down, then up, until `label` shows: at a big
+    /// font a menu is taller than the window, as a person would find.
+    pub fn scroll_popup_to(&mut self, label: &str) {
+        for dy in [-6.0, 6.0] {
+            for _ in 0..12 {
+                if self.texts.iter().any(|(_, s)| s == label) {
+                    return;
+                }
+                // The text drawn last is the topmost layer's: the open menu's.
+                let Some(at) = self.texts.last().map(|t| t.0.center()) else { return };
+                self.act(&format!("scroll {:.0} {:.0} {dy}", at.x, at.y));
+                self.idle(2);
+            }
+        }
+    }
+
     /// Click the last-drawn text exactly equal to `label` (topmost wins), like a user
     /// clicking a button by its caption. Fails if it isn't on screen.
     pub fn click_text(&mut self, label: &str) {
+        if !self.texts.iter().any(|(_, s)| s == label) && self.popup_open() {
+            self.scroll_popup_to(label);
+        }
         let Some((r, _)) = self.texts.iter().rev().find(|(_, s)| s == label).cloned() else {
             let near: Vec<&str> = self.texts.iter().map(|(_, s)| s.as_str()).filter(|s| s.len() < 30).take(40).collect();
             self.fail(&format!("no {label:?} on screen; visible: {near:?}"));
@@ -863,6 +913,11 @@ impl Sim {
         self.app.panels.get(&self.app.active).map(|p| p.tab()).unwrap_or_else(|| self.fail("no active panel"))
     }
 
+    pub fn tab_mut(&mut self) -> &mut crate::tab::Tab {
+        let id = self.app.active;
+        self.app.panels.get_mut(&id).map(|p| p.tab_mut()).expect("an active panel")
+    }
+
     pub fn popup_open(&self) -> bool {
         !matches!(self.app.popup, Popup::None)
     }
@@ -916,7 +971,14 @@ impl Sim {
     fn check_shapes(&self, shapes: &[epaint::ClippedShape]) {
         let screen = Rect::from_min_size(Pos2::ZERO, self.size).expand(2.0);
         let mut texts: Vec<(Rect, String)> = vec![];
-        for cs in shapes {
+        // An opaque rect over the whole window (the welcome) hides what was drawn before
+        // it: only text after it can overlap anything seen.
+        let covered = if self.check_overlap {
+            shapes.iter().rposition(|cs| matches!(&cs.shape, epaint::Shape::Rect(r) if r.fill.a() == 255 && r.rect.contains_rect(screen.shrink(4.0)))).unwrap_or(0)
+        } else {
+            0
+        };
+        for (k, cs) in shapes.iter().enumerate() {
             // Text with nothing visible (empty, or only spaces, as a file can be named)
             // has no bounds: egui reports NaN for it.
             if let epaint::Shape::Text(t) = &cs.shape {
@@ -935,7 +997,7 @@ impl Sim {
             if vis.is_positive() && !screen.contains_rect(vis) {
                 self.fail(&format!("shape drawn off screen: {vis:?} (screen {screen:?})"));
             }
-            if self.check_overlap {
+            if self.check_overlap && k >= covered {
                 if let epaint::Shape::Text(t) = &cs.shape {
                     let s = t.galley.text().trim().to_string();
                     // Text laid out but not shown (a field's own, under right-to-left text
@@ -966,6 +1028,7 @@ impl Sim {
             };
             self.popup_checks.set(self.popup_checks.get() + 1);
             let pr = &frame;
+            let mut inside: Vec<(Rect, String)> = vec![];
             for cs in &shapes[start + 1..] {
                 // A background that reaches outside the popup means another area (a
                 // progress card, a toast) has started drawing on top: its text isn't ours.
@@ -981,6 +1044,18 @@ impl Sim {
                     let vis = cs.shape.visual_bounding_rect().intersect(cs.clip_rect);
                     if vis.is_positive() && pr.shrink(1.0).contains(vis.min) && (vis.max.x > pr.max.x + 1.0 || vis.max.y > pr.max.y + 1.0) {
                         self.fail(&format!("text {s:?} at {vis:?} runs out of its popup {pr:?} ({})", self.app.popup.kind_name()));
+                    }
+                    if self.check_popup_overlap && vis.is_positive() && vis.height() > 4.0 && pr.contains_rect(vis) {
+                        inside.push((vis, s.trim().to_string()));
+                    }
+                }
+            }
+            for i in 0..inside.len() {
+                for j in i + 1..inside.len() {
+                    let (a, b) = (&inside[i], &inside[j]);
+                    let x = a.0.intersect(b.0);
+                    if x.is_positive() && x.area() > 0.35 * a.0.area().min(b.0.area()) {
+                        self.fail(&format!("text overlaps in the {} popup: {:?} at {:?} and {:?} at {:?}", self.app.popup.kind_name(), a.1, a.0, b.1, b.0));
                     }
                 }
             }
@@ -1066,12 +1141,96 @@ impl Rng {
     }
 }
 
-/// Click the control registered as `what` this frame, when there is one.
+/// Click the control registered as `what` this frame, when there is one; a preview
+/// option that lives in the preview's ⋯ menu is clicked there, as a person finds it.
 pub fn click_control_at(s: &mut Sim, what: &str) {
     let r = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == what).map(|(_, r, _)| *r));
     if let Some(r) = r {
         s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+    } else if let Some(label) = preview_item(what) {
+        if open_preview_menu(s) && s.texts.iter().any(|(_, t)| t == label) {
+            s.click_text(label);
+        } else {
+            close_preview_menu(s);
+        }
+    } else if what == "contents toggle" {
+        contents_from_menu(s);
     }
+}
+
+/// Searching inside files, switched on from the toolbar's ⋮ menu (the filter field shows
+/// its toggle only while it is on).
+pub fn contents_from_menu(s: &mut Sim) -> bool {
+    let Some(r) = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "panel menu").map(|(_, r, _)| *r)) else { return false };
+    s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+    s.idle(2);
+    s.scroll_popup_to("Search File Contents");
+    s.idle(15);
+    if !s.texts.iter().any(|(_, t)| t == "Search File Contents") {
+        s.act("key Escape");
+        return false;
+    }
+    s.click_text("Search File Contents");
+    s.idle(2);
+    true
+}
+
+/// The preview's options are in its ⋯ menu: the menu's words for what was a button.
+pub fn preview_item(what: &str) -> Option<&'static str> {
+    Some(match what {
+        "Wrap lines" => "Wrap lines",
+        "Line numbers" => "Line numbers",
+        "Larger text" => "Larger text",
+        "Smaller text" => "Smaller text",
+        "Source" => "Source",
+        "Rendered" => "Rendered",
+        "Tree" => "Tree",
+        "Table" => "Table",
+        "Show values" | "Hide values" => "Show values",
+        "Follow" => "Follow",
+        "Blame" => "Blame",
+        "Pause" => "Pause",
+        "Play" => "Play",
+        "Find (Ctrl+F)" => "Find",
+        "Zoom to fit" => "Zoom to fit",
+        "Actual pixels (1:1)" => "Actual pixels (1:1)",
+        "Fill the inspector" => "Fill the preview",
+        "Pixel grid at high zoom" => "Pixel grid at high zoom",
+        "Minimap while zoomed" => "Minimap while zoomed",
+        "Previous page" => "Previous page",
+        "Next page" => "Next page",
+        "Place automatically" => "Place automatically",
+        "Dock right" => "Dock right",
+        "Dock bottom" => "Dock bottom",
+        _ => return None,
+    })
+}
+
+/// Opens the preview's ⋯ menu by its button; false when there is none on screen.
+pub fn open_preview_menu(s: &mut Sim) -> bool {
+    let Some(r) = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "preview menu").map(|(_, r, _)| *r)) else { return false };
+    s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+    s.idle(2);
+    true
+}
+
+/// Closes the ⋯ menu by its button again, if it is open.
+pub fn close_preview_menu(s: &mut Sim) {
+    let open = egui::Popup::is_any_open(&s.app.ctx);
+    if let (true, Some(r)) = (open, crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "preview menu").map(|(_, r, _)| *r))) {
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        s.idle(2);
+    }
+}
+
+/// Whether the preview's ⋯ menu offers `label`, looked at by opening it and closing it.
+pub fn preview_menu_has(s: &mut Sim, label: &str) -> bool {
+    if !open_preview_menu(s) {
+        return false;
+    }
+    let has = s.texts.iter().any(|(_, t)| t == label);
+    close_preview_menu(s);
+    has
 }
 
 /// Often enough, into one of the fixture's work trees first (by Go To, as a person
@@ -1105,7 +1264,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
     const WORDS: &[&str] = &["doc", "a", "img", ".png", "~/", "/", "Code/maia/", "zzz", "résumé", "1", "new name"];
     let (w, h) = (s.size.x, s.size.y);
     let p = |rng: &mut Rng| (rng.f(0.0, w), rng.f(0.0, h));
-    match rng.below(176) {
+    match rng.below(191) {
         0..=29 => {
             let k = *rng.pick(KEYS);
             s.act(&format!("key {k}"));
@@ -1519,8 +1678,12 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
         }
         141 => {
             // Show Space Used: walked by keys and clicks, into folders and back, some
-            // checked and trashed (asked first) or left, sometimes shown in Maia.
-            if rng.below(2) == 0 {
+            // checked and trashed (asked first) or left, sometimes shown in Maia. Free up
+            // too, from its command or Tab: groups opened and closed, folders checked,
+            // what is chosen deleted after asking, Find Duplicates opened from it.
+            if rng.below(3) == 0 {
+                s.cmd(Cmd::FreeUpSpace);
+            } else if rng.below(2) == 0 {
                 s.cmd(Cmd::SpaceUsed);
             } else {
                 let (x, y) = p(rng);
@@ -1533,9 +1696,10 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 if !matches!(s.app.popup, Popup::SpaceUsed(_)) {
                     break;
                 }
-                match rng.below(5) {
+                match rng.below(6) {
                     0 => click_control_at(s, rng.pick(&["space row", "space show", "space trash", "space trash cancel", "space close"])),
-                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "Enter", "Backspace", "space", "Delete", "End", "PageDown", "Escape"]))),
+                    1 => click_control_at(s, rng.pick(&["space free up", "space contents", "free group", "free part", "free go", "free delete confirm", "free delete cancel", "free dupes", "free chart"])),
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "ArrowRight", "ArrowLeft", "Enter", "Backspace", "space", "Delete", "End", "PageDown", "Tab", "Escape"]))),
                 }
                 s.idle(rng.below(4));
             }
@@ -2352,7 +2516,7 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
                 }
                 match rng.below(4) {
                     0 => s.act(&format!("key {}", rng.pick(&["ArrowRight", "ArrowLeft", "Enter", "Tab", "space"]))),
-                    1 => click_control_at(s, rng.pick(&["tour next", "tour back", "tour dot", "tour film", "tour theme", "switch", "choice"])),
+                    1 => click_control_at(s, rng.pick(&["welcome next", "welcome back", "welcome skip", "tour dot", "tour film", "tour theme", "switch", "choice"])),
                     2 => {
                         let r = s.text_rect_any(&["Font size", "Show hidden files", "Animations"]);
                         if let Some(r) = r {
@@ -2734,6 +2898,292 @@ pub fn monkey_step(s: &mut Sim, rng: &mut Rng) {
             s.act(&format!("text {}", rng.pick(&["*.png", "*.{md,txt}", "IMG*", "*", "[a-f]*", "*/*.rs", "{", "?", "résumé*", " "])));
             s.act(rng.pick(&["key Enter", "key Enter", "key Escape"]));
         }
+        176 => {
+            // A copy started from here into another folder, held or not; then the transfers
+            // list steered: keys, its buttons, a drag among the waiting.
+            let srcs: Vec<PathBuf> = s.tab().target_entries().into_iter().map(|e| e.path.clone()).take(3).collect();
+            let dest = root().join("home").read_dir().ok().and_then(|r| r.flatten().map(|d| d.path()).find(|p| p.is_dir())).map(|h| h.join("Empty"));
+            if let (false, Some(dest)) = (srcs.is_empty(), dest.filter(|d| d.is_dir())) {
+                s.app.begin_transfer(srcs, dest, false);
+                s.idle(2);
+                if rng.below(2) == 0 {
+                    if let Some(j) = s.app.jobs.last() {
+                        j.pause.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+            s.act("key ctrl+shift+j");
+            for _ in 0..rng.below(6) {
+                match rng.below(4) {
+                    0 => click_control_at(s, rng.pick(&["transfer pause", "transfer cancel", "transfer start now", "clash keep both", "clash skip", "clash replace", "clash same", "transfers chip"])),
+                    1 => {
+                        let rows = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == "transfer waiting").map(|(_, r, _)| *r).collect::<Vec<_>>());
+                        if rows.len() >= 2 {
+                            let (a, b) = (rows[rng.below(rows.len())], rows[rng.below(rows.len())]);
+                            s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", a.center().x, a.center().y, b.center().x, b.center().y + 4.0));
+                        }
+                    }
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "alt+ArrowUp", "alt+ArrowDown", "space", "Enter", "Delete"]))),
+                }
+                s.idle(2);
+            }
+            for j in &s.app.jobs {
+                j.pause.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+            s.act(rng.pick(&["key Escape", "move -50 -50"]));
+        }
+        177 => {
+            // Jump: a few letters, then a folder picked or not.
+            s.act("key ctrl+g");
+            if !matches!(s.app.popup, Popup::Jump(_)) {
+                return;
+            }
+            s.idle(3);
+            for _ in 0..rng.below(4) {
+                match rng.below(3) {
+                    0 => s.act(&format!("text {}", rng.pick(&["d", "doc", "pic", "zzz", "/", "é"]))),
+                    1 => s.act(&format!("key {}", rng.pick(&["ArrowDown", "ArrowUp", "Backspace"]))),
+                    _ => click_control_at(s, "jump row"),
+                }
+            }
+            if matches!(s.app.popup, Popup::Jump(_)) {
+                s.act(rng.pick(&["key Enter", "key Escape"]));
+            }
+            s.settle();
+        }
+        178 => {
+            // Paste From Earlier: by a digit, a click, or not at all.
+            s.act("key ctrl+shift+v");
+            if !matches!(s.app.popup, Popup::Pastes(_)) {
+                return;
+            }
+            match rng.below(4) {
+                0 => s.act(&format!("text {}", 1 + rng.below(9))),
+                1 => click_control_at(s, "paste row"),
+                2 => s.act(&format!("key {}", rng.pick(&["ArrowDown", "Enter"]))),
+                _ => s.act("key Escape"),
+            }
+            s.idle(5);
+            if matches!(s.app.popup, Popup::Choose { .. } | Popup::Conflict(..)) {
+                s.act(rng.pick(&["key Enter", "key Escape"]));
+            }
+        }
+        179 => {
+            // A pin: on the selection, or on the tab.
+            s.cmd(if rng.below(2) == 0 { Cmd::PinToTop } else { Cmd::PinTab });
+            s.idle(10);
+        }
+        180 => {
+            // The calendar: days by keys and clicks, months back and on.
+            s.act("key shift+F3");
+            if !matches!(s.app.popup, Popup::Calendar(_)) {
+                return;
+            }
+            for _ in 0..rng.below(6) {
+                match rng.below(3) {
+                    0 => click_control_at(s, rng.pick(&["calendar day", "calendar previous month", "calendar next month", "calendar strip picture"])),
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "shift+ArrowRight", "shift+ArrowLeft", "PageUp", "PageDown"]))),
+                }
+                s.idle(2);
+            }
+            if matches!(s.app.popup, Popup::Calendar(_)) {
+                s.act(rng.pick(&["key Enter", "key Escape"]));
+            }
+        }
+        181 => {
+            // Space used round its three views, a block of the map opened, up again.
+            s.cmd(Cmd::SpaceUsed);
+            if !matches!(s.app.popup, Popup::SpaceUsed(_)) {
+                return;
+            }
+            for _ in 0..1 + rng.below(5) {
+                match rng.below(4) {
+                    0 => s.act("key Tab"),
+                    1 => click_control_at(s, rng.pick(&["space contents", "space map", "space free up", "space block"])),
+                    _ => s.act(&format!("key {}", rng.pick(&["ArrowDown", "Enter", "Backspace", "End"]))),
+                }
+                s.idle(3);
+            }
+            s.act("key Escape");
+            if matches!(s.app.popup, Popup::Duplicates(_) | Popup::Confirm { .. }) {
+                s.act("key Escape");
+            }
+        }
+        182 => {
+            // The README card: its edge dragged or reset, opened, closed for the folder,
+            // or all of them switched off and on.
+            let edge = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "readme edge").map(|(_, r, _)| *r));
+            match (rng.below(4), edge) {
+                (0, Some(e)) => {
+                    let to = e.center().y + rng.f(-200.0, 300.0);
+                    s.act(&format!("drag {:.0} {:.0} {:.0} {to:.0}", e.center().x, e.center().y, e.center().x));
+                }
+                (1, Some(e)) => s.act(&format!("dclick {:.0} {:.0}", e.center().x, e.center().y)),
+                (2, Some(_)) => click_control_at(s, rng.pick(&["readme more", "readme more", "readme close"])),
+                _ => s.cmd(Cmd::ToggleReadme),
+            }
+            s.idle(12);
+        }
+        183 => {
+            // Send To Phone opened on what is selected, its switch flipped, closed; or the
+            // list grouped by where downloads came from.
+            if rng.below(2) == 0 {
+                s.cmd(Cmd::GroupOrigin);
+                s.settle();
+                return;
+            }
+            s.cmd(Cmd::SendToPhone);
+            if !matches!(s.app.popup, Popup::Phone(_)) {
+                return;
+            }
+            s.idle(5);
+            if rng.below(2) == 0 {
+                click_control_at(s, "switch");
+            }
+            s.act("key Escape");
+        }
+        184 => {
+            // The GitHub page (no gh here: it says what to install), Sort By Colour, or a
+            // rest wherever the pointer is (a folder there fans out its pictures).
+            match rng.below(3) {
+                0 => {
+                    s.cmd(Cmd::GitHubProfile);
+                    s.idle(10);
+                    s.act("key ArrowDown");
+                    s.cmd(Cmd::Back);
+                    s.settle();
+                }
+                1 => {
+                    s.cmd(Cmd::SortColour);
+                    s.idle(10);
+                }
+                _ => {
+                    let (x, y) = p(rng);
+                    s.act(&format!("move {x:.0} {y:.0}"));
+                    s.idle(40);
+                }
+            }
+        }
+        185 => {
+            // The viewer: compared side by side or over one another, its strip, closed.
+            s.cmd(Cmd::ViewPictures);
+            if !matches!(s.app.popup, Popup::Viewer(_)) {
+                return;
+            }
+            s.idle(rng.below(20) + 1);
+            for _ in 0..rng.below(5) {
+                let k = *rng.pick(&["W", "C", "ArrowRight", "ArrowLeft", "Escape"]);
+                s.act(&format!("key {k}"));
+            }
+            if rng.below(2) == 0 {
+                s.act(&format!("move {:.0} {:.0}", w / 2.0, h - 15.0));
+                s.idle(20);
+                let strip = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|x| x.2 == "viewer filmstrip").map(|x| x.1).collect::<Vec<_>>());
+                if let Some(r) = strip.get(rng.below(strip.len().max(1))) {
+                    s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+                }
+            }
+            for _ in 0..4 {
+                s.act("key Escape");
+            }
+            s.idle(30);
+        }
+        186 => {
+            // A theme hovered in the picker (it washes in), or the window resized (icons
+            // glide to new rows).
+            if rng.below(2) == 0 {
+                s.cmd(Cmd::ChooseTheme);
+                s.idle(4);
+                let (x, y) = p(rng);
+                s.act(&format!("move {x:.0} {y:.0}"));
+                s.idle(4);
+                s.act("key Escape");
+            } else {
+                let (w0, h0) = (s.size.x, s.size.y);
+                s.resize(rng.f(420.0, 1500.0), rng.f(380.0, 950.0));
+                s.idle(20);
+                s.resize(w0, h0);
+                s.idle(20);
+            }
+        }
+        187 => {
+            // The right-click menu's row of icons: by the mouse, or reached with Up and
+            // walked with Left and Right, then Enter or Escape.
+            let list = s.app.panels.get(&s.app.active).map(|p| p.list_rect).unwrap_or(Rect::NOTHING);
+            let names: Vec<Rect> = s.texts.iter().filter(|(r, _)| list.contains(r.center())).map(|(r, _)| *r).collect();
+            if names.is_empty() {
+                return;
+            }
+            let r = *rng.pick(&names);
+            s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
+            s.idle(2);
+            let icons = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == "menu action").map(|(_, r, _)| *r).collect::<Vec<_>>());
+            if icons.is_empty() || rng.below(2) == 0 {
+                s.act("key ArrowUp");
+                for _ in 0..rng.below(5) {
+                    s.act(rng.pick(&["key ArrowRight", "key ArrowLeft"]));
+                }
+                s.act(rng.pick(&["key Enter", "key Escape", "key ArrowDown"]));
+            } else {
+                let i = *rng.pick(&icons);
+                s.act(&format!("click {:.0} {:.0}", i.center().x, i.center().y));
+            }
+            s.idle(3);
+            if matches!(s.app.popup, Popup::Ctx(_)) {
+                s.act("key Escape");
+            }
+        }
+        188 => {
+            // The preview's ⋯ menu: something in it, or nothing and away.
+            if !open_preview_menu(s) {
+                s.cmd(Cmd::ToggleInspector);
+                return;
+            }
+            let words = ["Wrap lines", "Line numbers", "Larger text", "Smaller text", "Source", "Rendered", "Find", "Details", "Dock right", "Dock bottom", "Place automatically", "Zoom to fit", "Pixel grid at high zoom", "Next page", "Previous page"];
+            let shown: Vec<&str> = words.iter().copied().filter(|w| s.texts.iter().any(|(_, t)| t == w)).collect();
+            if shown.is_empty() || rng.below(4) == 0 {
+                close_preview_menu(s);
+            } else {
+                s.click_text(rng.pick(&shown));
+            }
+            s.idle(2);
+        }
+        189 => {
+            // Something to the trash, then often taken back by the toast's Undo.
+            s.act("key Delete");
+            for _ in 0..20 {
+                s.idle(2);
+                if crate::ui::CONTROLS.with(|c| c.borrow().iter().any(|(_, _, w)| *w == "toast undo")) {
+                    break;
+                }
+            }
+            if rng.below(3) > 0 {
+                click_control_at(s, "toast undo");
+                s.idle(4);
+            }
+        }
+        190 => {
+            // The sidebar's filter, by typing while pointing at the sidebar after a click in
+            // it; then left with Escape, cleared, or kept.
+            if !s.app.sidebar {
+                return;
+            }
+            let x = (s.app.sidebar_width * 0.5).max(20.0);
+            let y = h - 30.0;
+            s.act(&format!("click {x:.0} {y:.0}"));
+            s.act(&format!("move {x:.0} {y:.0}"));
+            s.act(&format!("text {}", rng.pick(&["ho", "d", "zz", "Tr", "é"])));
+            s.idle(2);
+            match rng.below(3) {
+                0 => s.act("key Escape"),
+                1 => {
+                    for _ in 0..3 {
+                        s.act("key Backspace");
+                    }
+                }
+                _ => {}
+            }
+        }
         _ => {
             s.note("idle".into());
             s.idle(rng.below(20) + 1);
@@ -2770,7 +3220,7 @@ fn columns_step(s: &mut Sim, rng: &mut Rng) {
             let (x, y) = (rng.f(list.left(), list.right()), rng.f(list.top(), list.bottom()));
             s.note(format!("wheel along the strip at {x:.0} {y:.0}"));
             s.frame(vec![Event::PointerMoved(pos2(x, y))]);
-            s.frame(vec![Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: vec2(rng.f(-6.0, 6.0), 0.0), modifiers: egui::Modifiers::NONE }]);
+            s.frame(vec![Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: vec2(rng.f(-6.0, 6.0), 0.0), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel, modifiers: egui::Modifiers::NONE }]);
             s.idle(rng.below(12));
         }
     }
@@ -2959,13 +3409,17 @@ mod journeys {
         s.idle(2);
         // Toasts, job cards and letter tags float over the list by design.
         s.check_overlap = !s.popup_open() && s.app.toast.is_none() && s.app.jobs.is_empty() && s.app.hints.is_none();
+        // MAIA_SIM_POPUP_OVERLAP=1: every popup looked at is held to it too.
+        s.check_popup_overlap = s.popup_open() && std::env::var_os("MAIA_SIM_POPUP_OVERLAP").is_some();
         s.idle(2);
         s.check_overlap = false;
+        s.check_popup_overlap = false;
     }
 
     fn report(name: &str, s: &Sim) {
         let (p50, p95, max) = s.timing();
-        eprintln!("sim {name}: {} frames, frame ms p50 {p50:.1} p95 {p95:.1} max {max:.1}", s.frame_ms.len());
+        let (rss, peak) = crate::memory::resident_kb();
+        eprintln!("sim {name}: {} frames, frame ms p50 {p50:.1} p95 {p95:.1} max {max:.1}, resident {} MB, peak {} MB", s.frame_ms.len(), rss / 1024, peak / 1024);
     }
 
     #[test]
@@ -3002,6 +3456,43 @@ mod journeys {
             }
         }
         report("views", &s);
+    }
+
+    /// Names and text in scripts the interface font has no letters for, Persian and Hebrew
+    /// above all, are drawn from the fallback fonts in every view and in the preview,
+    /// never as boxes, and lay out like any other name.
+    #[test]
+    fn names_in_other_scripts() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("scripts");
+        let dir = home.join("نامه‌ها");
+        let names = ["سفر نوروز ۱۴۰۴.jpg", "گزارش مالی.pdf", "یادداشت.txt", "קבצים חדשים.odt", "trip سفر 2026.png", "plain.txt"];
+        for n in names {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(n), if n.ends_with(".txt") { "سلام، این یک یادداشت است.\nخط دوم با English وسطش.\n" } else { "x" }).unwrap();
+        }
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        go(&mut s, &dir);
+        // Right-to-left ones as they read: joined, in display order.
+        for n in names {
+            assert!(some_text(&s, &crate::rtl::display(n)), "{n} listed whole");
+        }
+        s.shot("scripts-details");
+        for v in [ViewList, ViewLarge, ViewTree] {
+            s.cmd(v);
+            look(&mut s, &format!("scripts {v:?}"));
+        }
+        s.cmd(ViewLarge);
+        s.shot("scripts-icons");
+        s.cmd(ViewDetails);
+        s.cmd(ToggleInspector);
+        select_path(&mut s, &dir.join("یادداشت.txt"));
+        s.idle(5);
+        look(&mut s, "scripts preview");
+        s.shot("scripts-preview");
+        report("scripts", &s);
     }
 
     #[test]
@@ -3230,7 +3721,8 @@ mod journeys {
         s.settle();
         let n = s.tab().entries.len();
         let (p50, p95, max) = s.timing();
-        eprintln!("sim flatten /usr: {n} files in {:.1}s, {} frames while streaming, p50 {p50:.1} p95 {p95:.1} max {max:.1} ms", t0.elapsed().as_secs_f32(), s.frame_ms.len());
+        let (rss, peak) = crate::memory::resident_kb();
+        eprintln!("sim flatten /usr: {n} files in {:.1}s, {} frames while streaming, p50 {p50:.1} p95 {p95:.1} max {max:.1} ms, resident {} MB, peak {} MB", t0.elapsed().as_secs_f32(), s.frame_ms.len(), rss / 1024, peak / 1024);
         let streaming = std::mem::take(&mut s.frame_ms);
         for (what, line) in [("filter", "text lib"), ("scroll", "scroll 600 400 -10"), ("end", "key End"), ("sort", "key ctrl+alt+2"), ("clear", "key Escape")] {
             let i = s.frame_ms.len();
@@ -3257,6 +3749,12 @@ mod journeys {
         let budget = 200.0 * (n as f32 / 200_000.0).max(1.0);
         let worst = s.frame_ms.iter().cloned().fold(0.0f32, f32::max);
         assert!(worst < budget, "slowest interaction frame {worst:.1} ms of {budget:.0} for {n} files");
+        // Leaving the walk frees its entries, hundreds of thousands of small blocks.
+        s.cmd(Cmd::Up);
+        s.settle();
+        s.idle(5);
+        let (rss, _) = crate::memory::resident_kb();
+        eprintln!("sim flatten /usr: resident after leaving {} MB", rss / 1024);
     }
 
     /// Tree view, "expand all" over thousands of folders: drawing stays smooth while the
@@ -3725,7 +4223,8 @@ mod journeys {
         // Rubber band from empty space below the rows up across them: several selected.
         let list = s.app.panels[&s.app.active].list_rect;
         let last = s.text_rect("report.md");
-        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", list.center().x + 120.0, list.bottom() - 20.0, list.center().x + 100.0, last.top() - 30.0));
+        // (Left of the middle: the move's Undo toast sits at the bottom right.)
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", list.center().x - 60.0, list.bottom() - 20.0, list.center().x - 80.0, last.top() - 30.0));
         s.settle();
         assert!(s.tab().selected.len() >= 2, "rubber band selected {} items", s.tab().selected.len());
         s.act("key Escape");
@@ -3772,7 +4271,16 @@ mod journeys {
         let t = s.tab();
         let name = crate::listing::display_name(&t.entries[t.cursor.unwrap() as usize], &s.app.cfg);
         let list = s.app.panels[&s.app.active].list_rect;
-        let seen = s.texts.iter().any(|(r, txt)| (txt == &name || name.starts_with(txt.trim_end_matches('…'))) && list.contains(r.center()));
+        // A name may be drawn on two lines (icon views break it between words) and
+        // shortened anywhere with "…": what is drawn is the name's start and end.
+        let shows = |txt: &str| {
+            let flat = txt.replace('\n', "");
+            match flat.split_once('…') {
+                Some((head, tail)) => name.starts_with(head) && name.ends_with(tail),
+                None => flat == name,
+            }
+        };
+        let seen = s.texts.iter().any(|(r, txt)| shows(txt) && list.contains(r.center()));
         if !seen {
             s.fail(&format!("{what}: cursor item {name:?} not drawn inside the list"));
         }
@@ -3827,7 +4335,7 @@ mod journeys {
             s.act("key ArrowDown");
             s.act("key Escape");
             s.act("key Escape");
-            assert!(s.tab().filter.is_empty() && !s.ctx.wants_keyboard_input(), "{v:?}: Escape twice clears and leaves the filter");
+            assert!(s.tab().filter.is_empty() && !s.ctx.egui_wants_keyboard_input(), "{v:?}: Escape twice clears and leaves the filter");
         }
         report("keys", &s);
     }
@@ -4063,6 +4571,11 @@ mod journeys {
         s.act("key ctrl+a");
         s.act("text animations");
         s.idle(2);
+        // From the default, on (a run with motion off starts away from it).
+        if !s.app.cfg.animations {
+            click_in_row(&mut s, "switch", "Appearance · Animations");
+            assert!(s.app.cfg.animations);
+        }
         click_in_row(&mut s, "switch", "Appearance · Animations");
         assert!(!s.app.cfg.animations);
         click_in_row(&mut s, "reset option", "Appearance · Animations");
@@ -4306,6 +4819,18 @@ mod journeys {
     fn click_control(s: &mut Sim, what: &str) {
         s.idle(1);
         let r = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == what).map(|(_, r, _)| *r));
+        if r.is_none() {
+            // A preview option: in the preview's ⋯ menu, clicked there.
+            if let Some(label) = preview_item(what) {
+                if open_preview_menu(s) && s.texts.iter().any(|(_, t)| t == label) {
+                    s.click_text(label);
+                    return;
+                }
+            }
+            if what == "contents toggle" && contents_from_menu(s) {
+                return;
+            }
+        }
         let r = r.unwrap_or_else(|| s.fail(&format!("no {what} on screen")));
         s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
     }
@@ -4366,22 +4891,22 @@ mod journeys {
         // PDF: page 1, then Page Down with the pointer over the preview.
         select_path(&mut s, &d.join("doc.pdf"));
         wait_until(&mut s, "PDF page 1", 20, |s| inspector(s).pdf_state().is_some_and(|(p, n, shown)| p == 1 && n == Some(3) && shown.is_some_and(|x| x.0 == 1)));
-        assert!(s.texts.iter().any(|(_, t)| t == "1 / 3"), "page counter shown");
+        assert!(preview_menu_has(&mut s, "Page 1 of 3"), "page counter shown, in the preview's menu");
         let list = s.app.panels[&s.app.active].list_rect;
         s.act(&format!("move {:.0} {:.0}", list.right() + 150.0, list.center().y));
         s.act("key PageDown");
         wait_until(&mut s, "PDF page 2", 20, |s| inspector(s).pdf_state().is_some_and(|(p, _, shown)| p == 2 && shown.is_some_and(|x| x.0 == 2)));
         s.idle(2);
-        assert!(s.texts.iter().any(|(_, t)| t == "2 / 3"), "page counter follows");
+        assert!(preview_menu_has(&mut s, "Page 2 of 3"), "page counter follows");
         s.act("move -50 -50");
         look(&mut s, "pdf preview");
-        toolbar_centred(&mut s, "pdf", &["2 / 3"]);
+        toolbar_centred(&mut s, "pdf", &[]);
         // Font size and Spacing change every row's height; the toolbar stays centred.
         for (font, spacing) in [(16.5, 1.6), (11.0, 0.7), (20.0, 2.0), (13.0, 1.0)] {
             s.app.cfg.font_size = font;
             s.app.cfg.spacing = spacing;
             s.idle(3);
-            toolbar_centred(&mut s, &format!("pdf at font {font}, spacing {spacing}"), &["2 / 3"]);
+            toolbar_centred(&mut s, &format!("pdf at font {font}, spacing {spacing}"), &[]);
             look(&mut s, &format!("pdf at font {font}, spacing {spacing}"));
         }
         // Video.
@@ -4496,12 +5021,12 @@ mod journeys {
         }
         assert!(sidebar_text(&s, "Photo Card").is_some(), "removable card offered in the sidebar");
         assert!(sidebar_text(&s, "Windows").is_none(), "internal disk only in Computer");
-        assert!(s.texts.iter().any(|(_, t)| t == "14.9 GB · Not mounted"), "card marked as not mounted");
+        assert!(s.texts.iter().any(|(_, t)| t == "16.0 GB · Not mounted"), "card marked as not mounted");
         // Inspector on an unmounted drive.
         s.cmd(ToggleInspector);
         select_name(&mut s, "Windows");
         s.idle(3);
-        assert!(s.texts.iter().any(|(_, t)| t == "200 GB · Not mounted"), "inspector shows the drive");
+        assert!(s.texts.iter().any(|(_, t)| t == "215 GB · Not mounted"), "inspector shows the drive");
         look(&mut s, "inspector on an unmounted drive");
         s.cmd(ToggleInspector);
 
@@ -4538,7 +5063,7 @@ mod journeys {
         s.settle();
         assert!(s.tab().entries.iter().any(|e| e.name == "readme.txt"), "card's files listed");
         assert!(drive_log(&d).contains("udisksctl mount -b /dev/sdz1"));
-        wait_until(&mut s, "card mounted in the sidebar", 10, |s| sidebar_text(s, "Photo Card").is_some() && !s.texts.iter().any(|(_, t)| t == "14.9 GB · Not mounted"));
+        wait_until(&mut s, "card mounted in the sidebar", 10, |s| sidebar_text(s, "Photo Card").is_some() && !s.texts.iter().any(|(_, t)| t == "16.0 GB · Not mounted"));
         look(&mut s, "inside the card");
 
         // Eject from the sidebar: the tab leaves first, then the disk powers off.
@@ -4641,23 +5166,23 @@ mod journeys {
             s.idle(2);
         };
         s.cmd(Computer);
-        wait_until(&mut s, "locked drive listed", 10, |s| s.tab().entries.iter().any(|e| e.name == "Encrypted 500 GB"));
-        assert!(sidebar_text(&s, "Encrypted 500 GB").is_some(), "offered in the sidebar");
-        assert!(some_text(&s, "500 GB · Locked"), "marked as locked");
+        wait_until(&mut s, "locked drive listed", 10, |s| s.tab().entries.iter().any(|e| e.name == "Encrypted 537 GB"));
+        assert!(sidebar_text(&s, "Encrypted 537 GB").is_some(), "offered in the sidebar");
+        assert!(some_text(&s, "537 GB · Locked"), "marked as locked");
         look(&mut s, "a locked drive");
         shots(&mut s, "encrypted-locked");
-        let r = list_text(&s, "Encrypted 500 GB");
+        let r = list_text(&s, "Encrypted 537 GB");
         s.act(&format!("click {:.0} {:.0} right", r.center().x, r.center().y));
         s.idle(20);
         assert!(some_text(&s, "Unlock…") && some_text(&s, "Eject") && !some_text(&s, "Mount") && !some_text(&s, "Lock"), "a locked drive unlocks");
         s.act("key Escape");
 
         // Opened: the passphrase is asked; a wrong one is refused in the dialog.
-        select_name(&mut s, "Encrypted 500 GB");
+        select_name(&mut s, "Encrypted 537 GB");
         s.act("key Enter");
         s.idle(2);
         assert!(matches!(s.app.popup, Popup::Unlock(_)), "passphrase asked");
-        assert!(some_text(&s, "Unlock “Encrypted 500 GB”"));
+        assert!(some_text(&s, "Unlock “Encrypted 537 GB”"));
         s.act("text battery staple");
         shots(&mut s, "encrypted-passphrase");
         s.act("key Enter");
@@ -7263,7 +7788,9 @@ mod journeys {
         let before = changes(&s).said;
         click_control(&mut s, "commit");
         s.idle(5);
-        assert!(changes(&s).said == before && !changes(&s).busy, "nothing staged, nothing tried");
+        // The index changed a moment ago: the page may still be reading it again.
+        wait_until(&mut s, "the page settled", 10, |s| !changes(s).busy);
+        assert!(changes(&s).said == before, "nothing staged, nothing tried");
         // The keys (the button took the keyboard from the field): Home and Down to a
         // file, Space stages it, Delete asks.
         assert!(s.ctx.memory(|m| m.focused()).is_none());
@@ -7786,7 +8313,10 @@ mod journeys {
 
     /// The colour `label` was last drawn in.
     fn color_of(s: &Sim, label: &str) -> egui::Color32 {
-        let i = s.texts.iter().rposition(|(_, t)| t == label).unwrap_or_else(|| s.fail(&format!("no {label:?} on screen")));
+        // An icon view sets a long name on two lines, broken at a space or after "_": the
+        // same characters, across the break.
+        let bare = |t: &str| t.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        let i = s.texts.iter().rposition(|(_, t)| t == label || (t.contains('\n') && bare(t) == bare(label))).unwrap_or_else(|| s.fail(&format!("no {label:?} on screen")));
         s.text_colors[i]
     }
 
@@ -8250,13 +8780,14 @@ mod journeys {
             if let Popup::Sync(st) = &mut s.app.popup
                 && let Some(p) = st.plan.as_mut()
             {
-                p.unread = v;
+                p.unlisted = v;
             }
             s.idle(3);
         };
         unread(&mut s, vec![b.join("both"), a.join("folder-a")]);
-        assert!(some_text_at(&s, "2 folders couldn't be read, so nothing in them changes"), "counted");
+        assert!(some_text_at(&s, "2 folders couldn't be read and are left as they are"), "counted");
         assert!(s.texts.iter().filter(|(r, t)| t == "Unread" && popup.contains_rect(*r)).count() == 2 && some_text_at(&s, "both"), "each listed");
+        s.shot("sync-preview-unread");
         look(&mut s, "sync preview with unread folders");
         unread(&mut s, vec![]);
         s.act("key Enter");
@@ -9430,7 +9961,8 @@ mod journeys {
         s.act("key enter");
         let mode = |s: &Sim| s.app.terminal.pty().map(|p| p.shared.term().screen.mouse);
         let top = |s: &Sim| s.app.terminal.text().lines().next().unwrap_or_default().to_string();
-        wait_until(&mut s, "less with the mouse", 10, |s| mode(s) == Some(crate::vt::Track::Click) && top(s) == "1");
+        // less 710 asks for drags too (1002) after clicks (1000); older ones clicks alone.
+        wait_until(&mut s, "less with the mouse", 10, |s| matches!(mode(s), Some(crate::vt::Track::Click | crate::vt::Track::Drag)) && top(s) == "1");
         s.idle(3);
         let body = s.texts.iter().rev().find(|(_, t)| t == "2").map(|(r, _)| *r).unwrap_or_else(|| s.fail("less's second row"));
         s.act(&format!("scroll {:.0} {:.0} -2", body.center().x, body.center().y));
@@ -9627,15 +10159,21 @@ mod journeys {
         s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
         s.idle(2);
         // A long menu in a short window scrolls.
-        for _ in 0..20 {
+        for _ in 0..40 {
             if some_text(&s, "Add to .gitignore") {
                 break;
             }
             // Over the menu itself: near the window's foot it opens upward, away from
             // the middle.
             let over = s.ctx.memory(|m| m.area_rect(egui::Id::new("ctxmenu"))).map(|r| r.center()).unwrap_or(pos2(row.center().x + 120.0, s.size.y / 2.0));
-            s.act(&format!("scroll {:.0} {:.0} -3", over.x, over.y));
+            s.act(&format!("scroll {:.0} {:.0} -6", over.x, over.y));
             s.idle(2);
+        }
+        if !some_text(&s, "Add to .gitignore") {
+            let menu = s.ctx.memory(|m| m.area_rect(egui::Id::new("ctxmenu")));
+            let shown: Vec<&str> = s.texts.iter().filter(|(r, _)| menu.is_some_and(|m| m.intersects(*r))).map(|(_, t)| t.as_str()).collect();
+            let repo = crate::gitstatus::repo_for(&app).map(|r| r.marks.keys().filter(|k| k.ends_with("scratch.txt")).count());
+            s.fail(&format!("no \"Add to .gitignore\": menu {menu:?} shows {shown:?}; scratch.txt marked {repo:?}"));
         }
         let at = s.text_rect("Add to .gitignore").center();
         s.act(&format!("click {:.0} {:.0}", at.x, at.y));
@@ -9644,9 +10182,9 @@ mod journeys {
         look(&mut s, "gitignore menu");
         s.shot("share-gitignore-menu");
         s.click_text("This File");
-        // The file is written before git is asked what it tracks; the toast comes after.
-        wait_until(&mut s, "scratch.txt ignored", 10, |s| faded(s, "scratch.txt") && s.app.toast.as_ref().is_some_and(|t| t.0.contains(".gitignore")));
-        assert!(toast_is(&s, "Added /scratch.txt to .gitignore"), "{:?}", s.app.toast);
+        // The row fades when git's status is read again, which can land a frame before
+        // the word on what was added.
+        wait_until(&mut s, "scratch.txt ignored", 10, |s| faded(s, "scratch.txt") && toast_is(s, "Added /scratch.txt to .gitignore"));
         menu(&mut s, "a.tmp", "all *.tmp");
         wait_until(&mut s, "*.tmp ignored", 10, |s| faded(s, "a.tmp") && faded(s, "b.tmp"));
         let gi = std::fs::read_to_string(app.join(".gitignore")).unwrap();
@@ -9777,7 +10315,7 @@ mod journeys {
         assert_eq!(sets[0].files[0].path, d.join("beach.jpg"), "the oldest copy first");
         assert_eq!(sets[1].files[0].path, d.join("notes.txt"));
         assert!(s.texts.iter().any(|(_, t)| t.starts_with("2 sets of duplicates; ")), "what could be freed");
-        assert!(some_text(&s, "beach.jpg · 3 copies · 488 KB each"), "{:?}", s.texts.iter().filter(|t| t.1.contains("copies")).collect::<Vec<_>>());
+        assert!(some_text(&s, "beach.jpg · 3 copies · 500 KB each"), "{:?}", s.texts.iter().filter(|t| t.1.contains("copies")).collect::<Vec<_>>());
         look(&mut s, "duplicates");
         s.shot("duplicates");
         // Both notes checked: refused, the file would be gone.
@@ -10577,8 +11115,8 @@ mod journeys {
         inspector_mut(s).rich_state()
     }
 
-    fn has_control(_s: &Sim, what: &str) -> bool {
-        crate::ui::CONTROLS.with(|c| c.borrow().iter().any(|(_, _, w)| *w == what))
+    fn has_control(s: &mut Sim, what: &str) -> bool {
+        crate::ui::CONTROLS.with(|c| c.borrow().iter().any(|(_, _, w)| *w == what)) || preview_item(what).is_some_and(|l| preview_menu_has(s, l))
     }
 
     fn inspector_texts(s: &Sim) -> Vec<String> {
@@ -10647,7 +11185,7 @@ mod journeys {
         s.cmd(ToggleInspector);
         s.settle();
         assert!(s.app.cfg.source_views.markdown);
-        assert!(has_control(&s, "Rendered"), "Rendered offered beside Source");
+        assert!(has_control(&mut s, "Rendered"), "Rendered offered beside Source");
         click_control(&mut s, "Rendered");
         s.idle(2);
         assert!(!s.app.cfg.source_views.markdown);
@@ -10763,7 +11301,7 @@ mod journeys {
         select_path(&mut s, &d.join("app.log"));
         wait_until(&mut s, "log", 10, |s| inspector(s).text_lines().is_some_and(|l| l.0.len() == 40));
         s.idle(2);
-        assert!(has_control(&s, "line filter"), "a log has its filter");
+        assert!(has_control(&mut s, "line filter"), "a log has its filter");
         click_control(&mut s, "Follow");
         wait_until(&mut s, "following", 5, |s| inspector(s).text_lines().is_some_and(|l| l.1));
         {
@@ -10807,9 +11345,13 @@ mod journeys {
         select_path(&mut s, &d.join("notes.md"));
         click_control(&mut s, "Source");
         wait_until(&mut s, "notes", 10, |s| inspector(s).text_lines().is_some());
-        assert!(!has_control(&s, "Follow"));
+        assert!(!has_control(&mut s, "Follow"));
         std::fs::write(d.join("notes.md"), "# Notes\nmore\nand more\n").unwrap();
-        wait_until(&mut s, "Follow offered", 10, |s| has_control(s, "Follow"));
+        let t0 = std::time::Instant::now();
+        while !has_control(&mut s, "Follow") {
+            assert!(t0.elapsed().as_secs() < 10, "Follow offered");
+            s.idle(5);
+        }
         click_control(&mut s, "Rendered");
         // Blame: who and when beside each line; the summary on hover; a click opens it.
         if git {
@@ -10959,7 +11501,8 @@ mod journeys {
         let e = s.tab().entries.iter().find(|e| e.name == "Q3 report.docx").unwrap().clone();
         assert_eq!(inspector(&s).pdf_path(), Some(crate::office::cached(&e.path, e.size, e.modified).as_path()));
         assert!(!some_text(&s, "Preparing preview…"));
-        toolbar_centred(&mut s, "office", &["1 / 2"]);
+        toolbar_centred(&mut s, "office", &[]);
+        assert!(preview_menu_has(&mut s, "Page 1 of 2"), "the page count, in the preview's menu");
         look(&mut s, "office preview");
         s.shot("office-preview");
         let list = s.app.panels[&s.app.active].list_rect;
@@ -10990,7 +11533,7 @@ mod journeys {
             s.app.cfg.font_size = font;
             s.app.cfg.spacing = spacing;
             s.idle(3);
-            toolbar_centred(&mut s, &format!("office at font {font}, spacing {spacing}"), &["1 / 2"]);
+            toolbar_centred(&mut s, &format!("office at font {font}, spacing {spacing}"), &[]);
             look(&mut s, &format!("office at font {font}, spacing {spacing}"));
         }
         // No LibreOffice: as before, nothing converted.
@@ -11254,6 +11797,7 @@ mod journeys {
         right(&mut s, "photo.jpg");
         s.click_text("Picture");
         s.idle(2);
+        s.scroll_popup_to("Crop…");
         for t in ["Rotate left", "Rotate right", "Resize", "Crop…"] {
             assert!(some_text(&s, t), "{t}");
         }
@@ -11707,7 +12251,7 @@ mod journeys {
         select_path(&mut s, &d.join("Harbour.cbz"));
         wait_until(&mut s, "the comic's first page", 15, |s| inspector(s).comic_pages() == Some(10) && inspector(s).pdf_state().is_some_and(|p| p.2.is_some_and(|x| x.0 == 1)));
         s.idle(2);
-        in_inspector(&s, "1 / 10");
+        assert!(preview_menu_has(&mut s, "Page 1 of 10"), "the comic's page count, in the preview's menu");
         look(&mut s, "a comic");
         s.shot("preview-comic");
         let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
@@ -11772,6 +12316,14 @@ mod journeys {
         let mut s = Sim::new(&home, vec2(1280.0, 800.0));
         s.app.cfg.theme = crate::theme::ThemeName::Graphite;
         s.settle();
+        // The sidebar, long with what other journeys left in it, scrolled to it.
+        for _ in 0..10 {
+            if sidebar_text(&s, "Timeline").is_some() {
+                break;
+            }
+            s.act(&format!("scroll {:.0} 400 -6", s.app.sidebar_width / 2.0));
+            s.idle(2);
+        }
         let row = sidebar_text(&s, "Timeline").unwrap_or_else(|| s.fail("Timeline in the sidebar"));
         let home_row = sidebar_text(&s, "Home").unwrap();
         assert!(row.top() > home_row.top() && row.top() - home_row.top() < 60.0, "right under Home");
@@ -11922,7 +12474,7 @@ mod journeys {
         menu_pick(&mut s, "Format…");
         s.idle(2);
         assert!(matches!(s.app.popup, Popup::FormatDrive(_)));
-        for t in ["Format “Photo Card”", "14.9 GB removable drive · /dev/sdz", "Type Photo Card to confirm", "Everything on this 14.9 GB drive is erased: every partition and every file on it."] {
+        for t in ["Format “Photo Card”", "16.0 GB removable drive · /dev/sdz", "Type Photo Card to confirm", "Everything on this 16.0 GB drive is erased: every partition and every file on it."] {
             assert!(some_text(&s, t), "{t:?} shown");
         }
         s.act("key Enter");
@@ -13171,6 +13723,12 @@ mod journeys {
         let row = row_text(&s, "report.txt");
         s.act(&format!("click {:.0} {:.0} right", row.center().x, row.center().y));
         s.idle(2);
+        // The menu is taller than the window: its end scrolled to.
+        if !some_text(&s, "Previous Versions…") {
+            let r = s.text_rect("Rename");
+            s.act(&format!("scroll {:.0} {:.0} -30", r.center().x, r.center().y));
+            s.idle(4);
+        }
         assert!(some_text(&s, "Previous Versions…"), "in the file's menu");
         s.click_text("Previous Versions…");
         wait_until(&mut s, "the snapshots read", 10, |s| versions_page(s).is_some_and(|p| p.found.is_some()));
@@ -13256,6 +13814,185 @@ mod journeys {
         report("versions", &s);
     }
 
+    /// Memory through a picture-heavy session: camera-sized pictures thumbnailed in the
+    /// largest icons and opened in the viewer, then left. Prints resident and peak memory.
+    #[test]
+    fn memory_through_many_pictures() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("memory");
+        let d = home.join("Photos");
+        std::fs::create_dir_all(&d).unwrap();
+        let (w, h) = (2400u32, 1600u32);
+        for k in 0..60u32 {
+            let mut out = vec![];
+            let mut e = png::Encoder::new(&mut out, w, h);
+            e.set_color(png::ColorType::Rgb);
+            e.set_depth(png::BitDepth::Eight);
+            e.set_compression(png::Compression::Fast);
+            let row: Vec<u8> = (0..w).flat_map(|x| [(x / 9 + k * 40) as u8, (k * 13) as u8, (x / 7) as u8]).collect();
+            let px: Vec<u8> = (0..h).flat_map(|y| row.iter().map(move |c| c.wrapping_add((y / 6) as u8))).collect();
+            e.write_header().unwrap().write_image_data(&px).unwrap();
+            std::fs::write(d.join(format!("photo {k:02}.png")), out).unwrap();
+        }
+        let kb = |what: &str| {
+            let (rss, peak) = crate::memory::resident_kb();
+            eprintln!("memory {what}: resident {} MB, peak {} MB", rss / 1024, peak / 1024);
+            rss as i64 / 1024
+        };
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.idle(3);
+        // Measured from here, so journeys that ran before in this process don't count.
+        let base = kb("open");
+        s.cmd(Cmd::ViewXL);
+        for _ in 0..14 {
+            s.act("key PageDown");
+            for _ in 0..8 {
+                s.idle(4);
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+        }
+        // Sixty decoded photos' buffers are freed by now: with glibc left as it is, they
+        // stayed in the workers' arenas (84 MB more than at the start); handed back, a few.
+        let mb = kb("thumbnailed") - base;
+        assert!(mb < 32, "the decoded pictures' memory is handed back: {mb} MB more resident");
+        s.act("key Home");
+        s.act("key Enter");
+        for _ in 0..6 {
+            s.act("key Right");
+            for _ in 0..4 {
+                s.idle(3);
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+        }
+        kb("viewer");
+        s.act("key Escape");
+        s.cmd(Cmd::Up);
+        for _ in 0..10 {
+            s.idle(3);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let mb = kb("left") - base;
+        assert!(mb < 32, "and stays handed back after the folder is left: {mb} MB more");
+        report("memory", &s);
+    }
+
+    /// A picture for the Stack view's cards: a two-colour sweep with a disc, each seed its own.
+    fn cover_png(seed: u32) -> Vec<u8> {
+        let (w, h) = (240u32, 180u32);
+        let hue = |k: u32| -> [f32; 3] {
+            let a = (seed * 47 + k * 113) % 360;
+            let f = |n: f32| {
+                let k = (n + a as f32 / 30.0) % 12.0;
+                0.62 - 0.38 * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
+            };
+            [f(0.0), f(8.0), f(4.0)]
+        };
+        let (c0, c1) = (hue(0), hue(1));
+        let (cx, cy, rr) = (60.0 + (seed % 5) as f32 * 30.0, 50.0 + (seed % 3) as f32 * 40.0, 34.0 + (seed % 4) as f32 * 9.0);
+        let mut out = vec![];
+        let mut e = png::Encoder::new(&mut out, w, h);
+        e.set_color(png::ColorType::Rgba);
+        e.set_depth(png::BitDepth::Eight);
+        let px: Vec<u8> = (0..h)
+            .flat_map(|y| {
+                (0..w).flat_map(move |x| {
+                    let t = (x + y) as f32 / (w + h) as f32;
+                    let inside = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt() < rr;
+                    let c: Vec<u8> = (0..3).map(|i| (255.0 * if inside { 0.95 - c0[i] * 0.4 } else { c0[i] + (c1[i] - c0[i]) * t }) as u8).collect();
+                    [c[0], c[1], c[2], 255]
+                })
+            })
+            .collect();
+        e.write_header().unwrap().write_image_data(&px).unwrap();
+        out
+    }
+
+    /// The Stack view: pictures as covers, folders and other files by their icons, the
+    /// cursor's item out of the row with its name over it, flipped through by keys.
+    #[test]
+    fn stack_view() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("stack");
+        let d = home.join("Shelf");
+        std::fs::create_dir_all(&d).unwrap();
+        for k in 0..36 {
+            std::fs::write(d.join(format!("photo {:02}.png", k + 1)), cover_png(k)).unwrap();
+        }
+        for f in ["Albums", "Projects", "Scans"] {
+            std::fs::create_dir_all(d.join(f)).unwrap();
+        }
+        // Covers: one kept for the folder, four of five pictures in a square, one of two alone.
+        std::fs::write(d.join("Albums/cover.png"), cover_png(40)).unwrap();
+        std::fs::write(d.join("Albums/b.png"), cover_png(41)).unwrap();
+        for k in 0..5 {
+            std::fs::write(d.join(format!("Projects/shot {k}.png")), cover_png(50 + k)).unwrap();
+        }
+        for k in 0..2 {
+            std::fs::write(d.join(format!("Scans/page {k}.png")), cover_png(60 + k)).unwrap();
+        }
+        for (f, body) in [("notes.txt", "notes\n"), ("main.rs", "fn main() {}\n"), ("song.mp3", "ID3"), ("report.pdf", "%PDF-1.4"), ("archive.zip", "PK")] {
+            std::fs::write(d.join(f), body).unwrap();
+        }
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        s.cmd(Cmd::ViewStack);
+        s.act("key Down");
+        for _ in 0..6 {
+            s.act("key Right");
+            s.idle(2);
+        }
+        s.idle(40);
+        // Thumbnails fade in on the clock, not the frame count.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        look(&mut s, "stack");
+        s.shot("stack-graphite");
+        s.act("key Home");
+        s.idle(40);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        look(&mut s, "stack, first");
+        s.shot("stack-first");
+        s.act("key Right");
+        s.idle(40);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        s.idle(4);
+        look(&mut s, "stack, a folder of pictures");
+        s.shot("stack-mosaic");
+        // Pointing at the scrubber shows what is there.
+        let list = s.app.panels[&s.app.active].list_rect;
+        let y = list.bottom() - (16.0 * s.app.cfg.spacing.max(0.7)).round() - 24.0;
+        s.act(&format!("move {:.0} {y:.0}", list.center().x + 60.0));
+        s.idle(6);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        s.idle(3);
+        s.shot("stack-peek");
+        s.act("key End");
+        s.idle(40);
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        look(&mut s, "stack, light");
+        s.shot("stack-paper");
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        // Beside another panel, narrow.
+        s.cmd(Cmd::SplitRight);
+        s.idle(4);
+        s.cmd(Cmd::ViewStack);
+        s.act("key End");
+        s.idle(40);
+        look(&mut s, "stack, split");
+        s.shot("stack-split");
+        // The row eases toward the cursor, so for some frames after the list shrinks it
+        // still stands past its end: from the last of 44 items, a filter that keeps one.
+        s.act("text notes");
+        s.idle(30);
+        assert_eq!(s.tab().view.len(), 1, "the filter keeps notes.txt alone");
+        look(&mut s, "stack, the list shrunk under the row");
+        report("stack", &s);
+    }
+
     fn space(s: &Sim) -> &crate::spaceuse::State {
         match &s.app.popup {
             Popup::SpaceUsed(st) => st,
@@ -13291,14 +14028,22 @@ mod journeys {
         wait_until(&mut s, "every size counted", 10, |s| !space(s).counting());
         s.idle(3);
         assert_eq!(space_names(&s), ["Big", "movie.mkv", "Small", "big-link", "Empty"]);
-        assert!(some_text(&s, "488 KB") && some_text(&s, "391 KB") && some_text(&s, "10 B"), "each size beside its bar");
-        assert!(s.texts.iter().any(|(_, t)| t.ends_with("Disk · 879 KB")), "where, and how much in all");
+        assert!(some_text(&s, "500 KB") && some_text(&s, "400 KB") && some_text(&s, "10 B"), "each size beside its bar");
+        assert!(s.texts.iter().any(|(_, t)| t.ends_with("Disk") || t.contains("Disk · ")), "where");
+        assert!(some_text(&s, "900 KB"), "how much in all, in the ring");
         look(&mut s, "space used");
         s.shot("space-used-graphite");
         s.app.cfg.theme = crate::theme::ThemeName::Paper;
         look(&mut s, "space used, light");
         s.shot("space-used-paper");
         s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        // Filling the window and back.
+        s.act("key f");
+        s.idle(30);
+        look(&mut s, "space used, full window");
+        s.shot("space-used-full");
+        s.act("key f");
+        s.idle(30);
         // Into Big, and back with the cursor on it.
         s.act("key Enter");
         wait_until(&mut s, "Big read", 10, |s| space(s).dir == d.join("Big") && !space(s).counting());
@@ -13325,7 +14070,7 @@ mod journeys {
         assert_eq!(space(&s).checked.len(), 2);
         s.act("key Delete");
         assert!(space(&s).confirm, "asks first");
-        assert!(some_text(&s, "Move 2 items (391 KB) to the trash?"), "{:?}", s.texts.iter().filter(|t| t.1.starts_with("Move")).collect::<Vec<_>>());
+        assert!(some_text(&s, "Move 2 items (400 KB) to the trash?"), "{:?}", s.texts.iter().filter(|t| t.1.starts_with("Move")).collect::<Vec<_>>());
         look(&mut s, "space used asking");
         s.shot("space-used-confirm-graphite");
         s.act("key Enter");
@@ -13359,6 +14104,201 @@ mod journeys {
         assert!(some_text(&s, "This folder is empty"));
         s.act("key Escape");
         report("space used", &s);
+    }
+
+    fn free_up(s: &Sim) -> &crate::freeup::View {
+        space(s).free_up.as_ref().unwrap_or_else(|| s.fail("Free up has not started"))
+    }
+
+    /// Free Up Space from the palette: Space used on the whole disk, showing Free up. Build
+    /// output, packages, a download cache, thumbnails and the trash found under the home
+    /// folder and grouped; the last thirty days of the disk's record drawn over them, a day
+    /// pointed at; a group opened and a folder in it left out by keys; the rest deleted
+    /// after asking, and what was left out still there; Contents and back by Tab and by the
+    /// tabs; Find Duplicates from its row; a small window and the whole window.
+    #[test]
+    fn free_up_space() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("freeup");
+        let w = |p: &str, n: usize| {
+            let p = home.join(p);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, vec![b'x'; n]).unwrap();
+        };
+        w("Projects/engine/Cargo.toml", 20);
+        w("Projects/engine/target/debug/engine", 3_000_000);
+        w("Projects/tool/Cargo.toml", 20);
+        w("Projects/tool/target/debug/tool", 1_200_000);
+        w("Projects/site/package.json", 2);
+        w("Projects/site/node_modules/react/index.js", 800_000);
+        let cache = dirs::cache_dir().unwrap();
+        let pip = cache.join("pip/http/freeup-wheel");
+        std::fs::create_dir_all(pip.parent().unwrap()).unwrap();
+        std::fs::write(&pip, vec![b'p'; 600_000]).unwrap();
+        std::fs::create_dir_all(cache.join("thumbnails/normal")).unwrap();
+        std::fs::write(cache.join("thumbnails/normal/freeup.png"), vec![b't'; 40_000]).unwrap();
+        w("old draft.txt", 50_000);
+        crate::trashcan::delete(&home.join("old draft.txt")).unwrap();
+        // Twelve days of the disk's record, rising a little each day, under the reading the
+        // dialog takes itself today.
+        let top = crate::trashcan::topdir(&home);
+        let (total, free) = crate::fsx::disk_space(&home).unwrap();
+        let used = total - free;
+        let today = crate::timefmt::local_day(std::time::SystemTime::now());
+        let book = crate::freeup::book_path();
+        let _ = std::fs::remove_file(&book);
+        for k in (1..=12).rev() {
+            crate::freeup::note_in(&book, &top, used / 2 + used / 2 * (12 - k as u64) / 12, total, today - k);
+        }
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        palette_run(&mut s, "Free Up Space");
+        assert!(space(&s).showing_free, "opens on Free up");
+        wait_until(&mut s, "everything found and counted", 20, |s| space(s).free_up.as_ref().is_some_and(|f| f.done && f.counting() == 0));
+        assert_eq!(space(&s).root, top, "the whole disk");
+        s.idle(3);
+        for t in ["Build output", "Contents", "Free up", "Used now", "After", "Used, last 30 days"] {
+            assert!(some_text(&s, t), "{t} on screen");
+        }
+        use crate::freeup::Group;
+        assert_eq!(free_up(&s).groups.iter().map(|g| g.group).collect::<Vec<_>>(), [Group::Builds, Group::Packages, Group::Caches, Group::Thumbs, Group::Trash]);
+        // At a big font the list scrolls: its last row brought into view.
+        s.act("key End");
+        s.idle(20);
+        assert!(some_text(&s, "Duplicate files"));
+        s.act("key Home");
+        s.idle(20);
+        let parts = |s: &Sim, g: crate::freeup::Group| -> Vec<PathBuf> { free_up(s).groups.iter().filter(|x| x.group == g).flat_map(|x| x.parts.iter().map(|p| p.path.clone())).collect() };
+        let builds = parts(&s, crate::freeup::Group::Builds);
+        assert!(builds.contains(&home.join("Projects/engine/target")) && builds.contains(&home.join("Projects/tool/target")), "{builds:?}");
+        assert!(parts(&s, crate::freeup::Group::Packages).contains(&home.join("Projects/site/node_modules")));
+        assert!(parts(&s, crate::freeup::Group::Caches).contains(&cache.join("pip")));
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with('+') && t.ends_with("in 7 days")), "the week's change: {:?}", s.texts.iter().filter(|t| t.1.contains("days")).collect::<Vec<_>>());
+        look(&mut s, "free up");
+        s.shot("free-up-graphite");
+        s.app.cfg.theme = crate::theme::ThemeName::Paper;
+        look(&mut s, "free up, light");
+        s.shot("free-up-paper");
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        // A day of the chart pointed at.
+        let chart = crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == "free chart").map(|(_, r, _)| *r)).unwrap_or_else(|| s.fail("no chart"));
+        s.act(&format!("move {:.0} {:.0}", chart.right() - 3.0, chart.center().y));
+        s.idle(2);
+        assert!(s.texts.iter().any(|(_, t)| t.ends_with(" used") && t.contains(':')), "the day pointed at");
+        s.act("move -50 -50");
+        // Build output opened, the tool's build left out, closed again.
+        s.act("key Home");
+        assert_eq!(free_up(&s).sel, 0);
+        let rows = free_up(&s).rows().len();
+        s.act("key ArrowRight");
+        assert_eq!(free_up(&s).rows().len(), rows + free_up(&s).groups[0].parts.len(), "its folders under it");
+        look(&mut s, "free up, a group open");
+        s.shot("free-up-open");
+        let tool = free_up(&s).groups[0].parts.iter().position(|p| p.path == home.join("Projects/tool/target")).unwrap();
+        for _ in 0..=tool {
+            s.act("key ArrowDown");
+        }
+        s.act("key space");
+        assert!(!free_up(&s).groups[0].parts[tool].checked, "left out");
+        s.act("key ArrowLeft");
+        assert_eq!(free_up(&s).rows().len(), rows, "closed, the cursor on its group");
+        assert_eq!(free_up(&s).sel, 0);
+        // The packages put in, the thumbnails (other journeys' too) left alone.
+        s.act("key ArrowDown");
+        s.act("key space");
+        let thumbs = free_up(&s).rows().iter().position(|r| matches!(r, crate::freeup::Row::Group(g) if free_up(&s).groups[*g].group == crate::freeup::Group::Thumbs)).unwrap();
+        while free_up(&s).sel < thumbs {
+            s.act("key ArrowDown");
+        }
+        s.act("key space");
+        let chosen = free_up(&s).chosen();
+        assert!(some_text(&s, &format!("Free {}", crate::fsx::fmt_size(chosen))), "the button says how much");
+        s.act("key Delete");
+        assert!(free_up(&s).confirm, "asks first");
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with(&format!("Delete {} for good?", crate::fsx::fmt_size(chosen)))));
+        look(&mut s, "free up asking");
+        s.shot("free-up-confirm");
+        s.act("key Enter");
+        wait_until(&mut s, "deleted", 20, |_| !home.join("Projects/engine/target").exists() && !home.join("Projects/site/node_modules").exists() && !cache.join("pip").exists());
+        wait_until(&mut s, "the disk read again", 20, |s| free_up(s).note.as_deref().is_some_and(|n| n.starts_with("Freed")));
+        assert!(home.join("Projects/tool/target/debug/tool").exists() && home.join("Projects/engine/Cargo.toml").exists(), "what was left out stays");
+        assert!(crate::trashcan::list().iter().any(|i| i.original == home.join("old draft.txt")), "the trash was not chosen");
+        look(&mut s, "free up after");
+        s.shot("free-up-after");
+        // Contents and back, by key and by the tabs.
+        s.act("key Tab");
+        assert!(!space(&s).showing_free);
+        wait_until(&mut s, "the disk's folders counted", 20, |s| !space(s).counting());
+        assert!(space_names(&s).iter().any(|n| n == "home"), "the disk's top folder");
+        look(&mut s, "space used of the disk");
+        click_control(&mut s, "space free up");
+        assert!(space(&s).showing_free);
+        click_control(&mut s, "space contents");
+        assert!(!space(&s).showing_free);
+        // Tab goes round: the map, then Free up.
+        s.act("key Tab");
+        assert!(!space(&s).showing_free && crate::spaceuse::MAP.load(std::sync::atomic::Ordering::Relaxed), "the map");
+        look(&mut s, "space used as a map");
+        s.shot("space-map");
+        s.act("key Tab");
+        assert!(space(&s).showing_free);
+        // Find Duplicates from its row, in the home folder.
+        s.act("key End");
+        assert_eq!(free_up(&s).rows()[free_up(&s).sel], crate::freeup::Row::Dupes);
+        s.act("key Enter");
+        s.settle();
+        assert!(matches!(&s.app.popup, Popup::Duplicates(_)), "Find Duplicates open: {} {:?}", s.app.popup.kind_name(), s.app.toast.as_ref().map(|t| t.0.clone()));
+        s.act("key Escape");
+        // A small window, and the whole window.
+        s.resize(520.0, 340.0);
+        palette_run(&mut s, "Free Up Space");
+        wait_until(&mut s, "found again", 20, |s| space(s).free_up.as_ref().is_some_and(|f| f.done && f.counting() == 0));
+        look(&mut s, "free up small");
+        s.shot("free-up-small");
+        s.act("key Escape");
+        s.resize(1280.0, 800.0);
+        palette_run(&mut s, "Free Up Space");
+        wait_until(&mut s, "found once more", 20, |s| space(s).free_up.as_ref().is_some_and(|f| f.done && f.counting() == 0));
+        s.act("key f");
+        s.idle(30);
+        look(&mut s, "free up, whole window");
+        s.shot("free-up-full");
+        s.act("key f");
+        s.idle(30);
+        s.act("key Escape");
+        // From Show Space Used in a project, Free up keeps to that folder.
+        go(&mut s, &home.join("Projects"));
+        palette_run(&mut s, "Show Space Used");
+        click_control(&mut s, "space free up");
+        wait_until(&mut s, "the project folder looked at", 20, |s| space(s).free_up.as_ref().is_some_and(|f| f.done && f.counting() == 0));
+        assert_eq!(parts(&s, crate::freeup::Group::Builds), [home.join("Projects/tool/target")]);
+        assert!(parts(&s, crate::freeup::Group::Trash).is_empty() && parts(&s, crate::freeup::Group::Thumbs).is_empty(), "nothing from outside it");
+        look(&mut s, "free up in a project");
+        s.act("key Escape");
+        // An empty folder has nothing; with animations off, in three more themes.
+        go(&mut s, &home.join("Empty"));
+        palette_run(&mut s, "Show Space Used");
+        click_control(&mut s, "space free up");
+        wait_until(&mut s, "an empty folder looked at", 20, |s| space(s).free_up.as_ref().is_some_and(|f| f.done));
+        assert!(some_text(&s, "Nothing here that comes back by itself"));
+        look(&mut s, "free up, nothing");
+        s.shot("free-up-empty");
+        s.act("key Escape");
+        go(&mut s, &home);
+        s.app.cfg.animations = false;
+        for (theme, name) in [(crate::theme::ThemeName::Midnight, "midnight"), (crate::theme::ThemeName::Latte, "latte"), (crate::theme::ThemeName::Gruvbox, "gruvbox")] {
+            s.app.cfg.theme = theme;
+            palette_run(&mut s, "Free Up Space");
+            wait_until(&mut s, "found in another theme", 20, |s| space(s).free_up.as_ref().is_some_and(|f| f.done && f.counting() == 0));
+            look(&mut s, &format!("free up, {name}"));
+            s.shot(&format!("free-up-{name}"));
+            s.act("key Escape");
+        }
+        s.app.cfg.animations = true;
+        report("free up", &s);
     }
 
     fn viewer(s: &Sim) -> &crate::viewer::State {
@@ -13447,14 +14387,14 @@ mod journeys {
         s.act("move 300 300");
         assert!(some_text(&s, "1 / 13"), "back when it moves");
         s.act("key ArrowRight");
-        assert_eq!(viewer(&s).fading_from(), Some(0), "a quiet fade between pictures");
+        assert_eq!(viewer(&s).fading_from(), s.app.cfg.animations.then_some(0), "a quiet fade between pictures");
         s.app.cfg.animations = false;
         s.act("key ArrowRight");
         assert_eq!(viewer(&s).fading_from(), None, "none without animations");
         s.app.cfg.animations = true;
-        // Escape: the cursor on the picture last shown.
+        // Escape: the cursor on the picture last shown (it shrinks back there first).
         s.act("key Escape");
-        assert!(!s.popup_open());
+        wait_until(&mut s, "the viewer closed", 5, |s| !s.popup_open());
         assert_eq!(s.tab().cursor.map(|c| s.tab().entries[c as usize].name.clone()).as_deref(), Some("img02.png"));
         // From the picture's menu.
         let row = row_text(&s, "img07.png");
@@ -13463,6 +14403,7 @@ mod journeys {
         s.click_text("View Pictures");
         assert_eq!(pic(&s), "img07.png");
         s.act("key Escape");
+        wait_until(&mut s, "the viewer closed", 5, |s| !s.popup_open());
         // Enter and double-click open the picture's app by default.
         let n = crate::mime::LAUNCHED.lock().unwrap().len();
         select_path(&mut s, &trip.join("img05.png"));
@@ -13621,8 +14562,14 @@ mod journeys {
         crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
         select_path(&mut s, &d.join("still.png"));
         select_path(&mut s, &d.join("photo.heic"));
-        wait_until(&mut s, "the install note", 5, |s| some_text(s, "Install ImageMagick to see HEIC photos"));
-        look(&mut s, "a HEIC without ImageMagick");
+        // Only where nothing reads a HEIC: a desktop thumbnailer for it (glycin's, say)
+        // makes it a picture like any other.
+        if crate::thumbcache::thumbnailer_for(&crate::mime::mime_db().for_name("photo.heic", false, false)).is_none() {
+            wait_until(&mut s, "the install note", 5, |s| some_text(s, "Install ImageMagick to see HEIC photos"));
+            look(&mut s, "a HEIC without ImageMagick");
+        } else {
+            eprintln!("animated pictures: a thumbnailer here reads HEIC, so the install note is not shown");
+        }
         for (ms, step) in &s.slow {
             eprintln!("  slow frame {ms:.0} ms after: {step}");
         }
@@ -13775,6 +14722,17 @@ mod journeys {
         }
     }
 
+    /// The welcome settled and nothing pointed at: its own text demanded clean (it covers
+    /// the window, so what is under it is not looked at).
+    fn look_welcome(s: &mut Sim, what: &str) {
+        s.note(format!("look: {what}"));
+        s.act("move -50 -50");
+        s.idle(16);
+        s.check_overlap = true;
+        s.idle(2);
+        s.check_overlap = false;
+    }
+
     /// Wait for the page's film to be on screen (decoded on its own thread).
     fn film_on(s: &mut Sim) {
         wait_until(s, "the film shown", 10, |s| tour(s).film_shown());
@@ -13804,60 +14762,130 @@ mod journeys {
         let home = fixture("tour");
         let now = env!("CARGO_PKG_VERSION");
         let seen = || crate::config::load_userdata().seen_version;
-        // A first start: the tour, its choices at their defaults.
+        // A first start: the welcome over the whole window, its choices at their defaults.
         forget_maia();
         let mut s = Sim::new(&home, vec2(1280.0, 800.0));
         s.idle(3);
         assert!(tour(&s).kind == crate::tour::Kind::Welcome && tour(&s).auto && tour(&s).page == 0, "the tour on a first start");
         assert_eq!(seen(), now, "this version written down at once");
         s.shot("tour-start");
-        for t in ["Welcome to Maia", "Appearance", "Files & folders", "Follow system light/dark", "Font size", "Animations", "Show hidden files"] {
+        let n = crate::tour::WELCOME.len();
+        for t in ["Welcome to Maia", "Get started", "Skip", &format!("1 of {n}")] {
             assert!(some_text(&s, t), "{t:?} on the first page");
         }
         let d = crate::config::Config::default();
-        assert!(s.app.cfg.theme == d.theme && !s.app.cfg.show_hidden && !s.app.cfg.single_click && !s.app.cfg_dirty, "nothing chosen yet");
-        look(&mut s, "tour first page");
-        // A light theme and hidden files, chosen here, take effect behind it.
-        let themes = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == "tour theme").map(|(_, r, _)| *r).collect::<Vec<_>>());
+        // A run in another theme (MAIA_SIM_THEME) starts there.
+        let themed = std::env::var_os("MAIA_SIM_THEME").is_some();
+        assert!((themed || s.app.cfg.theme == d.theme) && !s.app.cfg.show_hidden && !s.app.cfg.single_click && !s.app.cfg_dirty, "nothing chosen yet");
+        look_welcome(&mut s, "welcome first page");
+        let controls = |s: &Sim, what: &str| crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == what).map(|(_, r, _)| *r).collect::<Vec<_>>());
+        let click = |s: &mut Sim, r: Rect| s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+        // The look: a theme pointed at shows the window in it, one clicked is kept.
+        click_control(&mut s, "welcome next");
+        assert_eq!(tour(&s).page, 1);
+        s.idle(14);
+        assert!(some_text(&s, "Pick a look") && some_text(&s, "Follow the desktop"));
+        let themes = controls(&s, "tour theme");
         assert_eq!(themes.len(), 6, "six themes to pick from");
-        let latte = themes[5];
-        s.act(&format!("click {:.0} {:.0}", latte.center().x, latte.center().y));
+        s.act(&format!("move {:.0} {:.0}", themes[1].center().x, themes[1].center().y));
+        s.idle(2);
+        assert!(s.app.preview_theme.is_some(), "pointed at, the window shows it");
+        s.act("move -50 -50");
+        s.idle(2);
+        click(&mut s, themes[5]);
         assert_eq!(s.app.cfg.theme, crate::theme::ThemeName::Latte, "picked");
+        assert!(!s.app.cfg.follow_system_theme, "picked by hand, the desktop's is not followed");
         s.idle(2);
         assert!(!s.app.pal.dark, "the window light at once");
-        click_in_row(&mut s, "switch", "Show hidden files");
-        s.settle();
-        assert!(s.app.cfg.show_hidden && s.tab().view.iter().any(|&i| s.tab().entries[i as usize].name == ".bashrc"), "hidden files shown behind the tour");
         assert!(s.app.cfg_dirty, "kept as Options keeps it");
-        // On by the keys, the buttons and the dots.
+        look_welcome(&mut s, "welcome look");
+        // The size: Roomy, the window following; animations off and on again.
         s.act("key ArrowRight");
-        assert_eq!(tour(&s).page, 1);
+        assert_eq!(tour(&s).page, 2);
+        s.idle(14);
+        let sizes = controls(&s, "welcome size");
+        assert_eq!(sizes.len(), 3);
+        click(&mut s, sizes[2]);
+        assert!((s.app.cfg.font_size - 16.5).abs() < 0.01 && (s.app.cfg.spacing - 1.6).abs() < 0.01, "Roomy: {} {}", s.app.cfg.font_size, s.app.cfg.spacing);
+        s.idle(4);
+        look_welcome(&mut s, "welcome size, roomy");
+        let anim = s.app.cfg.animations;
+        click_in_row(&mut s, "switch", "Animations");
+        assert_eq!(s.app.cfg.animations, !anim);
+        click_in_row(&mut s, "switch", "Animations");
+        assert_eq!(s.app.cfg.animations, anim);
+        // Opening: one click, for folders only.
+        s.act("key Enter");
+        assert_eq!(tour(&s).page, 3, "Enter goes on");
+        s.idle(14);
+        assert!(!some_text(&s, "Folders only"), "only with one click");
+        let clicks = controls(&s, "welcome click");
+        assert_eq!(clicks.len(), 2);
+        click(&mut s, clicks[1]);
+        assert!(s.app.cfg.single_click);
+        s.idle(14);
+        assert!(some_text(&s, "Folders only"));
+        click_in_row(&mut s, "switch", "Folders only");
+        assert!(s.app.cfg.single_click_folders_only);
+        look_welcome(&mut s, "welcome one click");
+        // What is shown: hidden files, behind it at once; previews nowhere.
+        click_control(&mut s, "welcome next");
+        assert_eq!(tour(&s).page, 4);
+        s.idle(14);
+        let hidden = controls(&s, "welcome hidden");
+        assert_eq!(hidden.len(), 2);
+        click(&mut s, hidden[1]);
+        s.settle();
+        assert!(s.app.cfg.show_hidden && s.tab().view.iter().any(|&i| s.tab().entries[i as usize].name == ".bashrc"), "hidden files shown behind the welcome");
+        let chips = controls(&s, "welcome thumbs choice");
+        assert_eq!(chips.len(), 3, "three places for previews");
+        click(&mut s, chips[2]);
+        assert_eq!(s.app.cfg.thumbnails, crate::config::ThumbMode::Never);
+        click(&mut s, chips[0]);
+        assert_eq!(s.app.cfg.thumbnails, crate::config::ThumbMode::LocalDisks);
+        look_welcome(&mut s, "welcome what you see");
+        // The extras: search by meaning switched by its whole row.
+        click_control(&mut s, "welcome next");
+        assert_eq!(tour(&s).page, 5);
+        s.idle(14);
+        assert!(some_text(&s, "Open folders in Maia") && some_text(&s, "Search by meaning"));
+        s.click_text("Search by meaning");
+        assert!(s.app.cfg.semantic_search, "the row flips it");
+        s.click_text("Search by meaning");
+        assert!(!s.app.cfg.semantic_search);
+        look_welcome(&mut s, "welcome extras");
+        // Back and on by the buttons, the keys and the dots; no further back than the first.
+        click_control(&mut s, "welcome back");
+        assert_eq!(tour(&s).page, 4);
+        click_control(&mut s, "welcome next");
+        click_control(&mut s, "welcome next");
+        assert_eq!(tour(&s).page, 6);
         film_on(&mut s);
         assert!(some_text(&s, "Go anywhere by typing") && some_text(&s, "Ctrl+P") && some_text(&s, "Go To"), "the page, its keys as bound");
-        look(&mut s, "tour film page");
-        click_control(&mut s, "tour next");
-        assert_eq!(tour(&s).page, 2);
-        click_control(&mut s, "tour back");
-        assert_eq!(tour(&s).page, 1);
-        s.act("key Enter");
-        assert_eq!(tour(&s).page, 2, "Enter goes on");
-        s.act("key ArrowLeft");
-        s.act("key ArrowLeft");
-        s.act("key ArrowLeft");
+        look_welcome(&mut s, "welcome film page");
+        for _ in 0..8 {
+            s.act("key ArrowLeft");
+        }
         assert_eq!(tour(&s).page, 0, "and no further back than the first");
-        let dots = crate::ui::CONTROLS.with(|c| c.borrow().iter().filter(|(_, _, w)| *w == "tour dot").map(|(_, r, _)| *r).collect::<Vec<_>>());
-        assert_eq!(dots.len(), crate::tour::WELCOME.len(), "a dot a page");
-        let last = dots[dots.len() - 1];
-        s.act(&format!("click {:.0} {:.0}", last.center().x, last.center().y));
-        assert_eq!(tour(&s).page, crate::tour::WELCOME.len() - 1);
+        let dots = controls(&s, "tour dot");
+        assert_eq!(dots.len(), n, "a dot a page");
+        click(&mut s, dots[n - 1]);
+        assert_eq!(tour(&s).page, n - 1);
         film_on(&mut s);
-        assert!(some_text(&s, "Done"), "the last page ends it");
+        assert!(some_text(&s, "Start using Maia") && !some_text(&s, "Skip"), "the last page ends it, no Skip");
         s.act("key ArrowRight");
         assert!(s.popup_open(), "Right on the last page stays");
         // Escape closes it, saying where it is.
         s.act("key Escape");
         assert!(!s.popup_open());
         assert!(s.app.toast.as_ref().is_some_and(|t| t.0.contains("Welcome Tour")), "where to find it again");
+        // Skip closes it too, from any page but the last.
+        s.cmd(Welcome);
+        s.act("key ArrowRight");
+        click_control(&mut s, "welcome skip");
+        assert!(!s.popup_open(), "skipped");
+        s.app.cfg.font_size = d.font_size;
+        s.app.cfg.spacing = d.spacing;
         s.app.save_all(&s.ctx.clone());
         drop(s);
         // Started again: nothing, and the choices kept.
@@ -13873,18 +14901,45 @@ mod journeys {
         let mut s = Sim::new(&home, vec2(1280.0, 800.0));
         s.idle(3);
         assert!(tour(&s).kind == crate::tour::Kind::News && tour(&s).auto, "What's New after an update");
-        film_on(&mut s);
-        assert!(some_text(&s, &format!("New in Maia {}", crate::tour::NEWS_VERSION)) && some_text(&s, "Maia picks your files") && some_text(&s, "Options"));
+        // Over the whole window as the welcome is: the version, then a film a page.
+        let v = crate::tour::NEWS_VERSION;
         let n = crate::tour::NEWS.len();
-        for _ in 1..n {
+        s.idle(14);
+        for t in [&format!("Maia {v}") as &str, v, "See what's new", "Skip", &format!("1 of {n}")] {
+            assert!(some_text(&s, t), "{t:?} on What's New's first page");
+        }
+        look_welcome(&mut s, "news first page");
+        click_control(&mut s, "welcome next");
+        assert_eq!(tour(&s).page, 1);
+        film_on(&mut s);
+        assert!(some_text(&s, "Jump to the folders you use") && some_text(&s, "Ctrl+G") && some_text(&s, "Jump To Folder"), "the page, its keys as bound");
+        look_welcome(&mut s, "news film page");
+        // A command without keys is shown by its name, as the palette finds it.
+        s.act("key ArrowRight");
+        film_on(&mut s);
+        assert!(some_text(&s, "Show Space Used") && some_text(&s, "Free Up Space"));
+        for _ in 2..n {
             s.act("key ArrowRight");
         }
-        s.idle(12);
-        assert!(some_text(&s, &format!("Also new in {}", crate::tour::NEWS_VERSION)) && some_text(&s, "For everyone"), "the rest, in groups");
-        look(&mut s, "tour list page");
-        // A click outside closes it.
-        s.act("click 20 790");
-        assert!(!s.popup_open(), "a click outside closes it");
+        s.idle(14);
+        assert_eq!(tour(&s).page, n - 1);
+        for t in ["Also new", "For everyone", "Send To Phone", "Transfers you can steer", "Done"] {
+            assert!(some_text(&s, t), "{t:?} on the last page");
+        }
+        assert!(!some_text(&s, "Skip"), "the last page ends it, no Skip");
+        look_welcome(&mut s, "news list page");
+        // The groups further down are a scroll away.
+        let at = s.text_rect_any(&["Send To Phone"]).unwrap_or_else(|| s.fail("no card"));
+        for _ in 0..6 {
+            s.act(&format!("scroll {:.0} {:.0} -10", at.center().x, at.center().y));
+            s.idle(3);
+        }
+        assert!(some_text(&s, "Lines of code") && some_text(&s, "For developers"), "the last group reached");
+        look_welcome(&mut s, "news list page scrolled");
+        // Done closes it, saying where it is.
+        click_control(&mut s, "welcome next");
+        assert!(!s.popup_open(), "done");
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0.contains("What's New in Maia")), "where to find it again");
         assert_eq!(seen(), now);
         drop(s);
         // A newer version seen (Maia went back a version): nothing.
@@ -13899,19 +14954,32 @@ mod journeys {
         s.act("text welcome tour");
         s.act("key Enter");
         assert!(tour(&s).kind == crate::tour::Kind::Welcome && !tour(&s).auto, "from the palette");
-        click_control(&mut s, "tour close");
+        click_control(&mut s, "welcome skip");
         assert!(!s.popup_open() && s.app.toast.is_none(), "closed without a word");
         s.app.popup = Popup::options_at(crate::popups::Section::System);
         s.idle(3);
+        // At a big font the section scrolls to it.
+        for _ in 0..6 {
+            if some_text(&s, "What's new") {
+                break;
+            }
+            let c = s.size / 2.0;
+            s.act(&format!("scroll {:.0} {:.0} -10", c.x + 80.0, c.y));
+            s.idle(3);
+        }
         assert!(some_text(&s, "What's new"), "a row in Startup & system");
         click_control(&mut s, "whats new button");
         s.idle(1);
         assert!(tour(&s).kind == crate::tour::Kind::News, "from Options");
         // A film plays to its end, then rests, and nothing wakes the window.
+        s.act("key ArrowRight");
         film_on(&mut s);
         wait_until(&mut s, "the film over", 60, |s| {
             tour(s).film_done()
         });
+        // Memory goes back to the system two seconds (real ones) after decodes settle;
+        // with motion off the film ends inside them.
+        std::thread::sleep(std::time::Duration::from_millis(2200));
         s.idle(3);
         assert_eq!(s.repaint, std::time::Duration::MAX, "nothing left to draw: {:?}", s.repaint);
         // A click on it plays it again.
@@ -13922,6 +14990,7 @@ mod journeys {
         // Animations off: each film shows its last state at once, nothing ticking.
         s.app.cfg.animations = false;
         s.cmd(WhatsNew);
+        s.act("key ArrowRight");
         film_on(&mut s);
         wait_until(&mut s, "the still", 10, |s| tour(s).film_done());
         s.idle(3);
@@ -13954,17 +15023,26 @@ mod journeys {
                 }
             }
         }
-        // The first page scrolls in a short window: its last choice reachable.
-        s.resize(900.0, 420.0);
-        s.cmd(Welcome);
-        s.idle(4);
-        let r = s.text_rect("Follow system light/dark");
-        s.act(&format!("scroll {:.0} {:.0} -20", r.center().x, r.center().y));
-        s.idle(6);
-        for t in ["Single click to open", "Search by meaning", "Startup & system", "Default file manager"] {
-            assert!(some_text(&s, t), "{t:?} scrolled to");
+        // Each step in a short and a narrow window, at a big font: nothing overlaps.
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        for (w, h, fs, sp) in [(900.0, 420.0, 16.5, 1.6), (520.0, 640.0, 16.5, 1.6), (1280.0, 800.0, 20.0, 2.0), (700.0, 460.0, 11.0, 0.7)] {
+            s.resize(w, h);
+            s.cmd(Welcome);
+            s.app.cfg.font_size = fs;
+            s.app.cfg.spacing = sp;
+            for p in 0..6 {
+                s.idle(14);
+                look_welcome(&mut s, &format!("welcome step {p} at {w}x{h}, {fs}/{sp}"));
+                if shots {
+                    s.shot(&format!("welcome-step-{p}-{w}x{h}-{fs}"));
+                }
+                s.act("key ArrowRight");
+            }
+            s.act("key Escape");
         }
-        s.act("key Escape");
+        s.app.cfg.font_size = d.font_size;
+        s.app.cfg.spacing = d.spacing;
+        s.resize(1280.0, 800.0);
         report("welcome tour", &s);
     }
 
@@ -14073,7 +15151,7 @@ mod journeys {
             std::fs::create_dir_all(f.parent().unwrap()).unwrap();
             std::fs::write(f, s).unwrap();
         };
-        wf("README.md", "# weather\n\nToday's forecast in the terminal.\n");
+        wf("README.md", "# weather\n\nToday's forecast in the terminal: the high, the low and the chance of rain for any city, in Celsius or Fahrenheit.\n\n## Install\n\n    cargo install --path .\n\n## Use\n\n    weather Lisbon\n    weather --fahrenheit Porto\n\n## Next\n\n- Wind on the Beaufort scale\n- A week ahead\n- Colours for hot and cold days\n");
         wf("Cargo.toml", "[package]\nname = \"weather\"\nversion = \"0.4.0\"\nedition = \"2024\"\n");
         wf("src/main.rs", "mod forecast;\nmod units;\n\nfn main() {\n    let f = forecast::today(\"Lisbon\");\n    println!(\"{}\", f.summary());\n}\n");
         wf("src/forecast.rs", "pub struct Forecast {\n    pub high: f32,\n    pub low: f32,\n}\n\npub fn today(city: &str) -> Forecast {\n    let _ = city;\n    Forecast { high: 24.0, low: 16.0 }\n}\n");
@@ -14326,76 +15404,135 @@ mod journeys {
             f.shot(&mut s, 2400, "");
             f.finish(&s);
         }
-        if want("picker") {
-            // An app asking for photos to upload: Maia is the dialog.
-            use crate::portal::{Filter, Pick};
-            let images = Filter { name: "Images".into(), rules: vec![(0, "*.jpg".into()), (0, "*.png".into())] };
-            let mut s = film_window(&pics, fonts);
-            s.app.picker = Some(Box::new(crate::picker::Picker::new(Pick { title: "Upload photos".into(), accept_label: "Upload".into(), multiple: true, filters: vec![images], current_filter: Some(0), ..Default::default() })));
-            s.settle();
-            let names: Vec<String> = s.tab().view.iter().map(|&i| s.tab().entries[i as usize].name.clone()).filter(|n| n.starts_with("IMG_")).collect();
-            let mut f = Film::new(&s, "picker");
-            f.shot(&mut s, 1400, "");
-            let picked: Vec<&str> = [0, 2, 5].iter().filter_map(|&i| names.get(i).map(String::as_str)).collect();
-            select_names(&mut s, &picked);
-            f.shot(&mut s, 2200, "Ctrl click");
-            f.finish(&s);
-            s.app.picker = None;
-        }
-        if want("columns") {
+        if want("jump") {
             let mut s = film_window(&h, fonts);
-            select_name(&mut s, "Pictures");
-            let mut f = Film::new(&s, "columns");
-            s.act("key ctrl+shift+7");
-            wait_until(&mut s, "the columns", 10, |s| s.tab().strip.as_ref().is_some_and(|st| st.get(&h.join("Pictures")).is_some()));
-            f.shot(&mut s, 1500, "Ctrl Shift 7");
-            s.act("key ArrowRight");
-            wait_until(&mut s, "into Pictures", 10, |s| s.tab().path == h.join("Pictures") && s.tab().strip.as_ref().is_some_and(|st| st.get(&pics).is_some()));
-            f.shot(&mut s, 2200, "→");
+            // Gone to as a person goes: the app counts each folder left.
+            let walk = |s: &mut Sim, p: &Path| {
+                let panel = s.app.active;
+                s.app.actions.push(crate::app::Action::Navigate { panel, path: p.to_path_buf() });
+                s.settle();
+            };
+            for (dir, n) in [(h.join("Code/weather"), 6), (pics.clone(), 4), (docs.join("Recipes"), 3), (docs.join("Invoices"), 2), (h.join("Music/Night Drive"), 1)] {
+                for _ in 0..n {
+                    walk(&mut s, &dir);
+                    walk(&mut s, &h);
+                }
+            }
+            let mut f = Film::new(&s, "jump");
+            s.act("key ctrl+g");
+            wait_until(&mut s, "the folders", 10, |_| controls_named("jump row").len() >= 4);
+            f.shot(&mut s, 1700, "Ctrl G");
+            s.act("text lis");
+            s.idle(3);
+            f.shot(&mut s, 1200, "");
+            s.act("key Enter");
+            wait_until(&mut s, "in Lisbon", 10, |s| s.tab().path == pics);
+            wait_thumbs(&mut s);
+            f.shot(&mut s, 2200, "Enter");
+            f.finish(&s);
+            let _ = std::fs::remove_file(crate::config::userdata_path());
+        }
+        if want("space") {
+            let mut s = film_window(&h, fonts);
+            s.cmd(SpaceUsed);
+            wait_until(&mut s, "counted", 20, |s| !space(s).counting());
+            // What it counted, as if three days ago the harbour film had not come yet and
+            // Downloads had held a little more.
+            let mut sizes: std::collections::HashMap<String, u64> = space(&s).items.iter().filter_map(|i| Some((i.entry.name.clone(), i.size?))).collect();
+            if let Some(v) = sizes.get_mut("Videos") {
+                *v = v.saturating_sub(24 << 20);
+            }
+            if let Some(v) = sizes.get_mut("Downloads") {
+                *v += 9 << 20;
+            }
+            s.act("key Escape");
+            s.settle();
+            let today = crate::timefmt::local_day(std::time::SystemTime::now());
+            let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - 3 * 86_400;
+            crate::grew::note_in(&crate::grew::book_path(), crate::grew::Reading { day: today - 3, at, dir: h.clone(), sizes });
+            s.cmd(SpaceUsed);
+            wait_until(&mut s, "what grew", 20, |s| !space(s).counting() && space(s).before.is_some());
+            // The whole window, for the ring beside the list.
+            s.act("key f");
+            let mut f = Film::new(&s, "space");
+            f.shot(&mut s, 2200, "");
+            s.act("key Tab");
+            s.idle(20);
+            f.shot(&mut s, 2400, "Tab");
+            s.act("key Escape");
             f.finish(&s);
         }
-        if want("filter") {
-            let mut s = film_window(&docs, fonts);
-            s.act("key ctrl+e");
-            wait_until(&mut s, "every file below", 10, |s| s.tab().entries.iter().any(|e| e.name == "Lemon cake.md"));
-            let mut f = Film::new(&s, "filter");
-            f.shot(&mut s, 1200, "Ctrl E");
-            s.act("key ctrl+f");
-            s.act("text pdf | ext:md -recipes");
-            wait_until(&mut s, "narrowed", 10, |s| s.tab().view.len() == 6);
-            f.shot(&mut s, 2600, "Ctrl F");
-            f.finish(&s);
-        }
-        if want("gitsearch") && crate::media::have("git") {
-            let p = h.join("Code/weather");
-            let mut s = film_window(&p, fonts);
-            wait_until(&mut s, "the branch", 10, |s| branch_now(s) == "main");
-            s.cmd(GitHistory);
-            wait_until(&mut s, "the history", 10, |s| some_text(s, "Convert to Fahrenheit"));
-            let mut f = Film::new(&s, "gitsearch");
-            f.shot(&mut s, 1300, "");
-            s.act("key ctrl+f");
-            s.act("text city");
-            wait_until(&mut s, "found", 10, |s| probe(s).narrowed && listed(s) == ["Read the city from the command line"]);
-            f.shot(&mut s, 2200, "Ctrl F");
-            f.finish(&s);
-        }
-        if want("sorting") {
+        if want("calendar") {
+            // The trip's photos over three days in May: the time of day they were taken
+            // is the files' own.
+            let mut photos: Vec<PathBuf> = std::fs::read_dir(&pics).unwrap().flatten().map(|e| e.path()).collect();
+            photos.sort();
+            let at = |x: i64| crate::timefmt::local_day(std::time::UNIX_EPOCH + std::time::Duration::from_secs(x as u64));
+            for (i, p) in photos.iter().enumerate() {
+                let d = crate::calendar::day_of(2026, 5, if i < 3 { 14 } else if i < 7 { 15 } else { 17 });
+                let mut secs = d * 86_400 + 12 * 3600 + i as i64 * 600;
+                secs += (d - at(secs)) * 86_400;
+                std::fs::File::options().write(true).open(p).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64)).unwrap();
+            }
             let mut s = film_window(&pics, fonts);
-            let first = s.tab().view.iter().map(|&i| s.tab().entries[i as usize].path.clone()).find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("IMG_")));
-            let Some(first) = first else { s.fail("no pictures") };
-            select_path(&mut s, &first);
-            let mut f = Film::new(&s, "sorting");
-            s.cmd(ViewPictures);
-            wait_until(&mut s, "the viewer", 10, |s| matches!(s.app.popup, Popup::Viewer(_)));
-            f.shot(&mut s, 1200, "F3");
-            s.act("key ctrl+1");
-            f.shot(&mut s, 1300, "Ctrl 1");
-            s.act("key c");
-            s.act("key ArrowRight");
-            f.shot(&mut s, 2000, "C →");
+            wait_thumbs(&mut s);
+            let mut f = Film::new(&s, "calendar");
+            s.act("key shift+F3");
+            wait_until(&mut s, "the trip's month", 20, |s| some_text(s, "May 2026") && s.texts.iter().any(|(_, t)| t.starts_with("9 pictures")));
+            for _ in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                s.idle(4);
+            }
+            f.shot(&mut s, 1700, "Shift F3");
+            let days = controls_named("calendar day");
+            let Some(day) = s.texts.iter().filter(|(r, t)| t == "15" && days.iter().any(|d| d.contains(r.center()))).map(|x| x.0).next() else { s.fail("no 15th") };
+            f.shot_click(&mut s, &format!("click {:.0} {:.0}", day.center().x, day.center().y), 1700);
+            s.act("key shift+ArrowRight");
+            s.act("key shift+ArrowRight");
+            f.shot(&mut s, 2300, "Shift → →");
             s.act("key Escape");
-            s.act("key Escape");
+            f.finish(&s);
+        }
+        if want("readme") {
+            let mut s = film_window(&h.join("Code/weather"), fonts);
+            wait_until(&mut s, "the card", 10, |_| controls_named("readme edge").len() == 1);
+            let mut f = Film::new(&s, "readme");
+            f.shot(&mut s, 1800, "");
+            // Its edge pulled down for more of it.
+            let e = controls_named("readme edge")[0].center();
+            let to = e + vec2(0.0, 120.0);
+            s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", e.x, e.y, to.x, to.y));
+            f.shot(&mut s, 2400, "");
+            if let Some(r) = f.rows.last_mut() {
+                r.3 = Some(pos2(to.x * s.ppp, to.y * s.ppp));
+            }
+            f.finish(&s);
+            s.app.cfg.readme_height = 0.0;
+            s.app.cfg_dirty = true;
+            s.settle();
+        }
+        if want("pastes") {
+            let mut s = film_window(&docs, fonts);
+            // Three sets copied in three folders.
+            select_name(&mut s, "Garden plan.md");
+            s.act("key ctrl+c");
+            go(&mut s, &pics);
+            let names: Vec<String> = s.tab().view.iter().map(|&i| s.tab().entries[i as usize].name.clone()).filter(|n| n.starts_with("IMG_")).take(3).collect();
+            select_names(&mut s, &names.iter().map(String::as_str).collect::<Vec<_>>());
+            s.act("key ctrl+c");
+            go(&mut s, &h.join("Music"));
+            select_name(&mut s, "Night Drive");
+            s.act("key ctrl+c");
+            go(&mut s, &h.join("Downloads"));
+            s.app.toast = None;
+            let mut f = Film::new(&s, "pastes");
+            s.act("key ctrl+shift+v");
+            wait_until(&mut s, "the sets", 10, |_| controls_named("paste row").len() == 3);
+            f.shot(&mut s, 2000, "Ctrl Shift V");
+            s.act("text 2");
+            wait_until(&mut s, "the photos pasted", 10, |s| names.iter().all(|n| h.join("Downloads").join(n).exists()) && !s.popup_open());
+            wait_thumbs(&mut s);
+            f.shot(&mut s, 2200, "2");
             f.finish(&s);
         }
         crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
@@ -15192,6 +16329,14 @@ mod journeys {
         assert_eq!(last_copy(&s), "first line here\nsecond line with words\nthird line");
         // A click in the list gives Ctrl+C back to the files.
         let ir = s.app.panels[&s.app.active].inspector_rect.unwrap();
+        // At a big font the folder's README card leaves it below the fold: scrolled to.
+        if !s.texts.iter().any(|(r, t)| t == "notes.txt" && r.left() > s.app.sidebar_width && !ir.contains(r.center())) {
+            let id = s.app.active;
+            let t = s.app.panels.get_mut(&id).unwrap().tab_mut();
+            t.cursor = t.entries.iter().position(|e| e.name == "notes.txt").map(|i| i as u32);
+            t.scroll_to_cursor = true;
+            s.idle(20);
+        }
         let row = s.texts.iter().find(|(r, t)| t == "notes.txt" && r.left() > s.app.sidebar_width && !ir.contains(r.center())).map(|x| x.0).unwrap_or_else(|| s.fail("notes.txt listed"));
         s.idle(40);
         s.act(&format!("click {:.0} {:.0}", row.center().x, row.center().y));
@@ -15429,7 +16574,7 @@ mod journeys {
         wait_until(&mut s, "a decoded", 10, |s| s.app.thumbs.dims(&d.join("a.png")).is_some());
         s.idle(2);
         for b in ["viewer trash", "viewer rotate right", "viewer rotate left", "viewer tags", "viewer compare", "viewer close"] {
-            assert!(has_control(&s, b), "{b} shown with the name");
+            assert!(has_control(&mut s, b), "{b} shown with the name");
         }
         shot_still(&mut s, "viewer-tools-graphite");
         // Delete: to the trash, the next one shown; Ctrl+Z here brings it back.
@@ -15445,7 +16590,7 @@ mod journeys {
         s.act("key Delete");
         wait_until(&mut s, "a in the trash again", 10, |s| !d.join("a.png").exists() && s.app.jobs.iter().all(|j| j.finished_at.is_some()));
         s.act("key Escape");
-        assert!(!s.popup_open());
+        wait_until(&mut s, "the viewer closed", 5, |s| !s.popup_open());
         s.idle(3);
         s.act("key ctrl+z");
         s.settle();
@@ -15547,7 +16692,7 @@ mod journeys {
         s.act("key Escape");
         s.act("key Escape");
         s.act("key Escape");
-        assert!(!s.popup_open());
+        wait_until(&mut s, "the viewer closed", 5, |s| !s.popup_open());
         report("sort pictures", &s);
     }
 
@@ -15958,7 +17103,6 @@ mod journeys {
         let top = crate::fsx::home();
         assert_eq!(strip(&s).chain, vec![top.clone(), home.clone()], "the strip starts at the home folder");
         look(&mut s, "Documents in columns");
-        assert!(some_text(&s, "Columns"), "the status chip names the view");
         assert!(!s.texts.iter().any(|(_, t)| t.ends_with('%')), "no zoom chip: Columns has no zoom");
         assert!(in_list(&s, "Documents").right() < in_list(&s, "notes.txt").left(), "home's column is left of Documents'");
         s.shot("columns-documents");
@@ -16193,10 +17337,19 @@ mod journeys {
         s.shot("columns-paper");
         s.app.cfg.theme = crate::theme::ThemeName::Midnight;
         look(&mut s, "after the themes");
-        // The view chip's popup: Columns marked under the zoom axis; a stop leaves it, the
-        // Columns row goes back.
-        s.click_text("Columns");
-        s.idle(3);
+        // The views popup, from the toolbar's ⋮ menu: Columns marked under the zoom axis; a
+        // stop leaves it, the Columns row goes back.
+        let views = |s: &mut Sim| {
+            let m = controls_named("panel menu")[0];
+            s.act(&format!("click {:.0} {:.0}", m.center().x, m.center().y));
+            s.idle(2);
+            // Further down a long menu: scrolled to, and let come to rest before the click.
+            s.scroll_popup_to("View and size…");
+            s.idle(15);
+            s.click_text("View and size…");
+            s.idle(3);
+        };
+        views(&mut s);
         assert!(matches!(s.app.popup, Popup::Zoom { .. }), "the chip opens the views");
         std::thread::sleep(std::time::Duration::from_millis(300));
         s.idle(10);
@@ -16205,8 +17358,7 @@ mod journeys {
         s.idle(2);
         assert!(!s.tab().settings.column_view && (s.tab().settings.zoom - 0.2).abs() < 1e-3, "a named stop leaves Columns");
         if !s.popup_open() {
-            s.click_text("List");
-            s.idle(3);
+            views(&mut s);
         }
         let row = s.texts.iter().rev().find(|(_, t)| t == "Columns").map(|(r, _)| *r).unwrap_or_else(|| s.fail("the popup's Columns row"));
         s.act(&format!("click {:.0} {:.0}", row.center().x, row.center().y));
@@ -16597,7 +17749,7 @@ mod journeys {
         let mut s = Sim::new(&docs, vec2(1000.0, 640.0));
         s.app.picker = Some(Box::new(Picker::new(Pick { mode: Mode::Save, current_name: "Untitled.md".into(), ..Default::default() })));
         s.settle();
-        let caret = |s: &Sim| egui::TextEdit::load_state(&s.ctx, egui::Id::new("picker name")).and_then(|st| st.cursor.char_range()).map(|r| (r.secondary.index, r.primary.index));
+        let caret = |s: &Sim| egui::TextEdit::load_state(&s.ctx, egui::Id::new("picker name")).and_then(|st| st.cursor.char_range()).map(|r| (r.secondary.index.0, r.primary.index.0));
         // Typed straight away, over the name part: گزارش.md, drawn md.شرازگ.
         s.act("text گزارش");
         assert_eq!(s.app.picker.as_ref().unwrap().name, "گزارش.md");
@@ -16632,4 +17784,1687 @@ mod journeys {
         }
         report("picker persian", &s);
     }
+
+    // ---------------------------------------------------------------- features of 2026-10-26
+
+    /// A popup settled with nothing pointed at, its own text demanded clean.
+    fn look_popup(s: &mut Sim, what: &str) {
+        s.note(format!("look: {what}"));
+        s.act("move -50 -50");
+        s.idle(12);
+        assert!(s.popup_open(), "{what}: the popup is open");
+        s.check_popup_overlap = true;
+        s.idle(2);
+        s.check_popup_overlap = false;
+    }
+
+    /// Nothing left asking for frames once the feature is closed and toasts have gone:
+    /// an idle window costs no CPU.
+    fn settles_idle(s: &mut Sim, what: &str) {
+        s.act("move -50 -50");
+        let t0 = Instant::now();
+        while s.repaint != std::time::Duration::MAX {
+            if t0.elapsed().as_secs() >= 8 {
+                s.fail(&format!("{what}: still asking to be drawn again in {:?}", s.repaint));
+            }
+            s.frame(vec![]);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn click_rect(s: &mut Sim, r: Rect) {
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+    }
+
+    /// The transfers chip and its list: a copy paused there (Space and its button), two
+    /// waiting behind it put in another order with Alt and the arrows, one started at
+    /// once, one cancelled; a queued copy whose name is taken asked about inside the
+    /// list; the chip gone once all is done; the command with nothing running says so.
+    /// In a small window and at the owner's look.
+    #[test]
+    fn transfers_steered_from_the_status_bar() {
+        if !sandboxed() {
+            return;
+        }
+        use std::sync::atomic::Ordering::Relaxed;
+        let home = fixture("transfers");
+        let src = home.join("Outbox");
+        std::fs::create_dir_all(&src).unwrap();
+        let big: Vec<u8> = (0..48_000_000u32).map(|i| (i % 249) as u8).collect();
+        std::fs::write(src.join("film.mkv"), &big).unwrap();
+        for n in ["one.txt", "two.txt", "three.txt", "taken.txt"] {
+            std::fs::write(src.join(n), n).unwrap();
+        }
+        let dest = home.join("Inbox");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("taken.txt"), "already here").unwrap();
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        s.cmd(Transfers);
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0 == "Nothing is being copied or moved"));
+        // The film, held at once so it is still there to steer.
+        s.app.start_job(crate::ops::OpKind::Copy { srcs: vec![src.join("film.mkv")], dest: dest.clone(), decide: Default::default() });
+        s.app.jobs.last().unwrap().pause.store(true, Relaxed);
+        let film = s.app.jobs.last().unwrap().id;
+        wait_until(&mut s, "the film holding the disk", 10, |s| s.app.queue.running() == [film]);
+        for n in ["one.txt", "two.txt", "three.txt"] {
+            s.app.begin_transfer(vec![src.join(n)], dest.clone(), false);
+            s.idle(2);
+        }
+        wait_until(&mut s, "three waiting", 10, |s| s.app.queue.waiting().len() == 3);
+        // Behind them, a name already taken: asked when its turn comes, not now.
+        s.app.begin_transfer(vec![src.join("taken.txt")], dest.clone(), false);
+        s.idle(3);
+        assert!(!matches!(s.app.popup, Popup::Conflict(..)), "no dialog for a queued copy");
+        wait_until(&mut s, "four waiting", 10, |s| s.app.queue.waiting().len() == 4);
+        assert!(some_text(&s, "5 jobs · 0%") || s.texts.iter().any(|(_, t)| t.starts_with("5 jobs · ")), "the chip");
+        click_control(&mut s, "transfers chip");
+        assert!(matches!(s.app.popup, Popup::Transfers(_)), "the list opens above the chip");
+        let chip = controls_named("transfers chip")[0];
+        look_popup(&mut s, "transfers");
+        s.shot("transfers");
+        assert!(some_text(&s, "Copying film.mkv"));
+        assert_eq!(controls_named("transfer waiting").len(), 4);
+        // The waiting ones by the keys: the third first.
+        let ids = s.app.queue.waiting();
+        s.act("key ArrowDown");
+        s.act("key ArrowDown");
+        s.act("key ArrowDown");
+        s.act("key alt+ArrowUp");
+        s.act("key alt+ArrowUp");
+        assert_eq!(s.app.queue.waiting(), [ids[2], ids[0], ids[1], ids[3]], "moved up twice");
+        // A waiting row's buttons show on the row pointed at (and the keyboard's row) only:
+        // the second (two.txt) started now by its button, pointed at first.
+        assert_eq!(controls_named("transfer start now").len(), 1, "only the keyboard's row shows its buttons");
+        let rows = controls_named("transfer waiting");
+        s.act(&format!("move {:.0} {:.0}", rows[2].center().x, rows[2].center().y));
+        s.idle(2);
+        let starts = controls_named("transfer start now");
+        assert_eq!(starts.len(), 2, "the row pointed at shows its buttons too");
+        let start = *starts.iter().find(|b| (b.center().y - rows[2].center().y).abs() < 2.0).unwrap_or_else(|| s.fail("Start now on the row pointed at"));
+        click_rect(&mut s, start);
+        wait_until(&mut s, "two.txt copied past the paused film", 10, |_| dest.join("two.txt").exists());
+        s.idle(2);
+        // The first (one.txt, now second in line) cancelled by its ✕, pointed at first.
+        let rows = controls_named("transfer waiting");
+        s.act(&format!("move {:.0} {:.0}", rows[1].center().x, rows[1].center().y));
+        s.idle(2);
+        let cancel = *controls_named("transfer cancel").iter().find(|b| (b.center().y - rows[1].center().y).abs() < 2.0).unwrap_or_else(|| s.fail("✕ on the row pointed at"));
+        click_rect(&mut s, cancel);
+        wait_until(&mut s, "one.txt cancelled", 10, |s| s.app.queue.waiting().len() == 2);
+        // Space resumes the film; its button, shown while it is pointed at, pauses it again,
+        // and again resumes.
+        s.act("key space");
+        assert!(!s.app.jobs.iter().find(|j| j.id == film).unwrap().pause.load(Relaxed), "resumed by Space");
+        let title = s.text_rect("Copying film.mkv");
+        s.act(&format!("move {:.0} {:.0}", title.center().x, title.center().y));
+        s.idle(2);
+        click_control(&mut s, "transfer pause");
+        assert!(s.app.jobs.iter().find(|j| j.id == film).unwrap().pause.load(Relaxed), "paused by its button");
+        click_control(&mut s, "transfer pause");
+        // three.txt runs after the film, then taken.txt asks inside the list.
+        wait_until(&mut s, "the clash asked in the list", 20, |s| some_text(s, "Keep both"));
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with(" is already there") || t.contains("is already there")), "said in its job");
+        look_popup(&mut s, "transfers asking");
+        s.shot("transfers-clash");
+        click_control(&mut s, "clash keep both");
+        wait_until(&mut s, "everything done", 20, |s| crate::transfers::live(&s.app) == 0);
+        s.idle(3);
+        assert!(!s.popup_open(), "the list closes once there is nothing in it");
+        assert_eq!(std::fs::read(dest.join("film.mkv")).unwrap().len(), big.len());
+        assert!(dest.join("three.txt").exists() && !dest.join("one.txt").exists(), "three copied, one cancelled");
+        assert_eq!(std::fs::read_to_string(dest.join("taken.txt")).unwrap(), "already here", "kept");
+        assert_eq!(std::fs::read_dir(&dest).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("taken")).count(), 2, "both kept");
+        assert!(!s.texts.iter().any(|(r, t)| t.contains(" jobs · ") || (t.contains("job · ") && r.intersects(chip))), "no chip");
+        // In a small window, at a big font: the list fits above the chip.
+        s.resize(560.0, 420.0);
+        s.app.cfg.font_size = 16.5;
+        s.app.cfg.spacing = 1.6;
+        s.app.start_job(crate::ops::OpKind::Copy { srcs: vec![src.join("film.mkv")], dest: home.join("Empty"), decide: Default::default() });
+        s.app.jobs.last().unwrap().pause.store(true, Relaxed);
+        s.idle(3);
+        s.act("key ctrl+shift+j");
+        assert!(matches!(s.app.popup, Popup::Transfers(_)), "Show Transfers by its key");
+        look_popup(&mut s, "transfers small");
+        s.shot("transfers-small");
+        s.act("key Escape");
+        let j = s.app.jobs.last().unwrap();
+        j.cancel.store(true, Relaxed);
+        j.pause.store(false, Relaxed);
+        wait_until(&mut s, "cancelled", 10, |s| crate::transfers::live(&s.app) == 0);
+        settles_idle(&mut s, "transfers");
+        report("transfers", &s);
+    }
+
+    /// Paste From Earlier: three sets copied, the list newest first; the second pasted by
+    /// its digit, the first by a click; a cut set gone from the list once pasted; nothing
+    /// copied yet says so.
+    #[test]
+    fn paste_from_earlier_copies() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("pastes");
+        let docs = home.join("Documents");
+        let mut s = Sim::new(&docs, vec2(1280.0, 800.0));
+        s.idle(3);
+        s.cmd(PasteEarlier);
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0 == "Nothing copied yet"));
+        for (name, key) in [("report.md", "ctrl+c"), ("notes.txt", "ctrl+c"), ("budget 2026.csv", "ctrl+x")] {
+            select_name(&mut s, name);
+            s.act(&format!("key {key}"));
+        }
+        assert_eq!(s.app.pastes.len(), 3);
+        go(&mut s, &home.join("Empty"));
+        s.act("key ctrl+shift+v");
+        assert!(matches!(s.app.popup, Popup::Pastes(_)));
+        assert_eq!(controls_named("paste row").len(), 3);
+        assert!(some_text(&s, "1 file from pastes/Documents"), "said in a few words: the last two folders");
+        look_popup(&mut s, "paste from earlier");
+        s.shot("pastes");
+        // The newest is the cut csv; 2 is notes.txt.
+        s.act("text 2");
+        wait_until(&mut s, "notes pasted", 10, |_| home.join("Empty/notes.txt").exists());
+        assert!(!s.popup_open(), "picked, it closes");
+        s.settle();
+        s.act("key ctrl+shift+v");
+        let rows = controls_named("paste row");
+        click_rect(&mut s, rows[0]);
+        wait_until(&mut s, "the cut moved", 10, |_| home.join("Empty/budget 2026.csv").exists() && !docs.join("budget 2026.csv").exists());
+        s.settle();
+        assert_eq!(s.app.pastes.len(), 2, "the cut set is gone once pasted");
+        // At the owner's look, in a narrow window.
+        s.resize(480.0, 600.0);
+        s.app.cfg.font_size = 16.5;
+        s.app.cfg.spacing = 1.6;
+        s.act("key ctrl+shift+v");
+        look_popup(&mut s, "paste from earlier, narrow");
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        settles_idle(&mut s, "pastes");
+        report("pastes", &s);
+    }
+
+    /// Jump: folders gone to often rank first; a few letters find one, its own name
+    /// counting for more; Enter goes there; a folder since deleted isn't offered.
+    #[test]
+    fn jump_to_where_you_go_most() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("jump");
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        s.idle(3);
+        let trips: [(&str, usize); 4] = [("Documents/Taxes/2025", 5), ("Music/Album", 3), ("Code/maia/src", 2), ("Pictures/Trip", 1)];
+        // Gone to as a user goes: the app counts each folder left.
+        let walk = |s: &mut Sim, p: PathBuf| {
+            let panel = s.app.active;
+            s.app.actions.push(crate::app::Action::Navigate { panel, path: p });
+            s.settle();
+        };
+        for (dir, n) in trips {
+            for _ in 0..n {
+                walk(&mut s, home.join(dir));
+                walk(&mut s, home.clone());
+            }
+        }
+        std::fs::create_dir_all(home.join("Gone soon")).unwrap();
+        for _ in 0..9 {
+            walk(&mut s, home.join("Gone soon"));
+            walk(&mut s, home.clone());
+        }
+        assert!(s.app.ud.visits.len() >= 5, "visits counted: {}", s.app.ud.visits.len());
+        std::fs::remove_dir(home.join("Gone soon")).unwrap();
+        s.act("key ctrl+g");
+        assert!(matches!(s.app.popup, Popup::Jump(_)), "Jump by its key");
+        wait_until(&mut s, "the folders checked", 10, |s| controls_named("jump row").len() >= 4);
+        s.idle(4);
+        let rows: Vec<String> = s.texts.iter().filter(|(_, t)| t.starts_with("~/")).map(|(_, t)| t.clone()).collect();
+        assert!(!rows.iter().any(|t| t.contains("Gone soon")), "a deleted folder isn't offered: {rows:?}");
+        assert!(!rows.iter().any(|t| t.ends_with("/jump")), "nor the folder shown now: {rows:?}");
+        look_popup(&mut s, "jump");
+        s.shot("jump");
+        s.act("text trip");
+        s.idle(3);
+        look_popup(&mut s, "jump narrowed");
+        s.act("key Enter");
+        s.settle();
+        assert!(!s.popup_open());
+        assert_eq!(s.tab().path, home.join("Pictures/Trip"), "went there");
+        // A few letters of the folder's own name beat the same letters further up.
+        s.act("key ctrl+g");
+        wait_until(&mut s, "listed again", 10, |s| controls_named("jump row").len() >= 4);
+        s.act("text tax");
+        s.idle(3);
+        s.act("key Enter");
+        s.settle();
+        assert_eq!(s.tab().path, home.join("Documents/Taxes/2025"));
+        s.resize(460.0, 520.0);
+        s.app.cfg.font_size = 16.5;
+        s.app.cfg.spacing = 1.6;
+        s.act("key ctrl+g");
+        wait_until(&mut s, "listed small", 10, |s| controls_named("jump row").len() >= 1);
+        look_popup(&mut s, "jump small");
+        s.act("key Escape");
+        settles_idle(&mut s, "jump");
+        report("jump", &s);
+    }
+
+    /// Pin To Top: a pinned file first whatever the sort, the pin drawn at its name's end
+    /// in every view, kept through a rename and its undo, and off again; Pin Tab: the tab
+    /// at the left as its icon, without a close button, kept out of Close Other Tabs.
+    #[test]
+    fn pins_in_folders_and_tab_strips() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("pins");
+        let docs = home.join("Documents");
+        let mut s = Sim::new(&docs, vec2(1280.0, 800.0));
+        s.idle(3);
+        let first = |s: &Sim| s.tab().view.first().map(|&i| s.tab().entries[i as usize].name.clone()).unwrap_or_default();
+        assert_eq!(first(&s), "Taxes");
+        select_name(&mut s, "notes.txt");
+        s.cmd(PinToTop);
+        s.settle();
+        assert_eq!(first(&s), "notes.txt", "pinned ahead of the folders");
+        assert!(s.app.ud.pinned.contains(&docs.join("notes.txt")));
+        for v in [ViewDetails, ViewList, ViewLarge, ViewTree, ViewColumns] {
+            s.cmd(v);
+            s.settle();
+            look(&mut s, &format!("pinned in {v:?}"));
+        }
+        s.cmd(ViewDetails);
+        s.settle();
+        s.cmd(SortSizeDesc);
+        s.settle();
+        assert_eq!(first(&s), "notes.txt", "whatever the sort");
+        // Renamed, it stays pinned; the rename undone, too.
+        select_name(&mut s, "notes.txt");
+        s.act("key F2");
+        s.act("key ctrl+a");
+        s.act("text kept.txt");
+        s.act("key Enter");
+        s.settle();
+        assert_eq!(first(&s), "kept.txt", "the pin follows the rename");
+        s.act("key ctrl+z");
+        s.settle();
+        assert_eq!(first(&s), "notes.txt", "and its undo");
+        select_name(&mut s, "notes.txt");
+        s.cmd(PinToTop);
+        s.settle();
+        assert!(s.app.ud.pinned.is_empty(), "again unpins");
+        assert_ne!(first(&s), "notes.txt");
+        // Tabs.
+        s.act("key ctrl+t");
+        s.act("key ctrl+t");
+        s.settle();
+        let p = s.app.panel();
+        assert_eq!(p.tabs.len(), 3);
+        let id = p.tabs[2].id;
+        s.cmd(PinTab);
+        s.idle(20);
+        let p = s.app.panel();
+        assert_eq!(p.tabs[0].id, id, "to the left");
+        assert!(p.tabs[0].pinned && p.tabs[p.active].id == id);
+        look(&mut s, "a pinned tab");
+        s.shot("pinned-tab");
+        // Kept through a restart: the layout as saved, read back and applied.
+        let ctx = s.ctx.clone();
+        let saved = serde_json::to_string(&s.app.layout_snap(&ctx)).unwrap();
+        let back: crate::config::LayoutSnap = serde_json::from_str(&saved).unwrap();
+        assert!(s.app.apply_layout(&back), "the layout applies");
+        s.idle(20);
+        let p = s.app.panel();
+        assert!(p.tabs[0].pinned && p.tabs.iter().filter(|t| t.pinned).count() == 1, "pinned after a restart");
+        s.act("key ctrl+Tab");
+        s.idle(20);
+        assert!(!s.app.panel().tab().pinned);
+        s.cmd(CloseOtherTabs);
+        s.idle(20);
+        assert_eq!(s.app.panel().tabs.len(), 2, "kept out of Close Other Tabs");
+        assert!(s.app.panel().tabs[0].pinned);
+        s.act("key ctrl+1");
+        s.idle(20);
+        s.app.cfg.font_size = 16.5;
+        s.app.cfg.spacing = 1.6;
+        look(&mut s, "a pinned tab at a big font");
+        s.cmd(PinTab);
+        s.idle(20);
+        assert!(!s.app.panel().tabs.iter().any(|t| t.pinned));
+        settles_idle(&mut s, "pins");
+        report("pins", &s);
+    }
+
+    /// A folder's README above its files: shown at its start, dragged taller by its edge
+    /// and kept for every folder, a double click back to the start's height, Show all and
+    /// Show less, closed for this folder alone, and the command that hides them all.
+    #[test]
+    fn readme_card_above_the_files() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("readme");
+        let proj = home.join("Code/maia");
+        std::fs::write(proj.join("README"), format!("Maia\n\n{}", "A paragraph of the README that goes on for a while.\n\n".repeat(40))).unwrap();
+        let mut s = Sim::new(&proj, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(20);
+        wait_until(&mut s, "the card", 10, |s| controls_named("readme edge").len() == 1);
+        s.idle(20);
+        assert!(some_text(&s, "Show all"));
+        look(&mut s, "readme card");
+        s.shot("readme");
+        let list_top = |s: &Sim| s.app.panels[&s.app.active].list_rect.top();
+        let edge = controls_named("readme edge")[0];
+        let before = edge.center().y;
+        s.act(&format!("drag {:.0} {:.0} {:.0} {:.0}", edge.center().x, edge.center().y, edge.center().x, edge.center().y + 120.0));
+        s.idle(4);
+        assert!(s.app.cfg.readme_height > 0.0, "the height kept: {}", s.app.cfg.readme_height);
+        let after = controls_named("readme edge")[0].center().y;
+        assert!((after - before - 120.0).abs() < 8.0, "followed the pointer: {before} to {after}");
+        look(&mut s, "readme card dragged");
+        // Another folder with a README gets the same height.
+        std::fs::write(home.join("Music/README.md"), "# Music\n\nThe albums.\n\n".repeat(30)).unwrap();
+        go(&mut s, &home.join("Music"));
+        s.idle(20);
+        wait_until(&mut s, "the music card", 10, |s| controls_named("readme edge").len() == 1);
+        s.idle(20);
+        let e2 = controls_named("readme edge")[0];
+        assert!((e2.center().y - after).abs() < 8.0, "the same height everywhere: {} vs {after}", e2.center().y);
+        // Double click: the start's own height again.
+        s.act(&format!("dclick {:.0} {:.0}", e2.center().x, e2.center().y));
+        s.idle(20);
+        assert_eq!(s.app.cfg.readme_height, 0.0);
+        // Show all, then Show less.
+        s.click_text("Show all");
+        s.idle(20);
+        assert!(some_text(&s, "Show less"));
+        look(&mut s, "readme open");
+        s.click_text("Show less");
+        s.idle(20);
+        // Closed: gone for this folder, still there for the project.
+        click_control(&mut s, "readme close");
+        s.idle(20);
+        assert!(controls_named("readme edge").is_empty(), "closed");
+        assert!(s.app.ud.readme_hidden.contains(&home.join("Music")));
+        go(&mut s, &proj);
+        s.idle(20);
+        wait_until(&mut s, "the project's card", 10, |s| controls_named("readme edge").len() == 1);
+        // At the owner's look, split, narrow; then the command hides them all.
+        s.app.cfg.font_size = 16.5;
+        s.app.cfg.spacing = 1.6;
+        s.idle(20);
+        look(&mut s, "readme at a big font");
+        s.cmd(SplitRight);
+        s.settle();
+        s.idle(20);
+        look(&mut s, "readme split");
+        s.resize(640.0, 480.0);
+        s.idle(20);
+        look(&mut s, "readme narrow");
+        s.cmd(ToggleReadme);
+        s.idle(20);
+        assert!(!s.app.cfg.show_readme && controls_named("readme edge").is_empty());
+        s.cmd(ToggleReadme);
+        s.idle(20);
+        let _ = list_top(&s);
+        settles_idle(&mut s, "readme");
+        report("readme", &s);
+    }
+
+    /// A picture copied in another app pasted as a picture file, named for the time and
+    /// opened for renaming; copied text as a .txt; nothing usable on the clipboard pastes
+    /// the files Maia copied; a folder that can't be written says so and leaves nothing.
+    #[test]
+    fn paste_a_picture_as_a_file() {
+        if !sandboxed() {
+            return;
+        }
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                *crate::clipboard::OFFER.lock().unwrap() = None;
+            }
+        }
+        let _clear = Clear;
+        let home = fixture("clipfile");
+        let pics = home.join("Pictures");
+        let mut png = vec![];
+        {
+            let mut e = png::Encoder::new(&mut png, 2, 2);
+            e.set_color(png::ColorType::Rgb);
+            e.set_depth(png::BitDepth::Eight);
+            e.write_header().unwrap().write_image_data(&[255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]).unwrap();
+        }
+        *crate::clipboard::OFFER.lock().unwrap() = Some(("image/png".into(), png.clone()));
+        let mut s = Sim::new(&pics, vec2(1280.0, 800.0));
+        s.idle(3);
+        s.act("key ctrl+v");
+        let pasted = |dir: &Path, ext: &str| std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("Pasted ") && p.extension().is_some_and(|e| e == ext)).collect::<Vec<_>>();
+        wait_until(&mut s, "the picture written", 10, |_| pasted(&pics, "png").len() == 1);
+        s.settle();
+        assert_eq!(std::fs::read(&pasted(&pics, "png")[0]).unwrap(), png, "as it was offered");
+        assert!(s.tab().rename.is_some(), "ready to be renamed");
+        s.act("key Escape");
+        s.act("key ctrl+v");
+        wait_until(&mut s, "a second one beside it", 10, |_| pasted(&pics, "png").len() == 2);
+        s.settle();
+        s.act("key Escape");
+        s.act("key ctrl+z");
+        s.settle();
+        assert_eq!(pasted(&pics, "png").len(), 1, "undone");
+        *crate::clipboard::OFFER.lock().unwrap() = Some(("text/plain;charset=utf-8".into(), b"a note from the browser".to_vec()));
+        s.act("key ctrl+v");
+        wait_until(&mut s, "the text written", 10, |_| pasted(&pics, "txt").len() == 1);
+        s.settle();
+        s.act("key Escape");
+        assert_eq!(std::fs::read_to_string(&pasted(&pics, "txt")[0]).unwrap(), "a note from the browser");
+        // Something else: the app's own copy pastes.
+        *crate::clipboard::OFFER.lock().unwrap() = Some(("application/x-other".into(), b"x".to_vec()));
+        go(&mut s, &home.join("Documents"));
+        select_name(&mut s, "report.md");
+        s.act("key ctrl+c");
+        go(&mut s, &pics);
+        s.act("key ctrl+v");
+        wait_until(&mut s, "the copied file pasted", 10, |_| pics.join("report.md").exists());
+        // A folder that can't be written.
+        *crate::clipboard::OFFER.lock().unwrap() = Some(("image/png".into(), png.clone()));
+        use std::os::unix::fs::PermissionsExt;
+        let ro = home.join("Read only");
+        std::fs::create_dir_all(&ro).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        go(&mut s, &ro);
+        s.act("key ctrl+v");
+        wait_until(&mut s, "refused", 10, |s| s.app.toast.as_ref().is_some_and(|t| t.0.starts_with("Couldn't paste here")));
+        assert_eq!(std::fs::read_dir(&ro).unwrap().count(), 0, "nothing left");
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+        settles_idle(&mut s, "paste a picture");
+        report("paste a picture", &s);
+    }
+
+    /// Send To Phone: the address as a code and as text, fetched as a phone would over a
+    /// real connection (one file at once, several as a page, a folder as a zip), the device
+    /// and what it got shown; a photo sent without its place when that is switched on;
+    /// closing stops the server.
+    #[test]
+    fn send_to_a_phone() {
+        if !sandboxed() {
+            return;
+        }
+        use std::io::{Read, Write};
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                *crate::phone::TEST_LAN.lock().unwrap() = None;
+            }
+        }
+        let _clear = Clear;
+        *crate::phone::TEST_LAN.lock().unwrap() = Some(std::net::Ipv4Addr::LOCALHOST);
+        let home = fixture("phone");
+        let docs = home.join("Documents");
+        let fetch = |url: &str| -> (String, Vec<u8>) {
+            let rest = url.strip_prefix("http://").unwrap();
+            let (host, path) = rest.split_once('/').unwrap();
+            let mut c = std::net::TcpStream::connect(host).unwrap();
+            c.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+            write!(c, "GET /{path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").unwrap();
+            let mut b = vec![];
+            c.read_to_end(&mut b).unwrap();
+            let at = b.windows(4).position(|w| w == b"\r\n\r\n").map_or(b.len(), |i| i + 4);
+            (String::from_utf8_lossy(&b[..at]).into_owned(), b[at..].to_vec())
+        };
+        let mut s = Sim::new(&docs, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        // A folder alone, without bsdtar to zip it, can't go.
+        select_name(&mut s, "Taxes");
+        s.cmd(SendToPhone);
+        assert!(!s.popup_open() && s.app.toast.as_ref().is_some_and(|t| t.0.contains("bsdtar")), "says what it needs");
+        select_name(&mut s, "notes.txt");
+        s.cmd(SendToPhone);
+        assert!(matches!(s.app.popup, Popup::Phone(_)));
+        let url = |s: &Sim| match &s.app.popup {
+            Popup::Phone(st) => st.server.shared.lock().unwrap().url.clone(),
+            _ => None,
+        };
+        wait_until(&mut s, "listening", 10, |s| url(s).is_some());
+        let u = url(&s).unwrap().unwrap_or_else(|e| s.fail(&e));
+        assert!(u.starts_with("http://127.0.0.1:") && u.ends_with('/'), "{u}");
+        s.idle(10);
+        assert!(some_text(&s, u.trim_start_matches("http://").trim_end_matches('/')) || s.texts.iter().any(|(_, t)| t.contains("127.0.0.1")), "the address shown");
+        look_popup(&mut s, "send to phone");
+        s.shot("phone");
+        // The code as drawn in the window scans to the address (when frames are painted).
+        if let (Some(dir), Some((w, h, rgb))) = (s.shots_dir(), s.pixels()) {
+            let f = dir.join("phone-scan.png");
+            write_png(&f, w, h, &rgb);
+            if let Ok(o) = std::process::Command::new("zbarimg").args(["--raw", "-q"]).arg(&f).output() {
+                assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), u, "the window's code scans");
+            }
+            let _ = std::fs::remove_file(&f);
+        }
+        let (h, body) = fetch(&u);
+        assert!(h.starts_with("HTTP/1.1 200") && body == std::fs::read(docs.join("notes.txt")).unwrap(), "{h}");
+        wait_until(&mut s, "the phone seen", 10, |s| match &s.app.popup {
+            Popup::Phone(st) => !st.server.shared.lock().unwrap().got.is_empty(),
+            _ => false,
+        });
+        s.idle(4);
+        look_popup(&mut s, "send to phone, sent");
+        s.shot("phone-sent");
+        // Without the token, nothing.
+        let host = u.trim_start_matches("http://").split('/').next().unwrap().to_string();
+        let (h, body) = fetch(&format!("http://{host}/notes.txt"));
+        assert!(h.starts_with("HTTP/1.1 404") && body.is_empty(), "{h}");
+        s.act("key Escape");
+        s.idle(4);
+        assert!(!s.popup_open());
+        wait_until(&mut s, "the server stopped", 10, |_| std::net::TcpStream::connect(u.trim_start_matches("http://").split('/').next().unwrap()).is_err());
+        // Several, a folder among them: a page, and the folder as a zip.
+        let have_bsdtar = Path::new("/usr/bin/bsdtar").exists();
+        let fake = root().join("phone-tools");
+        let _ = std::fs::create_dir_all(&fake);
+        if have_bsdtar {
+            let _ = std::os::unix::fs::symlink("/usr/bin/bsdtar", fake.join("bsdtar"));
+        }
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+        select_names(&mut s, &["Taxes", "report.md"]);
+        s.cmd(SendToPhone);
+        wait_until(&mut s, "listening again", 10, |s| url(s).is_some());
+        let u = url(&s).unwrap().unwrap();
+        let (h, page) = fetch(&u);
+        let page = String::from_utf8_lossy(&page).into_owned();
+        assert!(h.contains("text/html") && page.contains("report.md") && page.contains("Taxes.zip"), "{page}");
+        if have_bsdtar {
+            let k = if page.find("Taxes.zip").unwrap() < page.find("report.md").unwrap() { 0 } else { 1 };
+            let (h, zip) = fetch(&format!("{u}{k}/"));
+            assert!(h.contains("application/zip") && zip.starts_with(b"PK"), "{h}");
+        }
+        look_popup(&mut s, "send to phone, several");
+        s.act("key Escape");
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        // At the owner's look in a small window.
+        s.resize(520.0, 560.0);
+        s.app.cfg.font_size = 16.5;
+        s.app.cfg.spacing = 1.6;
+        select_name(&mut s, "notes.txt");
+        s.cmd(SendToPhone);
+        wait_until(&mut s, "listening small", 10, |s| url(s).is_some());
+        look_popup(&mut s, "send to phone small");
+        s.shot("phone-small");
+        s.act("key Escape");
+        settles_idle(&mut s, "phone");
+        report("phone", &s);
+    }
+
+    /// View Calendar: a folder's pictures by the day they were taken (the file's date for
+    /// those without one), on the newest month; a day clicked selects its pictures in the
+    /// list, Shift and the arrows a run of days; months back and on; no pictures, a word.
+    #[test]
+    fn pictures_on_a_calendar() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("calendar");
+        let trip = home.join("Pictures/Trip");
+        // Three days: four pictures on the 3rd, five on the 5th, three on the 9th, in
+        // the month before this one.
+        let now = crate::timefmt::local_day(std::time::SystemTime::now());
+        let (y, m, _) = crate::calendar::civil(now);
+        let (py, pm) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
+        let day = |d: u32| crate::calendar::day_of(py, pm, d);
+        let names: Vec<PathBuf> = (0..12).map(|i| trip.join(format!("img{i:02}.png"))).collect();
+        for (i, p) in names.iter().enumerate() {
+            let d = if i < 4 { day(3) } else if i < 9 { day(5) } else { day(9) };
+            // Noon in UTC, moved a day when the local day differs.
+            let mut secs = d * 86_400 + 12 * 3600;
+            let at = |x: i64| crate::timefmt::local_day(std::time::UNIX_EPOCH + std::time::Duration::from_secs(x as u64));
+            secs += (d - at(secs)) * 86_400;
+            let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64);
+            std::fs::File::options().write(true).open(p).unwrap().set_modified(t).unwrap();
+            assert_eq!(crate::timefmt::local_day(t), d, "{}", p.display());
+        }
+        let mut s = Sim::new(&home.join("Documents"), vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        s.act("key shift+F3");
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0 == "No pictures here"));
+        go(&mut s, &trip);
+        s.act("key shift+F3");
+        assert!(matches!(s.app.popup, Popup::Calendar(_)));
+        let month = format!("{} {py}", ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][pm as usize - 1]);
+        wait_until(&mut s, "the month of the pictures", 20, |s| some_text(s, &month) && some_text(s, "12 pictures"));
+        look_popup(&mut s, "calendar");
+        s.shot("calendar");
+        // The 5th clicked: its five pictures selected.
+        let days = controls_named("calendar day");
+        assert_eq!(days.len(), 3, "the days with pictures");
+        let fifth = s.texts.iter().filter(|(r, t)| t == "5" && days.iter().any(|d| d.contains(r.center()))).map(|x| x.0).next().unwrap_or_else(|| s.fail("no 5th"));
+        click_rect(&mut s, fifth);
+        s.idle(2);
+        let sel: Vec<String> = s.tab().selected.iter().map(|&i| s.tab().entries[i as usize].name.clone()).collect();
+        assert_eq!(sel.len(), 5, "{sel:?}");
+        assert!(sel.iter().all(|n| ["img04.png", "img05.png", "img06.png", "img07.png", "img08.png"].contains(&n.as_str())));
+        // Shift and Right to the 9th: the run of days.
+        for _ in 0..4 {
+            s.act("key shift+ArrowRight");
+        }
+        s.idle(2);
+        assert_eq!(s.tab().selected.len(), 8, "the 5th to the 9th");
+        look_popup(&mut s, "calendar, days picked");
+        s.act("key PageDown");
+        assert!(!some_text(&s, &month), "the next month");
+        s.act("key PageUp");
+        assert!(some_text(&s, &month));
+        s.act("key Escape");
+        assert!(!s.popup_open());
+        assert_eq!(s.tab().selected.len(), 8, "the selection stays");
+        // At the owner's look, narrow and short.
+        s.resize(520.0, 520.0);
+        s.app.cfg.font_size = 16.5;
+        s.app.cfg.spacing = 1.6;
+        s.act("key shift+F3");
+        wait_until(&mut s, "shown small", 20, |s| some_text(s, &month));
+        look_popup(&mut s, "calendar small");
+        s.shot("calendar-small");
+        s.act("key Escape");
+        settles_idle(&mut s, "calendar");
+        report("calendar", &s);
+    }
+
+    /// Where downloads came from: Group By Origin puts folders first, each site next and
+    /// the unmarked last, in every view; the inspector shows the address, and the list
+    /// groups again when a file is marked later.
+    #[test]
+    fn downloads_grouped_by_where_they_came_from() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("origin");
+        let dl = home.join("Downloads");
+        std::fs::write(dl.join("notes.txt"), "plain").unwrap();
+        let mark = |f: &str, name: &str, url: &str| {
+            use std::os::unix::ffi::OsStrExt;
+            let c = std::ffi::CString::new(dl.join(f).as_os_str().as_bytes()).unwrap();
+            let n = std::ffi::CString::new(name).unwrap();
+            unsafe { libc::setxattr(c.as_ptr(), n.as_ptr(), url.as_ptr().cast(), url.len(), 0) == 0 }
+        };
+        if !mark("setup.tar.gz", "user.xdg.origin.url", "https://www.example.com/files/setup.tar.gz?x=1") {
+            eprintln!("origin: no user attributes here, skipped");
+            return;
+        }
+        assert!(mark("archive.zip", "user.xdg.referrer.url", "https://github.com/someone/thing/releases"));
+        let mut s = Sim::new(&dl, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        s.cmd(GroupOrigin);
+        // A group's header: its name, then its count.
+        let header = |s: &Sim, t: &str| s.texts.iter().find(|(_, x)| x == t || x.starts_with(&format!("{t} "))).map(|x| x.0);
+        wait_until(&mut s, "the sites as groups", 10, |s| header(s, "example.com").is_some() && header(s, "github.com").is_some() && header(s, "Unknown").is_some());
+        let y = |s: &Sim, t: &str| header(s, t).unwrap_or_else(|| s.fail(&format!("no {t} group"))).center().y;
+        assert!(y(&s, "Folders") < y(&s, "example.com") && y(&s, "github.com") < y(&s, "Unknown"), "folders first, the unmarked last");
+        for v in [ViewDetails, ViewList, ViewLarge, ViewTree] {
+            s.cmd(v);
+            s.settle();
+            look(&mut s, &format!("grouped by origin in {v:?}"));
+        }
+        s.cmd(ViewDetails);
+        s.settle();
+        s.shot("origin-groups");
+        // The address in the inspector.
+        select_name(&mut s, "setup.tar.gz");
+        s.cmd(ToggleInspector);
+        // The preview read, so its toolbar (and the name's pill) stays where it is.
+        wait_until(&mut s, "the preview", 10, |s| s.app.panels[&s.app.active].inspector_rect.is_some_and(|ir| s.texts.iter().any(|(r, t)| t == "gz" && ir.contains(r.center()))));
+        look(&mut s, "the inspector beside groups");
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("no inspector"));
+        let pill = s.texts.iter().find(|(r, t)| t == "setup.tar.gz" && ir.contains(r.center())).map(|x| x.0).unwrap_or_else(|| s.fail("no name pill"));
+        click_rect(&mut s, pill);
+        s.idle(20);
+        wait_until(&mut s, "the address shown", 10, |s| some_text(s, "example.com/files/setup.tar.gz"));
+        s.shot("origin-inspector");
+        click_rect(&mut s, pill);
+        // Marked later, read again when the folder changes.
+        assert!(mark("notes.txt", "user.xdg.origin.url", "https://files.example.org/notes.txt"));
+        crate::origin::invalidate(&dl.join("notes.txt"));
+        let id = s.app.active;
+        s.app.panels.get_mut(&id).unwrap().tab_mut().reload();
+        s.settle();
+        wait_until(&mut s, "regrouped", 10, |s| header(s, "files.example.org").is_some());
+        s.app.cfg.font_size = 16.5;
+        s.app.cfg.spacing = 1.6;
+        look(&mut s, "grouped by origin at a big font");
+        settles_idle(&mut s, "origin");
+        report("origin", &s);
+    }
+
+    /// Lines of code in the inspector: a project folder's languages and lines, counted
+    /// on a thread; a folder that isn't a project's top shows none.
+    #[test]
+    fn lines_of_code_in_the_inspector() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("loc");
+        let code = home.join("Code");
+        std::fs::write(code.join("maia/src/extra.py"), "# a tool\nprint('x')\nprint('y')\n").unwrap();
+        let mut s = Sim::new(&code, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        select_name(&mut s, "maia");
+        s.cmd(ToggleInspector);
+        s.idle(4);
+        // The details card, from the name in the preview's header (found once the preview
+        // has slid open: the name sits at its left and moves with it).
+        look(&mut s, "a project in the inspector");
+        let ir = s.app.panels[&s.app.active].inspector_rect.unwrap_or_else(|| s.fail("no inspector"));
+        let pill = s.texts.iter().find(|(r, t)| t == "maia" && ir.contains(r.center())).map(|x| x.0).unwrap_or_else(|| s.fail("no name in the header"));
+        click_rect(&mut s, pill);
+        wait_until(&mut s, "the languages counted", 15, |s| some_text(s, "Rust") && some_text(s, "Python"));
+        s.idle(4);
+        s.shot("lines-of-code");
+        select_name(&mut s, "deep");
+        s.idle(20);
+        assert!(!some_text(&s, "Rust"), "not a project: no count");
+        s.app.cfg.font_size = 16.5;
+        s.app.cfg.spacing = 1.6;
+        select_name(&mut s, "maia");
+        wait_until(&mut s, "shown again", 15, |s| some_text(s, "Rust"));
+        s.shot("lines-of-code-big");
+        s.resize(700.0, 500.0);
+        s.idle(4);
+        s.shot("lines-of-code-narrow");
+        settles_idle(&mut s, "lines of code");
+        report("lines of code", &s);
+    }
+
+    /// Space used's map and what grew: an earlier reading of the folder makes each row say
+    /// how it changed and the whole folder how much since; the map lays every item out as
+    /// a block, a folder's block opens it and Backspace comes back; at the owner's look.
+    #[test]
+    fn space_map_and_what_grew() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("spacemap");
+        let d = home.join("Disk");
+        for (n, size) in [("Films", 3_000_000usize), ("Photos", 1_500_000), ("Music", 600_000), ("Mail", 200_000)] {
+            std::fs::create_dir_all(d.join(n)).unwrap();
+            std::fs::write(d.join(n).join("data.bin"), vec![1u8; size]).unwrap();
+        }
+        std::fs::write(d.join("notes.txt"), vec![b'n'; 90_000]).unwrap();
+        // Three days ago the films were smaller and the mail bigger.
+        let today = crate::timefmt::local_day(std::time::SystemTime::now());
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - 3 * 86_400;
+        let sizes = [("Films", 1_000_000u64), ("Photos", 1_500_000), ("Music", 600_000), ("Mail", 2_200_000), ("notes.txt", 90_000)].iter().map(|(n, s)| (n.to_string(), *s)).collect();
+        crate::grew::note_in(&crate::grew::book_path(), crate::grew::Reading { day: today - 3, at, dir: d.clone(), sizes });
+        let mut s = Sim::new(&d, vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        s.cmd(SpaceUsed);
+        wait_until(&mut s, "counted", 20, |s| !space(s).counting() && space(s).before.is_some());
+        s.idle(10);
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with('+')), "a change said beside a row");
+        assert!(s.texts.iter().any(|(_, t)| t.starts_with('−')), "and a shrink");
+        assert!(some_text(&s, "Change"), "sorted by change on offer");
+        look(&mut s, "what grew");
+        s.shot("what-grew");
+        // By change: what grew most first, what shrank most last; S back to size.
+        click_control(&mut s, "space sort change");
+        s.idle(10);
+        let names = space_names(&s);
+        assert_eq!((names.first().map(String::as_str), names.last().map(String::as_str)), (Some("Films"), Some("Mail")), "{names:?}");
+        s.act("key s");
+        s.idle(10);
+        assert_eq!(space_names(&s), ["Films", "Photos", "Music", "Mail", "notes.txt"], "biggest first again");
+        // The map.
+        click_control(&mut s, "space map");
+        s.idle(20);
+        // Each block says its size and share under its name.
+        let shares: Vec<Rect> = s.texts.iter().filter(|(_, t)| t.contains(" · ") && t.ends_with('%')).map(|x| x.0).collect();
+        // The smallest block has no room for its size at the biggest fonts.
+        assert!(shares.len() == 5 || s.app.cfg.font_size > 17.0 && shares.len() == 4, "a block an item: {}", shares.len());
+        for (i, a) in shares.iter().enumerate() {
+            for b in &shares[i + 1..] {
+                assert!(!a.intersects(*b), "blocks apart: {a:?} {b:?}");
+            }
+        }
+        look(&mut s, "the map");
+        s.shot("space-map-blocks");
+        assert!(s.texts.iter().any(|(_, t)| t.ends_with("· 56%")), "the films' share");
+        // The films' block, pointed at, then clicked open.
+        let films = s.texts.iter().find(|(_, t)| t == "Films" && true).map(|x| x.0).unwrap_or_else(|| s.fail("no Films block"));
+        let films = s.texts.iter().filter(|(r, t)| t == "Films" && r.left() > films.left()).map(|x| x.0).last().unwrap_or(films);
+        let at = films.center() + vec2(0.0, 60.0);
+        s.act(&format!("move {:.0} {:.0}", at.x, at.y));
+        s.idle(2);
+        assert_eq!(controls_named("space block").len(), 1, "the block under the pointer");
+        s.act(&format!("click {:.0} {:.0}", at.x, at.y));
+        s.idle(4);
+        if space(&s).dir != d.join("Films") {
+            s.act(&format!("dclick {:.0} {:.0}", at.x, at.y));
+        }
+        wait_until(&mut s, "into the films", 10, |s| space(s).dir == d.join("Films"));
+        s.act("key Backspace");
+        wait_until(&mut s, "back up", 10, |s| space(s).dir == d);
+        s.app.cfg.font_size = 16.5;
+        s.app.cfg.spacing = 1.6;
+        s.idle(20);
+        look(&mut s, "the map at a big font");
+        s.resize(560.0, 440.0);
+        s.idle(20);
+        look(&mut s, "the map small");
+        s.shot("space-map-small");
+        click_control(&mut s, "space contents");
+        s.idle(20);
+        look(&mut s, "what grew small");
+        s.act("key Escape");
+        settles_idle(&mut s, "space map");
+        report("space map", &s);
+    }
+
+    /// Thirty thousand files grouped by where they came from: every file's attributes read
+    /// on the worker while the list keeps drawing, compared with grouping by type.
+    #[test]
+    fn huge_tree_grouped_by_origin_stays_responsive() {
+        if !sandboxed() {
+            return;
+        }
+        // A flattened walk is never grouped: one big folder, a tenth of it downloads.
+        let dir = root().join("home/bigorigin");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sites = ["example.com", "github.com", "files.example.org", "cdn.example.net"];
+        for i in 0..30_000 {
+            let p = dir.join(format!("file{i:05}.{}", ["txt", "png", "pdf", "zip"][i % 4]));
+            std::fs::write(&p, b"").unwrap();
+            if i % 10 == 0 {
+                use std::os::unix::ffi::OsStrExt;
+                let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+                let url = format!("https://{}/{i}", sites[i / 10 % 4]);
+                unsafe { libc::setxattr(c.as_ptr(), c"user.xdg.origin.url".as_ptr(), url.as_ptr().cast(), url.len(), 0) };
+            }
+        }
+        let mut s = Sim::new(&dir, vec2(1280.0, 800.0));
+        s.settle();
+        let n = s.tab().entries.len();
+        let worst_of = |s: &mut Sim, what: &str, c: Cmd, secs: u64| {
+            let i = s.frame_ms.len();
+            let t0 = Instant::now();
+            s.cmd(c);
+            // Until the groups stop changing for half a second.
+            let mut quiet = Instant::now();
+            let mut last = (s.tab().group_labels.len(), s.tab().rows.len());
+            while quiet.elapsed().as_millis() < 500 && t0.elapsed().as_secs() < secs {
+                s.frame(vec![]);
+                std::thread::sleep(std::time::Duration::from_millis(4));
+                let now = (s.tab().group_labels.len(), s.tab().rows.len());
+                if now != last {
+                    last = now;
+                    quiet = Instant::now();
+                }
+            }
+            let v = &s.frame_ms[i..];
+            let worst = v.iter().cloned().fold(0.0f32, f32::max);
+            let mut sorted = v.to_vec();
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            let p95 = sorted.get(sorted.len() * 95 / 100).copied().unwrap_or(0.0);
+            eprintln!("sim origin: {what}: {n} files, {} groups after {:.1}s, {} frames, p95 {p95:.1} worst {worst:.1} ms", s.tab().group_labels.len(), t0.elapsed().as_secs_f32(), v.len());
+            (p95, worst)
+        };
+        let (_, by_type) = worst_of(&mut s, "by type", GroupType, 20);
+        let (p95, by_origin) = worst_of(&mut s, "by origin", GroupOrigin, 60);
+        assert!(s.tab().group_labels.iter().any(|l| l == crate::origin::UNKNOWN) && s.tab().group_labels.iter().any(|l| l == "github.com"), "grouped: {:?}", s.tab().group_labels);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(p95 < 40.0, "frames while origins land: p95 {p95:.1} ms");
+        let budget = (by_type * 2.0).max(200.0 * (n as f32 / 200_000.0).max(1.0));
+        assert!(by_origin < budget, "the worst frame grouping by origin, {by_origin:.1} ms, against {by_type:.1} by type");
+    }
+
+
+    // ------------------------------------------------------------------ the GitHub page
+
+    /// A `gh` that answers as GitHub did (the captured answers in tests.rs): who is signed
+    /// in, the profile, the recent commits, one commit's files. `signed_in` false: gh
+    /// knows nobody.
+    fn fake_gh(name: &str, signed_in: bool) -> PathBuf {
+        let d = root().join(name);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("viewer.json"), crate::tests::GH_VIEWER).unwrap();
+        std::fs::write(d.join("history.json"), crate::tests::GH_HISTORY).unwrap();
+        let user = if signed_in { "echo ana-lima" } else { "true" };
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{log}'\ncase \"$1 $2\" in\n  'config get') {user} ;;\n  'api graphql') case \"$*\" in *'-F id='*) cat '{d}/history.json' ;; *) cat '{d}/viewer.json' ;; esac ;;\n  'api repos/'*) echo '{{\"files\":[{{\"filename\":\"src/lamp.rs\",\"additions\":4,\"deletions\":1}},{{\"filename\":\"README.md\",\"additions\":2,\"deletions\":0}}]}}' ;;\n  *) exit 1 ;;\nesac\n",
+            log = d.join("log").display(),
+            d = d.display()
+        );
+        let gh = d.join("gh");
+        std::fs::write(&gh, script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        d
+    }
+
+    fn github_page(s: &Sim) -> &crate::github::Page {
+        &s.app.github
+    }
+
+    /// The profile page from `gh`: the card, the year, the timeline; the arrows through
+    /// it, a commit's files opened under it, Enter into a clone's history and O to the
+    /// commit on GitHub; Refresh; Up to Computer. Without gh, and signed out, it says
+    /// what to do. Wide and narrow, in a light theme and at the owner's look.
+    #[test]
+    fn github_profile_page() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("github");
+        let d = fake_gh("fake-gh", true);
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(d.clone()));
+        let _ = std::fs::remove_dir_all(crate::github::cache_dir());
+        // The badges as read from the profile page earlier today (curl is no test's).
+        std::fs::create_dir_all(crate::github::cache_dir()).unwrap();
+        std::fs::write(crate::github::cache_dir().join("achievements.txt"), "starstruck\tStarstruck\t1\t4\nquickdraw\tQuickdraw\t0\t1\npull-shark\tPull Shark\t2\t2\ngalaxy-brain\tGalaxy Brain\t0\t1").unwrap();
+        // A clone of one repository on this computer, known to Recent Projects.
+        let clone = home.join("Code/lamp");
+        std::fs::create_dir_all(&clone).unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&clone).args(args).output().unwrap().status.success(), "git {args:?}");
+        git(&["init", "-q"]);
+        git(&["remote", "add", "origin", "https://github.com/ana-lima/lamp.git"]);
+        crate::projects::save_cache(&crate::projects::cache_path(), &[clone.clone()]).unwrap();
+        let mut s = Sim::new(&home.join("Documents"), vec2(1280.0, 800.0));
+        s.app.github = Default::default();
+        s.cmd(GitHubProfile);
+        assert!(crate::tab::is_github(&s.tab().path));
+        wait_until(&mut s, "the profile", 20, |s| some_text(s, "Ana Lima") && some_text(s, "1,318 contributions in the last year"));
+        assert!(some_text(&s, "1,204 followers · 12 following") && some_text(&s, "@ana-lima · she/her") && some_text(&s, "Porto"));
+        // The card's sections, scrolled to where a big font puts them.
+        let name = s.text_rect("Ana Lima");
+        let mut seen = std::collections::HashSet::new();
+        let mut badges = 0;
+        for _ in 0..8 {
+            for w in ["Achievements", "Languages", "Organisations"] {
+                if some_text(&s, w) {
+                    seen.insert(w);
+                }
+            }
+            badges = badges.max(controls_named("github achievement").len());
+            s.act(&format!("scroll {:.0} {:.0} -4", name.center().x, name.center().y));
+            s.idle(4);
+        }
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert_eq!(badges, 4);
+        for _ in 0..8 {
+            s.act(&format!("scroll {:.0} {:.0} 4", name.center().x, name.center().y));
+        }
+        s.idle(4);
+        assert!(some_text(&s, "Keep the lamp lit") && some_text(&s, "Created kettle"));
+        wait_until(&mut s, "said when it was asked", 10, |s| s.texts.iter().any(|(_, t)| t.starts_with("Updated")));
+        assert_eq!(s.tab().title(), "GitHub");
+        look(&mut s, "github page");
+        s.shot("github");
+        // The arrows: the first shows where it is, then down to a commit of the clone.
+        s.act("key ArrowDown");
+        assert!(github_page(&s).keyed);
+        let lamp = github_page(&s).data.as_ref().unwrap().items.iter().position(|i| i.repo == "ana-lima/lamp" && i.sha.is_some()).unwrap();
+        for _ in 0..lamp {
+            s.act("key ArrowDown");
+        }
+        assert_eq!(github_page(&s).sel, lamp);
+        // Its files: not in the clone (a fresh one), so from GitHub, under the row.
+        wait_until(&mut s, "the commit's files", 10, |s| some_text(s, "src/lamp.rs") && some_text(s, "README.md"));
+        assert!(s.texts.iter().any(|(_, t)| t.contains("on this computer at ~/")), "the clone is known");
+        look(&mut s, "a commit opened");
+        s.shot("github-commit-open");
+        // O: the commit on GitHub.
+        let before = launched().len();
+        s.act("key O");
+        s.idle(2);
+        assert!(launched()[before..].iter().any(|l| l.contains("https://github.com/ana-lima/lamp/commit/")), "{:?}", &launched()[before..]);
+        // Narrow: the card shrinks to a line over the year (narrower than the page needs
+        // for its column at this font size).
+        let k = s.app.cfg.font_size / 13.0;
+        s.resize((s.app.sidebar_width + 460.0 * k).round(), 700.0);
+        // The panel eases to its new width.
+        s.idle(30);
+        assert!(!some_text(&s, "Languages") && s.texts.iter().any(|(_, t)| t.starts_with("Ana Lima · 1,204 followers")));
+        look(&mut s, "github narrow");
+        s.shot("github-narrow");
+        s.resize(1280.0, 800.0);
+        // A light theme and the owner's look.
+        s.app.cfg.theme = crate::theme::ThemeName::MinLight;
+        s.app.cfg.font_size = 16.5;
+        s.app.cfg.spacing = 1.6;
+        s.idle(3);
+        look(&mut s, "github light, big");
+        s.shot("github-light-big");
+        s.app.cfg.font_size = 13.0;
+        s.app.cfg.spacing = 1.0;
+        // Refresh asks again.
+        let asked = std::fs::read_to_string(d.join("log")).unwrap().lines().filter(|l| l.starts_with("api graphql")).count();
+        s.cmd(Refresh);
+        wait_until(&mut s, "asked again", 10, |s| !github_page(s).busy());
+        assert!(std::fs::read_to_string(d.join("log")).unwrap().lines().filter(|l| l.starts_with("api graphql")).count() > asked);
+        // Enter on the commit: its clone, its history open on it.
+        s.act("key Enter");
+        s.settle();
+        assert_eq!(s.tab().path, clone);
+        assert!(history_open(&s), "the commit in its clone's history");
+        // Back to the page, then up to Computer.
+        s.cmd(Back);
+        s.settle();
+        assert!(crate::tab::is_github(&s.tab().path));
+        s.cmd(Up);
+        assert!(crate::tab::is_computer(&s.tab().path));
+        // No gh: what to install. Signed out: what to do.
+        let none = root().join("no-tools");
+        std::fs::create_dir_all(&none).unwrap();
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(none.clone()));
+        let _ = std::fs::remove_dir_all(crate::github::cache_dir());
+        s.app.github = Default::default();
+        s.cmd(GitHubProfile);
+        wait_until(&mut s, "no gh", 10, |s| some_text(s, "Your GitHub profile shows here once GitHub's gh is installed"));
+        look(&mut s, "github without gh");
+        let out = fake_gh("fake-gh-out", false);
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = Some(out));
+        s.app.github = Default::default();
+        s.idle(2);
+        wait_until(&mut s, "signed out", 10, |s| some_text(s, "Sign in to GitHub with gh auth login"));
+        // Nothing is written into a place: a paste or a new folder there does nothing.
+        s.cmd(NewFolder);
+        assert!(s.tab().entries.is_empty() && !std::path::Path::new(crate::tab::GITHUB).exists());
+        crate::drives::FAKE.with(|f| *f.borrow_mut() = None);
+        settles_idle(&mut s, "github");
+        report("github", &s);
+    }
+
+    // ------------------------------------------------------------------ the listing
+
+    /// The listing's motion: a folder's pictures fanning out on a rest; rows gliding as
+    /// the filter and the sort change, icons as the window narrows; the years on a long
+    /// dated list's scrollbar and the month while it is dragged; cut files outlined, still
+    /// once they settle; the ring of kinds in the status bar; a refused name shaking and
+    /// saying why; a labelled folder in its colour.
+    #[test]
+    fn listing_in_motion() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("motion");
+        // A long list over eight years, one file a week back from now.
+        let dated = home.join("Dated");
+        std::fs::create_dir_all(&dated).unwrap();
+        let now = std::time::SystemTime::now();
+        for i in 0..400u64 {
+            let p = dated.join(format!("note{i:03}.txt"));
+            std::fs::write(&p, "x").unwrap();
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(now - std::time::Duration::from_secs(i * 7 * 86_400)).unwrap();
+        }
+        crate::tags::toggle(&[home.join("Documents/Taxes")], "Red", true).unwrap();
+        let mut s = Sim::new(&home.join("Pictures"), vec2(1280.0, 800.0));
+        s.cmd(ViewLarge);
+        s.settle();
+        // Peek: rest on Trip.
+        let trip = list_text(&s, "Trip");
+        s.act(&format!("move {:.0} {:.0}", trip.center().x, trip.center().y - 30.0));
+        wait_until(&mut s, "the cards out", 10, |s| s.tab().peek.showing().is_some_and(|(p, o)| p.ends_with("Trip") && o >= 1.0));
+        s.idle(10);
+        // Trip is in the top row: the fan comes down over it rather than over the toolbar.
+        let (fan, view) = s.tab().peek.fan().unwrap_or_else(|| s.fail("no fan drawn"));
+        assert!(fan.is_positive() && view.contains_rect(fan), "the fan stays in the view: {fan:?} in {view:?}");
+        s.shot("peek");
+        s.act("move -50 -50");
+        wait_until(&mut s, "the cards back", 10, |s| s.tab().peek.showing().is_none());
+        // The ring: only pictures in Trip.
+        go(&mut s, &home.join("Pictures/Trip"));
+        let ring = *controls_named("folder at a glance").first().unwrap_or_else(|| s.fail("no ring"));
+        s.act(&format!("move {:.0} {:.0}", ring.center().x, ring.center().y));
+        s.idle(40);
+        assert!(some_text(&s, "Pictures 100%"), "the ring says what fills the folder");
+        s.shot("glance");
+        // Icons reflow as the window narrows.
+        s.act("move -50 -50");
+        s.idle(3);
+        s.resize(760.0, 800.0);
+        s.idle(1);
+        let anim = s.app.cfg.animations;
+        assert_eq!(s.tab().glide.moving() > 0, anim, "icons glide to their new rows, when things move at all");
+        s.settle();
+        s.idle(20);
+        assert_eq!(s.tab().glide.moving(), 0);
+        look(&mut s, "icons after the reflow");
+        s.resize(1280.0, 800.0);
+        // The filter: rows glide up as others drop out, and come back.
+        go(&mut s, &home.join("Big"));
+        s.cmd(ViewDetails);
+        s.settle();
+        s.cmd(FocusFilter);
+        s.act("text .rs");
+        s.idle(1);
+        let mut moved = 0;
+        for _ in 0..6 {
+            s.idle(1);
+            moved = moved.max(s.tab().glide.moving());
+        }
+        assert_eq!(moved > 0, anim, "rows on their way");
+        s.idle(30);
+        assert_eq!(s.tab().glide.moving(), 0, "settled");
+        s.act("key Escape");
+        s.settle();
+        look(&mut s, "after the filter");
+        // A sort moves them too.
+        s.cmd(SortSize);
+        s.idle(2);
+        s.idle(30);
+        assert_eq!(s.tab().glide.moving(), 0);
+        // The date ribbon: years on the scrollbar of the dated list.
+        go(&mut s, &dated);
+        s.cmd(SortModified);
+        s.settle();
+        s.idle(20);
+        let years: Vec<i32> = s.tab().ribbon.marks.iter().map(|m| m.1).collect();
+        assert!(years.len() >= 7 && years.windows(2).all(|w| w[0] > w[1]), "newest year first: {years:?}");
+        let lr = s.app.panels[&s.app.active].list_rect;
+        s.act(&format!("move {:.0} {:.0}", lr.right() - 6.0, lr.center().y));
+        s.idle(20);
+        let shown: Vec<String> = years.iter().map(|y| y.to_string()).filter(|y| some_text(&s, y)).collect();
+        assert!(shown.len() >= 3, "the years named while pointed at: {shown:?}");
+        s.shot("ribbon-years");
+        // Dragging the scrollbar: the month passing.
+        s.act(&format!("down {:.0} {:.0}", lr.right() - 6.0, lr.top() + 40.0));
+        for k in 1..=10 {
+            s.act(&format!("move {:.0} {:.0}", lr.right() - 6.0, lr.top() + 40.0 + k as f32 * 40.0));
+        }
+        let months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+        assert!(s.texts.iter().any(|(_, t)| months.iter().any(|m| t.starts_with(m) && t.len() > m.len() + 4)), "a month and its year beside the thumb");
+        s.shot("ribbon-month");
+        s.act(&format!("up {:.0} {:.0}", lr.right() - 6.0, lr.top() + 440.0));
+        s.act("move -50 -50");
+        s.idle(30);
+        // Cut files: outlined, marching a moment, then still.
+        go(&mut s, &home.join("Documents"));
+        select_name(&mut s, "notes.txt");
+        s.act("key ctrl+x");
+        s.idle(2);
+        // (Without motion a toast may still ask for frames: only the marching is checked.)
+        if anim {
+            assert!(s.repaint < std::time::Duration::from_millis(100), "marching");
+        }
+        settles_idle(&mut s, "cut files rest");
+        // A taken name: the field shakes and says why; Escape leaves it as it was.
+        select_name(&mut s, "notes.txt");
+        s.act("key F2");
+        s.act("key ctrl+a");
+        s.act("text report.md");
+        s.act("key Enter");
+        s.idle(2);
+        assert!(s.tab().rename.is_some(), "still renaming");
+        assert!(some_text(&s, "“report.md” is already here"));
+        s.idle(30);
+        s.shot("rename-refused");
+        s.act("key ctrl+a");
+        s.act("key Backspace");
+        s.idle(2);
+        assert!(some_text(&s, "A name can't be empty"), "the reason follows the name");
+        s.act("key Escape");
+        s.idle(2);
+        assert!(s.tab().rename.is_none() && home.join("Documents/notes.txt").exists());
+        // The labelled folder, in every view.
+        for v in [ViewDetails, ViewList, ViewMedium, ViewLarge] {
+            s.cmd(v);
+            look(&mut s, "a coloured folder");
+        }
+        // Into a folder: the path's new name and its line.
+        go(&mut s, &home.join("Documents/Taxes/2025"));
+        s.idle(20);
+        look(&mut s, "breadcrumbs moved");
+        settles_idle(&mut s, "listing in motion");
+        report("listing in motion", &s);
+    }
+
+    // ------------------------------------------------------------------ pictures
+
+    /// Pictures: the viewer grows out of the thumbnail and back; its filmstrip rises at
+    /// the bottom and goes to a picture; two compared over one another with a line to
+    /// drag; the preview's colours, copied; a folder sorted by colour.
+    #[test]
+    fn pictures_in_their_own_light() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("light");
+        let trip = home.join("Pictures/Trip");
+        let mut s = Sim::new(&trip, vec2(1280.0, 800.0));
+        s.cmd(ViewLarge);
+        s.settle();
+        s.idle(10);
+        select_name(&mut s, "img03.png");
+        s.cmd(ViewPictures);
+        let growing = matches!(&s.app.popup, Popup::Viewer(v) if v.grow.is_some());
+        assert_eq!(growing, s.app.cfg.animations, "grows out of its thumbnail");
+        s.idle(30);
+        assert!(matches!(&s.app.popup, Popup::Viewer(v) if v.grow.is_none()));
+        // The filmstrip: the pointer at the bottom.
+        s.act("move 640 780");
+        s.idle(20);
+        let strip = controls_named("viewer filmstrip");
+        assert!(strip.len() >= 5, "{}", strip.len());
+        s.shot("filmstrip");
+        let at = |s: &Sim| if let Popup::Viewer(v) = &s.app.popup { v.at } else { usize::MAX };
+        let before = at(&s);
+        let other = *strip.iter().find(|r| (r.center().x - 640.0).abs() > 60.0).unwrap();
+        click_rect(&mut s, other);
+        s.idle(3);
+        assert_ne!(at(&s), before, "went to the picture clicked");
+        s.act("move 640 400");
+        s.idle(30);
+        assert!(controls_named("viewer filmstrip").is_empty(), "the strip goes down again");
+        // Over one another: W pins this one and draws the line; a drag moves it.
+        s.act("key ArrowRight");
+        s.act("key W");
+        let wipe = |s: &Sim| if let Popup::Viewer(v) = &s.app.popup { v.wipe } else { None };
+        assert_eq!(wipe(&s), Some(0.5));
+        s.act("key ArrowRight");
+        s.idle(5);
+        s.act("drag 640 400 300 400");
+        assert!(wipe(&s).is_some_and(|f| f < 0.4), "{:?}", wipe(&s));
+        // A small picture in a big window: the line stays on the pictures.
+        let line = if let Popup::Viewer(v) = &s.app.popup { v.wipe_line() } else { None };
+        let (x, (l, r)) = line.unwrap_or_else(|| s.fail("no wipe line"));
+        assert!(r - l < 900.0 && x >= l && x <= r, "line at {x} across {l}..{r}");
+        look_popup(&mut s, "pictures over one another");
+        s.shot("wipe");
+        s.act("key Escape");
+        assert_eq!(wipe(&s), None);
+        assert!(matches!(&s.app.popup, Popup::Viewer(v) if v.pin.is_none()));
+        // Closing puts it back where it came from.
+        s.act("key Escape");
+        assert_eq!(matches!(&s.app.popup, Popup::Viewer(v) if v.shrink.is_some()), s.app.cfg.animations, "shrinks back");
+        wait_until(&mut s, "the viewer gone", 5, |s| !s.popup_open());
+        // The preview's colours: one copied.
+        s.cmd(ToggleInspector);
+        wait_until(&mut s, "the colours", 20, |s| controls_named("picture colour").len() >= 2);
+        // The preview slides open: its chips' places once it rests.
+        s.idle(20);
+        let chip = controls_named("picture colour")[0];
+        s.shot("colours-in-preview");
+        click_rect(&mut s, chip);
+        s.idle(2);
+        assert!(s.copied.last().is_some_and(|c| c.starts_with('#') && c.len() == 7), "{:?}", s.copied.last());
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0.starts_with("Copied #")));
+        s.cmd(ToggleInspector);
+        // Sorted by colour: in the order of their colours, the broken one last.
+        go(&mut s, &home.join("Pictures"));
+        go(&mut s, &trip);
+        s.cmd(SortColour);
+        wait_until(&mut s, "the colours read", 30, |s| s.tab().entries.iter().filter(|e| crate::colours::sortable(e)).all(|e| crate::colours::sort_key(e).is_some()));
+        s.settle();
+        s.idle(4);
+        let keys: Vec<u64> = s.tab().view.iter().map(|&i| crate::colours::sort_key(&s.tab().entries[i as usize]).unwrap_or(u64::MAX)).collect();
+        assert!(keys.windows(2).all(|w| w[0] <= w[1]), "{keys:?}");
+        look(&mut s, "sorted by colour");
+        s.cmd(ViewLarge);
+        s.settle();
+        s.shot("sorted-by-colour");
+        settles_idle(&mut s, "pictures");
+        report("pictures in their own light", &s);
+    }
+
+    // ------------------------------------------------------------------ jobs
+
+    /// A copy into a folder that has a tab of its own: the tab's ring while it runs (paused
+    /// here), the card's speed line, both gone once it is done.
+    #[test]
+    fn copies_show_their_speed_and_their_tab() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("jobs-show");
+        let heavy = home.join("Heavy");
+        let dest = home.join("Dest");
+        std::fs::create_dir_all(&heavy).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        for i in 0..2 {
+            std::fs::write(heavy.join(format!("big{i}.bin")), vec![7u8; 24 << 20]).unwrap();
+        }
+        let mut s = Sim::new(&heavy, vec2(1280.0, 800.0));
+        let id = s.app.active;
+        s.app.actions.push(crate::app::Action::NewTab { panel: id, path: dest.clone(), select: None, focus: false });
+        s.settle();
+        let srcs = vec![heavy.join("big0.bin"), heavy.join("big1.bin")];
+        s.app.start_job(crate::ops::OpKind::Copy { srcs, dest: dest.clone(), decide: Default::default() });
+        s.app.jobs[0].pause.store(true, std::sync::atomic::Ordering::Relaxed);
+        s.idle(80);
+        if s.app.jobs[0].progress.lock().unwrap().finished {
+            eprintln!("sim jobs: the copy finished before it could be paused; nothing to watch");
+        } else {
+            assert!(!controls_named("tab progress").is_empty(), "the destination's tab shows the copy");
+            assert!(!controls_named("job speed").is_empty(), "the card draws its speed");
+            s.app.jobs[0].pause.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        wait_jobs(&mut s, "the copy");
+        s.idle(3);
+        assert!(controls_named("tab progress").is_empty(), "done: the folder's own icon again");
+        assert_eq!(std::fs::metadata(dest.join("big1.bin")).unwrap().len(), 24 << 20);
+        // Nothing is written into a place.
+        s.app.start_job(crate::ops::OpKind::Copy { srcs: vec![heavy.join("big0.bin")], dest: PathBuf::from(crate::tab::GITHUB), decide: Default::default() });
+        assert!(s.app.jobs.iter().all(|j| !matches!(&j.kind, crate::ops::OpKind::Copy { dest, .. } if crate::tab::is_place(dest))), "refused");
+        let _ = std::fs::remove_dir_all(&heavy);
+        let _ = std::fs::remove_dir_all(&dest);
+        report("copies", &s);
+    }
+
+    // ------------------------------------------------------------------ themes
+
+    /// Choosing a theme: hovering a card shows it on the window a frame later (the frame
+    /// between is the old one, kept for the wash), and every theme draws cleanly.
+    #[test]
+    fn themes_wash_in_and_all_read_cleanly() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("themes-all");
+        let mut s = Sim::new(&home.join("Documents"), vec2(1280.0, 800.0));
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        s.idle(3);
+        s.cmd(ChooseTheme);
+        s.idle(5);
+        let card = s.text_rect("Lagoon");
+        s.act(&format!("move {:.0} {:.0}", card.center().x, card.center().y));
+        s.idle(3);
+        assert_eq!(s.app.pal.bg, crate::theme::palette(crate::theme::ThemeName::Lagoon).bg, "the hovered theme on the window");
+        // Escape goes back to Options, a second one closes it.
+        s.act("key Escape");
+        s.act("key Escape");
+        wait_until(&mut s, "the picker closed", 5, |s| !s.popup_open());
+        assert_eq!(s.app.pal.bg, crate::theme::palette(crate::theme::ThemeName::Graphite).bg, "only hovered: the chosen theme back");
+        for t in crate::theme::ThemeName::ALL {
+            s.app.cfg.theme = t;
+            s.idle(3);
+            s.check_overlap = true;
+            s.idle(1);
+            s.check_overlap = false;
+        }
+        s.app.cfg.theme = crate::theme::ThemeName::Graphite;
+        settles_idle(&mut s, "themes");
+        report("themes", &s);
+    }
+
+    fn ctl(what: &str) -> Option<Rect> {
+        crate::ui::CONTROLS.with(|c| c.borrow().iter().find(|(_, _, w)| *w == what).map(|(_, r, _)| *r))
+    }
+
+    fn click_on(s: &mut Sim, r: Rect) {
+        s.act(&format!("click {:.0} {:.0}", r.center().x, r.center().y));
+    }
+
+    /// The redesigned window, worked as a person would: the status bar's words, the
+    /// toolbar's filter by Ctrl+F, the right-click menu's row of icons by mouse and by
+    /// keys, "Open in ›", the preview's ⋯ menu, the sidebar's filter appearing on typing,
+    /// trash and the toast's Undo, a dialog's quiet Cancel and red main button, same-named
+    /// tabs, the window's title and a picked tile under the cursor.
+    #[test]
+    fn redesigned_window_by_hand() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("redesign");
+        let dir = home.join("maia/src");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(home.join("notes/src")).unwrap();
+        for (n, len) in [("one.txt", 1_500usize), ("two.txt", 2_500), ("three.txt", 500)] {
+            std::fs::write(dir.join(n), "x".repeat(len)).unwrap();
+        }
+        let mut s = Sim::new(&dir, vec2(1280.0, 800.0));
+        s.settle();
+        // The status bar says it in words; Ctrl+F puts the keys in the toolbar's filter.
+        assert!(some_text(&s, "3 files · 4.5 KB"), "the summary: {:?}", s.texts.iter().rev().take(6).collect::<Vec<_>>());
+        s.act("key ctrl+f");
+        s.idle(2);
+        assert!(s.app.panels[&s.app.active].filter_has_focus, "Ctrl+F focuses the toolbar's filter");
+        s.act("text one");
+        s.settle();
+        assert!(some_text(&s, "1 of 3 files · 1.5 KB"), "filtered, said so");
+        let field = ctl("panel menu").unwrap_or_else(|| s.fail("the ⋮ menu"));
+        assert!(s.texts.iter().any(|(r, t)| t == "one" && r.center().y < field.bottom() + 4.0), "the filter, in the toolbar");
+        s.act("key Escape");
+        s.settle();
+        look(&mut s, "status bar");
+        s.shot("redesign-status");
+        // The right-click menu: Cut, Copy, Rename, Duplicate and Delete across its top.
+        let one = s.text_rect("one.txt");
+        s.act(&format!("click {:.0} {:.0}", one.center().x, one.center().y));
+        s.act(&format!("click {:.0} {:.0} right", one.center().x, one.center().y));
+        s.idle(4);
+        let icons = controls_named("menu action");
+        assert_eq!(icons.len(), 5, "five icons across the menu's top");
+        look_popup(&mut s, "menu with icons");
+        s.shot("redesign-menu");
+        assert!(!s.texts.iter().any(|(_, t)| t == "Cut" || t == "Duplicate" || t == "Move To Trash"), "not repeated as rows");
+        click_on(&mut s, icons[1]);
+        s.idle(2);
+        assert!(matches!(&s.app.clipboard, Some((p, false)) if p == &vec![dir.join("one.txt")]), "Copy by its icon");
+        // By the keys: Up from the first row onto the icons, Right to Cut's neighbour Copy
+        // and on to Rename, Enter.
+        s.act("key shift+F10");
+        s.idle(3);
+        s.act("key ArrowUp");
+        s.act("key ArrowRight");
+        s.act("key ArrowRight");
+        s.shot("redesign-menu-keys");
+        s.act("key Enter");
+        s.idle(3);
+        assert!(s.tab().rename.is_some(), "Rename, reached with the keys");
+        s.act("key Escape");
+        s.idle(2);
+        // Open in › New Tab.
+        let tabs = s.app.panels[&s.app.active].tabs.len();
+        let one = s.text_rect("one.txt");
+        s.act(&format!("click {:.0} {:.0} right", one.center().x, one.center().y));
+        s.idle(3);
+        s.click_text("Open in");
+        s.idle(2);
+        assert!(some_text(&s, "Right Split") && some_text(&s, "New Window"), "the four places, under one");
+        s.shot("redesign-open-in");
+        s.click_text("New Tab");
+        s.settle();
+        assert_eq!(s.app.panels[&s.app.active].tabs.len(), tabs + 1, "opened in a new tab");
+        s.act("key ctrl+w");
+        s.settle();
+        // The preview's ⋯ menu.
+        select_path(&mut s, &dir.join("two.txt"));
+        s.cmd(ToggleInspector);
+        s.settle();
+        assert!(ctl("preview menu").is_some() && ctl("Edit (Shift+F4)").is_some(), "name, Edit, ⋯ and ✕");
+        let wraps = inspector(&s).wraps();
+        assert!(open_preview_menu(&mut s), "the ⋯ button");
+        s.idle(4);
+        s.shot("redesign-preview-menu");
+        s.click_text("Wrap lines");
+        s.idle(2);
+        assert_ne!(inspector(&s).wraps(), wraps, "Wrap lines from the menu");
+        s.cmd(ToggleInspector);
+        s.settle();
+        // The sidebar's filter: hidden, then there as soon as one types at the sidebar.
+        assert!(!some_text(&s, "Filter sidebar…"), "no filter row until typed into");
+        let side = (s.app.sidebar_width * 0.5, 760.0);
+        s.act(&format!("click {:.0} {:.0}", side.0, side.1));
+        s.act(&format!("move {:.0} {:.0}", side.0, side.1));
+        s.act("text tra");
+        s.idle(3);
+        assert!(sidebar_text(&s, "Trash").is_some() && sidebar_text(&s, "Home").is_none(), "the sidebar narrowed");
+        assert!(s.tab().filter.is_empty(), "the list's filter untouched");
+        s.shot("redesign-sidebar-filter");
+        for _ in 0..3 {
+            s.act("key Backspace");
+        }
+        let list = s.app.panels[&s.app.active].list_rect;
+        click_on(&mut s, list);
+        s.idle(3);
+        assert!(!some_text(&s, "Filter sidebar…"), "empty and left: gone again");
+        // Trash with Delete; the toast says so and its Undo brings it back.
+        select_path(&mut s, &dir.join("three.txt"));
+        s.act("key Delete");
+        wait_until(&mut s, "the toast's Undo", 10, |_| ctl("toast undo").is_some());
+        assert!(!dir.join("three.txt").exists());
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0 == "three.txt moved to Trash"));
+        s.idle(3);
+        s.shot("redesign-undo-toast");
+        click_on(&mut s, ctl("toast undo").unwrap());
+        wait_until(&mut s, "three.txt back", 10, |_| dir.join("three.txt").exists());
+        s.idle(3);
+        // Another change: the earlier toast's Undo would take back the wrong thing.
+        select_path(&mut s, &dir.join("three.txt"));
+        s.act("key Delete");
+        wait_until(&mut s, "the toast's Undo again", 10, |_| ctl("toast undo").is_some());
+        s.cmd(NewFolder);
+        s.idle(3);
+        s.act("key Escape");
+        s.idle(2);
+        assert!(s.app.toast.as_ref().is_some_and(|t| t.0.starts_with("Created ")), "a new folder says so too");
+        s.act("key ctrl+z");
+        s.idle(3);
+        assert!(ctl("toast undo").is_none(), "undone by the keys: the Undo goes");
+        s.act("key ctrl+z");
+        wait_until(&mut s, "three.txt back by the keys", 10, |_| dir.join("three.txt").exists());
+        s.app.toast = None;
+        // A dialog's way out: quiet Cancel, Esc and Enter, and the red main button.
+        select_path(&mut s, &dir.join("three.txt"));
+        s.act("key shift+Delete");
+        s.idle(3);
+        assert!(s.popup_open() && some_text(&s, "Cancel"), "asked first");
+        look_popup(&mut s, "delete for good");
+        s.shot("redesign-dialog");
+        s.act("key Escape");
+        s.idle(2);
+        assert!(!s.popup_open() && dir.join("three.txt").exists(), "Esc is the way out");
+        s.act("key shift+Delete");
+        s.idle(3);
+        s.click_text("Cancel");
+        s.idle(2);
+        assert!(!s.popup_open() && dir.join("three.txt").exists(), "so is Cancel");
+        s.act("key shift+Delete");
+        s.idle(3);
+        s.act("key Enter");
+        wait_until(&mut s, "deleted for good", 10, |_| !dir.join("three.txt").exists());
+        // Same-named tabs, and the window's title.
+        s.settle();
+        assert_eq!(s.app.window_title, "src · Maia");
+        let id = s.app.active;
+        s.app.actions.push(crate::app::Action::NewTab { panel: id, path: home.join("notes/src"), select: None, focus: true });
+        s.settle();
+        // A new tab grows in over a tenth of a second of the clock.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        s.idle(4);
+        s.shot("redesign-same-name-tabs");
+        assert!(some_text(&s, "· maia") && some_text(&s, "· notes"), "the parents tell them apart: {:?}", s.texts.iter().filter(|t| t.0.top() < 40.0).map(|t| t.1.clone()).collect::<Vec<_>>());
+        assert_eq!(s.app.window_title, "src · Maia", "the title follows the tab shown");
+        s.app.actions.push(crate::app::Action::Navigate { panel: id, path: home.clone() });
+        s.settle();
+        assert_eq!(s.app.window_title, format!("{} · Maia", home.file_name().unwrap().to_string_lossy()));
+        assert!(!some_text(&s, "· maia"), "no longer shared: plain again");
+        s.cmd(Computer);
+        s.settle();
+        assert_eq!(s.app.window_title, "Computer · Maia");
+        s.act("key ctrl+w");
+        s.settle();
+        // A picked tile under the cursor, another picked beside it.
+        s.cmd(ViewLarge);
+        s.settle();
+        {
+            let t = s.tab_mut();
+            let picked: Vec<u32> = t.entries.iter().enumerate().filter(|(_, e)| e.name.ends_with(".txt")).map(|(i, _)| i as u32).collect();
+            t.selected = picked.iter().copied().collect();
+            t.cursor = picked.first().copied();
+        }
+        look(&mut s, "picked tiles");
+        s.shot("redesign-tiles");
+        report("redesign", &s);
+    }
+
+    /// Something missing, explained once: the toast's "How to install" gives the command
+    /// for the family a (fake) os-release names, with Copy; the name alone elsewhere.
+    #[test]
+    fn missing_tool_how_to_install() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("howto");
+        let mut s = Sim::new(&home, vec2(1280.0, 800.0));
+        for (release, want) in [("ID=pop\nID_LIKE=\"ubuntu debian\"\n", Some("sudo apt install libarchive-tools")), ("ID=cachyos\nID_LIKE=arch\n", Some("sudo pacman -S libarchive")), ("ID=nixos\n", None)] {
+            crate::needs::fake(release);
+            s.app.toast("Sending folders needs bsdtar");
+            s.idle(2);
+            let b = ctl("toast how to install").unwrap_or_else(|| s.fail("How to install on the toast"));
+            click_on(&mut s, b);
+            wait_until(&mut s, "the system known", 10, |_| crate::needs::family().is_some());
+            s.idle(3);
+            assert!(matches!(s.app.popup, Popup::Install { tool: "bsdtar" }));
+            look_popup(&mut s, "how to install");
+            match want {
+                Some(c) => {
+                    assert!(some_text(&s, c), "{c}");
+                    s.shot("howto-install");
+                    s.click_text("Copy");
+                    s.idle(2);
+                    assert!(!s.popup_open() && s.app.toast.as_ref().is_some_and(|t| t.0 == "Copied the install command"));
+                }
+                None => {
+                    assert!(s.texts.iter().any(|(_, t)| t.contains("Install the bsdtar package")), "the name alone");
+                    assert!(!some_text(&s, "Copy"), "nothing to copy");
+                    s.act("key Escape");
+                    s.idle(2);
+                }
+            }
+        }
+        report("howto", &s);
+    }
+
+    /// Both high-contrast themes through the list, the sidebar, a dialog, the preview and
+    /// a code preview, under the overlap checks.
+    #[test]
+    fn high_contrast_themes_through_the_window() {
+        if !sandboxed() {
+            return;
+        }
+        let home = fixture("contrast");
+        let dir = home.join("Documents");
+        std::fs::write(dir.join("main.rs"), "// a comment\nfn main() {\n    let x: u32 = 42;\n    println!(\"{x}\");\n}\n").unwrap();
+        let mut s = Sim::new(&dir, vec2(1280.0, 800.0));
+        for t in [crate::theme::ThemeName::HighContrastDark, crate::theme::ThemeName::HighContrastLight] {
+            s.app.cfg.theme = t;
+            s.settle();
+            let tag = if t == crate::theme::ThemeName::HighContrastDark { "dark" } else { "light" };
+            {
+                let tb = s.tab_mut();
+                let n = tb.entries.len().min(2) as u32;
+                tb.selected = (0..n).collect();
+                tb.cursor = Some(0);
+            }
+            look(&mut s, &format!("{tag}: list"));
+            s.shot(&format!("contrast-{tag}-list"));
+            select_path(&mut s, &dir.join("main.rs"));
+            s.cmd(ToggleInspector);
+            s.settle();
+            look(&mut s, &format!("{tag}: code preview"));
+            s.shot(&format!("contrast-{tag}-code"));
+            s.cmd(ToggleInspector);
+            s.settle();
+            s.act("key shift+Delete");
+            s.idle(3);
+            look_popup(&mut s, &format!("{tag}: dialog"));
+            s.shot(&format!("contrast-{tag}-dialog"));
+            s.act("key Escape");
+            s.cmd(Options);
+            s.idle(4);
+            look_popup(&mut s, &format!("{tag}: options"));
+            s.act("key Escape");
+            s.idle(2);
+        }
+        report("contrast", &s);
+    }
+
 }

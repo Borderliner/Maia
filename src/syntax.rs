@@ -241,6 +241,13 @@ const LANGS: &[(&[&str], Lang)] = &[
 ];
 
 /// Language for a file name, if it is code or markup we know.
+impl Lang {
+    /// What starts a comment to the end of the line, and what opens and closes one.
+    pub fn comments(&self) -> (&'static [&'static str], Option<(&'static str, &'static str)>) {
+        (self.line, self.block)
+    }
+}
+
 pub fn lang_for(name: &str) -> Option<&'static Lang> {
     let lower = name.to_ascii_lowercase();
     let ext = match lower.as_str() {

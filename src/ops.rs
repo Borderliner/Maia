@@ -21,6 +21,9 @@ pub enum Conflict {
     Merge,
     /// Land under this name instead.
     Rename(String),
+    /// Asked inside the job when it comes to it: a transfer queued behind others is
+    /// answered when its turn comes, not before it starts.
+    Ask,
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +116,29 @@ pub struct Progress {
     pub go: bool,
     /// When it started after waiting its turn (speed and time left count from here).
     pub since: Option<std::time::Instant>,
+    /// Files (anything but a folder) to copy, and copied: "412 of 640 files".
+    pub total_files: usize,
+    pub done_files: usize,
+    /// A name already taken where the job is putting something, waiting for an answer.
+    pub clash: Option<Clash>,
+    /// The answer, from the window: what to do, and whether for the others too.
+    pub answer: Option<(Conflict, bool)>,
+    /// "Same for the other N" is ticked for the clash shown.
+    pub same: bool,
+    /// Time spent waiting for answers, left out of the speed.
+    pub held: std::time::Duration,
+}
+
+/// A clash the job stopped at: `name` is already in the folder it is putting it in.
+#[derive(Clone, Debug)]
+pub struct Clash {
+    pub name: String,
+    /// "newer by 2 days", said of the one already there.
+    pub note: String,
+    /// Both are folders, so they can be merged.
+    pub dirs: bool,
+    /// Further items of the job whose names are taken too.
+    pub others: usize,
 }
 
 pub struct Job {
@@ -253,17 +279,19 @@ impl Gate<'_> {
 fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
     match kind {
         OpKind::Copy { srcs, dest, decide } => {
-            let total: u64 = srcs.iter().map(|s| tree_size(s)).sum();
+            let (total, files) = srcs.iter().map(|s| tree_stats(s)).fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
             {
                 let mut g = p.lock().unwrap();
                 g.total_bytes = total * cancel.weight();
                 g.total_items = srcs.len();
+                g.total_files = files;
             }
-            for s in srcs {
+            let mut same = None;
+            for (i, s) in srcs.iter().enumerate() {
                 if cancel.stop() {
                     break;
                 }
-                let policy = decide.get(s).cloned().unwrap_or(Conflict::KeepBoth);
+                let Some(policy) = decide_one(s, dest, decide, &srcs[i + 1..], &mut same, p, cancel, ctx) else { break };
                 let Some(d) = resolve_dest(s, dest, &policy, p) else { continue };
                 if s.is_dir() && inside(d.landed(), s) {
                     p.lock().unwrap().errors.push(format!("Can't copy {} into itself", s.display()));
@@ -271,7 +299,7 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 }
                 let merge = policy == Conflict::Merge && d.replace.is_none();
                 let fresh = fs::symlink_metadata(&d.to).is_err();
-                let r = checked(cancel, p, &d.to, copy_tree(s, &d.to, p, cancel, ctx, merge, false)).and_then(|_| match &d.replace {
+                let r = checked(cancel, p, &d.to, copy_tree(s, &d.to, p, cancel, ctx, merge, Label::Fresh)).and_then(|_| match &d.replace {
                     Some(t) => swap_in(&d.to, t),
                     None => Ok(()),
                 });
@@ -302,11 +330,13 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
         OpKind::Move { srcs, dest, decide } => {
             p.lock().unwrap().total_items = srcs.len();
             let mut later = vec![];
-            for s in srcs {
+            let mut same = None;
+            for (i, s) in srcs.iter().enumerate() {
                 if cancel.stop() {
                     break;
                 }
-                move_one(s, dest, decide.get(s).cloned().unwrap_or(Conflict::KeepBoth), p, cancel, ctx, &mut later);
+                let Some(policy) = decide_one(s, dest, decide, &srcs[i + 1..], &mut same, p, cancel, ctx) else { break };
+                move_one(s, dest, policy, p, cancel, ctx, &mut later);
             }
             finish_moves(later, p);
         }
@@ -351,7 +381,7 @@ fn run(kind: &OpKind, p: &Mutex<Progress>, cancel: &Gate, ctx: &egui::Context) {
                 // Over something: written beside it and swapped in once whole.
                 let over = fs::symlink_metadata(d).is_ok();
                 let to = if over { unique_dest(d.parent().unwrap_or(d), &format!(".{}.maia-part", name_of(d))) } else { d.clone() };
-                match checked(cancel, p, &to, copy_tree(s, &to, p, cancel, ctx, false, false)).and_then(|_| if over { swap_in(&to, d) } else { Ok(()) }) {
+                match checked(cancel, p, &to, copy_tree(s, &to, p, cancel, ctx, false, Label::Fresh)).and_then(|_| if over { swap_in(&to, d) } else { Ok(()) }) {
                     Ok(()) => {
                         let mut g = p.lock().unwrap();
                         g.produced.push((s.clone(), d.clone()));
@@ -629,9 +659,14 @@ fn move_one(s: &PathBuf, dest: &Path, policy: Conflict, p: &Mutex<Progress>, can
         },
         // Cross-device: copy and put in place; the original goes later.
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            p.lock().unwrap().total_bytes += tree_size(s) * cancel.weight();
-            let skipped = p.lock().unwrap().errors.len();
-            let r = checked(cancel, p, &d.to, copy_tree(s, &d.to, p, cancel, ctx, merge, true)).and_then(|_| match &d.replace {
+            let (bytes, files) = tree_stats(s);
+            {
+                let mut g = p.lock().unwrap();
+                g.total_bytes += bytes * cancel.weight();
+                g.total_files += files;
+            }
+            let errors_before = p.lock().unwrap().errors.len();
+            let r = checked(cancel, p, &d.to, copy_tree(s, &d.to, p, cancel, ctx, merge, Label::Keep)).and_then(|_| match &d.replace {
                 Some(t) => swap_in(&d.to, t),
                 None => Ok(()),
             });
@@ -641,7 +676,7 @@ fn move_one(s: &PathBuf, dest: &Path, policy: Conflict, p: &Mutex<Progress>, can
             // Something inside was skipped (a special file, an unreadable entry): the copy
             // is not the whole of it, so the original stays beside it.
             let whole = || {
-                if p.lock().unwrap().errors.len() > skipped {
+                if p.lock().unwrap().errors.len() > errors_before {
                     return Err(std::io::Error::other("not all of it could be copied, so the original was kept"));
                 }
                 Ok(())
@@ -808,9 +843,10 @@ fn resolve_dest(src: &Path, dest_dir: &Path, conflict: &Conflict, p: &Mutex<Prog
     if !exists || target == src {
         return Some(Dest { to: if exists { unique_dest(dest_dir, &name) } else { target }, replace: None });
     }
-    let newer = || crate::compare::newer(fs::metadata(src).and_then(|m| m.modified()).ok(), fs::metadata(&target).and_then(|m| m.modified()).ok());
+    let modified = |f: &Path| fs::metadata(f).and_then(|m| m.modified()).ok();
+    let newer = || crate::compare::newer(modified(src), modified(&target));
     match conflict {
-        Conflict::KeepBoth | Conflict::Rename(_) => Some(Dest { to: unique_dest(dest_dir, &name), replace: None }),
+        Conflict::KeepBoth | Conflict::Rename(_) | Conflict::Ask => Some(Dest { to: unique_dest(dest_dir, &name), replace: None }),
         Conflict::Newer if !newer() => {
             p.lock().unwrap().done_items += 1;
             None
@@ -822,6 +858,86 @@ fn resolve_dest(src: &Path, dest_dir: &Path, conflict: &Conflict, p: &Mutex<Prog
         Conflict::Merge if target.is_dir() && src.is_dir() => Some(Dest { to: target, replace: None }),
         Conflict::Merge | Conflict::Overwrite | Conflict::Newer => Some(Dest { to: unique_dest(dest_dir, &format!(".{name}.maia-part")), replace: Some(target) }),
     }
+}
+
+/// What to do with `s`: as decided before the job started, or, for one left to ask
+/// about whose name is taken, as answered in the window. "Same for the others" answers
+/// the rest of `rest` too. None when the job was cancelled while it waited.
+#[allow(clippy::too_many_arguments)]
+fn decide_one(s: &Path, dest: &Path, decide: &HashMap<PathBuf, Conflict>, rest: &[PathBuf], same: &mut Option<Conflict>, p: &Mutex<Progress>, gate: &Gate, ctx: &egui::Context) -> Option<Conflict> {
+    let policy = decide.get(s).cloned().unwrap_or(Conflict::KeepBoth);
+    if policy != Conflict::Ask {
+        return Some(policy);
+    }
+    let target = dest.join(s.file_name()?);
+    let Ok(there) = fs::symlink_metadata(&target) else { return Some(Conflict::KeepBoth) };
+    if target == s {
+        return Some(Conflict::KeepBoth);
+    }
+    let dirs = there.is_dir() && s.is_dir();
+    // A folder is never older or newer as a whole, and only two folders merge.
+    let fit = |c: Conflict| match c {
+        Conflict::Merge if !dirs => Conflict::Overwrite,
+        Conflict::Newer if s.is_dir() => Conflict::Overwrite,
+        c => c,
+    };
+    if let Some(c) = same.clone() {
+        return Some(fit(c));
+    }
+    let others = rest.iter().filter(|r| decide.get(*r) == Some(&Conflict::Ask) && r.file_name().is_some_and(|n| fs::symlink_metadata(dest.join(n)).is_ok())).count();
+    let ours = fs::metadata(s).and_then(|m| m.modified()).ok();
+    let note = clash_note(there.modified().ok(), ours);
+    {
+        let mut g = p.lock().unwrap_or_else(|e| e.into_inner());
+        g.clash = Some(Clash { name: name_of(&target), note, dirs, others });
+        g.answer = None;
+        g.same = false;
+    }
+    ctx.request_repaint();
+    let asked = std::time::Instant::now();
+    loop {
+        if gate.cancelled() {
+            let mut g = p.lock().unwrap_or_else(|e| e.into_inner());
+            g.clash = None;
+            g.held += asked.elapsed();
+            return None;
+        }
+        {
+            let mut g = p.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((c, all)) = g.answer.take() {
+                g.clash = None;
+                g.held += asked.elapsed();
+                if all {
+                    *same = Some(c.clone());
+                }
+                drop(g);
+                ctx.request_repaint();
+                return Some(fit(c));
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(60));
+    }
+}
+
+/// How the one already there compares by date with the one coming: "newer by 2 days",
+/// "older by 3 hours", "same date".
+pub fn clash_note(there: Option<std::time::SystemTime>, coming: Option<std::time::SystemTime>) -> String {
+    let (Some(a), Some(b)) = (there, coming) else { return String::new() };
+    let (word, d) = match a.duration_since(b) {
+        Ok(d) => ("newer", d),
+        Err(e) => ("older", e.duration()),
+    };
+    let s = d.as_secs();
+    let (n, unit) = match s {
+        0..2 => return "same date".into(),
+        2..60 => (s, "second"),
+        60..3600 => (s / 60, "minute"),
+        3600..86_400 => (s / 3600, "hour"),
+        86_400..2_592_000 => (s / 86_400, "day"),
+        2_592_000..31_536_000 => (s / 2_592_000, "month"),
+        _ => (s / 31_536_000, "year"),
+    };
+    format!("{word} by {n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
 /// Put a finished part in place of what it replaces: the old one to the trash, where it
@@ -861,7 +977,12 @@ fn inside(p: &Path, dir: &Path) -> bool {
 /// Total size of files below `p` (symlinks not followed). Iterative, so arbitrarily deep
 /// trees can't overflow the stack.
 pub fn tree_size(p: &Path) -> u64 {
-    let mut total = 0u64;
+    tree_stats(p).0
+}
+
+/// `tree_size`, and how many files (anything but a folder) make it up.
+pub fn tree_stats(p: &Path) -> (u64, usize) {
+    let (mut total, mut files) = (0u64, 0usize);
     let mut stack = vec![p.to_path_buf()];
     while let Some(d) = stack.pop() {
         let Ok(m) = fs::symlink_metadata(&d) else { continue };
@@ -871,9 +992,10 @@ pub fn tree_size(p: &Path) -> u64 {
             }
         } else {
             total += m.len();
+            files += 1;
         }
     }
-    total
+    (total, files)
 }
 
 fn copy_tree(
@@ -883,9 +1005,7 @@ fn copy_tree(
     cancel: &Gate,
     ctx: &egui::Context,
     merge: bool,
-    // A move keeps the SELinux label it had; a copy takes the one of where it lands, as
-    // with `cp` and `mv`.
-    label: bool,
+    label: Label,
 ) -> std::io::Result<()> {
     if cancel.stop() {
         return Err(std::io::Error::other("cancelled"));
@@ -904,11 +1024,13 @@ fn copy_tree(
     if ft.is_symlink() {
         let target = fs::read_link(src)?;
         std::os::unix::fs::symlink(target, dst)?;
+        p.lock().unwrap().done_files += 1;
     } else if ft.is_dir() {
         if !(merge && dst.is_dir()) {
             fs::create_dir(dst)?;
         }
-        for de in fs::read_dir(src)? {
+        let entries = fs::read_dir(src)?;
+        for de in entries {
             // An entry that can't be read is reported rather than silently left out, and
             // the rest is still copied; a move then keeps its original.
             let de = match de {
@@ -925,11 +1047,13 @@ fn copy_tree(
                     // A folder where a file was: the file goes first, as before.
                     fs::remove_file(&child)?;
                 } else {
-                    // A file over a file: written beside it and swapped in once whole, the old
-                    // one to the trash. The read-back check runs after the whole copy, so a
-                    // copy it then finds wrong is removed with the old one still in the trash.
+                    // A file over a file: copied beside it, then swap_in sends the old one to
+                    // the trash and gives the copy its name. Never renamed straight over it:
+                    // the read-back check only comes once the whole job is copied, and a copy
+                    // it rejects then must still leave the old file somewhere to get back.
                     let part = unique_dest(dst, &format!(".{}.maia-part", de.file_name().to_string_lossy()));
-                    if let Err(e) = copy_tree(&de.path(), &part, p, cancel, ctx, false, label).and_then(|_| swap_in(&part, &child)) {
+                    let made = copy_tree(&de.path(), &part, p, cancel, ctx, false, label);
+                    if let Err(e) = made.and_then(|_| swap_in(&part, &child)) {
                         let _ = remove_tree(&part);
                         return Err(e);
                     }
@@ -937,9 +1061,10 @@ fn copy_tree(
                     continue;
                 }
             }
-            copy_tree(&de.path(), &child, p, cancel, ctx, merge, label)?;
+            let inner = de.path();
+            copy_tree(&inner, &child, p, cancel, ctx, merge, label)?;
         }
-        xattrs(src, dst, label);
+        copy_attrs(src, dst, label);
         fs::set_permissions(dst, m.permissions())?;
         if !merge
             && let (Ok(mt), Ok(d)) = (m.modified(), fs::File::open(dst))
@@ -967,11 +1092,12 @@ fn copy_tree(
             }
         }
         // Before the permissions: a read-only file takes no attributes.
-        xattrs(src, dst, label);
+        copy_attrs(src, dst, label);
         fs::set_permissions(dst, m.permissions())?;
         if let Ok(mt) = m.modified() {
             let _ = w.set_modified(mt);
         }
+        p.lock().unwrap().done_files += 1;
     }
     Ok(())
 }
@@ -1036,16 +1162,25 @@ fn copy_data(r: &fs::File, w: &fs::File, len: u64, p: &Mutex<Progress>, cancel: 
 }
 
 /// Extended attributes (Maia's tags among them) copied over; those the target can't keep
-/// (another file system, or `security.*` without the right) are left behind. For a file
-/// written in place of `src`, so its SELinux label goes with it.
+/// (another file system, or `security.*` without the right) are left behind. All of them,
+/// the SELinux label too: the preview's save writes a new file that stands in for `src`.
 pub fn copy_xattrs(src: &Path, dst: &Path) {
-    xattrs(src, dst, true);
+    copy_attrs(src, dst, Label::Keep);
 }
 
-/// `copy_xattrs`, with `security.*` (the SELinux label) only when `label`: a copy left
-/// with its source's label (from ~/.ssh, say) can be refused to the programs that should
-/// read it where it now is.
-fn xattrs(src: &Path, dst: &Path, label: bool) {
+/// What happens to the `security.*` attributes (the SELinux label, file capabilities) of
+/// what a job copies.
+#[derive(Clone, Copy, PartialEq)]
+enum Label {
+    /// A move: the same file somewhere else, so it keeps them, as with `mv`.
+    Keep,
+    /// A copy: a new file, which the policy labels for the folder it lands in, as with
+    /// `cp`. A copy out of ~/.ssh still labelled ssh_home_t can be refused to the program
+    /// that reads it in its new place.
+    Fresh,
+}
+
+fn copy_attrs(src: &Path, dst: &Path, label: Label) {
     use std::os::unix::ffi::OsStrExt;
     let (Ok(s), Ok(d)) = (std::ffi::CString::new(src.as_os_str().as_bytes()), std::ffi::CString::new(dst.as_os_str().as_bytes())) else { return };
     let mut names = vec![0u8; 1024];
@@ -1061,7 +1196,8 @@ fn xattrs(src: &Path, dst: &Path, label: bool) {
         return;
     }
     let mut val = vec![0u8; 4096];
-    for name in names[..n as usize].split(|&b| b == 0).filter(|n| !n.is_empty() && (label || !n.starts_with(b"security."))) {
+    let wanted = |n: &&[u8]| !n.is_empty() && !(label == Label::Fresh && n.starts_with(b"security."));
+    for name in names[..n as usize].split(|&b| b == 0).filter(wanted) {
         let Ok(name) = std::ffi::CString::new(name) else { continue };
         let mut len = unsafe { libc::lgetxattr(s.as_ptr(), name.as_ptr(), val.as_mut_ptr().cast(), val.len()) };
         if len < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ERANGE) {
@@ -1119,7 +1255,7 @@ fn place_one(from: &Path, to: &Path, over: bool, p: &Mutex<Progress>, cancel: &G
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             p.lock().unwrap().total_bytes += tree_size(from) * cancel.weight();
             let skipped = p.lock().unwrap().errors.len();
-            let r = checked(cancel, p, to, copy_tree(from, to, p, cancel, ctx, false, true)).and_then(|_| {
+            let r = checked(cancel, p, to, copy_tree(from, to, p, cancel, ctx, false, Label::Keep)).and_then(|_| {
                 if p.lock().unwrap().errors.len() > skipped {
                     return Err(std::io::Error::other("not all of it could be copied, so the original was kept"));
                 }
@@ -1223,6 +1359,8 @@ pub struct Queue {
 
 struct Lane {
     id: u64,
+    /// Its place in the line: lower goes first. The job's id until it is moved.
+    rank: u64,
     label: String,
     disks: Vec<String>,
     running: bool,
@@ -1239,18 +1377,48 @@ impl Queue {
         self.lanes.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|l| l.running).map(|l| l.id).collect()
     }
 
-    /// Wait until no job started before this one, and none running, uses one of `disks`,
+    /// Jobs waiting their turn, the next first.
+    pub fn waiting(&self) -> Vec<u64> {
+        let lanes = self.lanes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut w: Vec<(u64, u64)> = lanes.iter().filter(|l| !l.running).map(|l| (l.rank, l.id)).collect();
+        w.sort_unstable();
+        w.into_iter().map(|x| x.1).collect()
+    }
+
+    /// Put waiting job `id` before waiting job `before` (last when None): the waiting
+    /// keep the places they had between them, handed out in the new order.
+    pub fn move_to(&self, id: u64, before: Option<u64>) {
+        let mut lanes = self.lanes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut w: Vec<(u64, u64)> = lanes.iter().filter(|l| !l.running).map(|l| (l.rank, l.id)).collect();
+        w.sort_unstable();
+        let Some(from) = w.iter().position(|x| x.1 == id) else { return };
+        let ranks: Vec<u64> = w.iter().map(|x| x.0).collect();
+        let mut ids: Vec<u64> = w.into_iter().map(|x| x.1).collect();
+        ids.remove(from);
+        let at = before.and_then(|b| ids.iter().position(|&x| x == b)).unwrap_or(ids.len());
+        ids.insert(at, id);
+        for (id, rank) in ids.into_iter().zip(ranks) {
+            if let Some(l) = lanes.iter_mut().find(|l| l.id == id) {
+                l.rank = rank;
+            }
+        }
+        drop(lanes);
+        self.turn.notify_all();
+    }
+
+    /// Wait until no job ahead of this one in the line, and none running, uses one of `disks`,
     /// or until the job is told to start anyway. False when it was cancelled first.
     fn wait_turn(&self, id: u64, label: &str, disks: Vec<String>, p: &Mutex<Progress>, gate: &Gate, ctx: &egui::Context) -> bool {
         let mut lanes = self.lanes.lock().unwrap_or_else(|e| e.into_inner());
-        lanes.push(Lane { id, label: label.to_string(), disks, running: false });
+        lanes.push(Lane { id, rank: id, label: label.to_string(), disks, running: false });
         let mut waited = false;
         loop {
             if gate.cancelled() {
                 return false;
             }
             let Some(me) = lanes.iter().position(|l| l.id == id) else { return false };
-            let ahead = |l: &&Lane| l.id != id && (l.running || l.id < id) && l.disks.iter().any(|d| lanes[me].disks.contains(d));
+            let rank = lanes[me].rank;
+            let ahead = |l: &&Lane| l.id != id && (l.running || l.rank < rank) && l.disks.iter().any(|d| lanes[me].disks.contains(d));
             let blocker = lanes.iter().filter(ahead).find(|l| l.running).or_else(|| lanes.iter().find(ahead)).map(|l| l.label.clone());
             let mut g = p.lock().unwrap_or_else(|e| e.into_inner());
             if blocker.is_none() || g.go {

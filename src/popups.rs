@@ -220,6 +220,8 @@ pub enum Popup {
     NewRef(NewRef),
     /// Something that went wrong, said in full (git's own words).
     Notice { title: String, text: String },
+    /// How to install a helper program a message said is missing.
+    Install { tool: &'static str },
     DropMenu { paths: Vec<PathBuf>, dest: PathBuf, pos: Pos2 },
     Connect(ConnectState),
     ArchivePassword(PasswordState),
@@ -250,6 +252,15 @@ pub enum Popup {
     Viewer(Box<crate::viewer::State>),
     /// The welcome tour or What's New.
     Tour(Box<crate::tour::State>),
+    /// The jobs under way, above the status bar's chip.
+    Transfers(crate::transfers::State),
+    Jump(Box<crate::jump::State>),
+    /// Send To Phone: the code, the files, the time left.
+    Phone(Box<crate::phone::State>),
+    /// Paste from earlier copies.
+    Pastes(crate::pastes::State),
+    /// A folder's pictures by the day they were taken.
+    Calendar(Box<crate::calendar::State>),
 }
 
 /// The branch menu, its lists read on a worker as it opens.
@@ -488,6 +499,11 @@ impl Popup {
             Popup::SpaceUsed(..) => "SpaceUsed",
             Popup::Viewer(..) => "Viewer",
             Popup::Tour(..) => "Tour",
+            Popup::Transfers(..) => "Transfers",
+            Popup::Jump(..) => "Jump",
+            Popup::Phone(..) => "Phone",
+            Popup::Pastes(..) => "Pastes",
+            Popup::Calendar(..) => "Calendar",
             Popup::MainMenu => "MainMenu",
             Popup::QuickMenu => "QuickMenu",
             Popup::PanelMenu { .. } => "PanelMenu",
@@ -507,6 +523,7 @@ impl Popup {
             Popup::GitCommit(..) => "GitCommit",
             Popup::NewRef(..) => "NewRef",
             Popup::Notice { .. } => "Notice",
+            Popup::Install { .. } => "Install",
             Popup::DropMenu { .. } => "DropMenu",
         }
     }
@@ -703,13 +720,29 @@ pub(crate) fn step(sel: &mut usize, n: usize, k: &Keys, skip: impl Fn(usize) -> 
     *sel = s;
 }
 
+/// The space inside a dialog's edge, and its corners: one measure for every dialog, so
+/// titles, lists and buttons line up the same way in each.
+pub(crate) const DIALOG_PAD: f32 = 20.0;
+pub(crate) const DIALOG_RADIUS: u8 = 12;
+
+/// A menu's or the palette's frame. Its shadow is lighter on a light theme, where the
+/// dark one's weight read as a smudge.
 pub(crate) fn popup_frame(pal: &Palette) -> egui::Frame {
     egui::Frame::NONE
-        .fill(pal.raised)
+        .fill(crate::frost::fill(pal.raised))
         .stroke(Stroke::new(1.0, pal.border))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(egui::Margin::same(8))
-        .shadow(egui::epaint::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(90) })
+        .shadow(egui::epaint::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(if pal.dark { 90 } else { 34 }) })
+}
+
+/// A dialog's frame: `DIALOG_PAD` inside, rounder corners and a deeper, softer shadow
+/// than a menu's, as it stands further off the window.
+pub(crate) fn dialog_frame(pal: &Palette) -> egui::Frame {
+    popup_frame(pal)
+        .corner_radius(CornerRadius::same(DIALOG_RADIUS))
+        .inner_margin(egui::Margin::same(DIALOG_PAD as i8))
+        .shadow(egui::epaint::Shadow { offset: [0, 10], blur: 32, spread: 0, color: Color32::from_black_alpha(if pal.dark { 80 } else { 30 }) })
 }
 
 /// A path with the home folder written as ~.
@@ -725,18 +758,18 @@ pub(crate) fn home_short(p: &Path) -> String {
 pub(crate) fn dialog_title(ui: &mut Ui, title: &str, sub: Option<&str>, pal: &Palette) {
     let fs = ui.style().text_styles.get(&egui::TextStyle::Body).map_or(13.0, |f| f.size);
     // Right-to-left text wraps in reading order, its first words on the first row.
-    let rtl = |ui: &mut Ui, text: &str, size: f32, color: Color32| {
-        let g = crate::rtl::wrapped(ui, text, FontId::proportional(size), color, ui.available_width());
+    let rtl = |ui: &mut Ui, text: &str, font: FontId, color: Color32| {
+        let g = crate::rtl::wrapped(ui, text, font, color, ui.available_width());
         ui.add(egui::Label::new(g));
     };
     if crate::rtl::has_rtl(title) {
-        rtl(ui, title, fs + 1.5, pal.text);
+        rtl(ui, title, crate::theme::semibold(fs + 1.5), pal.text);
     } else {
-        ui.add(egui::Label::new(egui::RichText::new(title).strong().size(fs + 1.5).color(pal.text)).wrap());
+        ui.add(egui::Label::new(egui::RichText::new(title).font(crate::theme::semibold(fs + 1.5)).color(pal.text)).wrap());
     }
     if let Some(sub) = sub {
         if crate::rtl::has_rtl(sub) {
-            rtl(ui, sub, fs, pal.text_dim);
+            rtl(ui, sub, FontId::proportional(fs), pal.text_dim);
         } else {
             ui.add(egui::Label::new(egui::RichText::new(sub).color(pal.text_dim)).wrap());
         }
@@ -747,7 +780,7 @@ pub(crate) fn dialog_title(ui: &mut Ui, title: &str, sub: Option<&str>, pal: &Pa
 fn group_label(ui: &mut Ui, text: &str, pal: &Palette) {
     ui.add_space(8.0);
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
-    ui.painter().text(pos2(r.left() + 4.0, r.center().y - 1.0), Align2::LEFT_CENTER, text, FontId::proportional(11.5), pal.text_dim);
+    ui.painter().text(pos2(r.left() + 4.0, r.center().y - 1.0), Align2::LEFT_CENTER, text, crate::theme::semibold(11.5), pal.text_dim);
 }
 
 /// A quiet card holding a group of rows inside a dialog.
@@ -779,9 +812,61 @@ fn field_row(ui: &mut Ui, key_w: f32, key: &str, pal: &Palette, value: impl FnOn
     });
 }
 
+/// A dialog's footer: a rule across it, then its keys on the left and its buttons on the
+/// right, the two centred on each other; where the keys would be squeezed beside the
+/// buttons, above them. The buttons as for `dialog_buttons`, the first the rightmost.
+///
+/// Laid out with the buttons' width from the frame before. When that width changes (the
+/// dialog opening, a label growing) the frame is drawn again before it is shown, so the
+/// footer never shows a frame laid out for the old width.
+pub(crate) fn footer(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette, add: impl FnOnce(&mut Ui)) {
+    footer_at(ui, items, pal, None, add);
+}
+
+/// `footer` with its buttons' labels (main one first) measured this frame: for buttons that
+/// come and go, which the frame before would lay out a frame late, the keys under them.
+pub(crate) fn footer_with(ui: &mut Ui, items: &[(&str, &str)], labels: &[&str], pal: &Palette, add: impl FnOnce(&mut Ui)) {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let pad = ui.spacing().button_padding.x;
+    let w = labels.iter().map(|l| (ui.painter().layout_no_wrap(l.to_string(), font.clone(), pal.text).size().x + 2.0 * pad).max(80.0)).sum::<f32>() + 8.0 * labels.len().saturating_sub(1) as f32;
+    footer_at(ui, items, pal, Some(w), add);
+}
+
+fn footer_at(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette, measured: Option<f32>, add: impl FnOnce(&mut Ui)) {
+    let id = ui.id().with("footer");
+    let known = measured.or_else(|| ui.ctx().data(|d| d.get_temp::<f32>(id)));
+    let bw = known.unwrap_or(0.0);
+    ui.add_space(14.0);
+    let (left, avail) = (ui.cursor().left(), ui.available_width());
+    let y = ui.cursor().top();
+    ui.painter().line_segment([pos2(left, y), pos2(left + avail, y)], Stroke::new(1.0, pal.border));
+    ui.add_space(15.0);
+    let top = ui.cursor().top();
+    let side = !items.is_empty() && avail - bw - 24.0 >= 240.0;
+    let keys_w = if side { avail - bw - 24.0 } else { avail };
+    let mut kh = 0.0;
+    if !items.is_empty() {
+        let mut keys = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(left, top), vec2(keys_w, 4000.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+        hint_chips(&mut keys, items, pal);
+        kh = keys.min_rect().height();
+    }
+    let s = ui.spacing();
+    let bh = (ui.text_style_height(&egui::TextStyle::Button) + 2.0 * s.button_padding.y).max(s.interact_size.y);
+    let (bt, band) = if side || items.is_empty() { (top, kh.max(bh)) } else { (top + kh + 12.0, bh) };
+    let mut b = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(left, bt), vec2(avail, band))).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    b.spacing_mut().item_spacing.x = 8.0;
+    add(&mut b);
+    let w = b.min_rect().width();
+    ui.allocate_exact_size(vec2(avail, bt + band - top), Sense::hover());
+    if measured.is_none() && known.is_none_or(|k| (k - w).abs() > 0.5) {
+        ui.ctx().data_mut(|d| d.insert_temp(id, w));
+        ui.ctx().request_discard("dialog footer width");
+    }
+}
+
 /// A dialog's buttons, on the right; the first given is the rightmost (the main one).
 pub(crate) fn dialog_buttons(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    ui.add_space(12.0);
+    ui.add_space(16.0);
     // In a row of its own first: laid out right to left straight in the dialog, the
     // buttons would centre on all the height left below them.
     ui.horizontal(|ui| {
@@ -792,20 +877,48 @@ pub(crate) fn dialog_buttons(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     });
 }
 
-/// The main button of a dialog, in the accent.
+/// The main button of a dialog, in the accent; in the danger red when what it does can't
+/// be taken back (deleting for good, discarding, writing over).
 pub(crate) fn primary_button(ui: &mut Ui, label: &str, enabled: bool, pal: &Palette) -> egui::Response {
-    ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(label).color(Color32::WHITE)).fill(pal.accent).min_size(vec2(72.0, 0.0)))
+    let destroys = ["Delete", "Discard", "Overwrite", "Erase", "Format", "Empty Trash"].iter().any(|w| label.starts_with(w));
+    let (fill, text) = if destroys { (pal.danger, Color32::WHITE) } else { (pal.accent, pal.on_accent()) };
+    ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(label).color(text)).fill(fill).min_size(vec2(80.0, 0.0)))
 }
 
 /// A dialog's other buttons: a quiet fill and outline, so they read as buttons and not
-/// as text beside the accent one.
+/// as text beside the accent one. The way out (Cancel, Close) is plainer still.
 pub(crate) fn plain_button(ui: &mut Ui, label: &str, pal: &Palette) -> egui::Response {
-    ui.add(egui::Button::new(label).fill(pal.card()).stroke(Stroke::new(1.0, pal.card_line())).min_size(vec2(72.0, 0.0)))
+    if matches!(label, "Cancel" | "Close") {
+        return quiet_button(ui, label, pal);
+    }
+    ui.add(egui::Button::new(label).fill(pal.card()).stroke(Stroke::new(1.0, pal.card_line())).min_size(vec2(80.0, 0.0)))
+}
+
+/// The way out of a dialog: its words alone, tinted while pointed at or focused, so the
+/// eye goes to the main button beside it. Keys reach it as any button.
+pub(crate) fn quiet_button(ui: &mut Ui, label: &str, pal: &Palette) -> egui::Response {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let g = ui.painter().layout_no_wrap(label.to_string(), font, pal.text_dim);
+    let s = ui.spacing();
+    let size = vec2(g.size().x + 2.0 * s.button_padding.x + 8.0, (g.size().y + 2.0 * s.button_padding.y).max(s.interact_size.y));
+    let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let hot = resp.hovered() || resp.has_focus();
+    if ui.is_rect_visible(r) {
+        if hot {
+            ui.painter().rect_filled(r, CornerRadius::same(6), pal.hover);
+        }
+        if resp.has_focus() {
+            ui.painter().rect_stroke(r, CornerRadius::same(6), Stroke::new(1.0, pal.accent.gamma_multiply(0.7)), StrokeKind::Inside);
+        }
+        ui.painter().galley(r.center() - g.size() / 2.0, g, if hot { pal.text } else { pal.text_dim });
+    }
+    resp
 }
 
 /// Top-centered popup. Returns (inner, rect).
 /// How far below the window's top a centred popup opens: less in a short window.
-fn popup_top(screen: Rect) -> f32 {
+pub(crate) fn popup_top(screen: Rect) -> f32 {
     (screen.height() * 0.09).clamp(12.0, 70.0).round()
 }
 
@@ -813,26 +926,33 @@ fn popup_top(screen: Rect) -> f32 {
 /// margins) room in the window: in a short one the list shrank off the bottom.
 pub(crate) fn fit_list(ctx: &egui::Context, max: f32, chrome: f32) -> f32 {
     let s = ctx.content_rect();
-    max.min(s.height() - popup_top(s) - 12.0 - chrome).max(96.0)
+    // The dialog's padding beyond the frame's old eight points comes out of the list.
+    max.min(s.height() - popup_top(s) - 12.0 - chrome - 2.0 * (DIALOG_PAD - 8.0)).max(96.0)
 }
 
 pub(crate) fn centered<R>(ctx: &egui::Context, id: &str, width: f32, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
+    centered_top(ctx, id, width, popup_top(ctx.content_rect()), pal, add)
+}
+
+/// `centered`, `top` below the window's top: a dialog that grows to fill the window.
+pub(crate) fn centered_top<R>(ctx: &egui::Context, id: &str, width: f32, top: f32, pal: &Palette, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
     let screen = ctx.content_rect();
     let w = width.min(screen.width() - 24.0);
-    let top = popup_top(screen);
     // A dialog taller than the window scrolls instead of losing its buttons off the
     // bottom; the scroll area claims its height (see `anchored`).
-    let room = (screen.height() - top - 12.0 - 16.0).max(60.0);
+    let inner = w - 2.0 * DIALOG_PAD;
+    let room = (screen.height() - top - 12.0 - 2.0 * DIALOG_PAD).max(60.0);
     note_layer(Id::new(id));
     let r = egui::Area::new(Id::new(id))
         .order(egui::Order::Foreground)
         .fixed_pos(pos2((screen.center().x - w / 2.0).round(), screen.top() + top))
         .show(ctx, |ui| {
-            popup_frame(pal)
+            crate::frost::behind(ui, DIALOG_RADIUS);
+            dialog_frame(pal)
                 .show(ui, |ui| {
-                    ui.set_width(w - 16.0);
+                    ui.set_width(inner);
                     egui::ScrollArea::vertical().id_salt("dialog").max_height(room).min_scrolled_height(room).auto_shrink([false, true]).show(ui, |ui| {
-                        ui.set_width(w - 16.0);
+                        ui.set_width(inner);
                         add(ui)
                     }).inner
                 })
@@ -856,6 +976,7 @@ pub(crate) fn anchored_from<R>(ctx: &egui::Context, id: &str, pos: Pos2, pivot: 
     // remembers its last size and would cut a longer menu short (see ctxmenu.rs).
     let room = if pivot == Align2::LEFT_BOTTOM { pos.y - screen.top() - 26.0 } else { screen.height() - 16.0 - 10.0 }.max(60.0);
     let r = egui::Area::new(Id::new(id)).order(egui::Order::Foreground).pivot(pivot).fixed_pos(pos2(x, pos.y)).constrain_to(screen.shrink(6.0)).show(ctx, |ui| {
+        crate::frost::behind(ui, 10);
         popup_frame(pal)
             .inner_margin(egui::Margin::same(5))
             .show(ui, |ui| {
@@ -873,13 +994,7 @@ pub(crate) fn clicked_outside(ctx: &egui::Context, rect: Rect) -> bool {
 }
 
 pub(crate) fn search_field(ui: &mut Ui, text: &mut String, hint: &str, focus: &mut bool, pal: &Palette, glyph: Glyph) -> egui::Response {
-    let resp = ui
-        .horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(vec2(20.0, 22.0), Sense::hover());
-            paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(14.0)), glyph, pal.text_dim);
-            ui.add(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(false).desired_width(ui.available_width() - 8.0).font(FontId::proportional(15.0)))
-        })
-        .inner;
+    let resp = crate::ui::search_row(ui, text, hint, FontId::proportional(15.0), glyph, 14.0, false, pal).0;
     if *focus {
         resp.request_focus();
         *focus = false;
@@ -897,6 +1012,11 @@ pub(crate) fn hints(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette) {
     let y = ui.cursor().top();
     ui.painter().line_segment([pos2(ui.min_rect().left(), y), pos2(ui.min_rect().right(), y)], Stroke::new(1.0, pal.border));
     ui.add_space(4.0);
+    hint_chips(ui, items, pal);
+}
+
+/// `hints` without the rule above them, for a footer that draws its own.
+pub(crate) fn hint_chips(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         for (k, label) in items {
@@ -904,15 +1024,23 @@ pub(crate) fn hints(ui: &mut Ui, items: &[(&str, &str)], pal: &Palette) {
                 ui.label(egui::RichText::new(*label).size(11.0).color(pal.text_dim));
                 continue;
             }
+            // A key and its label wrap together, as one block measured first: wrapped apart, a
+            // label began the next line on its own, away from its key.
             let g = ui.painter().layout_no_wrap(k.to_string(), FontId::proportional(10.5), pal.text_dim);
-            let (r, _) = ui.allocate_exact_size(g.size() + vec2(10.0, 6.0), Sense::hover());
+            let lg = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(11.0), pal.text_dim);
+            let chip = g.size() + vec2(10.0, 6.0);
+            // A key that shares the next one's label ("Up" "Down" to navigate) has none of
+            // its own; an empty label threw off the wrapped row and the chips overlapped.
+            let lw = if label.is_empty() { 0.0 } else { 4.0 + lg.size().x };
+            let (whole, _) = ui.allocate_exact_size(vec2(chip.x + lw, chip.y.max(lg.size().y)), Sense::hover());
+            let r = Rect::from_min_size(pos2(whole.left(), whole.center().y - chip.y / 2.0), chip);
             ui.painter().rect(r, CornerRadius::same(4), pal.bg, Stroke::new(1.0, pal.border), StrokeKind::Inside);
             ui.painter().galley(r.min + vec2(5.0, 3.0), g, pal.text_dim);
             crate::ui::note_control(ui, r, "key hint");
-            // A key that shares the next one's label ("Up" "Down" to navigate) has none of
-            // its own; an empty label threw off the wrapped row and the chips overlapped.
             if !label.is_empty() {
-                ui.label(egui::RichText::new(*label).size(11.0).color(pal.text_dim));
+                ui.painter().galley(pos2(r.right() + 4.0, whole.center().y - lg.size().y / 2.0), lg, pal.text_dim);
+            }
+            if !label.is_empty() {
                 ui.add_space(6.0);
             }
         }
@@ -985,7 +1113,7 @@ thread_local! {
     /// Layers drawn by popups this frame, and the last open popup's shapes (for the
     /// close fade): (shapes, fade start time).
     static POPUP_LAYERS: std::cell::RefCell<Vec<egui::LayerId>> = const { std::cell::RefCell::new(Vec::new()) };
-    static FADE: std::cell::RefCell<(Vec<egui::epaint::ClippedShape>, Option<f64>)> = const { std::cell::RefCell::new((Vec::new(), None)) };
+    pub(crate) static FADE: std::cell::RefCell<(Vec<egui::epaint::ClippedShape>, Option<f64>)> = const { std::cell::RefCell::new((Vec::new(), None)) };
 }
 
 const CLOSE_FADE: f64 = 0.08;
@@ -1078,6 +1206,11 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::SpaceUsed(st) => crate::spaceuse::popup(app, ctx, st),
         Popup::Viewer(st) => crate::viewer::draw(app, ctx, st),
         Popup::Tour(st) => crate::tour::draw(app, ctx, st),
+        Popup::Transfers(st) => crate::transfers::popup(app, ctx, st),
+        Popup::Jump(st) => crate::jump::popup(app, ctx, st),
+        Popup::Phone(st) => crate::phone::popup(app, ctx, st),
+        Popup::Pastes(st) => crate::pastes::popup(app, ctx, st),
+        Popup::Calendar(st) => crate::calendar::popup(app, ctx, st),
         Popup::MainMenu => main_menu(app, ctx),
         Popup::QuickMenu => quick_menu(app, ctx, None),
         Popup::PanelMenu { panel, anchor } => {
@@ -1100,6 +1233,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
         Popup::GitCommit(m) => commit_menu(app, ctx, m),
         Popup::NewRef(st) => new_ref(app, ctx, st),
         Popup::Notice { title, text } => notice(app, ctx, title, text),
+        Popup::Install { tool } => install_hint(app, ctx, tool),
         Popup::DropMenu { paths, dest, pos } => drop_menu(app, ctx, paths, dest, *pos),
     };
     if keep && matches!(app.popup, Popup::None) {
@@ -1127,6 +1261,8 @@ fn goto_items(app: &App, st: &mut GoToState, known: &crate::sidebar::Known, ctx:
     let label_of = |p: &Path| -> String {
         if tab::is_computer(p) {
             "Computer".into()
+        } else if tab::is_github(p) {
+            "GitHub".into()
         } else {
             p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string())
         }
@@ -1134,7 +1270,7 @@ fn goto_items(app: &App, st: &mut GoToState, known: &crate::sidebar::Known, ctx:
     // Short location hint: the parent folder, with the home folder as ~.
     let home = fsx::home();
     let sub_of = |p: &Path| -> String {
-        if tab::is_computer(p) {
+        if tab::is_place(p) {
             return String::new();
         }
         let s = p.parent().map(|x| x.display().to_string()).unwrap_or_default();
@@ -1142,7 +1278,7 @@ fn goto_items(app: &App, st: &mut GoToState, known: &crate::sidebar::Known, ctx:
         if s.starts_with(&h) { format!("~{}", &s[h.len()..]) } else { s }
     };
     let push = |items: &mut Vec<GoItem>, p: &Path| {
-        items.push(GoItem { label: label_of(p), sub: sub_of(p), path: p.to_path_buf(), is_dir: tab::is_computer(p) || known.dirs.contains(p), header: false, usage: None });
+        items.push(GoItem { label: label_of(p), sub: sub_of(p), path: p.to_path_buf(), is_dir: tab::is_place(p) || known.dirs.contains(p), header: false, usage: None });
     };
     let header = |items: &mut Vec<GoItem>, s: &str| items.push(GoItem { label: s.into(), sub: String::new(), path: PathBuf::new(), is_dir: false, header: true, usage: None });
     if input.trim().is_empty() {
@@ -1296,7 +1432,7 @@ fn goto_items(app: &App, st: &mut GoToState, known: &crate::sidebar::Known, ctx:
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0));
         // Only folders known to exist (from the background snapshot or open tabs): no stat calls here.
-        for (_, p) in scored.into_iter().filter(|(_, p)| tab::is_computer(p) || known.dirs.contains(p) || tab_dirs.contains(p) || dests.contains(p)).take(200) {
+        for (_, p) in scored.into_iter().filter(|(_, p)| tab::is_place(p) || known.dirs.contains(p) || tab_dirs.contains(p) || dests.contains(p)).take(200) {
             push(&mut items, &p);
             // A folder seen only in an open tab is still a folder (it had a file's icon).
             if let Some(it) = items.last_mut() {
@@ -1378,7 +1514,7 @@ fn goto(app: &mut App, ctx: &egui::Context, st: &mut GoToState) -> bool {
     if k.tab {
         if let Some((p, true)) = &cur {
             st.back.push(st.input.clone());
-            st.input = if tab::is_computer(p) { "/".into() } else { format!("{}/", p.display()).replace("//", "/") };
+            st.input = if tab::is_place(p) { "/".into() } else { format!("{}/", p.display()).replace("//", "/") };
             st.focus = true;
         }
     }
@@ -1406,7 +1542,7 @@ fn goto(app: &mut App, ctx: &egui::Context, st: &mut GoToState) -> bool {
                 Some(_) => "Folder to copy into…",
                 None => "Open or expand a folder…",
             };
-            let resp = ui.add(egui::TextEdit::singleline(&mut st.input).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(false).desired_width(w).font(FontId::proportional(15.0)));
+            let resp = ui.add(egui::TextEdit::singleline(&mut st.input).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(w).font(FontId::proportional(15.0)));
             if st.focus {
                 resp.request_focus();
                 if let Some(mut s) = egui::TextEdit::load_state(ui.ctx(), resp.id) {
@@ -1585,25 +1721,30 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::OpenLinkTarget => t.target_entries().first().map(|e| e.is_link).unwrap_or(false),
         Cmd::RestoreTrash => t.path.starts_with(crate::sidebar::trash_dir()),
         Cmd::Undo => !app.undo.is_empty(),
+        Cmd::Transfers => crate::transfers::live(app) > 0,
+        Cmd::PasteEarlier => !app.pastes.is_empty() && !tab::is_place(&t.path),
+        Cmd::SendToPhone => t.archive.is_none() && !tab::is_place(&t.path) && !t.targets_idx().is_empty(),
         Cmd::Redo => app.undo.can_redo(),
         Cmd::ReopenTab => !app.closed_tabs.is_empty(),
         Cmd::EditTags => t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()) && crate::musictags::applies(&t.target_entries().iter().map(|e| (e.ext(), e.is_dir)).collect::<Vec<_>>()),
-        Cmd::CompressLocked => t.archive.is_none() && !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),
-        Cmd::BatchRename => t.archive.is_none() && !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),
-        Cmd::CopyTo => !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),
-        Cmd::MoveTo => !tab::is_computer(&t.path) && t.archive.is_none() && !t.targets_idx().is_empty(),
+        Cmd::CompressLocked => t.archive.is_none() && !tab::is_place(&t.path) && !t.targets_idx().is_empty(),
+        Cmd::BatchRename => t.archive.is_none() && !tab::is_place(&t.path) && !t.targets_idx().is_empty(),
+        Cmd::CopyTo => !tab::is_place(&t.path) && !t.targets_idx().is_empty(),
+        Cmd::MoveTo => !tab::is_place(&t.path) && t.archive.is_none() && !t.targets_idx().is_empty(),
         Cmd::Rename | Cmd::Copy | Cmd::Cut | Cmd::Trash | Cmd::DeletePermanent | Cmd::Duplicate | Cmd::CreateLink => !t.targets_idx().is_empty(),
         Cmd::LoadLayout | Cmd::DeleteLayout => !app.ud.layouts.is_empty(),
         Cmd::SortFullAsc | Cmd::SortFullDesc => tab::is_computer(&t.path) && !(t.settings.sort == crate::config::SortKey::Usage && t.settings.desc == (c == Cmd::SortFullDesc)),
         Cmd::SortNameAsc | Cmd::SortNameDesc => !(t.settings.sort == crate::config::SortKey::Name && t.settings.desc == (c == Cmd::SortNameDesc)),
         Cmd::SortSizeAsc | Cmd::SortSizeDesc => !(t.settings.sort == crate::config::SortKey::Size && t.settings.desc == (c == Cmd::SortSizeDesc)),
-        Cmd::CloseOtherTabs => p.tabs.len() > 1,
-        Cmd::CloseRightTabs | Cmd::MoveTabRight => p.active + 1 < p.tabs.len(),
-        Cmd::CloseLeftTabs | Cmd::MoveTabLeft => p.active > 0,
-        Cmd::TabNewOrRecent | Cmd::ToggleFlatten | Cmd::OpenTerminal => !tab::is_computer(&t.path),
-        Cmd::OpenInEditor => !tab::is_computer(&t.path) && t.archive.is_none(),
-        Cmd::CopyPathRelative => !tab::is_computer(&t.path) && t.archive.is_none(),
-        Cmd::CopyCodeBlocks => !tab::is_computer(&t.path) && t.archive.is_none(),
+        Cmd::CloseOtherTabs => p.tabs.iter().enumerate().any(|(i, t)| i != p.active && !t.pinned),
+        Cmd::CloseRightTabs => p.tabs.iter().skip(p.active + 1).any(|t| !t.pinned),
+        Cmd::CloseLeftTabs => p.tabs.iter().take(p.active).any(|t| !t.pinned),
+        Cmd::MoveTabRight => p.tabs.get(p.active + 1).is_some_and(|t| t.pinned == p.tab().pinned),
+        Cmd::MoveTabLeft => p.active > 0 && p.tabs.get(p.active - 1).is_some_and(|t| t.pinned == p.tab().pinned),
+        Cmd::TabNewOrRecent | Cmd::ToggleFlatten | Cmd::OpenTerminal => !tab::is_place(&t.path),
+        Cmd::OpenInEditor => !tab::is_place(&t.path) && t.archive.is_none(),
+        Cmd::CopyPathRelative => !tab::is_place(&t.path) && t.archive.is_none(),
+        Cmd::CopyCodeBlocks => !tab::is_place(&t.path) && t.archive.is_none(),
         Cmd::Email => t.archive.is_none() && !t.target_entries().is_empty() && t.target_entries().iter().all(|e| !e.is_dir),
         Cmd::Print => t.archive.is_none() && !t.target_entries().is_empty() && t.target_entries().iter().all(|e| !e.is_dir && crate::sendto::printable(&e.name, e.ext())) && crate::drives::Tools::current().is_some_and(|t| crate::sendto::cups(&t)),
         Cmd::RotateLeft | Cmd::RotateRight | Cmd::ResizeHalf | Cmd::ResizeQuarter | Cmd::ResizeFit | Cmd::ResizeCustom => t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()) && !t.target_entries().is_empty() && t.target_entries().iter().all(|e| !e.is_dir && crate::picfix::is_picture(e.ext())) && crate::drives::Tools::current().is_some_and(|t| crate::picfix::magick(&t).is_some()),
@@ -1613,24 +1754,24 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
         Cmd::CompareFiles => t.archive.is_none() && t.target_entries().iter().filter(|e| !e.is_dir).count() == 2 && t.target_entries().len() == 2,
         Cmd::CopyWebLink | Cmd::OpenWebLink | Cmd::GitIgnore => t.archive.is_none() && crate::gitstatus::repo_for(&t.path).is_some(),
         Cmd::GitIgnoreExt => t.archive.is_none() && crate::gitstatus::repo_for(&t.path).is_some() && crate::share::shared_ext(t.target_entries().iter().map(|e| (e.path.as_path(), e.is_dir))).is_some(),
-        Cmd::CodeSearch | Cmd::FindTodos => !tab::is_computer(&t.path) && t.archive.is_none(),
-        Cmd::RunTask => !tab::is_computer(&t.path) && t.archive.is_none(),
-        Cmd::SaveSmart => !t.filter.trim().is_empty() && !t.content.on && t.smart.is_none() && !tab::is_computer(&t.path) && t.archive.is_none(),
-        Cmd::WhatsUsing => t.archive.is_none() && (!tab::is_computer(&t.path) || t.target_entries().iter().any(|e| tab::drive_dev(&e.path).is_none())),
-        Cmd::AddToShelf => t.archive.is_none() && !tab::is_computer(&t.path) && !t.targets_idx().is_empty(),
-        Cmd::ShelfMoveHere | Cmd::ShelfCopyHere => !app.shelf.items.is_empty() && t.archive.is_none() && !tab::is_computer(&t.path),
+        Cmd::CodeSearch | Cmd::FindTodos => !tab::is_place(&t.path) && t.archive.is_none(),
+        Cmd::RunTask => !tab::is_place(&t.path) && t.archive.is_none(),
+        Cmd::SaveSmart => !t.filter.trim().is_empty() && !t.content.on && t.smart.is_none() && !tab::is_place(&t.path) && t.archive.is_none(),
+        Cmd::WhatsUsing => t.archive.is_none() && (!tab::is_place(&t.path) || t.target_entries().iter().any(|e| tab::drive_dev(&e.path).is_none())),
+        Cmd::AddToShelf => t.archive.is_none() && !tab::is_place(&t.path) && !t.targets_idx().is_empty(),
+        Cmd::ShelfMoveHere | Cmd::ShelfCopyHere => !app.shelf.items.is_empty() && t.archive.is_none() && !tab::is_place(&t.path),
         Cmd::ClearShelf => !app.shelf.items.is_empty(),
-        Cmd::TidyFolder => !tab::is_computer(&t.path) && t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()),
-        Cmd::CleanBuilds | Cmd::FindDuplicates | Cmd::SpaceUsed | Cmd::ViewPictures => !tab::is_computer(&t.path) && t.archive.is_none(),
+        Cmd::TidyFolder => !tab::is_place(&t.path) && t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()),
+        Cmd::CleanBuilds | Cmd::FindDuplicates | Cmd::SpaceUsed | Cmd::FreeUpSpace | Cmd::ViewPictures | Cmd::ViewCalendar => !tab::is_place(&t.path) && t.archive.is_none(),
         Cmd::PreviousVersions => t.archive.is_none() && !t.path.starts_with(crate::sidebar::trash_dir()) && matches!(t.target_entries().as_slice(), [e] if !e.is_dir),
         Cmd::CopyPathLine => p.line_hint.as_ref().is_some_and(|h| t.target_entries().iter().any(|e| e.path == h.0)),
         Cmd::OpenTabInWindow => p.tabs.len() > 0,
         Cmd::GroupDeleted | Cmd::GroupOriginal => crate::trashcan::is_trash_files(&t.path),
         Cmd::GroupFree | Cmd::GroupFs | Cmd::GroupFull => tab::is_computer(&t.path),
-        Cmd::GroupItems | Cmd::GroupUsage | Cmd::GroupName | Cmd::GroupType | Cmd::GroupDate | Cmd::GroupCreated | Cmd::GroupAccessed | Cmd::GroupSize => !tab::is_computer(&t.path) && !t.tree_active(),
-        Cmd::GroupTag => !tab::is_computer(&t.path) && !t.tree_active(),
-        Cmd::SortTags | Cmd::SortTaken | Cmd::SortDimensions | Cmd::SortDuration => !tab::is_computer(&t.path),
-        Cmd::GroupTaken => !tab::is_computer(&t.path) && !t.tree_active(),
+        Cmd::GroupItems | Cmd::GroupUsage | Cmd::GroupName | Cmd::GroupType | Cmd::GroupDate | Cmd::GroupCreated | Cmd::GroupAccessed | Cmd::GroupSize => !tab::is_place(&t.path) && !t.tree_active(),
+        Cmd::GroupTag => !tab::is_place(&t.path) && !t.tree_active(),
+        Cmd::SortTags | Cmd::SortTaken | Cmd::SortDimensions | Cmd::SortDuration | Cmd::SortColour => !tab::is_place(&t.path),
+        Cmd::GroupTaken | Cmd::GroupOrigin => !tab::is_place(&t.path) && !t.tree_active(),
         Cmd::GroupExpandAll => t.settings.group != crate::config::GroupBy::None && !t.collapsed_groups.is_empty(),
         Cmd::GroupCollapseAll => t.settings.group != crate::config::GroupBy::None,
         _ => true,
@@ -1639,11 +1780,16 @@ pub(crate) fn applicable(app: &App, c: Cmd) -> bool {
 
 /// A menu row for a command: dimmed (and inert) when it can't apply.
 fn cmd_row(ui: &mut Ui, app: &App, c: Cmd) -> bool {
+    cmd_row_as(ui, app, c, c.info().title)
+}
+
+/// `cmd_row` under another label, for a command whose name follows its state.
+fn cmd_row_as(ui: &mut Ui, app: &App, c: Cmd, title: &str) -> bool {
     let pal = app.pal;
     let enabled = applicable(app, c);
     let chips: Vec<String> = app.keymap.bindings(c).iter().take(3).map(commands::binding_to_string).collect();
     let resp = row(ui, 26.0, false, &pal, |ui, r| {
-        ui.painter().text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, c.info().title, FontId::proportional(13.0), if enabled { pal.text } else { pal.text_dim.gamma_multiply(0.6) });
+        ui.painter().text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, title, FontId::proportional(13.0), if enabled { pal.text } else { pal.text_dim.gamma_multiply(0.6) });
         let mut x = r.right() - 6.0;
         for ch in chips.iter().rev() {
             x -= crate::ui::paint_chip(ui.painter(), pos2(x, r.center().y), ch, &pal) + 3.0;
@@ -1731,7 +1877,7 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
                     add_binding(app, cmd, binding.clone());
                     st.conflict = None;
                 }
-                if ui.button("Cancel").clicked() {
+                if quiet_button(ui, "Cancel", &pal).clicked() {
                     st.conflict = None;
                 }
             });
@@ -1824,6 +1970,7 @@ fn palette(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
     let pos = pos2((screen.center().x - w / 2.0).round(), screen.top() + top);
     note_layer(Id::new("palette"));
     let area = egui::Area::new(Id::new("palette")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+        crate::frost::behind(ui, 10);
         popup_frame(&pal).show(ui, |ui| {
             let (_, inner) = ui.allocate_space(vec2(w - 16.0, h - 16.0));
             let top_down = egui::Layout::top_down(egui::Align::Min);
@@ -2389,7 +2536,7 @@ impl Section {
             Section::Preview => paint_glyph(p, r, Glyph::Eye, col),
             Section::Search => paint_glyph(p, r, Glyph::Search, col),
             Section::Git => {
-                theme::paint_lucide(p, r, "git-branch", col);
+                theme::paint_symbol(p, r, "git-branch", col);
             }
             Section::System => paint_glyph(p, r, Glyph::Monitor, col),
         }
@@ -2418,7 +2565,7 @@ pub(crate) const OPTS: &[(Opt, Section, &str, &str, &str)] = &[
     (Opt::ShowSystem, Section::Files, "List", "Show system files", "Backups (*~, *.bak), sockets and devices."),
     (Opt::ShowExt, Section::Files, "List", "Show file extensions", "Display .txt, .png and so on."),
     (Opt::FoldersFirst, Section::Files, "List", "Folders first", "List folders before files."),
-    (Opt::DateFormat, Section::Files, "List", "Date format", "A strftime pattern, like %Y-%m-%d %H:%M."),
+    (Opt::DateFormat, Section::Files, "List", "Date format", "Empty says Yesterday 09:04; or a pattern like %Y-%m-%d."),
     (Opt::CalcSizes, Section::Files, "Folder sizes", "Calculate folder sizes", "Count sizes and items in the background."),
     (Opt::SizesSsd, Section::Files, "Folder sizes", "Solid-state drives", "SSDs and other fast storage."),
     (Opt::SizesHdd, Section::Files, "Folder sizes", "Spinning hard drives", "Rotational disks: slower and noisier."),
@@ -2549,7 +2696,8 @@ fn update_control(ui: &mut Ui, app: &mut App, pal: &Palette) {
             dim(ui, "Up to date");
         }
         State::Available(r) => {
-            let notes: String = r.notes.lines().filter(|l| !l.trim().is_empty()).take(8).collect::<Vec<_>>().join("\n");
+            // A release's text is Markdown: its headings shown without their marks.
+            let notes: String = r.notes.lines().map(|l| l.trim_start_matches('#').trim_start()).filter(|l| !l.trim().is_empty()).take(8).collect::<Vec<_>>().join("\n");
             let b = button(ui, &format!("Update to {}", r.version.trim_start_matches('v')), true);
             let b = if notes.is_empty() { b } else { b.on_hover_text(notes) };
             if b.clicked() {
@@ -2613,7 +2761,7 @@ pub(crate) fn switch(ui: &mut Ui, on: &mut bool, pal: &Palette) -> bool {
     toggle(ui, on, pal)
 }
 
-/// Switch: a pill whose knob carries a check (on) or a cross (off).
+/// Switch: a pill whose colour and knob side say it, with no mark on the knob.
 fn toggle(ui: &mut Ui, on: &mut bool, pal: &Palette) -> bool {
     let (r, resp) = ui.allocate_exact_size(vec2(32.0, 16.0), Sense::click());
     crate::ui::note_control(ui, r, "switch");
@@ -2624,13 +2772,6 @@ fn toggle(ui: &mut Ui, on: &mut bool, pal: &Palette) -> bool {
     let x = egui::lerp(r.left() + 8.0..=r.right() - 8.0, t);
     let c = pos2(x, r.center().y);
     ui.painter().circle_filled(c, 6.0, lerp_c(pal.bg, Color32::from_rgb(0xe8, 0xf4, 0xfa)));
-    let st = Stroke::new(1.3, lerp_c(pal.text_dim, pal.accent));
-    if t > 0.5 {
-        ui.painter().add(egui::Shape::line(vec![c + vec2(-2.6, 0.2), c + vec2(-0.8, 2.0), c + vec2(2.8, -1.8)], st));
-    } else {
-        ui.painter().line_segment([c + vec2(-2.0, -2.0), c + vec2(2.0, 2.0)], st);
-        ui.painter().line_segment([c + vec2(-2.0, 2.0), c + vec2(2.0, -2.0)], st);
-    }
     if resp.clicked() {
         *on = !*on;
         return true;
@@ -2863,7 +3004,7 @@ fn option_control_inner(ui: &mut Ui, app: &mut App, o: Opt, pal: &Palette, layou
         Opt::ThumbFill => toggle(ui, &mut c.thumb_fill, &pal),
         Opt::CheckCopies => toggle(ui, &mut c.check_copies, &pal),
         Opt::ScrollBeyond => toggle(ui, &mut c.scroll_beyond, &pal),
-        Opt::DateFormat => ui.add(egui::TextEdit::singleline(&mut c.date_format).desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).changed(),
+        Opt::DateFormat => ui.add(egui::TextEdit::singleline(&mut c.date_format).hint_text("Today 17:10").desired_width(150.0).margin(egui::Margin::symmetric(5, 2))).changed(),
         Opt::ActOnPress => toggle(ui, &mut c.act_on_press, &pal),
         Opt::SingleClick => toggle(ui, &mut c.single_click, &pal),
         Opt::SingleClickFolders => toggle(ui, &mut c.single_click_folders_only, &pal),
@@ -3154,8 +3295,9 @@ fn options(app: &mut App, ctx: &egui::Context, st: &mut OptState) -> bool {
     let pos = pos2((screen.center().x - w / 2.0).round(), (screen.top() + ((screen.height() - h) / 2.0).clamp(12.0, 70.0)).round());
     note_layer(Id::new("options"));
     let area = egui::Area::new(Id::new("options")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
-        popup_frame(&pal).show(ui, |ui| {
-            let (_, inner) = ui.allocate_space(vec2(w - 16.0, h - 16.0));
+        crate::frost::behind(ui, DIALOG_RADIUS);
+        dialog_frame(&pal).show(ui, |ui| {
+            let (_, inner) = ui.allocate_space(vec2(w - 2.0 * DIALOG_PAD, h - 2.0 * DIALOG_PAD));
             let top_down = egui::Layout::top_down(egui::Align::Min);
             let mut head = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(top_down));
             // The buttons first, from the right edge; the search takes what is left.
@@ -3317,7 +3459,7 @@ fn types(app: &mut App, ctx: &egui::Context, panel: u64, query: &mut String) -> 
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(20.0, 22.0), Sense::hover());
             paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(12.0)), Glyph::Search, pal.text_dim);
-            let te = ui.add(egui::TextEdit::singleline(query).hint_text(egui::RichText::new(format!("Filter {} types…", counts.len())).color(pal.text_dim)).frame(false).desired_width(ui.available_width() - 84.0));
+            let te = ui.add(egui::TextEdit::singleline(query).hint_text(egui::RichText::new(format!("Filter {} types…", counts.len())).color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(ui.available_width() - 84.0));
             if !te.has_focus() && query.is_empty() {
                 te.request_focus();
             }
@@ -3429,9 +3571,15 @@ fn tab_search(app: &mut App, ctx: &egui::Context, query: &mut String, sel: &mut 
     let mut rows: Vec<(String, PathBuf, Option<(u64, usize)>)> = vec![];
     let mut leaves = vec![];
     app.tree.leaves(&mut leaves);
+    // Same-named tabs say where they are, as on the tab strip.
+    let hints = app.tab_hints();
+    let mut hint_of: HashMap<(u64, usize), String> = HashMap::new();
     for pid in leaves {
         for (i, t) in app.panels[&pid].tabs.iter().enumerate() {
             rows.push((t.title(), t.path.clone(), Some((pid, i))));
+            if let Some(h) = hints.get(&t.id) {
+                hint_of.insert((pid, i), h.clone());
+            }
         }
     }
     for c in app.closed_tabs.iter().rev().take(20) {
@@ -3455,6 +3603,9 @@ fn tab_search(app: &mut App, ctx: &egui::Context, query: &mut String, sel: &mut 
                 }
                 let resp = row(ui, 30.0, i == *sel, &pal, |ui, r| {
                     let mut job = highlight_job(label, &q, FontId::proportional(13.5), pal.text, pal.accent);
+                    if let Some(h) = loc.and_then(|l| hint_of.get(&l)) {
+                        job.append(&format!(" · {h}"), 0.0, egui::TextFormat { font_id: FontId::proportional(13.5), color: pal.text_dim, ..Default::default() });
+                    }
                     // A tab named after a long folder is cut, not drawn past the window.
                     job.wrap = egui::text::TextWrapping { max_width: (r.width() - 20.0).max(8.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
                     let g = ui.fonts_mut(|f| f.layout_job(job));
@@ -3548,11 +3699,13 @@ fn zoom(app: &mut App, ctx: &egui::Context, panel: u64, anchor: Pos2) -> bool {
         return false;
     }
     // Opens above the footer chip. The named views sit beside a vertical slider, each
-    // at the height of its zoom value, so the dense views bunch up at the bottom; Columns,
-    // which has no zoom, below them. It hangs from its lower edge, whatever the Spacing.
+    // at the height of its zoom value, so the dense views bunch up at the bottom; Columns
+    // and Stack, which have no zoom, below them. It hangs from its lower edge, whatever the
+    // Spacing.
     let (w, track) = (176.0, 168.0);
     let columns = t.settings.column_view;
-    let mut set_columns = false;
+    let stacked = t.settings.stack_view;
+    let (mut set_columns, mut set_stack) = (false, false);
     let (_, rect) = anchored_from(ctx, "zoom", pos2(anchor.x - w + 30.0, anchor.y - 10.0), Align2::LEFT_BOTTOM, w, &pal, |ui| {
         let (r, resp) = ui.allocate_exact_size(vec2(w - 16.0, track + 20.0), Sense::click_and_drag());
         let rail_x = r.right() - 10.0;
@@ -3564,7 +3717,7 @@ fn zoom(app: &mut App, ctx: &egui::Context, panel: u64, anchor: Pos2) -> bool {
         for (name, v) in crate::listing::VIEW_STOPS {
             let y = y_of(v);
             let lr = Rect::from_min_max(pos2(r.left(), y - 10.0), pos2(rail_x - 14.0, y + 10.0));
-            let on = !columns && (crate::listing::view_name(z) == name || (name == "M Icons" && (z - 0.3).abs() < 0.001));
+            let on = !columns && !stacked && (crate::listing::view_name(z) == name || (name == "M Icons" && (z - 0.3).abs() < 0.001));
             let hov = ui.rect_contains_pointer(lr);
             if on {
                 painter.rect_filled(lr, CornerRadius::same(4), pal.accent);
@@ -3584,7 +3737,7 @@ fn zoom(app: &mut App, ctx: &egui::Context, panel: u64, anchor: Pos2) -> bool {
         // Slider rail and knob.
         painter.line_segment([pos2(rail_x, y0), pos2(rail_x, y1)], Stroke::new(4.0, pal.border));
         painter.line_segment([pos2(rail_x, y0), pos2(rail_x, y_of(z))], Stroke::new(4.0, pal.accent.gamma_multiply(0.6)));
-        painter.circle_filled(pos2(rail_x, y_of(z)), 7.0, if columns { pal.text_dim } else { pal.accent });
+        painter.circle_filled(pos2(rail_x, y_of(z)), 7.0, if columns || stacked { pal.text_dim } else { pal.accent });
         if let Some(pp) = resp.interact_pointer_pos() {
             if resp.dragged() || (resp.clicked() && pp.x > rail_x - 16.0) {
                 let v = ((pp.y - y0) / (y1 - y0)).clamp(0.0, 1.0);
@@ -3605,14 +3758,32 @@ fn zoom(app: &mut App, ctx: &egui::Context, panel: u64, anchor: Pos2) -> bool {
         crate::listing::paint_view_glyph(ui.painter(), Rect::from_center_size(pos2(lr.left() + 12.0, lr.center().y), Vec2::splat(11.0)), crate::listing::Mode::Columns, col);
         ui.painter().text(pos2(lr.left() + 26.0, lr.center().y), Align2::LEFT_CENTER, "Columns", FontId::proportional(12.5), col);
         set_columns = cresp.clicked();
+        let (sr, sresp) = ui.allocate_exact_size(vec2(w - 16.0, 20.0), Sense::click());
+        let lr = Rect::from_min_max(sr.min, pos2(rail_x - 14.0, sr.bottom()));
+        if stacked {
+            ui.painter().rect_filled(lr, CornerRadius::same(4), pal.accent);
+        } else if sresp.hovered() {
+            ui.painter().rect_filled(lr, CornerRadius::same(4), pal.hover);
+        }
+        let col = if stacked { Color32::WHITE } else { pal.text };
+        crate::listing::paint_view_glyph(ui.painter(), Rect::from_center_size(pos2(lr.left() + 12.0, lr.center().y), Vec2::splat(11.0)), crate::listing::Mode::Stack, col);
+        ui.painter().text(pos2(lr.left() + 26.0, lr.center().y), Align2::LEFT_CENTER, "Stack", FontId::proportional(12.5), col);
+        set_stack = sresp.clicked();
         if let Some(v) = set {
             t.settings.zoom = v;
-            t.dirty |= std::mem::take(&mut t.settings.column_view);
+            t.dirty |= std::mem::take(&mut t.settings.column_view) | std::mem::take(&mut t.settings.stack_view);
             t.scroll_to_cursor = true;
         }
     });
     if set_columns {
         t.settings.column_view = true;
+        t.settings.stack_view = false;
+        t.dirty = true;
+        t.scroll_to_cursor = true;
+    }
+    if set_stack {
+        t.settings.stack_view = true;
+        t.settings.column_view = false;
         t.dirty = true;
         t.scroll_to_cursor = true;
     }
@@ -4435,8 +4606,9 @@ fn themes(app: &mut App, ctx: &egui::Context) -> bool {
     let pos = pos2((screen.center().x - w / 2.0).round(), (screen.top() + ((screen.height() - h) / 2.0).clamp(12.0, 70.0)).round());
     note_layer(Id::new("themes"));
     let area = egui::Area::new(Id::new("themes")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
-        popup_frame(&pal).show(ui, |ui| {
-            let (_, inner) = ui.allocate_space(vec2(w - 16.0, h - 16.0));
+        crate::frost::behind(ui, DIALOG_RADIUS);
+        dialog_frame(&pal).show(ui, |ui| {
+            let (_, inner) = ui.allocate_space(vec2(w - 2.0 * DIALOG_PAD, h - 2.0 * DIALOG_PAD));
             let top_down = egui::Layout::top_down(egui::Align::Min);
             // Header: the close button and the filter from the right; the search takes
             // what is left.
@@ -4985,7 +5157,8 @@ fn sync(app: &mut App, ctx: &egui::Context, st: &mut crate::compare::SyncState) 
             dialog_buttons(ui, |ui| close = plain_button(ui, "Cancel", &pal).clicked());
             return;
         };
-        if plan.copy.is_empty() && plan.update.is_empty() && plan.extra.is_empty() && plan.unread.is_empty() {
+        let nothing = [plan.copy.is_empty(), plan.update.is_empty(), plan.extra.is_empty(), plan.unlisted.is_empty()];
+        if nothing.iter().all(|&n| n) {
             ui.label(egui::RichText::new("Both sides are the same already").color(pal.text_dim));
             dialog_buttons(ui, |ui| close = primary_button(ui, "Close", true, &pal).clicked());
             return;
@@ -5006,8 +5179,10 @@ fn sync(app: &mut App, ctx: &egui::Context, st: &mut crate::compare::SyncState) 
             if !plan.update.is_empty() {
                 dot(ui, crate::gitstatus::GREEN, format!("{} here, replacing the older ones there (to the trash)", count(plan.update.len(), "newer file", "newer files")));
             }
-            if !plan.unread.is_empty() {
-                dot(ui, pal.danger, if plan.unread.len() == 1 { "1 folder couldn't be read, so nothing in it changes".to_string() } else { format!("{} folders couldn't be read, so nothing in them changes", plan.unread.len()) });
+            match plan.unlisted.len() {
+                0 => {}
+                1 => dot(ui, pal.danger, "1 folder couldn't be read and is left as it is".to_string()),
+                n => dot(ui, pal.danger, format!("{n} folders couldn't be read and are left as they are")),
             }
             if extra > 0 {
                 let text = egui::RichText::new(format!("Mirror: also move {} only there to the trash", count(extra, "item", "items"))).color(if st.mirror { pal.danger } else { pal.text });
@@ -5023,7 +5198,7 @@ fn sync(app: &mut App, ctx: &egui::Context, st: &mut crate::compare::SyncState) 
             .iter()
             .map(|(_, d)| ("New", pal.accent, rel(d)))
             .chain(plan.update.iter().map(|(_, d)| ("Newer", crate::gitstatus::GREEN, rel(d))))
-            .chain(plan.unread.iter().map(|d| ("Unread", pal.danger, rel(d))))
+            .chain(plan.unlisted.iter().map(|d| ("Unread", pal.danger, rel(d))))
             .chain(plan.extra.iter().filter(|_| st.mirror).map(|d| ("Trash", pal.danger, rel(d))))
             .collect();
         group_label(ui, &format!("In “{}”", name(&st.to)), &pal);
@@ -5045,8 +5220,7 @@ fn sync(app: &mut App, ctx: &egui::Context, st: &mut crate::compare::SyncState) 
         }
         keys.push(("Esc", "cancel"));
         ui.add_space(4.0);
-        hints(ui, &keys, &pal);
-        dialog_buttons(ui, |ui| {
+        footer(ui, &keys, &pal, |ui| {
             if primary_button(ui, "Sync", job.is_some(), &pal).clicked() {
                 start = true;
             }
@@ -5169,7 +5343,7 @@ fn properties(app: &mut App, ctx: &egui::Context, st: &mut PropState) -> bool {
             let p = st.paths[0].clone();
             let Some((m, e)) = snap.single.clone() else {
                 dialog_title(ui, "Item no longer exists", Some(&p.display().to_string()), &pal);
-                dialog_buttons(ui, |ui| close = plain_button(ui, "Close", &pal).clicked());
+                dialog_buttons(ui, |ui| close = primary_button(ui, "Close", true, &pal).clicked());
                 return;
             };
             // The item: its icon, name and kind.
@@ -5296,8 +5470,8 @@ fn location_row(ui: &mut Ui, key_w: f32, dir: &Path, pal: &Palette) {
         ui.horizontal_top(|ui| {
             let room = (ui.available_width() - 52.0).max(40.0);
             ui.allocate_ui(vec2(room, 0.0), |ui| {
-                if crate::rtl::has_rtl(&path) {
-                    ui.add(egui::Label::new(crate::rtl::display_path(&path).into_owned()).wrap());
+                if let Some(job) = crate::rtl::shown_path_job(&path, egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color()) {
+                    ui.add(egui::Label::new(job).wrap());
                 } else {
                     ui.add(egui::Label::new(path.as_str()).wrap().selectable(true));
                 }
@@ -5526,11 +5700,15 @@ fn open_with(app: &mut App, ctx: &egui::Context, paths: &mut Vec<PathBuf>, query
     let mut focus = !ctx.memory(|m| m.has_focus(cmd_id));
     let (_, rect) = centered(ctx, "openwith", 480.0, &pal, |ui| {
         let first_name = if paths.len() == 1 {
-            first.file_name().map(|n| crate::rtl::display(&n.to_string_lossy()).into_owned()).unwrap_or_default()
+            first.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
         } else {
             format!("{} files", paths.len())
         };
-        ui.label(egui::RichText::new(format!("Open {first_name} with…")).strong());
+        let title = format!("Open {first_name} with…");
+        match crate::rtl::shown_job(&title, egui::TextStyle::Body.resolve(ui.style()), ui.visuals().strong_text_color()) {
+            Some(job) => ui.label(job),
+            None => ui.label(egui::RichText::new(title).strong()),
+        };
         ui.label(egui::RichText::new(format!("{} ({mime})", db.comment(&mime))).small().color(pal.text_dim));
         search_field(ui, query, "Filter applications…", &mut focus, &pal, Glyph::Search);
         egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
@@ -5594,8 +5772,11 @@ fn run_exec(app: &mut App, ctx: &egui::Context, path: &mut PathBuf) -> bool {
     let mut done = false;
     centered(ctx, "runexec", 440.0, &pal, |ui| {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let name_disp = crate::rtl::display(&name);
-        ui.label(egui::RichText::new(format!("“{name_disp}” is executable")).strong());
+        let title = format!("“{name}” is executable");
+        match crate::rtl::shown_job(&title, egui::TextStyle::Body.resolve(ui.style()), ui.visuals().strong_text_color()) {
+            Some(job) => ui.label(job),
+            None => ui.label(egui::RichText::new(title).strong()),
+        };
         ui.label(egui::RichText::new("Do you want to run it?").color(pal.text_dim));
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -5620,7 +5801,7 @@ fn run_exec(app: &mut App, ctx: &egui::Context, path: &mut PathBuf) -> bool {
                 app.actions.push(Action::Open(Popup::open_with(vec![path.clone()])));
                 done = true;
             }
-            if ui.button("Cancel").clicked() {
+            if quiet_button(ui, "Cancel", &pal).clicked() {
                 done = true;
             }
         });
@@ -5682,6 +5863,8 @@ fn quick_menu(app: &mut App, ctx: &egui::Context, panel: Option<(u64, Pos2)>) ->
     let mut run = None;
     let quick: Vec<Cmd> = app.ud.quick.iter().filter_map(|id| Cmd::from_id(id)).collect();
     let group = app.panels.get(&app.active).map(|p| p.tab().settings.group).unwrap_or_default();
+    let mut view_at = None;
+    let mut shown: Option<(bool, bool)> = None;
     let (_, rect) = anchored(ctx, "quickmenu", anchor, 280.0, &pal, |ui| {
         menu_heading(ui, "Quick", &pal);
         for c in &quick {
@@ -5709,6 +5892,27 @@ fn quick_menu(app: &mut App, ctx: &egui::Context, panel: Option<(u64, Pos2)>) ->
                     run = Some(c);
                 }
             }
+            // What the status bar used to switch: the view and its size, and whether
+            // folders and files are listed at all.
+            menu_sep(ui, &pal);
+            menu_heading(ui, "View", &pal);
+            if menu_item(ui, "View and size…", Some("Ctrl+wheel".into()), &pal) {
+                if let Some((p, a)) = panel {
+                    view_at = Some((p, a));
+                }
+            }
+            for c in [Cmd::ToggleFlatten, Cmd::ContentSearch] {
+                if cmd_item(ui, app, c) {
+                    run = Some(c);
+                }
+            }
+            let (folders, files) = app.panels.get(&app.active).map(|p| (p.tab().settings.show_folders, p.tab().settings.show_files)).unwrap_or((true, true));
+            if menu_item(ui, if folders { "Hide folders" } else { "Show folders" }, None, &pal) {
+                shown = Some((true, false));
+            }
+            if menu_item(ui, if files { "Hide files" } else { "Show files" }, None, &pal) {
+                shown = Some((false, true));
+            }
             menu_sep(ui, &pal);
             for c in [Cmd::SavedView, Cmd::ToggleInspector, Cmd::ClosePanel] {
                 if cmd_item(ui, app, c) {
@@ -5721,6 +5925,24 @@ fn quick_menu(app: &mut App, ctx: &egui::Context, panel: Option<(u64, Pos2)>) ->
         app.actions.push(Action::Cmd(c));
         return false;
     }
+    if let Some((p, a)) = view_at {
+        // The view chooser hangs from its lower edge (it opened above the status bar):
+        // from the toolbar its lower edge goes about its own height below the button.
+        app.popup = Popup::zoom(p, pos2(a.x + 30.0, a.y + 300.0));
+        return false;
+    }
+    if let Some((folders, files)) = shown {
+        if let Some(t) = app.panels.get_mut(&app.active).map(|p| p.tab_mut()) {
+            if folders {
+                t.settings.show_folders = !t.settings.show_folders;
+            }
+            if files {
+                t.settings.show_files = !t.settings.show_files;
+            }
+            t.dirty = true;
+        }
+        return false;
+    }
     !clicked_outside(ctx, rect)
 }
 
@@ -5730,7 +5952,7 @@ fn path_menu(app: &mut App, ctx: &egui::Context, panel: u64, path: &Path, anchor
         return false;
     }
     let mut done = false;
-    let computer = tab::is_computer(path);
+    let computer = tab::is_place(path);
     let (_, rect) = anchored(ctx, "pathmenu", anchor, 250.0, &pal, |ui| {
         if !computer {
             if menu_item(ui, "Copy path", None, &pal) {
@@ -5810,7 +6032,7 @@ fn path_dropdown(app: &mut App, ctx: &egui::Context, st: &mut PathDropState) -> 
             let (r, _) = ui.allocate_exact_size(vec2(20.0, 22.0), Sense::hover());
             paint_glyph(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(12.0)), Glyph::Search, pal.text_dim);
             let hint = format!("Filter {} {}…", n_items, if n_items == 1 { "item" } else { "items" });
-            let r = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(false).desired_width(ui.available_width() - 24.0));
+            let r = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(ui.available_width() - 24.0));
             if st.focus {
                 r.request_focus();
                 st.focus = false;
@@ -5886,7 +6108,7 @@ fn history(app: &mut App, ctx: &egui::Context, panel: u64, anchor: Pos2) -> bool
     let (_, rect) = anchored(ctx, "history", anchor, 320.0, &pal, |ui| {
         menu_heading(ui, "History", &pal);
         for (i, h) in hist.iter().take(15) {
-            let name = if tab::is_computer(h) { "Computer".into() } else { h.display().to_string() };
+            let name = if tab::is_computer(h) { "Computer".into() } else if tab::is_github(h) { "GitHub".into() } else { h.display().to_string() };
             let label = if *i == pos { format!("● {name}") } else { name };
             if menu_item(ui, &label, None, &pal) {
                 go = Some(h.clone());
@@ -6020,7 +6242,7 @@ fn find_replace(app: &mut App, ctx: &egui::Context, panel: u64) -> bool {
                 r.find_replace();
                 done = true;
             }
-            if ui.button("Cancel").clicked() {
+            if quiet_button(ui, "Cancel", &pal).clicked() {
                 done = true;
             }
         });
@@ -6065,6 +6287,10 @@ fn tab_menu(app: &mut App, ctx: &egui::Context, panel: u64, idx: usize, pos: Pos
             if cmd_row(ui, app, c) {
                 run = Some(c);
             }
+        }
+        let pinned = app.panels.get(&panel).and_then(|p| p.tabs.get(idx)).is_some_and(|t| t.pinned);
+        if cmd_row_as(ui, app, Cmd::PinTab, if pinned { "Unpin Tab" } else { "Pin Tab" }) {
+            run = Some(Cmd::PinTab);
         }
         menu_sep(ui, &pal);
         if cmd_row(ui, app, Cmd::OpenTabInWindow) {
@@ -6782,6 +7008,48 @@ fn notice(app: &mut App, ctx: &egui::Context, title: &str, text: &str) -> bool {
     !(close || ok)
 }
 
+/// The command that installs a missing helper, for this system's package manager, with a
+/// button that copies it; the tool's name alone where the system is not one Maia knows.
+fn install_hint(app: &mut App, ctx: &egui::Context, tool: &str) -> bool {
+    let pal = app.pal;
+    let close = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+    crate::needs::warm();
+    let family = crate::needs::family();
+    if family.is_none() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    let command = family.and_then(|f| crate::needs::command(tool, f));
+    let enter = command.is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+    let (mut copy, mut done) = (enter, false);
+    centered(ctx, "install hint", 440.0, &pal, |ui| {
+        ui.add_space(4.0);
+        let sub = match (&command, family) {
+            (Some(_), _) => "Run this in a terminal, then try again.".to_string(),
+            (None, None) => "…".to_string(),
+            (None, Some(_)) => format!("Install the {tool} package from your system's software, then try again."),
+        };
+        dialog_title(ui, &format!("Install {tool}"), Some(&sub), &pal);
+        if let Some(c) = &command {
+            ui.add_space(8.0);
+            card(ui, &pal, |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(c.as_str()).font(FontId::monospace(13.0)).color(pal.text)).selectable(true).wrap());
+            });
+        }
+        dialog_buttons(ui, |ui| {
+            if command.is_some() {
+                copy |= primary_button(ui, "Copy", true, &pal).clicked();
+            }
+            done |= plain_button(ui, "Close", &pal).clicked();
+        });
+    });
+    if let (true, Some(c)) = (copy, &command) {
+        crate::clipboard::set_text(c);
+        app.toast("Copied the install command");
+        return false;
+    }
+    !(close || done)
+}
+
 fn group_menu(app: &mut App, ctx: &egui::Context, panel: u64, label: &str, pos: Pos2) -> bool {
     let pal = app.pal;
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
@@ -6833,8 +7101,9 @@ fn drop_menu(app: &mut App, ctx: &egui::Context, paths: &[PathBuf], dest: &Path,
     }
     let mut pick: Option<u8> = None;
     let (_, rect) = anchored(ctx, "dropmenu", pos, 200.0, &pal, |ui| {
-        let dest_name = dest.file_name().map(|n| crate::rtl::display(&n.to_string_lossy()).into_owned()).unwrap_or_else(|| dest.display().to_string());
-        ui.label(egui::RichText::new(format!("{} item{} → {}", paths.len(), if paths.len() == 1 { "" } else { "s" }, dest_name)).small().color(pal.text_dim));
+        let dest_name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dest.display().to_string());
+        let line = format!("{} item{} → {}", paths.len(), if paths.len() == 1 { "" } else { "s" }, dest_name);
+        crate::rtl::label(ui, &line, egui::TextStyle::Small.resolve(ui.style()), pal.text_dim);
         for (k, label) in [(0u8, "Move here"), (1, "Copy here"), (2, "Link here")] {
             if menu_item(ui, label, None, &pal) {
                 pick = Some(k);

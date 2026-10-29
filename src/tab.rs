@@ -18,6 +18,18 @@ pub fn is_computer(p: &Path) -> bool {
     p.as_os_str() == COMPUTER || p.to_str().is_some_and(|s| s.ends_with(":computer") && !s.contains('/') && s.len() < 24)
 }
 
+/// Your GitHub profile (`github.rs`): a place Maia draws, not a folder.
+pub const GITHUB: &str = "maia:github";
+
+pub fn is_github(p: &Path) -> bool {
+    p.as_os_str() == GITHUB
+}
+
+/// Computer or GitHub: places with nothing on disk behind them, where nothing is written.
+pub fn is_place(p: &Path) -> bool {
+    is_computer(p) || is_github(p)
+}
+
 /// Computer view rows for drives that aren't mounted: "maia:drive:/dev/sdb1".
 pub const DRIVE: &str = "maia:drive:";
 
@@ -61,6 +73,8 @@ pub struct ViewCtx<'a> {
     pub folders_first: bool,
     pub recents_on_top: bool,
     pub recents: &'a HashSet<PathBuf>,
+    /// Kept first in their folder, before recents and folders-first.
+    pub pinned: &'a HashSet<PathBuf>,
     pub stats: &'a HashMap<PathBuf, DirStats>,
 }
 
@@ -117,6 +131,8 @@ pub struct Tab {
     pub rename: Option<Rename>,
     /// Counts for the footer: (visible folders, total folders, visible files, total files).
     pub counts: (usize, usize, usize, usize),
+    /// Bytes in the files shown (folders' own sizes arrive later, from the stats).
+    pub shown_bytes: u64,
     pub hidden_count: usize,
     /// What git ignores here, left out of the view (the Ignored files option is Hide).
     pub git_hide: Option<std::sync::Arc<HashSet<std::ffi::OsString>>>,
@@ -139,15 +155,42 @@ pub struct Tab {
     pub nav_row_step: usize,
     pub nav_col_step: usize,
     pub cursor_screen_pos: Option<egui::Pos2>,
+    /// Where the items on screen were drawn last frame (their picture or icon): the
+    /// viewer grows a picture out of its place and puts it back there.
+    pub item_rects: Vec<(u32, egui::Rect)>,
+    /// The folder under the pointer fanning out its pictures (`peek.rs`).
+    pub peek: crate::peek::Peek,
+    /// Years marked on the scrollbar of a list sorted by a date (`ribbon.rs`).
+    pub ribbon: crate::ribbon::Ribbon,
+    /// Rows easing to their new places after the order changed (`glide.rs`).
+    pub glide: crate::glide::Glide,
+    /// Counts the times the shown order was worked out.
+    pub view_gen: u64,
+    /// What kinds of file fill the list, for the status bar's ring (`glance.rs`).
+    pub glance: crate::glance::Glance,
     pub pending_rename: Option<PathBuf>,
     pub rubber: Option<Rubber>,
     pub shown_zoom: f32,
+    /// The Stack view: where the row stands (an index into `view`, easing towards the
+    /// cursor's), and wheel movement short of a whole item.
+    pub stack_pos: f32,
+    pub stack_acc: f32,
+    /// The glow behind the card at the cursor, easing to its picture's colour (RGB, and
+    /// how much of it shows).
+    pub stack_glow: [f32; 4],
+    /// The scrubber's marks for the listing and sort they were made for: where each
+    /// letter, month, size or kind begins.
+    pub stack_marks: Option<(u64, std::rc::Rc<Vec<(usize, String)>>)>,
     /// Partial wheel notches toward the next zoom step.
     pub zoom_acc: f32,
     /// Where the Type column's filter button was last drawn (the Types popup opens there).
     pub funnel_at: Option<egui::Pos2>,
     /// Width the tab was last drawn at in its strip.
     pub shown_tab_w: f32,
+    /// Kept small at the strip's left and out of Close Other Tabs.
+    pub pinned: bool,
+    /// The folder's README, shown above the listing.
+    pub readme: Option<Box<crate::readme::Card>>,
     pub hscroll: f32,
     pub born: std::time::Instant,
     /// Details tree view: expanded folders and their pending child listings.
@@ -223,6 +266,7 @@ impl Tab {
             collapsed_groups: HashSet::new(),
             rename: None,
             counts: (0, 0, 0, 0),
+            shown_bytes: 0,
             hidden_count: 0,
             git_hide: None,
             only_changed: false,
@@ -239,12 +283,24 @@ impl Tab {
             nav_row_step: 1,
             nav_col_step: 0,
             cursor_screen_pos: None,
+            item_rects: Vec::new(),
+            peek: Default::default(),
+            ribbon: Default::default(),
+            glide: Default::default(),
+            view_gen: 0,
+            glance: Default::default(),
             pending_rename: None,
             rubber: None,
             shown_zoom: -1.0,
+            stack_pos: -1.0,
+            stack_acc: 0.0,
+            stack_glow: [0.0; 4],
+            stack_marks: None,
             zoom_acc: 0.0,
             funnel_at: None,
             shown_tab_w: 0.0,
+            pinned: false,
+            readme: None,
             hscroll: 0.0,
             born: std::time::Instant::now(),
             expanded: HashSet::new(),
@@ -270,6 +326,8 @@ impl Tab {
         }
         let base = if is_computer(&self.path) {
             "Computer".to_string()
+        } else if is_github(&self.path) {
+            "GitHub".to_string()
         } else if self.path == Path::new("/") {
             "/".to_string()
         } else if let Some((_, name)) = crate::sidebar::net_root(&self.path).filter(|r| r.0 == self.path) {
@@ -292,6 +350,13 @@ impl Tab {
         self.archive = None;
         if is_computer(&self.path) {
             self.load_computer();
+            return;
+        }
+        if is_github(&self.path) {
+            self.walk = None;
+            self.loading = None;
+            self.flatten = false;
+            self.set_entries(vec![]);
             return;
         }
         if !self.path.is_dir() {
@@ -467,7 +532,7 @@ impl Tab {
 
     /// Is the tree view active (Details view, not flattened)?
     pub fn tree_active(&self) -> bool {
-        !self.flatten && crate::listing::mode_of(&self.settings) == crate::listing::Mode::Tree && !is_computer(&self.path) && self.archive.is_none()
+        !self.flatten && crate::listing::mode_of(&self.settings) == crate::listing::Mode::Tree && !is_place(&self.path) && self.archive.is_none()
     }
 
     pub fn toggle_expand(&mut self, dir: &Path) {
@@ -536,7 +601,7 @@ impl Tab {
             }
             return;
         }
-        if is_computer(&self.path) || self.rename.is_some() {
+        if is_place(&self.path) || self.rename.is_some() {
             return;
         }
         if c.gone.iter().any(|g| self.path.starts_with(g)) {
@@ -706,6 +771,8 @@ impl Tab {
         self.selected.clear();
         self.cursor = None;
         self.anchor = None;
+        // Another folder's row starts where its cursor is, not flipping over from the last.
+        self.stack_pos = -1.0;
         self.collapsed_groups.clear();
         self.expanded.clear();
         self.tree_loads.clear();
@@ -719,6 +786,7 @@ impl Tab {
                 // Browsing in Columns stays in Columns: a folder's saved view lends it
                 // its sort, not a view that would take the columns away.
                 self.settings.column_view |= before.column_view;
+                self.settings.stack_view = (self.settings.stack_view || before.stack_view) && !self.settings.column_view;
                 self.free_view.get_or_insert(before);
                 self.saved_scope = scope;
             }
@@ -784,7 +852,7 @@ impl Tab {
         if is_computer(&self.path) {
             return;
         }
-        let Some(parent) = self.path.parent().map(|p| p.to_path_buf()) else {
+        let Some(parent) = self.path.parent().filter(|_| !is_github(&self.path)).map(|p| p.to_path_buf()) else {
             let s = settings(Path::new(COMPUTER));
             self.navigate(PathBuf::from(COMPUTER), s);
             return;
@@ -797,7 +865,7 @@ impl Tab {
     }
 
     pub fn set_flatten(&mut self, on: bool) {
-        if is_computer(&self.path) || self.archive.is_some() || self.flatten == on {
+        if is_place(&self.path) || self.archive.is_some() || self.flatten == on {
             return;
         }
         self.flatten = on;
@@ -977,6 +1045,7 @@ impl Tab {
         let content = self.content.take();
         self.rebuild_inner(c, content.as_ref());
         self.content.put(content);
+        self.view_gen += 1;
         self.last_rebuild = Some(std::time::Instant::now());
         self.last_rebuild_ms = t0.elapsed().as_secs_f32() * 1000.0;
     }
@@ -1236,6 +1305,8 @@ impl Tab {
             let keyed: Option<Vec<Option<u64>>> = match s.sort {
                 SortKey::Tags => Some(crate::tags::sort_keys(top.iter().map(|&i| entries[i as usize].path.as_path()))),
                 SortKey::Taken | SortKey::Dimensions | SortKey::Duration => Some(top.iter().map(|&i| crate::facts::sort_key(&entries[i as usize], s.sort)).collect()),
+                SortKey::Colour => Some(top.iter().map(|&i| crate::colours::sort_key(&entries[i as usize])).collect()),
+                SortKey::Type => Some(type_keys(top.iter().map(|&i| &entries[i as usize]))),
                 _ => None,
             };
             let by_name = |a: &u32, b: &u32| compare(&entries[*a as usize], &entries[*b as usize], SortKey::Name, s.desc, c, tm);
@@ -1249,7 +1320,7 @@ impl Tab {
                     SortKey::Folders => stat(e).map(|x| x.folders as u64).unwrap_or(0),
                     SortKey::Files => stat(e).map(|x| x.files as u64).unwrap_or(0),
                     SortKey::Deleted => when(tm.get(&e.path).and_then(|t| t.1)),
-                    SortKey::Type | SortKey::Original | SortKey::Tags | SortKey::Taken | SortKey::Dimensions | SortKey::Duration => return None,
+                    SortKey::Type | SortKey::Original | SortKey::Tags | SortKey::Taken | SortKey::Dimensions | SortKey::Duration | SortKey::Colour => return None,
                 })
             };
             if !matches!(s.sort, SortKey::Type | SortKey::Original) || keyed.is_some() {
@@ -1269,11 +1340,12 @@ impl Tab {
                         // Recents on top (one lookup per item, not per comparison), then
                         // folders-first.
                         let recent = c.recents_on_top && c.recents.contains(&e.path);
+                        let pinned = !c.pinned.is_empty() && c.pinned.contains(&e.path);
                         let (missing, key) = match &keyed {
                             Some(v) => (v[k].is_none(), v[k].unwrap_or(0)),
                             None => (false, primary(e).unwrap_or(0)),
                         };
-                        let rank = if recent { 0 } else { 4 } + if e.is_dir == c.folders_first { 0 } else { 2 } + missing as u8;
+                        let rank = if pinned { 0 } else { 8 } + if recent { 0 } else { 4 } + if e.is_dir == c.folders_first { 0 } else { 2 } + missing as u8;
                         (tier(k), rank, key, u128::from_be_bytes(p), i)
                     })
                     .collect();
@@ -1328,15 +1400,21 @@ impl Tab {
         self.build_rows(top, &kids, c.stats);
         // Shown out of the folder's own items, as the totals count them: unfolded tree
         // rows are not in the totals (a folder of 1 showed "3/1" with two kids open).
-        let (mut vf, mut vfi) = (0, 0);
+        let (mut vf, mut vfi, mut bytes) = (0, 0, 0u64);
         for &i in &self.view {
             let e = &self.entries[i as usize];
             if e.depth > 0 {
                 continue;
             }
-            if e.is_dir { vf += 1 } else { vfi += 1 }
+            if e.is_dir {
+                vf += 1
+            } else {
+                vfi += 1;
+                bytes += e.size;
+            }
         }
         self.counts = (vf, tf, vfi, tfi);
+        self.shown_bytes = bytes;
         self.last_filter = self.filter.clone();
         self.index_view();
         // Apply a pending restore once results are complete.
@@ -1386,7 +1464,7 @@ impl Tab {
         // month and reads by day.
         let timeline = self.smart.as_ref().is_some_and(|s| s.id == crate::smart::TIMELINE);
         // Columns lists each folder in one run, as its other columns do.
-        if self.settings.group == GroupBy::None || self.settings.column_view || (self.flatten && !timeline) {
+        if self.settings.group == GroupBy::None || self.settings.column_view || self.settings.stack_view || (self.flatten && !timeline) {
             ordered.push((None, top));
         } else {
             let mut order: Vec<String> = vec![];
@@ -1471,6 +1549,43 @@ impl Tab {
         v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         v
     }
+}
+
+/// Sort keys for the Type column: each item's place among the kinds shown, in their
+/// alphabetical order, so the column reads in order. The kind is asked once per
+/// extension, not once per item.
+fn type_keys<'a>(items: impl Iterator<Item = &'a Entry>) -> Vec<Option<u64>> {
+    let db = crate::mime::mime_db();
+    let mut kinds: Vec<String> = vec![];
+    let mut by_ext: HashMap<(&'a str, bool, bool), usize> = HashMap::new();
+    let mut place = |kinds: &mut Vec<String>, k: String| kinds.iter().position(|x| *x == k).unwrap_or_else(|| {
+        kinds.push(k);
+        kinds.len() - 1
+    });
+    let idx: Vec<usize> = items
+        .map(|e| {
+            let short = || db.short(&e.name, e.ext(), e.is_dir, e.is_executable());
+            if db.named(&e.name) {
+                return place(&mut kinds, short());
+            }
+            match by_ext.get(&(e.ext(), e.is_dir, e.is_executable())) {
+                Some(&k) => k,
+                None => {
+                    let k = place(&mut kinds, short());
+                    by_ext.insert((e.ext(), e.is_dir, e.is_executable()), k);
+                    k
+                }
+            }
+        })
+        .collect();
+    // Few kinds: their alphabetical order is a small sort.
+    let mut order: Vec<usize> = (0..kinds.len()).collect();
+    order.sort_by(|a, b| kinds[*a].cmp(&kinds[*b]));
+    let mut rank = vec![0u64; kinds.len()];
+    for (r, &k) in order.iter().enumerate() {
+        rank[k] = r as u64;
+    }
+    idx.into_iter().map(|k| Some(rank[k])).collect()
 }
 
 pub fn volume_label(device: &str, mount: &Path) -> String {
@@ -1635,6 +1750,12 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
 }
 
 fn compare(a: &Entry, b: &Entry, key: SortKey, desc: bool, c: &ViewCtx, trash: &HashMap<PathBuf, (PathBuf, Option<SystemTime>)>) -> Ordering {
+    if !c.pinned.is_empty() {
+        let (pa, pb) = (c.pinned.contains(&a.path), c.pinned.contains(&b.path));
+        if pa != pb {
+            return pb.cmp(&pa);
+        }
+    }
     if c.recents_on_top {
         let (ra, rb) = (c.recents.contains(&a.path), c.recents.contains(&b.path));
         if ra != rb {
@@ -1666,6 +1787,10 @@ fn compare(a: &Entry, b: &Entry, key: SortKey, desc: bool, c: &ViewCtx, trash: &
             }
         }
         SortKey::Taken | SortKey::Dimensions | SortKey::Duration => match (crate::facts::sort_key(a, key), crate::facts::sort_key(b, key)) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (x, y) => return y.is_none().cmp(&x.is_none()).reverse().then_with(|| natural_cmp(a.lname(), b.lname())),
+        },
+        SortKey::Colour => match (crate::colours::sort_key(a), crate::colours::sort_key(b)) {
             (Some(x), Some(y)) => x.cmp(&y),
             (x, y) => return y.is_none().cmp(&x.is_none()).reverse().then_with(|| natural_cmp(a.lname(), b.lname())),
         },
@@ -1722,7 +1847,7 @@ fn group_label(e: &Entry, g: GroupBy, c: &GroupCtx) -> String {
             _ => "Other".into(),
         },
         // Same labels as the Type column.
-        GroupBy::Type => crate::mime::mime_db().label(&e.name, &e.ext(), e.is_dir, e.is_executable()),
+        GroupBy::Type => crate::mime::mime_db().short(&e.name, &e.ext(), e.is_dir, e.is_executable()),
         GroupBy::Modified => date_group(e.modified),
         GroupBy::Created => date_group(e.created),
         GroupBy::Accessed => date_group(e.accessed),
@@ -1734,10 +1859,10 @@ fn group_label(e: &Entry, g: GroupBy, c: &GroupCtx) -> String {
             }
             match e.size {
                 0 => "Empty".into(),
-                s if s < 16 << 10 => "Tiny (< 16 KB)".into(),
-                s if s < 1 << 20 => "Small (< 1 MB)".into(),
-                s if s < 128 << 20 => "Medium (< 128 MB)".into(),
-                s if s < 1 << 30 => "Large (< 1 GB)".into(),
+                s if s < 16_000 => "Tiny (< 16 KB)".into(),
+                s if s < 1_000_000 => "Small (< 1 MB)".into(),
+                s if s < 128_000_000 => "Medium (< 128 MB)".into(),
+                s if s < 1_000_000_000 => "Large (< 1 GB)".into(),
                 _ => "Huge (≥ 1 GB)".into(),
             }
         }
@@ -1769,9 +1894,9 @@ fn group_label(e: &Entry, g: GroupBy, c: &GroupCtx) -> String {
         GroupBy::FreeSpace | GroupBy::PercentFull if c.vols.get(&e.path).is_some_and(|v| !v.mounted) => "Not mounted".into(),
         GroupBy::FreeSpace => match c.vols.get(&e.path) {
             Some(v) => match v.free {
-                f if f < 1 << 30 => "Under 1 GB free".into(),
-                f if f < 10 << 30 => "1 – 10 GB free".into(),
-                f if f < 100 << 30 => "10 – 100 GB free".into(),
+                f if f < 1_000_000_000 => "Under 1 GB free".into(),
+                f if f < 10_000_000_000 => "1 – 10 GB free".into(),
+                f if f < 100_000_000_000 => "10 – 100 GB free".into(),
                 _ => "Over 100 GB free".into(),
             },
             None => "Unknown".into(),
@@ -1781,6 +1906,7 @@ fn group_label(e: &Entry, g: GroupBy, c: &GroupCtx) -> String {
         GroupBy::Tag => crate::tags::get(&e.path, |t| crate::tags::leading(t).cloned()).flatten().unwrap_or_else(|| NO_TAGS.into()),
         // By the month: photos span years, and a day's group would hold a handful.
         GroupBy::Taken => crate::facts::month_label(e),
+        GroupBy::Origin => crate::origin::group(e),
         GroupBy::PercentFull => match c.vols.get(&e.path) {
             Some(v) if v.total > 0 => match (v.total - v.free) as f64 / v.total as f64 {
                 f if f >= 0.9 => "Nearly full (90%+)".into(),
@@ -1801,6 +1927,9 @@ fn group_rank(l: &str, g: GroupBy) -> usize {
     if g == GroupBy::Taken {
         return crate::facts::month_rank(l);
     }
+    if g == GroupBy::Origin {
+        return crate::origin::rank(l);
+    }
     let order: &[&str] = match g {
         GroupBy::Name => &["A – H", "I – P", "Q – Z", "Other"],
         GroupBy::Type => &["Folder"],
@@ -1810,7 +1939,7 @@ fn group_rank(l: &str, g: GroupBy) -> usize {
         GroupBy::Usage => &["Over half", "10 – 50%", "1 – 10%", "< 1%"],
         GroupBy::FreeSpace => &["Under 1 GB free", "1 – 10 GB free", "10 – 100 GB free", "Over 100 GB free", "Unknown"],
         GroupBy::PercentFull => &["Nearly full (90%+)", "Over half full", "Under half full", "Unknown"],
-        GroupBy::None | GroupBy::Original | GroupBy::FileSystem | GroupBy::Tag | GroupBy::Taken => &[],
+        GroupBy::None | GroupBy::Original | GroupBy::FileSystem | GroupBy::Tag | GroupBy::Taken | GroupBy::Origin => &[],
     };
     order.iter().position(|o| *o == l).unwrap_or(if g == GroupBy::Type { 1 } else { 99 })
 }

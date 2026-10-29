@@ -41,13 +41,14 @@ impl Cmd {
             Cmd::GroupFull => G::PercentFull,
             Cmd::GroupTag => G::Tag,
             Cmd::GroupTaken => G::Taken,
+            Cmd::GroupOrigin => G::Origin,
             _ => return None,
         })
     }
 }
 
 /// Every "Group By …" command, in menu order.
-pub const GROUP_CMDS: [Cmd; 16] = [
+pub const GROUP_CMDS: [Cmd; 17] = [
     Cmd::GroupNone,
     Cmd::GroupName,
     Cmd::GroupSize,
@@ -58,6 +59,7 @@ pub const GROUP_CMDS: [Cmd; 16] = [
     Cmd::GroupItems,
     Cmd::GroupType,
     Cmd::GroupTag,
+    Cmd::GroupOrigin,
     Cmd::GroupUsage,
     Cmd::GroupDeleted,
     Cmd::GroupOriginal,
@@ -151,9 +153,11 @@ commands! {
     OpenInRightSplit, "open_in_right_split", Folder, "Open In Right Split", "Open the selected folder in a new panel to the right.", ["Ctrl+Alt+Right"];
     OpenInBottomSplit, "open_in_bottom_split", Folder, "Open In Bottom Split", "Open the selected folder in a new panel below.", ["Ctrl+Alt+Down"];
     OpenTerminal, "open_terminal", Folder, "Open Terminal Here", "Start your terminal in the current folder.", ["Ctrl+Shift+Backtick"];
+    GitHubProfile, "github_profile", Folder, "GitHub Profile", "Your GitHub profile through gh: followers, achievements, your year and what you did lately.", [];
     RecentProjects, "recent_projects", Folder, "Recent Projects", "Open one of the git repositories in your home folder, the ones you were in last first.", ["Ctrl+Alt+P"];
     QuickOpen, "quick_open", Folder, "Quick Open", "Find any file in this project by a few letters of its path.", ["Ctrl+O"];
     SetMark, "set_mark", Folder, "Set Mark…", "Give this place a letter: the file under the cursor, or the folder.", ["Ctrl+M"];
+    Jump, "jump", Folder, "Jump To Folder…", "Go to a folder you use often by a few letters of its name; with zoxide installed, its folders too.", ["Ctrl+G"];
     GoToMark, "go_to_mark", Folder, "Go To Mark…", "Go back to a place marked with a letter.", ["Ctrl+Quote"];
     RunTask, "run_task", Folder, "Run Task…", "Run a script, target or recipe of this project in your terminal.", ["Ctrl+Shift+B"];
     ToggleBookmark, "toggle_bookmark", Folder, "Toggle Bookmark", "Add or remove the current folder (or selection) from bookmarks.", ["Ctrl+D"];
@@ -163,6 +167,7 @@ commands! {
     NewTab, "new_tab", Tabs, "New Tab", "Open a new tab.", ["Ctrl+T"];
     CloseTab, "close_tab", Tabs, "Close Tab", "Close the current tab.", ["Ctrl+W", "Ctrl+F4"];
     CloseAllTabs, "close_all_tabs", Tabs, "Close All Tabs", "Close every tab in this panel except a fresh one.", ["Ctrl+Shift+W"];
+    PinTab, "pin_tab", Tabs, "Pin Tab", "Keep this tab small at the left and out of Close Other Tabs; again to unpin.", [];
     CloseOtherTabs, "close_other_tabs", Tabs, "Close Other Tabs", "Close all tabs in this panel except the current one.", [];
     CloseRightTabs, "close_right_tabs", Tabs, "Close Right Tabs", "Close the tabs to the right of the current one.", [];
     CloseLeftTabs, "close_left_tabs", Tabs, "Close Left Tabs", "Close the tabs to the left of the current one.", [];
@@ -210,13 +215,16 @@ commands! {
     CodeSearch, "search_code", View, "Search Code", "Find text in this project's files, by word, case or regular expression.", ["Ctrl+Alt+F"];
     FindTodos, "find_todos", View, "Find TODOs", "List every TODO, FIXME, HACK and XXX comment in this project.", [];
     ViewPictures, "view_pictures", View, "View Pictures", "Show this folder's pictures full window, from the one under the cursor; Space plays them as a slideshow.", ["F3"];
+    ViewCalendar, "view_calendar", View, "View Calendar", "This folder's pictures on a calendar by the day they were taken; pick days to select their pictures.", ["Shift+F3"];
     TypesFilter, "types_filter", View, "Filter By Type", "Choose which file types are shown.", ["Alt+T"];
     ToggleHidden, "toggle_hidden", View, "Toggle Hidden Files", "Show or hide dotfiles.", ["Ctrl+H"];
     ToggleSystem, "toggle_system", View, "Toggle System Files", "Show or hide backup files and special files (sockets, devices).", [];
     ToggleExtensions, "toggle_extensions", View, "Toggle File Extensions", "Show or hide file name extensions.", [];
     ToggleRecents, "toggle_recents", View, "Toggle Recents", "Mark recently used items with a dot.", [];
+    ToggleReadme, "toggle_readme", View, "Toggle Folder README", "Show a folder's README above its files.", [];
     ToggleRecentsOnTop, "toggle_recents_on_top", View, "Toggle Recents On Top", "Sort recently used items above the rest.", [];
     ToggleSidebar, "toggle_sidebar", View, "Toggle Sidebar", "Show or hide the quick access sidebar.", ["Ctrl+B"];
+    FilterSidebar, "filter_sidebar", View, "Filter Sidebar", "Narrow the sidebar's places by name. Typing while pointing at the sidebar does it too.", [];
     ZoomIn, "zoom_in", View, "Zoom In", "Step toward bigger icons (also Ctrl+wheel).", ["Ctrl+Equals", "Ctrl+Plus"];
     ZoomOut, "zoom_out", View, "Zoom Out", "Step toward denser views (also Ctrl+wheel).", ["Ctrl+Minus"];
     ViewDetails, "view_details", View, "View Details", "A table with sortable columns.", ["Ctrl+Shift+1", "Ctrl+0"];
@@ -226,6 +234,7 @@ commands! {
     ViewLarge, "view_large", View, "View Large Icons", "A grid of large thumbnails.", ["Ctrl+Shift+5"];
     ViewXL, "view_xl", View, "View XL Icons", "The biggest thumbnails.", ["Ctrl+Shift+6"];
     ViewColumns, "view_columns", View, "View Columns", "One column per folder, from your home folder or the drive down to this one.", ["Ctrl+Shift+7"];
+    ViewStack, "view_stack", View, "View Stack", "The items standing in a row, the one at the cursor turned to face you; flip through them with the arrows or the wheel.", ["Ctrl+Shift+8"];
     GroupNone, "group_none", Group, "Clear Grouping", "List everything in one run, without group headers.", [];
     GroupName, "group_name", Group, "Group By Name", "Alphabetical ranges.", [];
     GroupType, "group_type", Group, "Group By Type", "One group per file type.", [];
@@ -242,6 +251,7 @@ commands! {
     GroupFull, "group_percent_full", Group, "Group By Percent Full", "Drives by how full they are (Computer only).", [];
     GroupTag, "group_tag", Group, "Group By Tag", "One group per tag, colour labels first; an item shows under its first tag only.", [];
     GroupTaken, "group_date_taken", Group, "Group By Date Taken", "Photos and films by the month they were taken, newest first.", [];
+    GroupOrigin, "group_origin", Group, "Group By Origin", "Downloads by the site they came from, as the browser marked them; the rest under Unknown.", [];
     GroupExpandAll, "group_expand_all", Group, "Expand All Groups", "Open every group.", [];
     GroupCollapseAll, "group_collapse_all", Group, "Collapse All Groups", "Close every group, leaving just the headers.", [];
     SavedView, "saved_view_settings", View, "Saved View Settings", "Remember this view for this folder, its subfolders, or everywhere.", [];
@@ -261,6 +271,7 @@ commands! {
     SortSizeDesc, "sort_size_desc", Sort, "Sort By Size Desc", "Largest first (folders by their content size).", [];
     SortFullAsc, "sort_percent_full_asc", Sort, "Sort By Percent Full Asc", "Drives with the most free space first (Computer only).", [];
     SortFullDesc, "sort_percent_full_desc", Sort, "Sort By Percent Full Desc", "Fullest drives first (Computer only).", [];
+    SortColour, "sort_colour", Sort, "Sort By Colour", "Pictures by their main colour, red through violet, then the greys; the rest last.", [];
     ToggleFoldersFirst, "toggle_folders_first", Sort, "Toggle Folders First", "Switch between listing folders first or files first.", [];
 
     ToggleInspector, "toggle_inspector", Inspector, "Toggle Inspector", "Preview the item under the cursor beside the list.", ["Space", "Ctrl+I"];
@@ -283,6 +294,7 @@ commands! {
     Copy, "copy", Files, "Copy", "Copy the selection to the clipboard.", ["Ctrl+C", "Ctrl+Insert"];
     Cut, "cut", Files, "Cut", "Cut the selection to move it on paste.", ["Ctrl+X"];
     Paste, "paste", Files, "Paste", "Paste files here (or into the single selected folder).", ["Ctrl+V", "Shift+Insert"];
+    PasteEarlier, "paste_earlier", Files, "Paste From Earlier…", "Paste one of the last nine sets copied or cut this session; the clipboard keeps only the latest.", ["Ctrl+Shift+V"];
     CopyTo, "copy_to", Files, "Copy To…", "Copy the selection into a folder picked as in Go To, the folders copied and moved to last first.", ["Shift+F5"];
     MoveTo, "move_to", Files, "Move To…", "Move the selection into a folder picked as in Go To, the folders copied and moved to last first.", ["Shift+F6"];
     CopyPath, "copy_path", Files, "Copy As Path", "Copy full paths, quoted when needed; the folder if nothing is selected.", ["Ctrl+Shift+C"];
@@ -294,6 +306,9 @@ commands! {
     CopyWebLink, "copy_web_link", Files, "Copy Web Link", "Copy a link to the selection on GitHub, GitLab or Codeberg at this commit, with the line a search showed.", [];
     OpenWebLink, "open_web_link", Files, "Open Web Link", "Open the selection on GitHub, GitLab or Codeberg in your browser, at this commit and the line a search showed.", [];
     Email, "email", Files, "Email", "Attach the selected files to a new email in your mail app.", [];
+    PinToTop, "pin_to_top", Files, "Pin To Top", "Keep the selection first in its folder, whatever the sort; again to unpin.", [];
+    ToggleSharePlace, "toggle_share_place", Files, "Toggle Share Without Place", "Send and attach photos without where they were taken and the camera's details.", [];
+    SendToPhone, "send_to_phone", Files, "Send To Phone…", "Share the selection on this network for five minutes, through a code the phone's camera reads; folders go as zips.", [];
     Print, "print", Files, "Print…", "Print the selected files on one of your printers.", [];
     RotateLeft, "rotate_left", Files, "Rotate Left", "Turn the selected pictures a quarter to the left, in place; the originals go to the trash.", [];
     RotateRight, "rotate_right", Files, "Rotate Right", "Turn the selected pictures a quarter to the right, in place; the originals go to the trash.", [];
@@ -324,7 +339,9 @@ commands! {
     WhatsUsing, "whats_using", Files, "What's Using This…", "List the programs that have the selection open or work inside it, and stop your own.", [];
     FindDuplicates, "find_duplicates", Files, "Find Duplicates…", "Find files with the same contents under this folder, whatever their names, and trash the extra copies.", [];
     TidyFolder, "tidy_folder", Files, "Tidy Folder…", "Sort this folder's loose files into folders by kind, or its photos into a folder a month by when they were taken, seeing every move first.", [];
+    Transfers, "transfers", Files, "Show Transfers", "The copies and moves under way: pause one, start a waiting one now, or drag them into another order.", ["Ctrl+Shift+J"];
     SpaceUsed, "space_used", Files, "Show Space Used", "This folder's contents biggest first, each with its share, to find what fills the disk.", [];
+    FreeUpSpace, "free_up_space", Files, "Free Up Space…", "What could go to make room on this folder's disk: build output, download caches, thumbnails, the trash.", [];
     PreviousVersions, "previous_versions", Files, "Previous Versions…", "Earlier copies of the file kept in the disk's snapshots, to look at and restore.", [];
     CleanBuilds, "clean_build_folders", Files, "Clean Build Folders…", "Find build output and installed packages under this folder and trash the ones you pick.", [];
     CleanBuildsHome, "clean_build_folders_home", Files, "Clean Build Folders In Home…", "Find build output and installed packages in every project under your home folder.", [];

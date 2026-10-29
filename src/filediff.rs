@@ -142,7 +142,7 @@ pub fn view(ui: &mut Ui, rect: Rect, c: &mut Compare, wrap: &mut bool, env: &mut
         let g = crate::listing::elided(ui, &title, FontId::proportional(12.0), room.min(320.0), pal.text);
         let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 36.0, 22.0), Sense::hover());
         ui.painter().rect_filled(r, CornerRadius::same(11), pal.accent.gamma_multiply(0.22));
-        crate::theme::paint_lucide(ui.painter(), Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), Vec2::splat(12.0)), "git-compare", pal.text);
+        crate::theme::paint_symbol(ui.painter(), Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), Vec2::splat(12.0)), "git-compare", pal.text);
         ui.painter().galley(pos2(r.left() + 26.0, r.center().y - g.size().y / 2.0), g, pal.text);
         if let Some((add, del)) = counts.filter(|_| ui.available_width() > 90.0) {
             ui.add_space(6.0);
@@ -177,7 +177,7 @@ pub fn view(ui: &mut Ui, rect: Rect, c: &mut Compare, wrap: &mut bool, env: &mut
 /// The toolbar button that puts a diff's sides beside each other; true when clicked.
 pub fn diff_layout(ui: &mut Ui, side: bool, pal: &crate::theme::Palette) -> bool {
     crate::inspector::seg_button(ui, side, "Side by side", pal, |p, r, col| {
-        crate::theme::paint_lucide(p, r, "columns-2", col);
+        crate::theme::paint_symbol(p, r, "columns-2", col);
     })
 }
 

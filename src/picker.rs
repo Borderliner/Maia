@@ -71,11 +71,16 @@ impl Accept {
     }
 }
 
-/// Where the files an app asks to save land: each name's last part in `dir`. The names
-/// come from the app, which may be sandboxed: "/home/u/.bashrc" or "../../x" must not
-/// reach past the folder the user chose. Names with nothing left ("..", "/") are dropped.
-pub fn save_targets(dir: &Path, names: &[String]) -> Vec<PathBuf> {
-    names.iter().filter_map(|n| Path::new(n).file_name()).map(|n| dir.join(n)).collect()
+/// Where a file an app wants saved goes: in the folder the user picked, under the last
+/// plain part of the name the app suggested. The app may be sandboxed, and the name is
+/// its to choose, so "../../.profile" or "/home/u/.bashrc" lands in `dir` all the same.
+/// None for a name with no plain part ("..", "/").
+pub fn save_path(dir: &Path, name: &str) -> Option<PathBuf> {
+    let parts = Path::new(name).components().filter_map(|c| match c {
+        std::path::Component::Normal(part) => Some(part),
+        _ => None,
+    });
+    parts.last().map(|part| dir.join(part))
 }
 
 /// `*`, `?` and `[abc]` / `[a-z]` / `[!a]` classes, as shell globs and the portal's
@@ -345,7 +350,7 @@ fn selected_folders(app: &mut App) -> Vec<PathBuf> {
 /// The folder shown, when it is a real one (not Computer, not inside an archive).
 fn real_folder(app: &mut App) -> Option<PathBuf> {
     let t = app.tab();
-    (t.archive.is_none() && !crate::tab::is_computer(&t.path) && t.path.is_dir()).then(|| t.path.clone())
+    (t.archive.is_none() && !crate::tab::is_place(&t.path) && t.path.is_dir()).then(|| t.path.clone())
 }
 
 fn uri(p: &Path) -> String {
@@ -399,7 +404,7 @@ pub fn accept(app: &mut App) {
                 return;
             };
             let names = app.picker.as_ref().map(|p| p.pick.files.clone()).unwrap_or_default();
-            let paths = save_targets(&dir, &names);
+            let paths: Vec<PathBuf> = names.iter().filter_map(|n| save_path(&dir, n)).collect();
             let there: Vec<&PathBuf> = paths.iter().filter(|p| p.exists()).collect();
             let a = app.picker.as_ref().map(|p| p.answer(paths.iter().map(|f| uri(f)).collect()));
             let Some(a) = a else { return };
@@ -834,7 +839,7 @@ fn name_field(app: &mut App, ui: &mut Ui, r: Rect, fs: f32, pal: &crate::theme::
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink2(vec2(8.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
     let (width, hint) = (r.width() - 16.0, egui::RichText::new("Name").color(pal.text_dim));
     // Persian, Arabic or Hebrew names are drawn joined and in display order.
-    let resp = crate::rtl::line_edit(&mut child, id, &mut p.name, FontId::proportional(fs), |te| te.frame(false).desired_width(width).hint_text(hint)).response;
+    let resp = crate::rtl::line_edit(&mut child, id, &mut p.name, FontId::proportional(fs), |te| te.frame(crate::ui::bare_edit()).desired_width(width).hint_text(hint)).response;
     crate::ui::note_control(ui, r, "picker name");
     if std::mem::take(&mut p.focus_name) {
         resp.request_focus();

@@ -44,6 +44,17 @@ impl Panel {
             branch_chip: None,
         }
     }
+    /// Pinned tabs first, each side in its own order, the active tab still active.
+    pub fn settle_pins(&mut self) {
+        if self.tabs.windows(2).all(|w| w[0].pinned || !w[1].pinned) {
+            return;
+        }
+        let id = self.tabs.get(self.active).map(|t| t.id);
+        let (mut tabs, rest): (Vec<Tab>, Vec<Tab>) = std::mem::take(&mut self.tabs).into_iter().partition(|t| t.pinned);
+        tabs.extend(rest);
+        self.tabs = tabs;
+        self.active = id.and_then(|id| self.tabs.iter().position(|t| t.id == id)).unwrap_or(0);
+    }
     pub fn tab(&self) -> &Tab {
         &self.tabs[self.active.min(self.tabs.len() - 1)]
     }
@@ -56,7 +67,7 @@ impl Panel {
             tabs: self
                 .tabs
                 .iter()
-                .map(|t| TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: t.flatten, smart: t.smart.as_ref().map(|s| s.id) })
+                .map(|t| TabSnap { path: t.path.clone(), view: t.settings.clone(), flatten: t.flatten, smart: t.smart.as_ref().map(|s| s.id), pinned: t.pinned })
                 .collect(),
             active: self.active,
             inspector: self.inspector.is_some(),

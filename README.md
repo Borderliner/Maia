@@ -78,9 +78,10 @@ with:
 | Action | Keys |
 |---|---|
 | Go to a place or path | Ctrl+P, Ctrl+L |
+| A folder you use often, by a few letters | Ctrl+G |
 | New tab, close tab, reopen | Ctrl+T, Ctrl+W, Ctrl+Shift+T |
 | Split right, split below, switch panel | Ctrl+Shift+S, Ctrl+S, Tab |
-| Preview, pictures full window | Space, F3 |
+| Preview, pictures full window, on a calendar | Space, F3, Shift+F3 |
 | Find in the preview, edit it there | Ctrl+F, Shift+F4 |
 | Terminal under the files | Ctrl+` |
 | Find anywhere in home, in this project | Ctrl+K, Ctrl+O |
@@ -118,7 +119,9 @@ tools/window.sh      # a real window driven through a pipe, for checking by eye
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE). The bundled fonts and icons keep their own
-licenses, in `assets/`, and so do the Rust crates Maia is built from:
+GPL-3.0-or-later. See [LICENSE](LICENSE). The interface icons are the
+[Solar](https://github.com/saoudi-h/solar-icons) set by 480 Design, under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The bundled fonts and icons keep
+their own licenses, in `assets/`, and so do the Rust crates Maia is built from:
 [assets/THIRD-PARTY-NOTICES.txt](assets/THIRD-PARTY-NOTICES.txt) lists each with its
 license text (`tools/notices.py` writes it).

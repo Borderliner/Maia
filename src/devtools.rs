@@ -95,7 +95,7 @@ pub fn fmt_count(n: usize) -> String {
 /// archive).
 pub fn target_dir(app: &mut App) -> Option<PathBuf> {
     let t = app.tab();
-    if crate::tab::is_computer(&t.path) || t.archive.is_some() {
+    if crate::tab::is_place(&t.path) || t.archive.is_some() {
         return None;
     }
     let explicit = !t.selected.is_empty();
@@ -373,11 +373,11 @@ pub fn code_search_popup(app: &mut App, ctx: &egui::Context, st: &mut CodeState)
         // The query, with case, word and expression switches at its end.
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(20.0, 22.0), Sense::hover());
-            theme::paint_lucide(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(14.0)), "text-search", pal.text_dim);
+            theme::paint_symbol(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(14.0)), "text-search", pal.text_dim);
             let w = ui.available_width() - 3.0 * 32.0 - 6.0;
             let hint = if st.q.todo { "Narrow the TODOs…" } else { "Search code…" };
             let id = Id::new("code query");
-            let r = ui.add(egui::TextEdit::singleline(&mut st.q.text).id(id).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(false).desired_width(w.max(40.0)).font(FontId::proportional(15.0)));
+            let r = ui.add(egui::TextEdit::singleline(&mut st.q.text).id(id).hint_text(egui::RichText::new(hint).color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(w.max(40.0)).font(FontId::proportional(15.0)));
             crate::ui::note_control(ui, r.rect, "code query");
             if st.focus_query {
                 r.request_focus();
@@ -907,8 +907,7 @@ pub fn clean_popup(app: &mut App, ctx: &egui::Context, st: &mut CleanState) -> b
                 });
             }
         });
-        pp::hints(ui, &[("Space", "check"), ("Ctrl+A", "all"), ("Ctrl+M", "a month old"), ("Enter", "move to trash"), ("Shift+Delete", "delete"), ("Esc", "close")], &pal);
-        pp::dialog_buttons(ui, |ui| {
+        pp::footer(ui, &[("Space", "check"), ("Ctrl+A", "all"), ("Ctrl+M", "a month old"), ("Enter", "move to trash"), ("Shift+Delete", "delete"), ("Esc", "close")], &pal, |ui| {
             let label = if chosen == 0 { "Move to Trash".to_string() } else { format!("Move {} to Trash", crate::fsx::fmt_size(chosen_size)) };
             let b = pp::primary_button(ui, &label, chosen > 0, &pal);
             crate::ui::note_control(ui, b.rect, "clean trash");

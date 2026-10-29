@@ -375,7 +375,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                     let cb = Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), Vec2::splat(14.0));
                     crate::popups::checkbox_glyph(ui.painter(), cb, st.checked.contains(&c.path), &pal);
                     crate::ui::note_control(ui, cb, "duplicate check");
-                    let when = c.modified.map(|m| crate::timefmt::format(m, &app.cfg.date_format)).unwrap_or_default();
+                    let when = c.modified.map(|m| crate::timefmt::date(m, &app.cfg.date_format)).unwrap_or_default();
                     let wg = ui.painter().layout_no_wrap(when, FontId::proportional(small), dc);
                     let ww = wg.size().x;
                     ui.painter().galley(pos2(r.right() - 12.0 - ww, r.center().y - wg.size().y / 2.0), wg, dc);
@@ -400,9 +400,9 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
         };
         let col = if st.refusal.is_some() { pal.danger } else { pal.text_dim };
         ui.label(egui::RichText::new(status).size(small).color(col));
-        pp::hints(ui, &[("Space", "check"), ("Ctrl+A", "check the extras"), ("Enter", "move to trash"), ("Esc", "close")], &pal);
-        pp::dialog_buttons(ui, |ui| {
-            let label = if chosen == 0 { "Move to Trash".to_string() } else { format!("Move {} to Trash", crate::fsx::fmt_size(chosen_size)) };
+        let label = if chosen == 0 { "Move to Trash".to_string() } else { format!("Move {} to Trash", crate::fsx::fmt_size(chosen_size)) };
+        let labels: &[&str] = if st.sets.is_empty() { &[&label, "Cancel"] } else { &[&label, "Cancel", "Check the extras"] };
+        pp::footer_with(ui, &[("Space", "check"), ("Ctrl+A", "check the extras"), ("Enter", "move to trash"), ("Esc", "close")], labels, &pal, |ui| {
             let b = pp::primary_button(ui, &label, chosen > 0, &pal);
             crate::ui::note_control(ui, b.rect, "duplicates trash");
             trash |= b.clicked();

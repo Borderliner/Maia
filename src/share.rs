@@ -6,9 +6,9 @@
 use std::path::{Path, PathBuf};
 
 /// A file's text is cut after this much; a chat or an issue takes no more.
-pub const FILE_CAP: usize = 100 * 1024;
+pub const FILE_CAP: usize = 100_000;
 /// All the blocks together stop growing past this.
-pub const TOTAL_CAP: usize = 1024 * 1024;
+pub const TOTAL_CAP: usize = 1_000_000;
 /// A folder gives at most this many files.
 const MAX_FILES: usize = 300;
 
@@ -87,7 +87,7 @@ impl Blocks {
         let n = |k: usize| format!("{k} file{}", if k == 1 { "" } else { "s" });
         let mut s = format!("Copied {} as code blocks", n(self.files));
         if self.cut > 0 {
-            s += &format!(", {} cut at {} KB", n(self.cut), FILE_CAP / 1024);
+            s += &format!(", {} cut at {} KB", n(self.cut), FILE_CAP / 1000);
         }
         match self.skipped.as_slice() {
             [] => {}
@@ -142,7 +142,7 @@ pub fn code_blocks(paths: &[PathBuf], root: &Path) -> Blocks {
         }
         out.text += &rel;
         if cut {
-            out.text += &format!(" (the first {} KB of {})", FILE_CAP / 1024, crate::fsx::fmt_size(size));
+            out.text += &format!(" (the first {} KB of {})", FILE_CAP / 1000, crate::fsx::fmt_size(size));
         }
         out.text.push('\n');
         // A fence longer than any run of backticks inside, so the text cannot close it.

@@ -333,7 +333,7 @@ fn magick(t: &Tools, src: &Path, args: &[&str], fmt: &str, out: Option<&Path>) -
 /// A HEIC that ImageMagick can't read, decoded by libheif's own tool into a PNG beside
 /// `near` (removed again by the caller).
 fn heif_png(t: &Tools, src: &Path, near: &Path) -> Result<PathBuf, String> {
-    let tool = ["heif-dec", "heif-convert"].into_iter().find(|n| t.has(n)).ok_or("This picture needs libheif's heif-dec")?;
+    let tool = ["heif-dec", "heif-convert"].into_iter().find(|n| t.has(n)).ok_or("This picture needs heif-dec")?;
     let png = near.with_file_name(format!(".{}.heif.png", name_of(near)));
     let mut c = t.cmd(tool);
     c.arg(src).arg(&png);
@@ -745,7 +745,7 @@ fn ffmpeg(t: &Tools, src: &Path, args: &[&str], part: &Path, dur: Option<f64>, p
 fn selection(app: &crate::app::App) -> Option<(Vec<PathBuf>, Vec<String>)> {
     let p = app.panels.get(&app.active)?;
     let t = p.tab();
-    if t.archive.is_some() || t.path.starts_with(crate::sidebar::trash_dir()) || crate::tab::is_computer(&t.path) {
+    if t.archive.is_some() || t.path.starts_with(crate::sidebar::trash_dir()) || crate::tab::is_place(&t.path) {
         return None;
     }
     let ents = t.target_entries();

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::theme::ThemeName;
 
-pub const CONFIG_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 /// Kind of storage a folder lives on (decides folder-size scanning and thumbnails).
@@ -178,6 +178,12 @@ pub struct Config {
     pub highlight_recents: bool,
     pub recents_on_top: bool,
     pub recents_store: RecentsStore,
+    /// Photos sent or attached without where they were taken and the camera's details.
+    pub share_without_place: bool,
+    /// A folder's README above its files.
+    pub show_readme: bool,
+    /// The height its card was dragged to, in points (0: its own).
+    pub readme_height: f32,
     /// Folder sizes: master switch plus one switch per kind of drive.
     pub folder_sizes: bool,
     pub sizes_ssd: bool,
@@ -196,6 +202,7 @@ pub struct Config {
     /// Every copy read back from the disk and compared with what was copied.
     pub check_copies: bool,
     pub scroll_beyond: bool,
+    /// A strftime pattern; empty says dates against today ("Yesterday 09:04").
     pub date_format: String,
     // Mouse & keyboard
     pub act_on_press: bool,
@@ -266,6 +273,9 @@ impl Default for Config {
             highlight_recents: true,
             recents_on_top: false,
             recents_store: RecentsStore::Persistent,
+            share_without_place: false,
+            show_readme: true,
+            readme_height: 0.0,
             folder_sizes: true,
             sizes_ssd: true,
             sizes_hdd: false,
@@ -278,7 +288,7 @@ impl Default for Config {
             thumb_fill: false,
             check_copies: false,
             scroll_beyond: false,
-            date_format: "%x %H:%M".into(),
+            date_format: String::new(),
             act_on_press: true,
             single_click: false,
             single_click_folders_only: false,
@@ -336,11 +346,13 @@ pub enum SortKey {
     /// A picture's or a film's pixels.
     Dimensions,
     Duration,
+    /// Pictures by their main colour's hue, then the greys (`colours.rs`).
+    Colour,
 }
 
 impl SortKey {
     pub fn default_desc(self) -> bool {
-        !matches!(self, SortKey::Name | SortKey::Type | SortKey::Original | SortKey::Tags)
+        !matches!(self, SortKey::Name | SortKey::Type | SortKey::Original | SortKey::Tags | SortKey::Colour)
     }
 }
 
@@ -479,6 +491,8 @@ pub enum GroupBy {
     Tag,
     /// By the month a photo was taken or a film made, newest first.
     Taken,
+    /// Downloads by the site they came from (what the browser wrote on them).
+    Origin,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -496,6 +510,9 @@ pub struct ViewSettings {
     /// The Columns view: one column per folder level. It sits beside the zoom axis and
     /// leaves `zoom` as it was.
     pub column_view: bool,
+    /// The Stack view: the items standing in a row, the one at the cursor facing you.
+    /// Like Columns it sits beside the zoom axis; the two are never on together.
+    pub stack_view: bool,
 }
 
 impl Default for ViewSettings {
@@ -513,6 +530,7 @@ impl Default for ViewSettings {
             show_folders: true,
             show_files: true,
             column_view: false,
+            stack_view: false,
         }
     }
 }
@@ -546,6 +564,7 @@ pub struct TabSnap {
     pub flatten: bool,
     /// The smart folder shown, by its id.
     pub smart: Option<u64>,
+    pub pinned: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -605,6 +624,12 @@ pub struct UserData {
     pub tags: Vec<String>,
     /// Folders Copy To… and Move To… sent things into, newest first.
     pub destinations: Vec<PathBuf>,
+    /// Each folder left: how many times and when last, for Jump.
+    pub visits: HashMap<PathBuf, crate::jump::Visit>,
+    /// Files and folders kept first in their folder, whatever the sort.
+    pub pinned: Vec<PathBuf>,
+    /// Folders whose README was closed.
+    pub readme_hidden: Vec<PathBuf>,
 }
 
 impl UserData {
@@ -716,11 +741,24 @@ pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> T {
 
 pub fn load_config() -> Config {
     let path = config_path();
-    let cfg: Config = load_json(&path);
+    let mut cfg: Config = load_json(&path);
     if path.exists() && cfg.version > CONFIG_VERSION {
         let _ = std::fs::copy(&path, path.with_extension("json.bak"));
     }
+    migrate(&mut cfg);
     cfg
+}
+
+/// Settings written by an older Maia, brought up to this one. Before version 2 the
+/// default date pattern was written out like a choice; left as it was, it gives way to
+/// the relative dates that are now the default. A pattern chosen on purpose stays.
+pub fn migrate(cfg: &mut Config) {
+    if cfg.version < 2 {
+        if cfg.date_format == "%x %H:%M" {
+            cfg.date_format.clear();
+        }
+        cfg.version = CONFIG_VERSION;
+    }
 }
 
 pub fn load_userdata() -> UserData {

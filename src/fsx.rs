@@ -396,6 +396,10 @@ pub fn mounts() -> Vec<Mount> {
     mounts_in(&crate::drives::mounts_table())
 }
 
+/// Network filesystems listed with the disks: ones the user mounted on purpose. rclone is
+/// how Google Drive, OneDrive or S3 usually end up in a folder.
+const NETWORK_FS: [&str; 5] = ["fuse.sshfs", "fuse.rclone", "cifs", "nfs", "nfs4"];
+
 pub fn mounts_in(table: &Path) -> Vec<Mount> {
     let Ok(s) = fs::read_to_string(table) else { return vec![] };
     let mut out: Vec<Mount> = Vec::new();
@@ -415,7 +419,7 @@ pub fn mounts_in(table: &Path) -> Vec<Mount> {
             && !mp.starts_with("/root")
             && fs != "swap";
         let removable = mp.starts_with("/run/media") || mp.starts_with("/media") || mp.starts_with("/mnt");
-        if (wanted || removable || matches!(fs, "fuse.sshfs" | "fuse.rclone" | "cifs" | "nfs" | "nfs4"))
+        if (wanted || removable || NETWORK_FS.contains(&fs))
             && !out.iter().any(|m| m.path == Path::new(&mp))
         {
             out.push(Mount { device: dev.to_string(), path: PathBuf::from(mp), fstype: fs.to_string() });
@@ -451,13 +455,19 @@ pub fn plain_error(e: &str) -> &str {
 
 pub fn fmt_size(n: u64) -> String {
     const U: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
-    if n < 1024 {
+    // In thousands, as drives and downloads are labelled: a 4.7 GB film reads 4.7 GB.
+    if n < 1000 {
         return format!("{n} B");
     }
     let mut v = n as f64;
     let mut i = 0;
-    while v >= 1024.0 && i < U.len() - 1 {
-        v /= 1024.0;
+    while v >= 1000.0 && i < U.len() - 1 {
+        v /= 1000.0;
+        i += 1;
+    }
+    // 999.96 KB rounds up to "1000 KB": say it in the next unit instead.
+    if v >= 999.5 && i < U.len() - 1 {
+        v /= 1000.0;
         i += 1;
     }
     if v >= 100.0 { format!("{v:.0} {}", U[i]) } else { format!("{v:.1} {}", U[i]) }
@@ -518,6 +528,15 @@ pub fn expand_path(input: &str) -> PathBuf {
         }
     }
     PathBuf::from(out)
+}
+
+/// `p` opened for reading when it is a plain file (links followed), else None. Opened
+/// without waiting: a named pipe opened the usual way blocks until something writes to
+/// it, which would hang the worker for good.
+pub fn open_plain(p: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(p).ok()?;
+    f.metadata().ok()?.is_file().then_some(f)
 }
 
 /// Unique destination name: "name (1).ext", "name (2).ext", ...

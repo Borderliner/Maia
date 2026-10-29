@@ -135,6 +135,29 @@ pub fn set_text(s: &str) {
     });
 }
 
+/// Test builds: what another app offers on the clipboard (its type and bytes), as a
+/// simulation sets it; the sandbox has no clipboard of its own.
+#[cfg(test)]
+pub static OFFER: Mutex<Option<(String, Vec<u8>)>> = Mutex::new(None);
+
+/// The clipboard's contents in the first of `prefer` it is offered in.
+pub fn get_bytes(prefer: &[&str]) -> Option<(String, Vec<u8>)> {
+    #[cfg(test)]
+    if let Some((m, b)) = OFFER.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return prefer.contains(&m.as_str()).then_some((m, b));
+    }
+    with(|c| c.load(prefer).ok())
+}
+
+/// The system clipboard can be read (there is a display server to ask).
+pub fn available() -> bool {
+    #[cfg(test)]
+    if OFFER.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        return true;
+    }
+    with(|_| Some(())).is_some()
+}
+
 /// Clipboard text; a copied file list is returned as one path per line.
 pub fn get_text() -> Option<String> {
     with(|c| {

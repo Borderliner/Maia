@@ -35,7 +35,7 @@ fn cat(archive: &Path) -> Result<Command, String> {
         return Ok(c);
     }
     let n = archive.to_string_lossy().to_lowercase();
-    let t = SINGLE.iter().find(|(e, _)| n.ends_with(e)).map(|x| x.1).filter(|t| crate::media::have(t)).ok_or("bsdcat isn't installed")?;
+    let t = SINGLE.iter().find(|(e, _)| n.ends_with(e)).map(|x| x.1).filter(|t| crate::media::have(t)).ok_or("Opening this archive needs bsdcat")?;
     let mut c = tool(t);
     c.args(["-dc", "--"]).arg(archive);
     Ok(c)
@@ -228,10 +228,7 @@ pub fn parse_list(text: &str, now: SystemTime) -> Vec<Item> {
         let name = unescape(name);
         let dot = name.starts_with("./");
         let name = name.trim_start_matches("./").trim_end_matches('/');
-        // A rooted name ("/home/u/x") would become that path on this computer once joined
-        // to the archive's, so it is left out like "../" (bsdtar itself would strip the
-        // slash and extract it inside the folder).
-        if name.is_empty() || name == "." || name.starts_with('/') || name.split('/').any(|c| c == "..") {
+        if name.is_empty() || name == "." || leaves_archive(name) {
             continue;
         }
         out.push(Item { path: PathBuf::from(name), is_dir: perms.starts_with('d'), link, size, modified: when(f[5], f[6], f[7], now), dot });
@@ -529,9 +526,9 @@ pub fn read_member(archive: &Path, inner: &Path, cap: usize) -> Result<Vec<u8>, 
 pub(crate) fn seven() -> Result<&'static str, String> {
     #[cfg(test)]
     if NO_SEVEN.with(|n| n.get()) {
-        return Err("Encrypted 7z archives need the 7z command".into());
+        return Err("Encrypted 7z archives need 7z".into());
     }
-    ["7z", "7zz", "7za"].into_iter().find(|t| crate::media::have(t)).ok_or_else(|| "Encrypted 7z archives need the 7z command".to_string())
+    ["7z", "7zz", "7za"].into_iter().find(|t| crate::media::have(t)).ok_or_else(|| "Encrypted 7z archives need 7z".to_string())
 }
 
 #[cfg(test)]
@@ -554,13 +551,21 @@ fn list7(archive: &Path, pw: Option<&str>) -> Result<Vec<Item>, String> {
     Ok(parse_slt(&String::from_utf8_lossy(&out)))
 }
 
+/// A member name that, joined to the archive's own path, would point outside it: one
+/// going up a level, or one starting at the root ("/etc/passwd" in a tar names the real
+/// file). Such members aren't listed.
+fn leaves_archive(name: &str) -> bool {
+    use std::path::Component;
+    Path::new(name).components().any(|c| matches!(c, Component::RootDir | Component::ParentDir))
+}
+
 /// `7z l -slt` blocks ("Path = a/b.txt", "Size = 6", "Modified = 2026-10-15 19:19:57.79",
 /// "Attributes = D drwxr-xr-x") as listing items.
 pub fn parse_slt(text: &str) -> Vec<Item> {
     let mut out = vec![];
     for block in text.split("\n\n") {
         let field = |k: &str| block.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix(" = "));
-        let Some(path) = field("Path").filter(|p| !p.is_empty() && !p.starts_with('/') && !p.split('/').any(|c| c == "..")) else { continue };
+        let Some(path) = field("Path").filter(|p| !p.is_empty() && !leaves_archive(p)) else { continue };
         let attrs = field("Attributes").unwrap_or("");
         let unix = attrs.split_whitespace().nth(1).unwrap_or("");
         out.push(Item {

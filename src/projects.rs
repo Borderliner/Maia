@@ -128,7 +128,7 @@ pub fn rank(v: Vec<Project>, recents: &[PathBuf]) -> Vec<Project> {
 
 // ------------------------------------------------------------------ the cache
 
-fn cache_path() -> PathBuf {
+pub(crate) fn cache_path() -> PathBuf {
     // Tests run outside the sandbox too: never the real cache.
     let base = if cfg!(test) { None } else { dirs::cache_dir() };
     base.unwrap_or_else(std::env::temp_dir).join("maia/projects.txt")
@@ -470,7 +470,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                     x -= bg.size().x;
                     ui.painter().galley(pos2(x, r.center().y - bg.size().y / 2.0), bg, dc);
                     let ic = Rect::from_center_size(pos2(x - 10.0, r.center().y), Vec2::splat(small));
-                    crate::theme::paint_lucide(ui.painter(), ic, "git-branch", dc);
+                    crate::theme::paint_symbol(ui.painter(), ic, "git-branch", dc);
                     x = ic.left() - 8.0;
                     // Opens as it was left: its tabs and panels.
                     if let Some(w) = kept.get(&p.root) {

@@ -225,7 +225,7 @@ fn curl(url: &str, to: Option<&Path>) -> Result<Vec<u8>, String> {
         return Err("Not a secure address".into());
     }
     if !crate::media::have("curl") {
-        return Err("Needs curl, which isn't installed".into());
+        return Err("Checking for updates needs curl".into());
     }
     let mut c = crate::media::tool("curl");
     c.args(curl_args(url, to));

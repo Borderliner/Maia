@@ -55,6 +55,14 @@ impl Tools {
         }
     }
 
+    /// A file under /etc, or under the fakes' folder.
+    pub fn etc(&self, rel: &str) -> PathBuf {
+        match &self.dir {
+            Some(d) => d.join(rel),
+            None => Path::new("/etc").join(rel),
+        }
+    }
+
     pub fn cmd(&self, name: &str) -> Command {
         match &self.dir {
             Some(d) => Command::new(d.join(name)),
@@ -567,7 +575,7 @@ impl Job {
     /// password, and making a filesystem takes a while.
     pub fn format(drive: Drive, fs: Fs, label: String, ctx: &egui::Context) -> Result<Job, String> {
         if Tools::current().is_some_and(|t| !t.has("gdbus")) {
-            return Err("Formatting needs gdbus (from GLib)".into());
+            return Err("Formatting needs gdbus".into());
         }
         Job::spawn(Op::Format, drive, None, ctx, move |tools, d| format(tools, d, fs, &label).map(|_| None))
     }

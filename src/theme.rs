@@ -110,10 +110,32 @@ pub enum ThemeName {
     SpacemacsLight,
     Leuven,
     DoomOneLight,
+    TokyoNightMoon,
+    Nordfox,
+    SelenizedDark,
+    Vague,
+    Moonfly,
+    MaterialOcean,
+    Oldworld,
+    ChallengerDeep,
+    Noctis,
+    AuraDark,
+    Houston,
+    Lackluster,
+    FleetDark,
+    MelangeLight,
+    BlulocoLight,
+    NoctisLux,
+    MinLight,
+    MaterialLighter,
+    HorizonLight,
+    PencilLight,
+    HighContrastDark,
+    HighContrastLight,
 }
 
 impl ThemeName {
-    pub const ALL: [ThemeName; 101] = [
+    pub const ALL: [ThemeName; 123] = [
         ThemeName::System,
         ThemeName::Midnight,
         ThemeName::Graphite,
@@ -215,6 +237,28 @@ impl ThemeName {
         ThemeName::SpacemacsLight,
         ThemeName::Leuven,
         ThemeName::DoomOneLight,
+        ThemeName::TokyoNightMoon,
+        ThemeName::Nordfox,
+        ThemeName::SelenizedDark,
+        ThemeName::Vague,
+        ThemeName::Moonfly,
+        ThemeName::MaterialOcean,
+        ThemeName::Oldworld,
+        ThemeName::ChallengerDeep,
+        ThemeName::Noctis,
+        ThemeName::AuraDark,
+        ThemeName::Houston,
+        ThemeName::Lackluster,
+        ThemeName::FleetDark,
+        ThemeName::MelangeLight,
+        ThemeName::BlulocoLight,
+        ThemeName::NoctisLux,
+        ThemeName::MinLight,
+        ThemeName::MaterialLighter,
+        ThemeName::HorizonLight,
+        ThemeName::PencilLight,
+        ThemeName::HighContrastDark,
+        ThemeName::HighContrastLight,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -319,6 +363,28 @@ impl ThemeName {
             ThemeName::SpacemacsLight => "Spacemacs Light",
             ThemeName::Leuven => "Leuven",
             ThemeName::DoomOneLight => "Doom One Light",
+            ThemeName::TokyoNightMoon => "Tokyo Night Moon",
+            ThemeName::Nordfox => "Nordfox",
+            ThemeName::SelenizedDark => "Selenized Dark",
+            ThemeName::Vague => "Vague",
+            ThemeName::Moonfly => "Moonfly",
+            ThemeName::MaterialOcean => "Material Ocean",
+            ThemeName::Oldworld => "Oldworld",
+            ThemeName::ChallengerDeep => "Challenger Deep",
+            ThemeName::Noctis => "Noctis",
+            ThemeName::AuraDark => "Aura Dark",
+            ThemeName::Houston => "Houston",
+            ThemeName::Lackluster => "Lackluster",
+            ThemeName::FleetDark => "Fleet Dark",
+            ThemeName::MelangeLight => "Melange Light",
+            ThemeName::BlulocoLight => "Bluloco Light",
+            ThemeName::NoctisLux => "Noctis Lux",
+            ThemeName::MinLight => "Min Light",
+            ThemeName::MaterialLighter => "Material Lighter",
+            ThemeName::HorizonLight => "Horizon Light",
+            ThemeName::PencilLight => "Pencil Light",
+            ThemeName::HighContrastDark => "High Contrast Dark",
+            ThemeName::HighContrastLight => "High Contrast Light",
         }
     }
     /// A line about the theme, under its name in the theme picker.
@@ -425,13 +491,35 @@ impl ThemeName {
             ThemeName::SpacemacsLight => "Purple ink on parchment",
             ThemeName::Leuven => "Crisp blues on white",
             ThemeName::DoomOneLight => "One's colours, bright",
+            ThemeName::TokyoNightMoon => "Tokyo Night under a softer moon",
+            ThemeName::Nordfox => "Nord's frost, fox-made",
+            ThemeName::SelenizedDark => "Solarized retuned, deep teal",
+            ThemeName::Vague => "Muted and soft-spoken",
+            ThemeName::Moonfly => "Bright colours on near black",
+            ThemeName::MaterialOcean => "Deep ocean blue",
+            ThemeName::Oldworld => "Faded colours, old film",
+            ThemeName::ChallengerDeep => "Neon under the sea",
+            ThemeName::Noctis => "Teal depths",
+            ThemeName::AuraDark => "Purple and mint glow",
+            ThemeName::Houston => "Mission control",
+            ThemeName::Lackluster => "Almost no colour at all",
+            ThemeName::FleetDark => "Quiet charcoal, soft pastels",
+            ThemeName::MelangeLight => "Warm cocoa, by day",
+            ThemeName::BlulocoLight => "Bright, tuned colours on white",
+            ThemeName::NoctisLux => "Teal ink on cream",
+            ThemeName::MinLight => "Barely there",
+            ThemeName::MaterialLighter => "Material on white",
+            ThemeName::HorizonLight => "Sunrise pink",
+            ThemeName::PencilLight => "Pencil on paper",
+            ThemeName::HighContrastDark => "White on black, yellow selection",
+            ThemeName::HighContrastLight => "Black on white, blue selection",
         }
     }
     pub fn is_light(self) -> bool {
         if self == ThemeName::System {
             return !crate::syscolors::current().dark;
         }
-        matches!(self, ThemeName::Paper | ThemeName::Linen | ThemeName::Latte | ThemeName::SolarizedLight | ThemeName::RosePineDawn | ThemeName::GruvboxLight | ThemeName::AyuLight | ThemeName::EverforestLight | ThemeName::TokyoNightDay | ThemeName::KanagawaLotus | ThemeName::OneLight | ThemeName::LightOwl | ThemeName::Dayfox | ThemeName::FlexokiLight | ThemeName::GitHubLight | ThemeName::Tomorrow | ThemeName::IcebergLight | ThemeName::ModusOperandi | ThemeName::SelenizedLight | ThemeName::QuietLight | ThemeName::PaperColor | ThemeName::LightModern | ThemeName::IntelliJLight | ThemeName::XcodeLight | ThemeName::Dawnfox | ThemeName::VitesseLight | ThemeName::GruvboxMaterialLight | ThemeName::Alabaster | ThemeName::EdgeLight | ThemeName::MonokaiProLight | ThemeName::Alucard | ThemeName::Zenbones | ThemeName::SpacemacsLight | ThemeName::Leuven | ThemeName::DoomOneLight)
+        matches!(self, ThemeName::Paper | ThemeName::Linen | ThemeName::Latte | ThemeName::SolarizedLight | ThemeName::RosePineDawn | ThemeName::GruvboxLight | ThemeName::AyuLight | ThemeName::EverforestLight | ThemeName::TokyoNightDay | ThemeName::KanagawaLotus | ThemeName::OneLight | ThemeName::LightOwl | ThemeName::Dayfox | ThemeName::FlexokiLight | ThemeName::GitHubLight | ThemeName::Tomorrow | ThemeName::IcebergLight | ThemeName::ModusOperandi | ThemeName::SelenizedLight | ThemeName::QuietLight | ThemeName::PaperColor | ThemeName::LightModern | ThemeName::IntelliJLight | ThemeName::XcodeLight | ThemeName::Dawnfox | ThemeName::VitesseLight | ThemeName::GruvboxMaterialLight | ThemeName::Alabaster | ThemeName::EdgeLight | ThemeName::MonokaiProLight | ThemeName::Alucard | ThemeName::Zenbones | ThemeName::SpacemacsLight | ThemeName::Leuven | ThemeName::DoomOneLight | ThemeName::MelangeLight | ThemeName::BlulocoLight | ThemeName::NoctisLux | ThemeName::MinLight | ThemeName::MaterialLighter | ThemeName::HorizonLight | ThemeName::PencilLight | ThemeName::HighContrastLight)
     }
 }
 
@@ -574,6 +662,29 @@ impl Syntax {
             ThemeName::SpacemacsLight => (c(0x3a, 0x81, 0xc3), c(0xba, 0x2f, 0x59), c(0x2d, 0x95, 0x74), c(0x2a, 0xa1, 0xae), c(0x4e, 0x31, 0x63), c(0x6c, 0x31, 0x63), c(0x71, 0x5a, 0xb1), c(0x8f, 0x7a, 0x10)),
             ThemeName::Leuven => (c(0x00, 0x00, 0xff), c(0x64, 0x34, 0xa3), c(0x00, 0x80, 0x00), c(0x8d, 0x8d, 0x84), c(0xd0, 0x37, 0x2d), c(0x00, 0x66, 0x99), c(0xba, 0x36, 0xa5), c(0x8b, 0x45, 0x13)),
             ThemeName::DoomOneLight => (c(0xe4, 0x56, 0x49), c(0x98, 0x68, 0x01), c(0x50, 0xa1, 0x4f), c(0x9c, 0xa0, 0xa4), c(0xb7, 0x51, 0xb6), c(0x40, 0x78, 0xf2), c(0x01, 0x84, 0xbc), c(0xa8, 0x72, 0x00)),
+            ThemeName::TokyoNightMoon => (c(0xc0, 0x99, 0xff), c(0x65, 0xbc, 0xff), c(0xc3, 0xe8, 0x8d), c(0x63, 0x6d, 0xa6), c(0xff, 0x96, 0x6c), c(0x82, 0xaa, 0xff), c(0x4f, 0xd6, 0xbe), c(0xff, 0xc7, 0x77)),
+            ThemeName::Nordfox => (c(0xb4, 0x8e, 0xad), c(0xeb, 0xcb, 0x8b), c(0xa3, 0xbe, 0x8c), c(0x60, 0x72, 0x8a), c(0xc9, 0x82, 0x6b), c(0x81, 0xa1, 0xc1), c(0x88, 0xc0, 0xd0), c(0xbf, 0x88, 0xbc)),
+            ThemeName::SelenizedDark => (c(0x75, 0xb9, 0x38), c(0xdb, 0xb3, 0x2d), c(0x41, 0xc7, 0xb9), c(0x72, 0x89, 0x8f), c(0xed, 0x86, 0x49), c(0x46, 0x95, 0xf7), c(0xf2, 0x75, 0xbe), c(0xaf, 0x88, 0xeb)),
+            ThemeName::Vague => (c(0x6e, 0x94, 0xb2), c(0x9b, 0xb4, 0xbc), c(0xe8, 0xb5, 0x89), c(0x60, 0x60, 0x79), c(0xe0, 0xa3, 0x63), c(0xc4, 0x82, 0x82), c(0xc3, 0xc3, 0xd5), c(0xbb, 0x9d, 0xbd)),
+            ThemeName::Moonfly => (c(0xcf, 0x87, 0xe8), c(0x36, 0xc6, 0x92), c(0xc6, 0xc6, 0x84), c(0x94, 0x94, 0x94), c(0xf0, 0x94, 0x79), c(0x80, 0xa0, 0xff), c(0x79, 0xda, 0xc8), c(0xff, 0x51, 0x89)),
+            ThemeName::MaterialOcean => (c(0xc7, 0x92, 0xea), c(0xff, 0xcb, 0x6b), c(0xc3, 0xe8, 0x8d), c(0x4b, 0x52, 0x6d), c(0xf7, 0x8c, 0x6c), c(0x82, 0xaa, 0xff), c(0xf0, 0x71, 0x78), c(0x89, 0xdd, 0xff)),
+            ThemeName::Oldworld => (c(0xac, 0xa1, 0xcf), c(0xe6, 0xb9, 0x9d), c(0x90, 0xb9, 0x9f), c(0x57, 0x57, 0x5f), c(0xf5, 0xa1, 0x91), c(0x92, 0xa2, 0xd5), c(0x85, 0xb5, 0xba), c(0xe2, 0x9e, 0xca)),
+            ThemeName::ChallengerDeep => (c(0xc9, 0x91, 0xe1), c(0x91, 0xdd, 0xff), c(0xff, 0xe9, 0xaa), c(0x6d, 0x6b, 0x8d), c(0xff, 0xb3, 0x78), c(0x95, 0xff, 0xa4), c(0xaa, 0xff, 0xe4), c(0x90, 0x6c, 0xff)),
+            ThemeName::Noctis => (c(0xdf, 0x76, 0x9b), c(0xe4, 0xb7, 0x81), c(0x49, 0xe9, 0xa6), c(0x5b, 0x85, 0x8b), c(0x70, 0x60, 0xeb), c(0x16, 0xa3, 0xb6), c(0xd5, 0x97, 0x1a), c(0x49, 0xac, 0xe9)),
+            ThemeName::AuraDark => (c(0xa2, 0x77, 0xff), c(0x82, 0xe2, 0xff), c(0x61, 0xff, 0xca), c(0x6d, 0x6d, 0x6d), c(0xff, 0xca, 0x85), c(0xf6, 0x94, 0xff), c(0x82, 0xe2, 0xff), c(0xff, 0xca, 0x85)),
+            ThemeName::Houston => (c(0xcc, 0x75, 0xf4), c(0x00, 0xda, 0xef), c(0xff, 0xd4, 0x93), c(0x54, 0x58, 0x64), c(0x4b, 0xf3, 0xc8), c(0x54, 0xb9, 0xff), c(0xff, 0xc2, 0xa3), c(0xf4, 0x58, 0x7e)),
+            ThemeName::Lackluster => (c(0xaa, 0xaa, 0xaa), c(0x77, 0x88, 0xaa), c(0x78, 0x99, 0x78), c(0x55, 0x55, 0x55), c(0xff, 0xaa, 0x88), c(0xde, 0xee, 0xed), c(0xcc, 0xcc, 0xcc), c(0x77, 0x88, 0xaa)),
+            ThemeName::FleetDark => (c(0x83, 0xd6, 0xc5), c(0xeb, 0xc8, 0x8d), c(0xe3, 0x94, 0xdc), c(0x6d, 0x6d, 0x6d), c(0xaf, 0x9c, 0xff), c(0xef, 0xb0, 0x80), c(0x87, 0xc3, 0xff), c(0xaa, 0x9b, 0xf5)),
+            ThemeName::MelangeLight => (c(0xbc, 0x5c, 0x00), c(0xa0, 0x6d, 0x00), c(0x3a, 0x68, 0x4a), c(0x7d, 0x66, 0x58), c(0x90, 0x41, 0x80), c(0x46, 0x5a, 0xa4), c(0x3d, 0x65, 0x68), c(0xa6, 0x5f, 0x3f)),
+            ThemeName::BlulocoLight => (c(0x82, 0x3f, 0xf1), c(0xdf, 0x63, 0x1c), c(0x23, 0x97, 0x4a), c(0xa0, 0xa1, 0xa7), c(0xce, 0x33, 0xc0), c(0x27, 0x5f, 0xe4), c(0xd5, 0x27, 0x53), c(0x00, 0x98, 0xdd)),
+            ThemeName::NoctisLux => (c(0xd6, 0x30, 0x6a), c(0xb3, 0x69, 0x4d), c(0x00, 0x8a, 0x52), c(0x8c, 0xa6, 0xa6), c(0x58, 0x42, 0xff), c(0x00, 0x95, 0xa8), c(0xe6, 0x41, 0x00), c(0x00, 0x94, 0xf0)),
+            ThemeName::MinLight => (c(0xd3, 0x2f, 0x2f), c(0x22, 0x86, 0x3a), c(0x2b, 0x55, 0x81), c(0xaa, 0xaa, 0xaa), c(0x19, 0x76, 0xd2), c(0x6f, 0x42, 0xc1), c(0xb2, 0x56, 0x0c), c(0x6f, 0x42, 0xc1)),
+            ThemeName::MaterialLighter => (c(0x7c, 0x4d, 0xff), c(0xa8, 0x68, 0x08), c(0x56, 0x7f, 0x24), c(0x8a, 0x9d, 0xa7), c(0xc9, 0x48, 0x1f), c(0x61, 0x82, 0xb8), c(0xe5, 0x39, 0x35), c(0x1b, 0x7f, 0x86)),
+            ThemeName::HorizonLight => (c(0x8a, 0x31, 0xb9), c(0xc7, 0x4d, 0x0c), c(0x1d, 0x89, 0x91), c(0x96, 0x8a, 0x87), c(0xdc, 0x33, 0x18), c(0xe9, 0x53, 0x78), c(0xda, 0x10, 0x3f), c(0x2e, 0x8b, 0x57)),
+            ThemeName::PencilLight => (c(0x52, 0x3c, 0x79), c(0x7d, 0x72, 0x00), c(0x08, 0x80, 0x5a), c(0x99, 0x99, 0x99), c(0x0f, 0x7f, 0x93), c(0x00, 0x8e, 0xc4), c(0xc3, 0x07, 0x71), c(0x68, 0x55, 0xde)),
+            // Every colour at 7:1 or more against the background, comments included.
+            ThemeName::HighContrastDark => (c(0xd9, 0xa6, 0xff), c(0x5e, 0xe7, 0xff), c(0xa6, 0xf2, 0x8c), c(0xc8, 0xc8, 0xc8), c(0xff, 0xb8, 0x6b), c(0x8c, 0xbc, 0xff), c(0xff, 0xa8, 0xa8), c(0xff, 0xe0, 0x7a)),
+            ThemeName::HighContrastLight => (c(0x5c, 0x00, 0xa3), c(0x00, 0x52, 0x63), c(0x1a, 0x5c, 0x00), c(0x47, 0x47, 0x47), c(0x8a, 0x33, 0x00), c(0x00, 0x3a, 0xa8), c(0x9a, 0x00, 0x1c), c(0x5c, 0x47, 0x00)),
         };
         Syntax { keyword, kind, string, comment, number, function, property, meta }
     }
@@ -602,9 +713,25 @@ pub struct Palette {
     pub row_hover: Color32,
     /// Highlighted code (the theme's own, or the classic set: `Syntax`).
     pub syntax: Syntax,
+    /// Something to mind but not wrong: a drive nearly full, a changed file.
+    pub warn: Color32,
+    /// A high-contrast theme: the keyboard's cursor gets a thicker ring.
+    pub strong: bool,
 }
 
 impl Palette {
+    /// Text on the accent (a dialog's main button): white on a deep accent, near black on
+    /// a light one, where white all but disappears.
+    pub fn on_accent(&self) -> Color32 {
+        let lin = |c: u8| {
+            let c = c as f32 / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        let a = self.accent;
+        let lum = 0.2126 * lin(a.r()) + 0.7152 * lin(a.g()) + 0.0722 * lin(a.b());
+        if lum < 0.4 { Color32::WHITE } else { Color32::from_gray(24) }
+    }
+
     /// Text on a selected row: white on a deep selection colour, the theme's own text on
     /// a pale one (white there all but disappears).
     pub fn on_sel(&self) -> Color32 {
@@ -614,7 +741,9 @@ impl Palette {
         };
         let s = self.selected;
         let lum = 0.2126 * lin(s.r()) + 0.7152 * lin(s.g()) + 0.0722 * lin(s.b());
-        if lum < 0.3 { Color32::WHITE } else { self.text }
+        // A high-contrast selection is bright on a dark theme: black on it, not the
+        // theme's white text.
+        if lum < 0.3 { Color32::WHITE } else if self.strong && self.dark { Color32::BLACK } else { self.text }
     }
 
     /// A quiet card inside a popup (a group of rows): a step from the popup towards the
@@ -647,6 +776,23 @@ pub fn palette(t: ThemeName) -> Palette {
         p.alt = mix(p.panel, p.text, if p.dark { 0.035 } else { 0.03 });
     }
     p.row_hover = mix(p.panel, p.selected, if p.dark { 0.35 } else { 0.22 });
+    p.warn = crate::gitstatus::AMBER;
+    // The high-contrast pair sets every field itself: nothing mixed, nothing faint.
+    match t {
+        ThemeName::HighContrastDark => {
+            p.chrome = Color32::from_rgb(0x0a, 0x0a, 0x0a);
+            p.alt = Color32::from_rgb(0x12, 0x12, 0x12);
+            p.row_hover = Color32::from_rgb(0x2e, 0x2e, 0x2e);
+            p.warn = Color32::from_rgb(0xff, 0xc2, 0x3d);
+        }
+        ThemeName::HighContrastLight => {
+            p.chrome = Color32::from_rgb(0xf0, 0xf0, 0xf0);
+            p.alt = Color32::from_rgb(0xf2, 0xf2, 0xf2);
+            p.row_hover = Color32::from_rgb(0xd6, 0xe0, 0xff);
+            p.warn = Color32::from_rgb(0x6b, 0x40, 0x00);
+        }
+        _ => {}
+    }
     p.syntax = Syntax::of(t);
     p
 }
@@ -675,6 +821,8 @@ pub fn desktop_palette(d: &crate::syscolors::Desktop) -> Palette {
         alt: Color32::TRANSPARENT,
         row_hover: Color32::TRANSPARENT,
         syntax: Syntax::classic(dark),
+        warn: Color32::TRANSPARENT,
+        strong: false,
     };
     // A desktop's colours can be anything: deepen (or pale) the selection until its text
     // reads, as every theme's does.
@@ -716,6 +864,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Graphite => Palette {
             dark: true,
@@ -735,6 +885,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Lagoon => Palette {
             dark: true,
@@ -754,6 +906,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Navy => Palette {
             dark: true,
@@ -773,6 +927,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Paper => Palette {
             dark: false,
@@ -792,6 +948,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Linen => Palette {
             dark: false,
@@ -811,6 +969,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Mocha => Palette {
             dark: true,
@@ -830,6 +990,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::TokyoNight => Palette {
             dark: true,
@@ -849,6 +1011,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Gruvbox => Palette {
             dark: true,
@@ -868,6 +1032,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Latte => Palette {
             dark: false,
@@ -887,6 +1053,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Dracula => Palette {
             dark: true,
@@ -906,6 +1074,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Nord => Palette {
             dark: true,
@@ -925,6 +1095,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::OneDark => Palette {
             dark: true,
@@ -944,6 +1116,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::SolarizedLight => Palette {
             dark: false,
@@ -963,6 +1137,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::RosePineDawn => Palette {
             dark: false,
@@ -982,6 +1158,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Everforest => Palette {
             dark: true,
@@ -1001,6 +1179,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Kanagawa => Palette {
             dark: true,
@@ -1020,6 +1200,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::GruvboxLight => Palette {
             dark: false,
@@ -1039,6 +1221,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::AyuLight => Palette {
             dark: false,
@@ -1058,6 +1242,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::RosePine => Palette {
             dark: true,
@@ -1077,6 +1263,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::SolarizedDark => Palette {
             dark: true,
@@ -1096,6 +1284,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::NightOwl => Palette {
             dark: true,
@@ -1115,6 +1305,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::EverforestLight => Palette {
             dark: false,
@@ -1134,6 +1326,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::TokyoNightDay => Palette {
             dark: false,
@@ -1153,6 +1347,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::KanagawaLotus => Palette {
             dark: false,
@@ -1172,6 +1368,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::CatppuccinFrappe => Palette {
             dark: true,
@@ -1191,6 +1389,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::CatppuccinMacchiato => Palette {
             dark: true,
@@ -1210,6 +1410,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Monokai => Palette {
             dark: true,
@@ -1229,6 +1431,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Palenight => Palette {
             dark: true,
@@ -1248,6 +1452,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::AyuDark => Palette {
             dark: true,
@@ -1267,6 +1473,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::AyuMirage => Palette {
             dark: true,
@@ -1286,6 +1494,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::RosePineMoon => Palette {
             dark: true,
@@ -1305,6 +1515,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::TokyoNightStorm => Palette {
             dark: true,
@@ -1324,6 +1536,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::KanagawaDragon => Palette {
             dark: true,
@@ -1343,6 +1557,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Nightfox => Palette {
             dark: true,
@@ -1362,6 +1578,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::FlexokiDark => Palette {
             dark: true,
@@ -1381,6 +1599,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::OneLight => Palette {
             dark: false,
@@ -1400,6 +1620,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::LightOwl => Palette {
             dark: false,
@@ -1419,6 +1641,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Dayfox => Palette {
             dark: false,
@@ -1438,6 +1662,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::FlexokiLight => Palette {
             dark: false,
@@ -1457,6 +1683,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::GitHubDark => Palette {
             dark: true,
@@ -1476,6 +1704,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::GitHubDimmed => Palette {
             dark: true,
@@ -1495,6 +1725,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Zenburn => Palette {
             dark: true,
@@ -1514,6 +1746,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::TomorrowNight => Palette {
             dark: true,
@@ -1533,6 +1767,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::OceanicNext => Palette {
             dark: true,
@@ -1552,6 +1788,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Horizon => Palette {
             dark: true,
@@ -1571,6 +1809,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Cobalt2 => Palette {
             dark: true,
@@ -1590,6 +1830,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Synthwave => Palette {
             dark: true,
@@ -1609,6 +1851,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Moonlight => Palette {
             dark: true,
@@ -1628,6 +1872,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Poimandres => Palette {
             dark: true,
@@ -1647,6 +1893,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Oxocarbon => Palette {
             dark: true,
@@ -1666,6 +1914,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::ModusVivendi => Palette {
             dark: true,
@@ -1685,6 +1935,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Iceberg => Palette {
             dark: true,
@@ -1704,6 +1956,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::GitHubLight => Palette {
             dark: false,
@@ -1723,6 +1977,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Tomorrow => Palette {
             dark: false,
@@ -1742,6 +1998,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::IcebergLight => Palette {
             dark: false,
@@ -1761,6 +2019,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::ModusOperandi => Palette {
             dark: false,
@@ -1780,6 +2040,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::SelenizedLight => Palette {
             dark: false,
@@ -1799,6 +2061,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::QuietLight => Palette {
             dark: false,
@@ -1818,6 +2082,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::PaperColor => Palette {
             dark: false,
@@ -1837,6 +2103,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::DarkModern => Palette {
             dark: true,
@@ -1856,6 +2124,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Darcula => Palette {
             dark: true,
@@ -1875,6 +2145,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::XcodeDark => Palette {
             dark: true,
@@ -1894,6 +2166,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::MaterialDarker => Palette {
             dark: true,
@@ -1913,6 +2187,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::DoomOne => Palette {
             dark: true,
@@ -1932,6 +2208,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Sonokai => Palette {
             dark: true,
@@ -1951,6 +2229,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::GruvboxMaterial => Palette {
             dark: true,
@@ -1970,6 +2250,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Vesper => Palette {
             dark: true,
@@ -1989,6 +2271,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Andromeda => Palette {
             dark: true,
@@ -2008,6 +2292,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::ShadesOfPurple => Palette {
             dark: true,
@@ -2027,6 +2313,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Carbonfox => Palette {
             dark: true,
@@ -2046,6 +2334,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Duskfox => Palette {
             dark: true,
@@ -2065,6 +2355,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::VitesseDark => Palette {
             dark: true,
@@ -2084,6 +2376,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::LightModern => Palette {
             dark: false,
@@ -2103,6 +2397,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::IntelliJLight => Palette {
             dark: false,
@@ -2122,6 +2418,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::XcodeLight => Palette {
             dark: false,
@@ -2141,6 +2439,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         // Its darkest text, and its comment grey a shade deeper for dim text, to read on its base.
         ThemeName::Dawnfox => Palette {
@@ -2161,6 +2461,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::VitesseLight => Palette {
             dark: false,
@@ -2180,6 +2482,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::GruvboxMaterialLight => Palette {
             dark: false,
@@ -2199,6 +2503,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Alabaster => Palette {
             dark: false,
@@ -2218,6 +2524,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::MonokaiPro => Palette {
             dark: true,
@@ -2237,6 +2545,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Everblush => Palette {
             dark: true,
@@ -2256,6 +2566,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Jellybeans => Palette {
             dark: true,
@@ -2275,6 +2587,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Srcery => Palette {
             dark: true,
@@ -2294,6 +2608,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Terafox => Palette {
             dark: true,
@@ -2313,6 +2629,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::EdgeDark => Palette {
             dark: true,
@@ -2332,6 +2650,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Eighties => Palette {
             dark: true,
@@ -2351,6 +2671,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Panda => Palette {
             dark: true,
@@ -2370,6 +2692,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Cyberdream => Palette {
             dark: true,
@@ -2389,6 +2713,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Mariana => Palette {
             dark: true,
@@ -2408,6 +2734,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::Embark => Palette {
             dark: true,
@@ -2427,6 +2755,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::SpacemacsDark => Palette {
             dark: true,
@@ -2446,6 +2776,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::MelangeDark => Palette {
             dark: true,
@@ -2465,6 +2797,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
         },
         ThemeName::EdgeLight => Palette {
             dark: false,
@@ -2484,6 +2818,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::MonokaiProLight => Palette {
             dark: false,
@@ -2503,6 +2839,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Alucard => Palette {
             dark: false,
@@ -2522,6 +2860,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Zenbones => Palette {
             dark: false,
@@ -2541,6 +2881,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::SpacemacsLight => Palette {
             dark: false,
@@ -2560,6 +2902,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::Leuven => Palette {
             dark: false,
@@ -2579,6 +2923,8 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
         ThemeName::DoomOneLight => Palette {
             dark: false,
@@ -2598,6 +2944,470 @@ fn base_palette(t: ThemeName) -> Palette {
             alt: z,
             row_hover: z,
             syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::TokyoNightMoon => Palette {
+            dark: true,
+            bg: c(0x1e, 0x20, 0x30),
+            panel: c(0x22, 0x24, 0x36),
+            sidebar: c(0x1e, 0x20, 0x30),
+            raised: c(0x2f, 0x33, 0x4d),
+            hover: c(0x2a, 0x2e, 0x45),
+            selected: c(0x2d, 0x3f, 0x76),
+            cursor: c(0x3b, 0x4f, 0x8f),
+            accent: c(0x82, 0xaa, 0xff),
+            text: c(0xc8, 0xd3, 0xf5),
+            text_dim: c(0x82, 0x8b, 0xb8),
+            border: c(0x36, 0x3a, 0x58),
+            danger: c(0xff, 0x75, 0x7f),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::Nordfox => Palette {
+            dark: true,
+            bg: c(0x23, 0x28, 0x31),
+            panel: c(0x2e, 0x34, 0x40),
+            sidebar: c(0x23, 0x28, 0x31),
+            raised: c(0x39, 0x40, 0x4f),
+            hover: c(0x35, 0x3b, 0x49),
+            selected: c(0x3e, 0x4a, 0x5b),
+            cursor: c(0x4f, 0x60, 0x74),
+            accent: c(0x81, 0xa1, 0xc1),
+            text: c(0xcd, 0xce, 0xcf),
+            text_dim: c(0x8a, 0x8e, 0x96),
+            border: c(0x3b, 0x42, 0x52),
+            danger: c(0xd0, 0x73, 0x7c),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::SelenizedDark => Palette {
+            dark: true,
+            bg: c(0x0d, 0x35, 0x40),
+            panel: c(0x10, 0x3c, 0x48),
+            sidebar: c(0x0d, 0x35, 0x40),
+            raised: c(0x18, 0x49, 0x56),
+            hover: c(0x18, 0x49, 0x56),
+            selected: c(0x2d, 0x5b, 0x69),
+            cursor: c(0x3a, 0x6b, 0x79),
+            accent: c(0x58, 0xa6, 0xff),
+            text: c(0xca, 0xd8, 0xd9),
+            text_dim: c(0x84, 0x99, 0x9e),
+            border: c(0x1d, 0x4f, 0x5c),
+            danger: c(0xfa, 0x57, 0x50),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::Vague => Palette {
+            dark: true,
+            bg: c(0x10, 0x10, 0x11),
+            panel: c(0x14, 0x14, 0x15),
+            sidebar: c(0x10, 0x10, 0x11),
+            raised: c(0x1c, 0x1c, 0x24),
+            hover: c(0x25, 0x25, 0x30),
+            selected: c(0x33, 0x37, 0x38),
+            cursor: c(0x40, 0x44, 0x48),
+            accent: c(0x6e, 0x94, 0xb2),
+            text: c(0xcd, 0xcd, 0xcd),
+            text_dim: c(0x87, 0x87, 0x87),
+            border: c(0x25, 0x25, 0x30),
+            danger: c(0xd8, 0x64, 0x7e),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::Moonfly => Palette {
+            dark: true,
+            bg: c(0x12, 0x12, 0x12),
+            panel: c(0x08, 0x08, 0x08),
+            sidebar: c(0x12, 0x12, 0x12),
+            raised: c(0x1c, 0x1c, 0x1c),
+            hover: c(0x26, 0x26, 0x26),
+            selected: c(0x30, 0x30, 0x30),
+            cursor: c(0x3a, 0x3a, 0x3a),
+            accent: c(0x80, 0xa0, 0xff),
+            text: c(0xbd, 0xbd, 0xbd),
+            text_dim: c(0x80, 0x80, 0x80),
+            border: c(0x26, 0x26, 0x26),
+            danger: c(0xff, 0x54, 0x54),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::MaterialOcean => Palette {
+            dark: true,
+            bg: c(0x09, 0x0b, 0x10),
+            panel: c(0x0f, 0x11, 0x1a),
+            sidebar: c(0x09, 0x0b, 0x10),
+            raised: c(0x1a, 0x1c, 0x25),
+            hover: c(0x1f, 0x22, 0x33),
+            selected: c(0x25, 0x2b, 0x45),
+            cursor: c(0x2f, 0x37, 0x56),
+            accent: c(0x80, 0xcb, 0xc4),
+            text: c(0xa6, 0xac, 0xcd),
+            text_dim: c(0x71, 0x7c, 0xb4),
+            border: c(0x1f, 0x22, 0x33),
+            danger: c(0xf0, 0x71, 0x78),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::Oldworld => Palette {
+            dark: true,
+            bg: c(0x12, 0x12, 0x13),
+            panel: c(0x16, 0x16, 0x17),
+            sidebar: c(0x12, 0x12, 0x13),
+            raised: c(0x1b, 0x1b, 0x1c),
+            hover: c(0x2a, 0x2a, 0x2d),
+            selected: c(0x31, 0x31, 0x34),
+            cursor: c(0x3b, 0x3b, 0x3e),
+            accent: c(0x92, 0xa2, 0xd5),
+            text: c(0xc9, 0xc7, 0xcd),
+            text_dim: c(0x8b, 0x86, 0x93),
+            border: c(0x2a, 0x2a, 0x2d),
+            danger: c(0xea, 0x83, 0xa5),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::ChallengerDeep => Palette {
+            dark: true,
+            bg: c(0x10, 0x0e, 0x23),
+            panel: c(0x1e, 0x1c, 0x31),
+            sidebar: c(0x19, 0x17, 0x29),
+            raised: c(0x2b, 0x29, 0x43),
+            hover: c(0x2a, 0x28, 0x40),
+            selected: c(0x3e, 0x38, 0x59),
+            cursor: c(0x56, 0x55, 0x75),
+            accent: c(0x90, 0x6c, 0xff),
+            text: c(0xcb, 0xe3, 0xe7),
+            text_dim: c(0x8a, 0x88, 0x9d),
+            border: c(0x2b, 0x29, 0x43),
+            danger: c(0xff, 0x80, 0x80),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::Noctis => Palette {
+            dark: true,
+            bg: c(0x03, 0x19, 0x1b),
+            panel: c(0x05, 0x25, 0x29),
+            sidebar: c(0x03, 0x19, 0x1b),
+            raised: c(0x0b, 0x31, 0x35),
+            hover: c(0x08, 0x32, 0x36),
+            selected: c(0x0b, 0x4a, 0x51),
+            cursor: c(0x13, 0x66, 0x70),
+            accent: c(0x40, 0xd4, 0xe7),
+            text: c(0xb2, 0xca, 0xcd),
+            text_dim: c(0x5b, 0x85, 0x8b),
+            border: c(0x0d, 0x3a, 0x3f),
+            danger: c(0xe3, 0x4e, 0x1c),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::AuraDark => Palette {
+            dark: true,
+            bg: c(0x11, 0x0f, 0x18),
+            panel: c(0x15, 0x14, 0x1b),
+            sidebar: c(0x11, 0x0f, 0x18),
+            raised: c(0x1f, 0x1d, 0x29),
+            hover: c(0x1f, 0x1d, 0x29),
+            selected: c(0x29, 0x26, 0x3c),
+            cursor: c(0x3d, 0x37, 0x5e),
+            accent: c(0xa2, 0x77, 0xff),
+            text: c(0xed, 0xec, 0xee),
+            text_dim: c(0x8a, 0x8a, 0x8e),
+            border: c(0x2b, 0x28, 0x38),
+            danger: c(0xff, 0x67, 0x67),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::Houston => Palette {
+            dark: true,
+            bg: c(0x13, 0x15, 0x1a),
+            panel: c(0x17, 0x19, 0x1e),
+            sidebar: c(0x1d, 0x20, 0x27),
+            raised: c(0x23, 0x26, 0x2d),
+            hover: c(0x1f, 0x22, 0x28),
+            selected: c(0x2e, 0x33, 0x40),
+            cursor: c(0x34, 0x38, 0x41),
+            accent: c(0x00, 0xda, 0xef),
+            text: c(0xee, 0xf0, 0xf9),
+            text_dim: c(0x85, 0x8b, 0x98),
+            border: c(0x2a, 0x2d, 0x34),
+            danger: c(0xf4, 0x58, 0x7e),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::Lackluster => Palette {
+            dark: true,
+            bg: c(0x08, 0x08, 0x08),
+            panel: c(0x10, 0x10, 0x10),
+            sidebar: c(0x0c, 0x0c, 0x0c),
+            raised: c(0x19, 0x19, 0x19),
+            hover: c(0x1e, 0x1e, 0x1e),
+            selected: c(0x2a, 0x2a, 0x2a),
+            cursor: c(0x44, 0x44, 0x44),
+            accent: c(0x77, 0x88, 0xaa),
+            text: c(0xcc, 0xcc, 0xcc),
+            text_dim: c(0x7a, 0x7a, 0x7a),
+            border: c(0x22, 0x22, 0x22),
+            danger: c(0xe8, 0x3a, 0x3a),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::FleetDark => Palette {
+            dark: true,
+            bg: c(0x12, 0x12, 0x12),
+            panel: c(0x18, 0x18, 0x18),
+            sidebar: c(0x14, 0x14, 0x14),
+            raised: c(0x23, 0x23, 0x23),
+            hover: c(0x23, 0x23, 0x23),
+            selected: c(0x1f, 0x3a, 0x5f),
+            cursor: c(0x2e, 0x4a, 0x6e),
+            accent: c(0x87, 0xc3, 0xff),
+            text: c(0xd6, 0xd6, 0xdd),
+            text_dim: c(0x89, 0x89, 0x89),
+            border: c(0x2a, 0x2a, 0x2a),
+            danger: c(0xff, 0x6a, 0x6a),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::MelangeLight => Palette {
+            dark: false,
+            bg: c(0xe9, 0xe5, 0xe1),
+            panel: c(0xf1, 0xf1, 0xf1),
+            sidebar: c(0xe9, 0xe5, 0xe1),
+            raised: c(0xff, 0xff, 0xff),
+            hover: c(0xe6, 0xe1, 0xdc),
+            selected: c(0xd9, 0xd3, 0xce),
+            cursor: c(0xc9, 0xc0, 0xb9),
+            accent: c(0xbc, 0x5c, 0x00),
+            text: c(0x54, 0x43, 0x3a),
+            text_dim: c(0x7d, 0x66, 0x58),
+            border: c(0xdd, 0xd6, 0xd0),
+            danger: c(0xbf, 0x00, 0x21),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::BlulocoLight => Palette {
+            dark: false,
+            bg: c(0xef, 0xef, 0xef),
+            panel: c(0xf9, 0xf9, 0xf9),
+            sidebar: c(0xef, 0xef, 0xef),
+            raised: c(0xff, 0xff, 0xff),
+            hover: c(0xeb, 0xeb, 0xeb),
+            selected: c(0xd2, 0xec, 0xff),
+            cursor: c(0xb8, 0xdc, 0xf8),
+            accent: c(0x27, 0x5f, 0xe4),
+            text: c(0x38, 0x3a, 0x42),
+            text_dim: c(0x7a, 0x7c, 0x84),
+            border: c(0xe0, 0xe0, 0xe0),
+            danger: c(0xd5, 0x27, 0x53),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::NoctisLux => Palette {
+            dark: false,
+            bg: c(0xf6, 0xed, 0xda),
+            panel: c(0xfe, 0xf8, 0xec),
+            sidebar: c(0xf6, 0xed, 0xda),
+            raised: c(0xff, 0xfc, 0xf5),
+            hover: c(0xf2, 0xe7, 0xd0),
+            selected: c(0xad, 0xe2, 0xeb),
+            cursor: c(0x8f, 0xd3, 0xdf),
+            accent: c(0x00, 0x7f, 0x8f),
+            text: c(0x00, 0x56, 0x61),
+            text_dim: c(0x5f, 0x84, 0x84),
+            border: c(0xe8, 0xdc, 0xc4),
+            danger: c(0xe3, 0x4e, 0x1c),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::MinLight => Palette {
+            dark: false,
+            bg: c(0xf6, 0xf6, 0xf6),
+            panel: c(0xff, 0xff, 0xff),
+            sidebar: c(0xf6, 0xf6, 0xf6),
+            raised: c(0xff, 0xff, 0xff),
+            hover: c(0xf0, 0xf0, 0xf0),
+            selected: c(0xe3, 0xee, 0xfb),
+            cursor: c(0xcd, 0xdf, 0xf6),
+            accent: c(0x19, 0x76, 0xd2),
+            text: c(0x21, 0x21, 0x21),
+            text_dim: c(0x77, 0x77, 0x77),
+            border: c(0xe8, 0xe8, 0xe8),
+            danger: c(0xd3, 0x2f, 0x2f),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::MaterialLighter => Palette {
+            dark: false,
+            bg: c(0xee, 0xee, 0xee),
+            panel: c(0xfa, 0xfa, 0xfa),
+            sidebar: c(0xee, 0xee, 0xee),
+            raised: c(0xff, 0xff, 0xff),
+            hover: c(0xe7, 0xe7, 0xe8),
+            selected: c(0xdc, 0xef, 0xec),
+            cursor: c(0xb5, 0xde, 0xd9),
+            accent: c(0x1f, 0x8f, 0x97),
+            text: c(0x3c, 0x52, 0x5c),
+            text_dim: c(0x7a, 0x8f, 0x99),
+            border: c(0xe0, 0xe0, 0xe0),
+            danger: c(0xe5, 0x39, 0x35),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::HorizonLight => Palette {
+            dark: false,
+            bg: c(0xfa, 0xda, 0xd1),
+            panel: c(0xfd, 0xf0, 0xed),
+            sidebar: c(0xf9, 0xe4, 0xdf),
+            raised: c(0xff, 0xf8, 0xf6),
+            hover: c(0xf9, 0xe3, 0xde),
+            selected: c(0xf6, 0xd0, 0xc7),
+            cursor: c(0xf2, 0xbf, 0xb3),
+            accent: c(0xd6, 0x3c, 0x63),
+            text: c(0x1c, 0x1e, 0x26),
+            text_dim: c(0x7a, 0x6f, 0x6c),
+            border: c(0xf2, 0xd8, 0xd1),
+            danger: c(0xe3, 0x3e, 0x5a),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
+        },
+        ThemeName::HighContrastDark => Palette {
+            dark: true,
+            bg: c(0x00, 0x00, 0x00),
+            panel: c(0x00, 0x00, 0x00),
+            sidebar: c(0x0a, 0x0a, 0x0a),
+            raised: c(0x14, 0x14, 0x14),
+            hover: c(0x33, 0x33, 0x33),
+            selected: c(0xff, 0xd4, 0x00),
+            cursor: c(0xff, 0xe9, 0x5c),
+            accent: c(0x4c, 0xc9, 0xff),
+            text: c(0xff, 0xff, 0xff),
+            text_dim: c(0xc8, 0xc8, 0xc8),
+            border: c(0xff, 0xff, 0xff),
+            danger: c(0xff, 0x7a, 0x7a),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(true),
+            warn: z,
+            strong: true,
+        },
+        ThemeName::HighContrastLight => Palette {
+            dark: false,
+            bg: c(0xff, 0xff, 0xff),
+            panel: c(0xff, 0xff, 0xff),
+            sidebar: c(0xf5, 0xf5, 0xf5),
+            raised: c(0xff, 0xff, 0xff),
+            hover: c(0xe0, 0xe0, 0xe0),
+            selected: c(0x00, 0x33, 0xcc),
+            cursor: c(0x00, 0x22, 0x99),
+            accent: c(0x00, 0x33, 0xcc),
+            text: c(0x00, 0x00, 0x00),
+            text_dim: c(0x3d, 0x3d, 0x3d),
+            border: c(0x00, 0x00, 0x00),
+            danger: c(0xa0, 0x00, 0x00),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(false),
+            warn: z,
+            strong: true,
+        },
+        ThemeName::PencilLight => Palette {
+            dark: false,
+            bg: c(0xe4, 0xe4, 0xe4),
+            panel: c(0xf1, 0xf1, 0xf1),
+            sidebar: c(0xe8, 0xe8, 0xe8),
+            raised: c(0xfa, 0xfa, 0xfa),
+            hover: c(0xe4, 0xe4, 0xe4),
+            selected: c(0xdc, 0xe9, 0xf0),
+            cursor: c(0xc3, 0xdb, 0xe8),
+            accent: c(0x00, 0x79, 0xa8),
+            text: c(0x42, 0x42, 0x42),
+            text_dim: c(0x76, 0x76, 0x76),
+            border: c(0xdc, 0xdc, 0xdc),
+            danger: c(0xc3, 0x07, 0x71),
+            chrome: z,
+            alt: z,
+            row_hover: z,
+            syntax: Syntax::classic(false),
+            warn: z,
+            strong: false,
         },
     }
 }
@@ -2631,6 +3441,11 @@ pub fn apply(ctx: &egui::Context, p: &Palette, font_size: f32, spacing: f32, ani
     v.widgets.active.weak_bg_fill = p.selected;
     v.widgets.active.bg_fill = p.selected;
     v.widgets.open.weak_bg_fill = p.hover;
+    // Glyphs on whole pixels and unhinted, as text was drawn before egui 0.37: the same
+    // look, and each glyph rasterised once rather than at four offsets through the hinting
+    // interpreter. Left at their defaults, a dialog's first frame took 50 ms and more.
+    v.text_options.subpixel_binning = false;
+    v.text_options.font_hinting = false;
     ctx.set_visuals(v);
     ctx.all_styles_mut(|s| {
         use egui::{FontId, TextStyle};
@@ -2685,6 +3500,13 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
     // Those scripts' letters only (tools/rtl_fonts.sh), joined by src/rtl.rs.
     const ARABIC: &[u8] = include_bytes!("../assets/fallback-arabic.ttf");
     const HEBREW: &[u8] = include_bytes!("../assets/fallback-hebrew.ttf");
+    // The Nerd Font search (below) reads every font's character set: it runs meanwhile.
+    let nerd_list = || std::process::Command::new("fc-list").args(["--format=%{style[0]}|%{family[0]}|%{file}\n", NERD_CHARS]).output().ok();
+    let nerd = std::thread::Builder::new().spawn(nerd_list).ok();
+    // fontconfig's fallback order for sans-serif, with the languages each font covers:
+    // one call, read meanwhile too.
+    let sorted_list = || std::process::Command::new("fc-match").args(["-s", "sans-serif", "--format=%{file}\t%{lang}\n"]).output().ok();
+    let sorted = std::thread::Builder::new().spawn(sorted_list).ok();
     // System fonts are memory-mapped, not read: egui then uses the bytes in place (no
     // copy) and the kernel only pages in the glyph tables actually used, sharing them
     // with every other app (the CJK fallback alone is ~20 MB).
@@ -2701,9 +3523,13 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
         list.push(name.into());
     };
     let custom = if family.trim().is_empty() { None } else { fc_match(family.trim()) };
+    // The family the font came by, for its semibold below: the one asked for, else the
+    // desktop's.
+    let desktop_family = desktop_font_family();
+    let named = if custom.is_some() { Some(family.trim().to_string()) } else { desktop_family.clone().or(Some("system-ui".into())) };
     // Follow the desktop's UI font: the GTK font setting, then
     // fontconfig's system-ui alias, then a list of common sans families.
-    let desktop = desktop_font_family().and_then(|f| fc_match(&f)).or_else(|| fc_match("system-ui"));
+    let desktop = desktop_family.and_then(|f| fc_match(&f)).or_else(|| fc_match("system-ui"));
     let ui = custom.or(desktop).or_else(|| first(&[
         "/usr/share/fonts/inter/InterVariable.ttf",
         "/usr/share/fonts/inter/Inter-Regular.ttf",
@@ -2720,9 +3546,40 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
     if let Some(b) = ui {
         add(&mut fonts, "ui", b, &mut prop);
     }
+    // A heavier weight of the same font, for titles, headers and labels: a variable font's
+    // own weight axis set to 600 (one file holds every weight), else the family's semibold
+    // file, else none and they stay regular. Never another family's: a title in a second
+    // typeface beside the desktop's would look like a mistake.
+    let semibold = ui.and_then(|b| {
+        if let Some((lo, hi)) = weight_axis(b) {
+            let mut d = FontData::from_static(b);
+            d.tweak.coords = egui::epaint::text::VariationCoords::new([(b"wght", 600f32.clamp(lo, hi))]);
+            return Some(d);
+        }
+        let from = if custom.is_some() || desktop.is_some() { named.as_deref() } else { None }?;
+        let s = fc_match(&format!("{from}:weight=semibold"))?;
+        (s.as_ptr() != b.as_ptr()).then(|| FontData::from_static(s))
+    });
     // Symbols (arrows, stars, blocks) from the system when available.
-    if let Some(b) = first(&["/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]) {
+    let symbols = first(&["/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]);
+    if let Some(b) = symbols {
         add(&mut fonts, "symbols", b, &mut prop);
+    }
+    // Scripts the interface font has no letters for, each from the font the desktop's
+    // other apps fall back to; before the monospace font, which may cover some of them
+    // too and would set a Persian name in a typewriter face.
+    let sorted = match sorted {
+        Some(t) => t.join().ok().flatten(),
+        None => sorted_list(),
+    };
+    // The same file maps to the same bytes, so a font already in the list isn't added twice.
+    let mut have: Vec<*const u8> = [ui, symbols].into_iter().flatten().map(|b| b.as_ptr()).collect();
+    let text = sorted.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    for b in script_fonts(&text).into_iter().filter_map(|f| map_font(std::path::Path::new(f))) {
+        if !have.contains(&b.as_ptr()) {
+            add(&mut fonts, &format!("script-{}", have.len()), b, &mut prop);
+            have.push(b.as_ptr());
+        }
     }
     let custom_mono = if mono_family.trim().is_empty() { None } else { fc_match(mono_family.trim()) };
     let sys_mono = custom_mono.or_else(|| first(&[
@@ -2740,7 +3597,10 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
     }
     // Shell prompts and system summaries draw icons from the Nerd Fonts' private-use
     // range, which no ordinary font fills: a Nerd Font on the system does, in the terminal.
-    let nerd = std::process::Command::new("fc-list").args(["--format=%{style[0]}|%{family[0]}|%{file}\n", NERD_CHARS]).output().ok();
+    let nerd = match nerd {
+        Some(t) => t.join().ok().flatten(),
+        None => nerd_list(),
+    };
     if let Some(b) = nerd.and_then(|o| pick_nerd_font(&String::from_utf8_lossy(&o.stdout)).and_then(|f| map_font(std::path::Path::new(f)))) {
         add(&mut fonts, "nerd", b, &mut mono);
     }
@@ -2750,10 +3610,6 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
             break;
         }
     }
-    // Interface glyphs: a Lucide subset (ISC), drawn as text in its own family.
-    const ICONS: &[u8] = include_bytes!("../assets/lucide-subset.ttf");
-    fonts.font_data.insert("lucide".into(), FontData::from_static(ICONS).into());
-    fonts.families.insert(FontFamily::Name("icons".into()), vec!["lucide".into()]);
     for (name, bytes) in [("fb-sans", SANS), ("fb-mono", MONO), ("fb-symbols", SYMBOLS), ("fb-arabic", ARABIC), ("fb-hebrew", HEBREW)] {
         fonts.font_data.insert(name.into(), FontData::from_static(bytes).into());
     }
@@ -2765,9 +3621,53 @@ pub fn install_fonts(ctx: &egui::Context, family: &str, mono_family: &str) {
     prop.splice(1..1, ["fb-arabic", "fb-hebrew"].map(String::from));
     mono.push("fb-mono".into());
     mono.extend(prop.iter().filter(|n| *n != "mono").cloned());
+    // The semibold family falls back as the regular one does, for what its font lacks.
+    let mut semi: Vec<String> = prop.iter().filter(|n| *n != "ui").cloned().collect();
+    match semibold {
+        Some(d) => {
+            fonts.font_data.insert("ui-semibold".into(), d.into());
+            semi.insert(0, "ui-semibold".into());
+        }
+        None => semi.insert(0, "ui".into()),
+    }
+    fonts.families.insert(FontFamily::Name("semibold".into()), semi);
     fonts.families.insert(FontFamily::Proportional, prop);
     fonts.families.insert(FontFamily::Monospace, mono);
     ctx.set_fonts(fonts);
+}
+
+/// Languages whose script an interface font often lacks, one for each script: Persian
+/// (its letters are Arabic's and four more), Urdu, Hebrew, the Indic scripts, Thai, Lao,
+/// Khmer, Burmese, Georgian, Armenian, Ethiopic and Tibetan.
+const SCRIPT_LANGS: [&str; 20] = ["fa", "ur", "he", "hi", "bn", "pa", "gu", "ta", "te", "kn", "ml", "si", "th", "lo", "km", "my", "ka", "hy", "am", "bo"];
+
+/// From fontconfig's sorted fallback list (`file<TAB>lang|lang|...` lines), the first font
+/// for each of `SCRIPT_LANGS`, in the list's order and each file once.
+pub fn script_fonts(sorted: &str) -> Vec<&str> {
+    let fonts: Vec<(&str, &str)> = sorted.lines().filter_map(|l| l.split_once('\t')).collect();
+    let mut out: Vec<&str> = vec![];
+    for lang in SCRIPT_LANGS {
+        if let Some((file, _)) = fonts.iter().find(|(_, langs)| langs.split('|').any(|l| l == lang))
+            && !out.contains(file)
+        {
+            out.push(file);
+        }
+    }
+    // In the list's own order: the desktop's preference among them stands.
+    out.sort_by_key(|f| fonts.iter().position(|(g, _)| g == f));
+    out
+}
+
+/// The interface font a weight heavier (`install_fonts`), for titles, headers and labels.
+pub fn semibold(size: f32) -> egui::FontId {
+    egui::FontId::new(size, FontFamily::Name("semibold".into()))
+}
+
+/// A variable font's weight axis, its lowest and highest values.
+fn weight_axis(b: &[u8]) -> Option<(f32, f32)> {
+    use ab_glyph::VariableFont;
+    let f = ab_glyph::FontRef::try_from_slice(b).ok()?;
+    f.variations().into_iter().find(|a| &a.tag == b"wght").map(|a| (a.min_value, a.max_value))
 }
 
 // ---------------------------------------------------------------- icons
@@ -2838,20 +3738,27 @@ pub fn cat_color(c: FileCat) -> Color32 {
 }
 
 /// Draw a folder or document glyph centered in `rect`.
+/// Maia's own folder, in `col`: the theme's folder colour, or a folder's colour label.
+pub fn paint_folder(painter: &Painter, rect: Rect, col: Color32) {
+    let s = rect.width().min(rect.height());
+    let c = rect.center();
+    let w = s * 0.92;
+    let h = s * 0.72;
+    let r = Rect::from_center_size(c + vec2(0.0, s * 0.04), vec2(w, h));
+    let tab = Rect::from_min_size(r.min - vec2(0.0, s * 0.08), vec2(w * 0.42, s * 0.2));
+    let rad = CornerRadius::same((s * 0.08).max(1.0) as u8);
+    painter.rect_filled(tab, rad, col.gamma_multiply(0.75));
+    painter.rect_filled(r, rad, col);
+    let front = Rect::from_min_max(pos2(r.min.x, r.min.y + h * 0.22), r.max);
+    painter.rect_filled(front, rad, lighten(col, 0.12));
+}
+
 pub fn paint_icon(painter: &Painter, rect: Rect, cat: FileCat, ext: &str, is_link: bool) {
     let s = rect.width().min(rect.height());
     let c = rect.center();
     let col = cat_color(cat);
     if cat == FileCat::Folder {
-        let w = s * 0.92;
-        let h = s * 0.72;
-        let r = Rect::from_center_size(c + vec2(0.0, s * 0.04), vec2(w, h));
-        let tab = Rect::from_min_size(r.min - vec2(0.0, s * 0.08), vec2(w * 0.42, s * 0.2));
-        let rad = CornerRadius::same((s * 0.08).max(1.0) as u8);
-        painter.rect_filled(tab, rad, col.gamma_multiply(0.75));
-        painter.rect_filled(r, rad, col);
-        let front = Rect::from_min_max(pos2(r.min.x, r.min.y + h * 0.22), r.max);
-        painter.rect_filled(front, rad, lighten(col, 0.12));
+        paint_folder(painter, rect, col);
     } else {
         let w = s * 0.72;
         let h = s * 0.92;
@@ -2954,10 +3861,16 @@ pub fn paint_icon(painter: &Painter, rect: Rect, cat: FileCat, ext: &str, is_lin
         }
     }
     if is_link {
-        let a = Rect::from_min_size(pos2(rect.left(), rect.bottom() - s * 0.38), Vec2::splat(s * 0.38));
-        painter.rect(a, CornerRadius::same(2), Color32::WHITE, Stroke::new(1.0, Color32::DARK_GRAY), StrokeKind::Inside);
-        painter.line_segment([a.left_bottom() + vec2(s * 0.08, -s * 0.08), a.right_top() + vec2(-s * 0.08, s * 0.08)], Stroke::new(1.5, Color32::BLACK));
+        paint_link_badge(painter, rect);
     }
+}
+
+/// The small arrow in an icon's lower left corner that says it is a link.
+pub fn paint_link_badge(painter: &Painter, rect: Rect) {
+    let s = rect.width().min(rect.height());
+    let a = Rect::from_min_size(pos2(rect.left(), rect.bottom() - s * 0.38), Vec2::splat(s * 0.38));
+    painter.rect(a, CornerRadius::same(2), Color32::WHITE, Stroke::new(1.0, Color32::DARK_GRAY), StrokeKind::Inside);
+    painter.line_segment([a.left_bottom() + vec2(s * 0.08, -s * 0.08), a.right_top() + vec2(-s * 0.08, s * 0.08)], Stroke::new(1.5, Color32::BLACK));
 }
 
 fn lighten(c: Color32, t: f32) -> Color32 {
@@ -3016,19 +3929,13 @@ pub enum Glyph {
     Copy,
 }
 
-/// Draw a Lucide icon by name, centered in `rect` (the icon's stroke box roughly fills it).
-pub fn paint_lucide(painter: &Painter, rect: Rect, name: &str, col: Color32) -> bool {
-    let Some(&(_, ch)) = crate::lucide_map::LUCIDE.iter().find(|(n, _)| *n == name) else { return false };
-    let s = rect.width().min(rect.height());
-    // Lucide draws inside a 24-unit box with 2 units of padding: scale so the strokes span `s`.
-    let size = (s * 24.0 / 20.0).round().max(6.0);
-    let g = painter.layout_no_wrap(ch.to_string(), egui::FontId::new(size, FontFamily::Name("icons".into())), col);
-    let pos = rect.center() - g.rect.size() / 2.0;
-    painter.galley(pos2(pos.x.round(), pos.y.round()), g, col);
-    true
+/// Draw an interface icon by name (symbols.rs), centred in `rect` and spanning its shorter
+/// side. False when there is no such icon.
+pub fn paint_symbol(painter: &Painter, rect: Rect, name: &str, col: Color32) -> bool {
+    crate::symbols::paint(painter, rect, name, col)
 }
 
-/// Lucide name for each interface glyph.
+/// The icon for each interface glyph.
 fn glyph_name(g: Glyph) -> &'static str {
     match g {
         Glyph::Home => "house",
@@ -3046,10 +3953,11 @@ fn glyph_name(g: Glyph) -> &'static str {
         Glyph::Forward => "arrow-right",
         Glyph::ChevronRight => "chevron-right",
         Glyph::ChevronDown => "chevron-down",
+        Glyph::ChevronUp => "chevron-up",
         Glyph::Lock => "lock",
         Glyph::LockOpen => "lock-open",
         Glyph::Up => "arrow-up",
-        Glyph::Refresh => "rotate-ccw",
+        Glyph::Refresh => "refresh",
         Glyph::Split => "columns-2",
         Glyph::Search => "search",
         Glyph::Eye => "scan-eye",
@@ -3058,244 +3966,36 @@ fn glyph_name(g: Glyph) -> &'static str {
         Glyph::Clock => "clock",
         Glyph::Bookmark => "bookmark",
         Glyph::Folder => "folder",
-        Glyph::Monitor => "monitor",
+        Glyph::Monitor => "computer",
         Glyph::CollapseLeft => "panel-left-close",
         Glyph::Menu => "menu",
         Glyph::Usb => "usb",
+        Glyph::Eject => "eject",
         Glyph::Globe => "globe",
         Glyph::Phone => "smartphone",
+        Glyph::Wrap => "wrap",
+        Glyph::Tag => "tag",
+        Glyph::Cloud => "cloud",
+        Glyph::List => "list",
+        Glyph::ListTree => "list-tree",
         Glyph::Maximize => "maximize-2",
-        Glyph::Table => "grid-3x3",
-        Glyph::Eject | Glyph::Wrap | Glyph::Tag | Glyph::Cloud | Glyph::ChevronUp | Glyph::List | Glyph::ListTree | Glyph::Code | Glyph::Blame | Glyph::Follow | Glyph::Copy => "", // drawn below
+        Glyph::Code => "code",
+        Glyph::Table => "table",
+        Glyph::Blame => "blame",
+        Glyph::Follow => "follow",
+        Glyph::Copy => "copy",
     }
 }
 
 pub fn paint_glyph(painter: &Painter, rect: Rect, g: Glyph, col: Color32) {
-    if paint_lucide(painter, rect, glyph_name(g), col) {
-        return;
-    }
-    let s = rect.width().min(rect.height());
-    let c = rect.center();
-    let st = Stroke::new((s / 11.0).max(1.2), col);
-    let p = |x: f32, y: f32| -> Pos2 { c + vec2(x * s, y * s) };
-    let line = |a: Pos2, b: Pos2| painter.line_segment([a, b], st);
-    match g {
-        Glyph::Home => {
-            painter.add(Shape::line(vec![p(-0.35, 0.0), p(0.0, -0.32), p(0.35, 0.0)], st));
-            painter.add(Shape::line(vec![p(-0.25, -0.08), p(-0.25, 0.32), p(0.25, 0.32), p(0.25, -0.08)], st));
-        }
-        Glyph::Desktop => {
-            painter.rect_stroke(Rect::from_min_max(p(-0.38, -0.3), p(0.38, 0.18)), CornerRadius::same(2), st, StrokeKind::Middle);
-            line(p(0.0, 0.18), p(0.0, 0.32));
-            line(p(-0.18, 0.32), p(0.18, 0.32));
-        }
-        Glyph::Docs => {
-            painter.rect_stroke(Rect::from_min_max(p(-0.28, -0.36), p(0.28, 0.36)), CornerRadius::same(2), st, StrokeKind::Middle);
-            for y in [-0.15, 0.0, 0.15] {
-                line(p(-0.15, y), p(0.15, y));
-            }
-        }
-        Glyph::Down => {
-            line(p(0.0, -0.36), p(0.0, 0.16));
-            painter.add(Shape::line(vec![p(-0.2, -0.04), p(0.0, 0.16), p(0.2, -0.04)], st));
-            line(p(-0.32, 0.34), p(0.32, 0.34));
-        }
-        Glyph::Pics => {
-            painter.rect_stroke(Rect::from_min_max(p(-0.38, -0.3), p(0.38, 0.3)), CornerRadius::same(2), st, StrokeKind::Middle);
-            painter.add(Shape::line(vec![p(-0.38, 0.22), p(-0.1, -0.04), p(0.1, 0.14), p(0.2, 0.04), p(0.38, 0.2)], st));
-            painter.circle_stroke(p(0.15, -0.14), s * 0.06, st);
-        }
-        Glyph::Music => {
-            line(p(-0.12, 0.24), p(-0.12, -0.3));
-            line(p(-0.12, -0.3), p(0.28, -0.36));
-            line(p(0.28, -0.36), p(0.28, 0.18));
-            painter.circle_filled(p(-0.2, 0.26), s * 0.1, col);
-            painter.circle_filled(p(0.2, 0.2), s * 0.1, col);
-        }
-        Glyph::Video => {
-            painter.rect_stroke(Rect::from_min_max(p(-0.38, -0.24), p(0.16, 0.24)), CornerRadius::same(2), st, StrokeKind::Middle);
-            painter.add(Shape::line(vec![p(0.16, -0.06), p(0.38, -0.2), p(0.38, 0.2), p(0.16, 0.06)], st));
-        }
-        Glyph::Drive => {
-            painter.rect_stroke(Rect::from_min_max(p(-0.38, -0.18), p(0.38, 0.22)), CornerRadius::same(3), st, StrokeKind::Middle);
-            painter.circle_filled(p(0.22, 0.02), s * 0.05, col);
-            line(p(-0.24, 0.02), p(0.06, 0.02));
-        }
-        Glyph::Trash => {
-            line(p(-0.34, -0.24), p(0.34, -0.24));
-            line(p(-0.1, -0.34), p(0.1, -0.34));
-            painter.add(Shape::line(vec![p(-0.26, -0.24), p(-0.2, 0.36), p(0.2, 0.36), p(0.26, -0.24)], st));
-        }
-        Glyph::Pin => {
-            painter.circle_stroke(p(0.0, -0.14), s * 0.18, st);
-            line(p(0.0, 0.04), p(0.0, 0.38));
-        }
-        Glyph::Root => {
-            line(p(-0.3, -0.3), p(0.3, 0.3));
-        }
-        Glyph::Back => {
-            painter.add(Shape::line(vec![p(0.12, -0.3), p(-0.18, 0.0), p(0.12, 0.3)], st));
-        }
-        Glyph::Forward => {
-            painter.add(Shape::line(vec![p(-0.12, -0.3), p(0.18, 0.0), p(-0.12, 0.3)], st));
-        }
-        Glyph::Up => {
-            painter.add(Shape::line(vec![p(-0.3, 0.12), p(0.0, -0.18), p(0.3, 0.12)], st));
-        }
-        Glyph::Refresh => {
-            let pts: Vec<Pos2> = (0..=20)
-                .map(|i| {
-                    let a = 0.6 + i as f32 / 20.0 * 5.0;
-                    c + vec2(a.cos(), a.sin()) * s * 0.3
-                })
-                .collect();
-            let end = *pts.last().unwrap();
-            painter.add(Shape::line(pts, st));
-            painter.add(Shape::line(vec![end + vec2(-s * 0.16, -s * 0.02), end, end + vec2(-s * 0.02, s * 0.16)], st));
-        }
-        Glyph::Split => {
-            painter.rect_stroke(Rect::from_min_max(p(-0.38, -0.3), p(0.38, 0.3)), CornerRadius::same(2), st, StrokeKind::Middle);
-            line(p(0.0, -0.3), p(0.0, 0.3));
-        }
-        Glyph::Search => {
-            painter.circle_stroke(p(-0.06, -0.06), s * 0.24, st);
-            line(p(0.12, 0.12), p(0.34, 0.34));
-        }
-        Glyph::Eye => {
-            let top: Vec<Pos2> = (0..=16).map(|i| { let t = i as f32 / 16.0; p(-0.4 + 0.8 * t, -0.24 * (std::f32::consts::PI * t).sin()) }).collect();
-            let bot: Vec<Pos2> = (0..=16).map(|i| { let t = i as f32 / 16.0; p(-0.4 + 0.8 * t, 0.24 * (std::f32::consts::PI * t).sin()) }).collect();
-            painter.add(Shape::line(top, st));
-            painter.add(Shape::line(bot, st));
-            painter.circle_filled(c, s * 0.1, col);
-        }
-        Glyph::Plus => {
-            line(p(-0.3, 0.0), p(0.3, 0.0));
-            line(p(0.0, -0.3), p(0.0, 0.3));
-        }
-        Glyph::Close => {
-            line(p(-0.25, -0.25), p(0.25, 0.25));
-            line(p(-0.25, 0.25), p(0.25, -0.25));
-        }
-        Glyph::Bookmark => {
-            painter.add(Shape::closed_line(vec![p(-0.24, -0.36), p(0.24, -0.36), p(0.24, 0.38), p(0.0, 0.16), p(-0.24, 0.38)], st));
-        }
-        Glyph::Folder => {
-            painter.add(Shape::closed_line(vec![p(-0.38, -0.26), p(-0.1, -0.26), p(0.0, -0.16), p(0.38, -0.16), p(0.38, 0.3), p(-0.38, 0.3)], st));
-        }
-        Glyph::Monitor => {
-            painter.rect_stroke(Rect::from_min_max(p(-0.4, -0.3), p(0.4, 0.18)), CornerRadius::same(2), st, StrokeKind::Middle);
-            line(p(-0.16, 0.34), p(0.16, 0.34));
-            line(p(0.0, 0.18), p(0.0, 0.34));
-        }
-        Glyph::CollapseLeft => {
-            line(p(-0.34, -0.32), p(-0.34, 0.32));
-            line(p(0.34, 0.0), p(-0.16, 0.0));
-            painter.add(Shape::line(vec![p(0.0, -0.16), p(-0.16, 0.0), p(0.0, 0.16)], st));
-        }
-        Glyph::ChevronRight | Glyph::ChevronDown | Glyph::Lock | Glyph::LockOpen | Glyph::Usb | Glyph::Globe | Glyph::Phone | Glyph::Maximize | Glyph::Table => {}
-        // On Lucide's 24-unit grid, so they sit with the font's icons.
-        Glyph::Wrap => {
-            let m = |x: f32, y: f32| p((x - 12.0) * 0.036, (y - 12.0) * 0.036);
-            line(m(3.0, 6.0), m(21.0, 6.0));
-            line(m(3.0, 18.0), m(10.0, 18.0));
-            // Out along the middle row, round the end and back under it.
-            let mut pts = vec![m(3.0, 12.0)];
-            pts.extend((0..=12).map(|k| {
-                let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * k as f32 / 12.0;
-                m(18.0 + 3.0 * a.cos(), 15.0 + 3.0 * a.sin())
-            }));
-            pts.push(m(14.0, 18.0));
-            painter.add(Shape::line(pts, st));
-            painter.add(Shape::line(vec![m(16.0, 16.0), m(14.0, 18.0), m(16.0, 20.0)], st));
-        }
-        Glyph::Cloud => {
-            // Lucide's cloud: a large arc round the left and top, a small one at the right.
-            let m = |x: f32, y: f32| p((x - 12.0) * 0.036, (y - 12.0) * 0.036);
-            let arc = |cx: f32, cy: f32, r: f32, a0: f32, a1: f32, pts: &mut Vec<Pos2>| {
-                for k in 0..=14 {
-                    let a = (a0 + (a1 - a0) * k as f32 / 14.0).to_radians();
-                    pts.push(m(cx + r * a.cos(), cy + r * a.sin()));
-                }
-            };
-            let mut pts = vec![m(17.5, 19.0)];
-            arc(9.0, 12.0, 7.0, 90.0, 343.4, &mut pts);
-            arc(17.5, 14.5, 4.5, 270.0, 450.0, &mut pts);
-            painter.add(Shape::Path(egui::epaint::PathShape { points: pts, closed: true, fill: Color32::TRANSPARENT, stroke: st.into() }));
-        }
-        Glyph::Tag => {
-            let m = |x: f32, y: f32| p((x - 12.0) * 0.036, (y - 12.0) * 0.036);
-            let outline = vec![m(2.5, 2.5), m(11.2, 2.5), m(21.0, 12.3), m(12.3, 21.0), m(2.5, 11.2)];
-            painter.add(Shape::Path(egui::epaint::PathShape { points: outline, closed: true, fill: Color32::TRANSPARENT, stroke: st.into() }));
-            painter.circle_filled(m(7.5, 7.5), st.width * 0.9, col);
-        }
-        Glyph::Eject => {
-            // Rounded triangle over a bar, in Lucide's stroke style.
-            let tri = vec![p(0.0, -0.34), p(0.34, 0.06), p(-0.34, 0.06)];
-            painter.add(Shape::Path(egui::epaint::PathShape { points: tri, closed: true, fill: Color32::TRANSPARENT, stroke: st.into() }));
-            painter.rect_stroke(Rect::from_min_max(p(-0.34, 0.2), p(0.34, 0.32)), CornerRadius::same(1), st, StrokeKind::Middle);
-        }
-        Glyph::Menu => {
-            for y in [-0.24, 0.0, 0.24] {
-                line(p(-0.32, y), p(0.32, y));
-            }
-        }
-        Glyph::ChevronUp => {
-            // Lucide's chevron-up on the same scale as the font's chevron-down.
-            let m = |x: f32, y: f32| p((x - 12.0) / 20.0, (y - 12.0) / 20.0);
-            let st = Stroke::new(s / 10.0, col);
-            painter.add(Shape::line(vec![m(6.0, 15.0), m(12.0, 9.0), m(18.0, 15.0)], st));
-        }
-        Glyph::Code | Glyph::Blame | Glyph::Follow | Glyph::Copy => {
-            // On Lucide's 24-unit grid: angle brackets with a slash; a column of short
-            // marks beside lines; an arrow down onto a line; two overlapping sheets.
-            let m = |x: f32, y: f32| p((x - 12.0) / 20.0, (y - 12.0) / 20.0);
-            let st = Stroke::new(s / 10.0, col);
-            match g {
-                Glyph::Code => {
-                    painter.add(Shape::line(vec![m(18.0, 16.0), m(22.0, 12.0), m(18.0, 8.0)], st));
-                    painter.add(Shape::line(vec![m(6.0, 8.0), m(2.0, 12.0), m(6.0, 16.0)], st));
-                    painter.line_segment([m(14.5, 4.0), m(9.5, 20.0)], st);
-                }
-                Glyph::Blame => {
-                    // The gutter's strip, a name where a run begins, its lines beside it.
-                    painter.line_segment([m(3.0, 3.0), m(3.0, 21.0)], st);
-                    painter.circle_stroke(m(8.5, 7.0), s * 0.11, st);
-                    painter.line_segment([m(14.0, 7.0), m(21.0, 7.0)], st);
-                    painter.line_segment([m(14.0, 13.0), m(21.0, 13.0)], st);
-                    painter.line_segment([m(8.0, 19.0), m(21.0, 19.0)], st);
-                }
-                Glyph::Follow => {
-                    painter.line_segment([m(12.0, 3.0), m(12.0, 17.0)], st);
-                    painter.add(Shape::line(vec![m(6.0, 11.0), m(12.0, 17.0), m(18.0, 11.0)], st));
-                    painter.line_segment([m(5.0, 21.0), m(19.0, 21.0)], st);
-                }
-                _ => {
-                    painter.rect_stroke(Rect::from_min_max(m(8.0, 8.0), m(22.0, 22.0)), CornerRadius::same((s / 10.0).round() as u8), st, StrokeKind::Middle);
-                    painter.add(Shape::line(vec![m(4.0, 16.0), m(2.0, 14.0), m(2.0, 4.0), m(4.0, 2.0), m(14.0, 2.0), m(16.0, 4.0)], st));
-                }
-            }
-        }
-        Glyph::List | Glyph::ListTree => {
-            // Lucide's list (dots before three lines) and list-tree (lines branching off a stem).
-            let m = |x: f32, y: f32| p((x - 12.0) / 20.0, (y - 12.0) / 20.0);
-            let st = Stroke::new(s / 10.0, col);
-            if g == Glyph::List {
-                for y in [6.0, 12.0, 18.0] {
-                    painter.circle_filled(m(3.5, y), s / 18.0, col);
-                    painter.line_segment([m(8.0, y), m(21.0, y)], st);
-                }
-            } else {
-                painter.line_segment([m(8.0, 6.0), m(21.0, 6.0)], st);
-                painter.line_segment([m(13.0, 12.0), m(21.0, 12.0)], st);
-                painter.line_segment([m(13.0, 18.0), m(21.0, 18.0)], st);
-                painter.add(Shape::line(vec![m(4.0, 6.0), m(4.0, 17.0), m(5.0, 18.0), m(8.0, 18.0)], st));
-                painter.line_segment([m(4.0, 12.0), m(8.0, 12.0)], st);
-            }
-        }
-        Glyph::Clock => {
-            painter.circle_stroke(c, s * 0.34, st);
-            painter.add(Shape::line(vec![p(0.0, -0.2), p(0.0, 0.0), p(0.14, 0.1)], st));
-        }
+    paint_symbol(painter, rect, glyph_name(g), col);
+}
+
+/// A glyph large, as an empty state shows one: the two-tone drawing where the set has one.
+pub fn paint_glyph_large(painter: &Painter, rect: Rect, g: Glyph, col: Color32) {
+    let name = glyph_name(g);
+    if !paint_symbol(painter, rect, &format!("{name}@duo"), col) {
+        paint_symbol(painter, rect, name, col);
     }
 }
 

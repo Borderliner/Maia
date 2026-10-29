@@ -140,6 +140,8 @@ pub struct Inspector {
     zoom: f32,
     pan: Vec2,
     text_size: f32,
+    /// Ctrl+wheel notches not yet taken as a step of `text_size`.
+    zoom_acc: f32,
     show_meta: bool,
     /// Background load of the current item's content (folder listing / text).
     pending: Option<std::sync::mpsc::Receiver<Content>>,
@@ -598,6 +600,7 @@ impl Default for Inspector {
             zoom: 1.0,
             pan: Vec2::ZERO,
             text_size: 0.0,
+            zoom_acc: 0.0,
             show_meta: false,
             pending: None,
             extra_meta: false,
@@ -804,7 +807,7 @@ impl Inspector {
                 let db = std::fs::metadata(&path).is_ok_and(|m| m.is_file()) && std::fs::File::open(&path).and_then(|mut f| f.read_exact(&mut head)).is_ok() && crate::sqlite::is_db_header(&head);
                 let c = match (db, tools) {
                     (true, Some(t)) => Content::Sqlite(Box::new(crate::sqlite::View::start(path, t, &ctx))),
-                    (true, None) => Content::Note("Install sqlite3 to see the tables in this database".into()),
+                    (true, None) => Content::Note("Showing this database's tables needs sqlite3".into()),
                     _ => read_text(&path, &ctx),
                 };
                 let _ = tx.send(c);
@@ -1067,26 +1070,6 @@ pub(crate) fn seg_frame(ui: &mut Ui, pal: &theme::Palette, add: impl FnOnce(&mut
     ui.add_space(6.0);
 }
 
-/// Window outline with a highlighted region (layout icons).
-fn layout_icon(p: &egui::Painter, r: Rect, which: InspectorLayout, col: Color32) {
-    let b = r.shrink2(vec2(0.5, 1.5));
-    p.rect_stroke(b, CornerRadius::same(2), Stroke::new(1.2, col), StrokeKind::Middle);
-    match which {
-        InspectorLayout::Auto => {
-            p.line_segment([pos2(b.left() + b.width() * 0.38, b.top()), pos2(b.left() + b.width() * 0.38, b.bottom())], Stroke::new(1.2, col));
-            p.line_segment([pos2(b.left() + 2.5, b.top() + 3.5), pos2(b.left() + b.width() * 0.38 - 2.0, b.top() + 3.5)], Stroke::new(1.2, col));
-        }
-        InspectorLayout::Right => {
-            let x = b.left() + b.width() * 0.58;
-            p.rect_filled(Rect::from_min_max(pos2(x, b.top()), b.max).shrink(1.5), CornerRadius::same(1), col);
-        }
-        InspectorLayout::Bottom => {
-            let y = b.top() + b.height() * 0.55;
-            p.rect_filled(Rect::from_min_max(pos2(b.left(), y), b.max).shrink(1.5), CornerRadius::same(1), col);
-        }
-    }
-}
-
 #[allow(dead_code)]
 fn tool_button(ui: &mut Ui, label: &str, on: bool, tip: &str, pal: &theme::Palette) -> bool {
     let txt = egui::RichText::new(label).size(11.5).color(if on { pal.accent } else { pal.text_dim });
@@ -1096,7 +1079,7 @@ fn tool_button(ui: &mut Ui, label: &str, on: bool, tip: &str, pal: &theme::Palet
 
 pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
     let pal = *env.pal;
-    let computer = tab::is_computer(&panel.tab().path);
+    let computer = tab::is_place(&panel.tab().path);
     let target: Option<Entry> = {
         let t = panel.tab();
         let idx = t.cursor.or_else(|| if t.selected.len() == 1 { t.selected.iter().next().copied() } else { None });
@@ -1231,223 +1214,202 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
     let hdr = Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + 30.0));
     ui.painter().line_segment([hdr.left_bottom(), hdr.right_bottom()], Stroke::new(1.0, pal.border));
     let mut close = false;
-    let mut hui = ui.new_child(UiBuilder::new().max_rect(hdr.shrink2(vec2(6.0, 3.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    let mut hui = ui.new_child(UiBuilder::new().max_rect(hdr.shrink2(vec2(8.0, 3.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
     hui.set_clip_rect(hdr.intersect(ui.clip_rect()));
     hui.spacing_mut().item_spacing.x = 2.0;
-    if crate::ui::glyph_button(&mut hui, Glyph::Close, "Close inspector (Space)", true, &pal).clicked() {
+    // Three controls: Edit when the file can be edited, a menu holding the rest, and the
+    // way out. The file's name has what they leave.
+    let cur_layout = ins.layout.unwrap_or(env.cfg.inspector_layout);
+    let book = matches!(&ins.content, Content::Text { rich, .. } if matches!(rich.as_deref(), Some(Rich::Book(_))));
+    let editable = matches!(ins.content, Content::Text { .. }) && !book && target.as_ref().is_some_and(|e| !e.is_dir && e.size <= crate::quickedit::MAX && e.path.exists());
+    if crate::ui::glyph_button(&mut hui, Glyph::Close, "Close preview (Space)", true, &pal).clicked() {
         close = true;
     }
-    hui.add_space(4.0);
-    // Toolbar segments, each in a dashed outline: layout | fit, 1:1, fill | grid, minimap.
-    let cur_layout = ins.layout.unwrap_or(env.cfg.inspector_layout);
-    seg_frame(&mut hui, &pal, |ui| {
-        for (l, tip) in [(InspectorLayout::Auto, "Place automatically"), (InspectorLayout::Right, "Dock right"), (InspectorLayout::Bottom, "Dock bottom")] {
-            if seg_button(ui, cur_layout == l, tip, &pal, |p, r, c| layout_icon(p, r, l, c)) {
-                ins.layout = Some(l);
+    let (mr, mresp) = hui.allocate_exact_size(vec2(26.0, 22.0), Sense::click());
+    crate::ui::note_control(&hui, mr, "preview menu");
+    let open = egui::Popup::is_id_open(hui.ctx(), egui::Popup::default_response_id(&mresp));
+    if mresp.hovered() || open {
+        hui.painter().rect_filled(mr, CornerRadius::same(5), pal.hover);
+    }
+    for dx in [-5.0, 0.0, 5.0] {
+        hui.painter().circle_filled(mr.center() + vec2(dx, 0.0), 1.5, if mresp.hovered() || open { pal.text } else { pal.text_dim });
+    }
+    let mresp = mresp.on_hover_text("Preview options");
+    if editable {
+        let font = FontId::proportional((env.cfg.font_size - 1.0).max(10.0));
+        let g = hui.painter().layout_no_wrap("Edit".into(), font, pal.text_dim);
+        if !crate::ui::no_room(&hui, g.size().x + 16.0) {
+            let (er, eresp) = hui.allocate_exact_size(vec2(g.size().x + 16.0, 22.0), Sense::click());
+            crate::ui::note_control(&hui, er, "Edit (Shift+F4)");
+            if eresp.hovered() {
+                hui.painter().rect_filled(er, CornerRadius::same(5), pal.hover);
             }
-        }
-    });
-    match ins.content {
-        Content::Image => {
-            if let Some(a) = ins.anim.as_mut().filter(|a| a.moving()) {
-                seg_frame(&mut hui, &pal, |ui| {
-                    let (tip, icon) = if a.playing { ("Pause", "pause") } else { ("Play", "play") };
-                    if seg_button(ui, false, tip, &pal, |p, r, c| {
-                        theme::paint_lucide(p, r, icon, c);
-                    }) {
-                        a.toggle();
-                    }
-                });
-            }
-            seg_frame(&mut hui, &pal, |ui| {
-                for (f, tip) in [(Fit::Fit, "Zoom to fit"), (Fit::Actual, "Actual pixels (1:1)"), (Fit::Fill, "Fill the inspector")] {
-                    let on = ins.fit == f && ins.zoom == 1.0;
-                    let clicked = seg_button(ui, on, tip, &pal, |p, r, c| match f {
-                        Fit::Fit => {
-                            theme::paint_lucide(p, r, "minimize-2", c);
-                        }
-                        Fit::Actual => {
-                            p.text(r.center(), Align2::CENTER_CENTER, "1:1", FontId::proportional(10.5), c);
-                        }
-                        Fit::Fill => {
-                            theme::paint_lucide(p, r, "maximize-2", c);
-                        }
-                    });
-                    if clicked {
-                        ins.fit = f;
-                        ins.zoom = 1.0;
-                        ins.pan = Vec2::ZERO;
-                    }
-                }
-            });
-            if seg_button(&mut hui, ins.pixel_grid, "Pixel grid at high zoom", &pal, |p, r, c| {
-                theme::paint_lucide(p, r, "grid-3x3", c);
-            }) {
-                ins.pixel_grid = !ins.pixel_grid;
-            }
-            if seg_button(&mut hui, ins.minimap, "Minimap while zoomed", &pal, |p, r, c| {
-                theme::paint_lucide(p, r, "diamond", c);
-            }) {
-                ins.minimap = !ins.minimap;
-            }
-        }
-        Content::Pdf(ref v) => {
-            let (page, pages) = (v.page, v.pages.unwrap_or(0));
-            let mut go = None;
-            seg_frame(&mut hui, &pal, |ui| {
-                if seg_button(ui, false, "Previous page", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "chevron-left", c);
-                }) && page > 1
-                {
-                    go = Some(page - 1);
-                }
-                if seg_button(ui, false, "Next page", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "chevron-right", c);
-                }) && page < pages
-                {
-                    go = Some(page + 1);
-                }
-                // The page count belongs to the arrows, inside their outline.
-                if pages > 0 && !crate::ui::no_room(ui, 40.0) {
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new(format!("{page} / {pages}")).size(11.5).color(pal.text_dim));
-                    ui.add_space(3.0);
-                }
-            });
-            if let (Some(p), Content::Pdf(v)) = (go, &mut ins.content) {
-                v.page = p;
-            }
-        }
-        Content::Text { ref rich, .. } => {
-            let kind = rich.as_ref().and_then(|r| r.kind());
-            let source = kind.is_some_and(|k| env.cfg.source_views.get(k));
-            let env_file = matches!(rich.as_deref(), Some(Rich::Env(_)));
-            if let Some(k) = kind {
-                // Rendered or as written: remembered for each kind of file.
-                let (tip, glyph) = match k {
-                    RichKind::Markdown => ("Rendered", Glyph::Eye),
-                    RichKind::Data => ("Tree", Glyph::ListTree),
-                    RichKind::Table => ("Table", Glyph::Table),
-                };
-                seg_frame(&mut hui, &pal, |ui| {
-                    if seg_button(ui, !source, tip, &pal, |p, r, c| paint_glyph(p, r, glyph, c)) && source {
-                        env.actions.push(crate::app::Action::SourceView(k, false));
-                    }
-                    if seg_button(ui, source, "Source", &pal, |p, r, c| paint_glyph(p, r, Glyph::Code, c)) && !source {
-                        env.actions.push(crate::app::Action::SourceView(k, true));
-                    }
-                });
-            }
-            // A data file that would not parse shows its text either way.
-            let book = matches!(rich.as_deref(), Some(Rich::Book(_)));
-            let as_text = !book && (kind.is_none() || source || matches!(rich.as_deref(), Some(Rich::Broken(_))));
-            seg_frame(&mut hui, &pal, |ui| {
-                if as_text && seg_button(ui, ins.line_numbers, "Line numbers", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "list-ordered", c);
-                }) {
-                    ins.line_numbers = !ins.line_numbers;
-                }
-                if as_text && !env_file && seg_button(ui, ins.wraps(), "Wrap lines", &pal, |p, r, c| {
-                    paint_glyph(p, r, Glyph::Wrap, c);
-                }) {
-                    ins.toggle_wrap();
-                }
-                if seg_button(ui, false, "Smaller text", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "a-arrow-down", c);
-                }) {
-                    ins.text_size = (ins.text_size - 1.0).max(-6.0);
-                }
-                if seg_button(ui, false, "Larger text", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "a-arrow-up", c);
-                }) {
-                    ins.text_size = (ins.text_size + 1.0).min(16.0);
-                }
-            });
-            if env_file && seg_button(&mut hui, ins.env_all, if ins.env_all { "Hide values" } else { "Show values" }, &pal, |p, r, c| paint_glyph(p, r, if ins.env_all { Glyph::LockOpen } else { Glyph::Lock }, c)) {
-                ins.env_all = !ins.env_all;
-            }
-            let editable = !book && target.as_ref().is_some_and(|e| !e.is_dir && e.size <= crate::quickedit::MAX && e.path.exists());
-            if editable && seg_button(&mut hui, false, "Edit (Shift+F4)", &pal, |p, r, c| {
-                theme::paint_lucide(p, r, "pencil", c);
-            }) {
+            hui.painter().galley(er.center() - g.size() / 2.0, g, if eresp.hovered() { pal.text } else { pal.text_dim });
+            if eresp.on_hover_text("Edit (Shift+F4)").clicked() {
                 env.actions.push(crate::app::Action::Cmd(crate::commands::Cmd::EditInPreview));
             }
-            if as_text && !env_file && blame_ok && seg_button(&mut hui, ins.blame_on, "Blame", &pal, |p, r, c| paint_glyph(p, r, Glyph::Blame, c)) {
-                ins.blame_on = !ins.blame_on;
-            }
-            if as_text && !env_file && (log || ins.grew || ins.follow) && seg_button(&mut hui, ins.follow, "Follow", &pal, |p, r, c| paint_glyph(p, r, Glyph::Follow, c)) {
-                ins.toggle_follow();
-            }
         }
-        Content::Big(ref v) => {
-            let hex = v.hex;
-            seg_frame(&mut hui, &pal, |ui| {
-                if !hex && seg_button(ui, ins.line_numbers, "Line numbers", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "list-ordered", c);
-                }) {
-                    ins.line_numbers = !ins.line_numbers;
-                }
-                if seg_button(ui, false, "Smaller text", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "a-arrow-down", c);
-                }) {
-                    ins.text_size = (ins.text_size - 1.0).max(-6.0);
-                }
-                if seg_button(ui, false, "Larger text", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "a-arrow-up", c);
-                }) {
-                    ins.text_size = (ins.text_size + 1.0).min(16.0);
+    }
+    // The name, semibold; a click on it shows or hides the Details card.
+    if let Some(e) = &target {
+        hui.add_space(6.0);
+        let room = hui.available_width();
+        if room >= 24.0 {
+            let g = crate::listing::elided(&hui, &e.name, theme::semibold(env.cfg.font_size - 0.5), room, pal.text);
+            hui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                // As tall as the buttons beside it, the name centred in it: a tall font no
+                // longer pushes the row off the header's middle.
+                let (r, resp) = ui.allocate_exact_size(vec2(g.size().x, 22.0), Sense::click());
+                crate::ui::note_control(ui, r, "preview name");
+                ui.painter().galley(pos2(r.left(), r.center().y - g.size().y / 2.0), g, if ins.show_meta || resp.hovered() { pal.accent } else { pal.text });
+                if resp.on_hover_text(if ins.show_meta { "Hide details" } else { "Details" }).clicked() {
+                    ins.show_meta = !ins.show_meta;
                 }
             });
         }
-        Content::Sqlite(_) => {
-            seg_frame(&mut hui, &pal, |ui| {
-                if seg_button(ui, false, "Smaller text", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "a-arrow-down", c);
-                }) {
-                    ins.text_size = (ins.text_size - 1.0).max(-6.0);
-                }
-                if seg_button(ui, false, "Larger text", &pal, |p, r, c| {
-                    theme::paint_lucide(p, r, "a-arrow-up", c);
-                }) {
-                    ins.text_size = (ins.text_size + 1.0).min(16.0);
-                }
-            });
-        }
-        _ => {}
     }
     let findable = match &ins.content {
         Content::Text { rich, .. } => !matches!(rich.as_deref(), Some(Rich::Env(_) | Rich::Book(_))),
         Content::Big(_) => true,
         _ => false,
     };
-    if findable && seg_button(&mut hui, ins.find.is_some(), "Find (Ctrl+F)", &pal, |p, r, c| paint_glyph(p, r, Glyph::Search, c)) {
-        if ins.find.take().is_none() {
+    egui::Popup::menu(&mresp).show(|ui| {
+        ui.set_min_width(200.0);
+        let sep = |ui: &mut Ui| {
+            ui.separator();
+        };
+        let bigger = |ins: &mut Inspector, d: f32| ins.text_size = (ins.text_size + d).clamp(-6.0, 16.0);
+        match ins.content {
+            Content::Image => {
+                if let Some(a) = ins.anim.as_mut().filter(|a| a.moving()) {
+                    if ui.button(if a.playing { "Pause" } else { "Play" }).clicked() {
+                        a.toggle();
+                    }
+                    sep(ui);
+                }
+                for (f, tip) in [(Fit::Fit, "Zoom to fit"), (Fit::Actual, "Actual pixels (1:1)"), (Fit::Fill, "Fill the preview")] {
+                    if ui.radio(ins.fit == f && ins.zoom == 1.0, tip).clicked() {
+                        ins.fit = f;
+                        ins.zoom = 1.0;
+                        ins.pan = Vec2::ZERO;
+                    }
+                }
+                ui.checkbox(&mut ins.pixel_grid, "Pixel grid at high zoom");
+                ui.checkbox(&mut ins.minimap, "Minimap while zoomed");
+                sep(ui);
+            }
+            Content::Pdf(ref mut v) => {
+                let pages = v.pages.unwrap_or(0);
+                if pages > 0 {
+                    ui.label(egui::RichText::new(format!("Page {} of {pages}", v.page)).color(pal.text_dim));
+                }
+                if ui.add_enabled(v.page > 1, egui::Button::new("Previous page")).clicked() {
+                    v.page -= 1;
+                }
+                if ui.add_enabled(v.page < pages, egui::Button::new("Next page")).clicked() {
+                    v.page += 1;
+                }
+                sep(ui);
+            }
+            Content::Text { ref rich, .. } => {
+                let kind = rich.as_ref().and_then(|r| r.kind());
+                let source = kind.is_some_and(|k| env.cfg.source_views.get(k));
+                let env_file = matches!(rich.as_deref(), Some(Rich::Env(_)));
+                let broken = matches!(rich.as_deref(), Some(Rich::Broken(_)));
+                if let Some(k) = kind {
+                    // Rendered or as written: remembered for each kind of file.
+                    let shown = match k {
+                        RichKind::Markdown => "Rendered",
+                        RichKind::Data => "Tree",
+                        RichKind::Table => "Table",
+                    };
+                    if ui.radio(!source, shown).clicked() && source {
+                        env.actions.push(crate::app::Action::SourceView(k, false));
+                    }
+                    if ui.radio(source, "Source").clicked() && !source {
+                        env.actions.push(crate::app::Action::SourceView(k, true));
+                    }
+                    sep(ui);
+                }
+                // A data file that would not parse shows its text either way.
+                let as_text = !book && (kind.is_none() || source || broken);
+                if as_text {
+                    ui.checkbox(&mut ins.line_numbers, "Line numbers");
+                    if !env_file {
+                        let mut w = ins.wraps();
+                        if ui.checkbox(&mut w, "Wrap lines").clicked() {
+                            ins.toggle_wrap();
+                        }
+                    }
+                }
+                if env_file {
+                    ui.checkbox(&mut ins.env_all, "Show values");
+                }
+                if as_text && !env_file && blame_ok {
+                    ui.checkbox(&mut ins.blame_on, "Blame");
+                }
+                if as_text && !env_file && (log || ins.grew || ins.follow) {
+                    let mut f = ins.follow;
+                    if ui.checkbox(&mut f, "Follow").clicked() {
+                        ins.toggle_follow();
+                    }
+                }
+                if ui.add(egui::Button::new("Larger text").shortcut_text("Ctrl+wheel")).clicked() {
+                    bigger(ins, 1.0);
+                }
+                if ui.button("Smaller text").clicked() {
+                    bigger(ins, -1.0);
+                }
+                sep(ui);
+            }
+            Content::Big(ref v) => {
+                if !v.hex {
+                    ui.checkbox(&mut ins.line_numbers, "Line numbers");
+                }
+                if ui.add(egui::Button::new("Larger text").shortcut_text("Ctrl+wheel")).clicked() {
+                    bigger(ins, 1.0);
+                }
+                if ui.button("Smaller text").clicked() {
+                    bigger(ins, -1.0);
+                }
+                sep(ui);
+            }
+            Content::Sqlite(_) => {
+                if ui.add(egui::Button::new("Larger text").shortcut_text("Ctrl+wheel")).clicked() {
+                    bigger(ins, 1.0);
+                }
+                if ui.button("Smaller text").clicked() {
+                    bigger(ins, -1.0);
+                }
+                sep(ui);
+            }
+            _ => {}
+        }
+        if findable && ui.add(egui::Button::selectable(ins.find.is_some(), "Find").shortcut_text("Ctrl+F")).clicked() && ins.find.take().is_none() {
             ins.find = Some(crate::findbar::Finder::new(String::new()));
         }
-    }
-    // File name as a tinted pill; its chevron opens the metadata card.
-    if let Some(e) = &target {
-        hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Fit the space the toolbar buttons leave: elide the name, show just the
-            // chevron when no name fits, and nothing at all when even that doesn't.
-            let room = ui.available_width() - 6.0;
-            if room < 24.0 {
-                return;
+        if target.is_some() {
+            ui.checkbox(&mut ins.show_meta, "Details");
+        }
+        sep(ui);
+        for (l, tip) in [(InspectorLayout::Auto, "Place automatically"), (InspectorLayout::Right, "Dock right"), (InspectorLayout::Bottom, "Dock bottom")] {
+            if ui.radio(cur_layout == l, tip).clicked() {
+                ins.layout = Some(l);
             }
-            let name_w = (room - 34.0).min(260.0);
-            let g = (name_w >= 24.0).then(|| crate::listing::elided(ui, &e.name, FontId::proportional(12.0), name_w, pal.text));
-            let w = g.as_ref().map(|g| g.size().x + 34.0).unwrap_or(24.0);
-            let (r, resp) = ui.allocate_exact_size(vec2(w, 22.0), Sense::click());
-            let fill = if ins.show_meta { pal.accent.gamma_multiply(0.45) } else if resp.hovered() { pal.accent.gamma_multiply(0.35) } else { pal.accent.gamma_multiply(0.22) };
-            ui.painter().rect_filled(r, CornerRadius::same(11), fill);
-            if let Some(g) = g {
-                ui.painter().galley(pos2(r.left() + 10.0, r.center().y - g.size().y / 2.0), g, pal.text);
+        }
+    });
+    // Ctrl+wheel over a text preview sets its size, a step per notch, as the menu does.
+    if matches!(ins.content, Content::Text { .. } | Content::Big(_) | Content::Sqlite(_)) && ui.rect_contains_pointer(rect) && !ui.rect_contains_pointer(hdr) {
+        let zd = ui.input(|i| i.zoom_delta());
+        if (zd - 1.0).abs() > 1e-4 {
+            let speed = ui.ctx().options(|o| o.input_options.line_scroll_speed).max(1.0);
+            ins.zoom_acc += zd.ln() * 200.0 / speed;
+            while ins.zoom_acc.abs() >= 0.999 {
+                let d = ins.zoom_acc.signum();
+                ins.zoom_acc -= d;
+                ins.text_size = (ins.text_size + d).clamp(-6.0, 16.0);
             }
-            paint_glyph(ui.painter(), Rect::from_center_size(pos2(r.right() - 12.0, r.center().y), Vec2::splat(11.0)), if ins.show_meta { Glyph::ChevronDown } else { Glyph::ChevronRight }, pal.text);
-            if resp.on_hover_text("Details").clicked() {
-                ins.show_meta = !ins.show_meta;
-            }
-        });
+        }
     }
     if close {
         panel.inspector = None;
@@ -1584,7 +1546,7 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                         } else if resp.hovered() {
                             ui.painter().rect_filled(r, CornerRadius::same(4), pal.hover);
                         }
-                        theme::paint_lucide(ui.painter(), r.shrink(3.0), "info", if ins.extra_meta { Color32::WHITE } else { pal.text_dim });
+                        theme::paint_symbol(ui.painter(), r.shrink(3.0), "info", if ins.extra_meta { Color32::WHITE } else { pal.text_dim });
                         if resp.on_hover_text("Toggle extra details").clicked() {
                             toggle_extra = true;
                         }
@@ -1667,6 +1629,44 @@ pub fn inspector(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
                             ui.add(egui::Label::new(egui::RichText::new(crate::exif::place(lat, lon)).size(11.5)).truncate());
                         });
                         ui.end_row();
+                        // Whether Send To Phone and Email take the place along.
+                        ui.label(egui::RichText::new("Shared").color(pal.text_dim).size(11.5));
+                        ui.horizontal(|ui| {
+                            let mut on = env.cfg.share_without_place;
+                            if crate::popups::switch(ui, &mut on, &pal) {
+                                env.actions.push(crate::app::Action::Cmd(crate::commands::Cmd::ToggleSharePlace));
+                            }
+                            ui.label(egui::RichText::new(if on { "without place and camera" } else { "with place and camera" }).size(11.5).color(pal.text_dim));
+                        });
+                        ui.end_row();
+                    }
+                    // A download: the address it came from and the page that linked to it,
+                    // each opening in the browser.
+                    if let Some(o) = (!e.is_dir).then(|| crate::origin::get(&e.path).flatten()).flatten() {
+                        let page = o.page.as_deref().filter(|p| Some(*p) != o.url.as_deref());
+                        for (k, url) in [("From", o.url.as_deref()), ("Page", page)] {
+                            let Some(url) = url else { continue };
+                            ui.label(egui::RichText::new(k).color(pal.text_dim).size(11.5));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let open = crate::origin::openable(url);
+                                let text = egui::RichText::new(crate::origin::short(url)).size(11.5).color(if open { pal.accent } else { pal.text });
+                                let l = ui.add(egui::Label::new(text).truncate().sense(if open { Sense::click() } else { Sense::hover() }));
+                                crate::ui::note_control(ui, l.rect, "origin link");
+                                if open && l.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                                if l.on_hover_text(url).clicked() {
+                                    if let Err(err) = crate::mime::open_uri(url) {
+                                        env.actions.push(crate::app::Action::Toast(format!("Couldn't open the address: {err}")));
+                                    }
+                                }
+                            });
+                            ui.end_row();
+                        }
+                    }
+                    // A project's code: how many lines, and in what, most first.
+                    if let Some(c) = e.is_dir.then(|| crate::linecount::get(&e.path, ui.ctx())).flatten() {
+                        code_rows(ui, &c, &pal);
                     }
                 });
             });
@@ -1859,7 +1859,10 @@ fn text_body(ui: &mut Ui, body: Rect, ins: &mut Inspector, e: &Entry, env: &mut 
         ui.painter().galley(pos2(bar.right() - 8.0 - cg.size().x, bar.center().y - cg.size().y / 2.0), cg, pal.text_dim);
         if field.width() > 30.0 {
             let mut fui = ui.new_child(UiBuilder::new().max_rect(field).layout(egui::Layout::left_to_right(egui::Align::Center)));
-            let te = egui::TextEdit::singleline(&mut ins.filter).id_salt(("log-filter", id)).hint_text(egui::RichText::new("Filter lines").color(pal.text_dim)).frame(false).desired_width(field.width()).font(FontId::proportional(12.5));
+            // The bar's height, whatever the Spacing: a field as tall as a control would be
+            // runs out of it.
+            fui.spacing_mut().interact_size.y = field.height();
+            let te = egui::TextEdit::singleline(&mut ins.filter).id_salt(("log-filter", id)).hint_text(egui::RichText::new("Filter lines").color(pal.text_dim)).frame(crate::ui::bare_edit()).desired_width(field.width()).font(FontId::proportional(12.5));
             let r = fui.add(te);
             crate::ui::note_control(ui, r.rect, "line filter");
         }
@@ -1927,13 +1930,13 @@ fn edit_view(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
     let dirty = ed.dirty();
     seg_frame(&mut hui, &pal, |ui| {
         if seg_button(ui, true, "Stop editing (Esc)", &pal, |p, r, c| {
-            theme::paint_lucide(p, r, "pencil", c);
+            theme::paint_symbol(p, r, "pencil", c);
         }) {
             env.actions.push(Action::Run(Box::new(move |app| app.leave_edit(id, false))));
         }
         // Lit while there is something to save.
         if seg_button(ui, dirty, "Save (Ctrl+S)", &pal, |p, r, c| {
-            theme::paint_lucide(p, r, "save", c);
+            theme::paint_symbol(p, r, "save", c);
         }) {
             env.actions.push(Action::Run(Box::new(move |app| {
                 app.save_edit(id, false);
@@ -1942,7 +1945,7 @@ fn edit_view(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
     });
     seg_frame(&mut hui, &pal, |ui| {
         if seg_button(ui, ins.line_numbers, "Line numbers", &pal, |p, r, c| {
-            theme::paint_lucide(p, r, "list-ordered", c);
+            theme::paint_symbol(p, r, "list-ordered", c);
         }) {
             ins.line_numbers = !ins.line_numbers;
         }
@@ -1950,12 +1953,12 @@ fn edit_view(ui: &mut Ui, rect: Rect, panel: &mut Panel, env: &mut Env) {
             ins.wrap_code = !ins.wrap_code;
         }
         if seg_button(ui, false, "Smaller text", &pal, |p, r, c| {
-            theme::paint_lucide(p, r, "a-arrow-down", c);
+            theme::paint_symbol(p, r, "a-arrow-down", c);
         }) {
             ins.text_size = (ins.text_size - 1.0).max(-6.0);
         }
         if seg_button(ui, false, "Larger text", &pal, |p, r, c| {
-            theme::paint_lucide(p, r, "a-arrow-up", c);
+            theme::paint_symbol(p, r, "a-arrow-up", c);
         }) {
             ins.text_size = (ins.text_size + 1.0).min(16.0);
         }
@@ -2129,10 +2132,10 @@ fn hex_view(ui: &mut Ui, body: Rect, v: &mut crate::bigfile::Pager, size: f32, s
     let x_of = |i: usize| x_hex + (i * 3 + i / 8) as f32 * cw;
     let x_txt = x_of(bpr) + cw;
     let mut inner = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(8.0, 4.0))));
-    let sid = inner.make_persistent_id(Id::new("insp_hex"));
+    let sid = inner.make_persistent_id(egui::IdSalt::new("insp_hex"));
     let mut area = egui::ScrollArea::both().id_salt("insp_hex").auto_shrink([false, false]);
     if let Some(off) = target {
-        let at = egui::scroll_area::State::load(ui.ctx(), sid).map_or(0.0, |s| s.offset.y);
+        let at = egui::scroll_area::State::load(ui.ctx(), sid).map_or(0.0, |s| s.offset().y);
         let y = (off / v.bpr) as f32 * row_h;
         if y < at || y + row_h > at + inner.max_rect().height() {
             area = area.vertical_scroll_offset((y - inner.max_rect().height() / 3.0).max(0.0));
@@ -2350,6 +2353,11 @@ fn image_view(ui: &mut Ui, body: Rect, e: &Entry, ins: &mut Inspector, env: &mut
     let img_rect = Rect::from_center_size(area.center() + ins.pan, size);
     let clip = body;
     let painter = ui.painter().with_clip_rect(clip);
+    // The picture's own colours, softly around it, and the ones it is made of.
+    let colours = env.thumbs.get(&e.path, e.modified, want).map(|l| (l.glow, l.palette.clone()));
+    if let Some((glow, _)) = &colours {
+        crate::colours::paint_glow(&painter, img_rect, glow, crate::colours::glow_strength(pal.panel));
+    }
     checkerboard(&painter, img_rect.intersect(clip), &pal);
     painter.image(tex, img_rect, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
     // Pixel grid at high magnification.
@@ -2397,6 +2405,30 @@ fn image_view(ui: &mut Ui, body: Rect, e: &Entry, ins: &mut Inspector, env: &mut
     let r = Rect::from_min_size(pos2(body.right() - g.size().x - 18.0, body.bottom() - 24.0), g.size() + vec2(10.0, 6.0));
     ui.painter().rect_filled(r, CornerRadius::same(4), pal.raised.gamma_multiply(0.9));
     ui.painter().galley(r.min + vec2(5.0, 3.0), g, pal.text_dim);
+    // Its colours in a pill of their own on the left, the same height: one a click copies.
+    if let Some((_, palette)) = colours.filter(|(_, p)| !p.is_empty() && ins.crop.is_none()) {
+        let d = (r.height() - 8.0).max(8.0);
+        let gap = 4.0;
+        let n = palette.len();
+        let pill = Rect::from_min_size(pos2(body.left() + 8.0, r.top()), vec2(n as f32 * (d + gap) - gap + 8.0, r.height()));
+        if pill.right() + 8.0 < r.left() {
+            ui.painter().rect_filled(pill, CornerRadius::same(4), pal.raised.gamma_multiply(0.9));
+            for (i, (c, share)) in palette.iter().enumerate() {
+                let sr = Rect::from_min_size(pos2(pill.left() + 4.0 + i as f32 * (d + gap), pill.center().y - d / 2.0), vec2(d, d));
+                let resp = ui.interact(sr.expand(1.5), Id::new(("swatch", env.panel_id, i)), Sense::click());
+                crate::ui::note_control(ui, sr, "picture colour");
+                let hovered = resp.hovered();
+                ui.painter().rect_filled(if hovered { sr.expand(1.5) } else { sr }, CornerRadius::same(3), *c);
+                ui.painter().rect_stroke(sr, CornerRadius::same(3), Stroke::new(1.0, pal.border.gamma_multiply(0.6)), StrokeKind::Inside);
+                let hex = crate::colours::hex(*c);
+                let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{hex} · {}% of the picture · click to copy", (share * 100.0).round().max(1.0)));
+                if resp.clicked() {
+                    ui.ctx().copy_text(hex.clone());
+                    env.actions.push(crate::app::Action::Toast(format!("Copied {hex}")));
+                }
+            }
+        }
+    }
     let _ = fit_scale;
 }
 
@@ -2632,7 +2664,7 @@ fn media_view(ui: &mut Ui, body: Rect, e: &Entry, v: &mut MediaView, env: &mut E
             }
             None => {
                 ui.painter().rect_filled(cover.shrink(side * 0.2), CornerRadius::same(12), pal.raised);
-                theme::paint_lucide(ui.painter(), Rect::from_center_size(cover.center(), Vec2::splat(side * 0.3)), "music", pal.text_dim);
+                theme::paint_symbol(ui.painter(), Rect::from_center_size(cover.center(), Vec2::splat(side * 0.3)), "music", pal.text_dim);
             }
         }
         let mut y = cover.bottom() + 14.0;
@@ -2660,7 +2692,7 @@ fn media_view(ui: &mut Ui, body: Rect, e: &Entry, v: &mut MediaView, env: &mut E
         if resp.hovered() {
             ui.painter().rect_filled(r, CornerRadius::same(6), pal.hover);
         }
-        theme::paint_lucide(ui.painter(), r.shrink(5.0), icon, pal.text);
+        theme::paint_symbol(ui.painter(), r.shrink(5.0), icon, pal.text);
         resp.on_hover_text(tip).clicked()
     };
     let play_r = Rect::from_min_size(pos2(bar.left() + 4.0, bar.center().y - 14.0), vec2(28.0, 28.0));
@@ -2860,7 +2892,7 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
     }
     if let Some((line, byte)) = opts.reveal {
         // Only when out of view: stepping through matches on screen shouldn't jump.
-        let at = egui::scroll_area::State::load(ui.ctx(), inner.make_persistent_id(Id::new("insp_text"))).map_or(Vec2::ZERO, |s| s.offset);
+        let at = egui::scroll_area::State::load(ui.ctx(), inner.make_persistent_id(egui::IdSalt::new("insp_text"))).map_or(Vec2::ZERO, |s| s.offset());
         let view = inner.max_rect().size();
         // Wrapped: the last row starting at or before the byte.
         let row = rows.map_or(line, |r| r.partition_point(|x| (x.0 as usize, x.1 as usize) <= (line, byte)).saturating_sub(1));
@@ -2890,7 +2922,10 @@ pub(crate) fn text_view_ex(ui: &mut Ui, body: Rect, lines: &[String], truncated:
         }
     };
     let line_of = |li: usize| li.checked_sub(off).and_then(|k| lines.get(k));
-    area.auto_shrink([false, false]).stick_to_bottom(opts.stick).id_salt("insp_text").show_viewport(&mut inner, |ui, vp| {
+    // In a short panel the text gets only the room left (above a find bar, say), not the
+    // least height a scroll area would otherwise keep.
+    let room = inner.max_rect().height().max(0.0);
+    area.auto_shrink([false, false]).min_scrolled_height(room.min(64.0)).max_height(room).stick_to_bottom(opts.stick).id_salt("insp_text").show_viewport(&mut inner, |ui, vp| {
         let w = if rows.is_some() { vp.width() } else { (2000.0 * size * 0.62).min(lines.iter().map(|l| l.len()).max().unwrap_or(0) as f32 * size * 0.62 + gutter + 20.0).max(vp.width()) };
         let sense = if pick.is_some() { Sense::click() } else if sel.is_some() { Sense::click_and_drag() } else { Sense::hover() };
         let (r, resp) = ui.allocate_exact_size(vec2(w, n as f32 * row_h + 8.0), sense);
@@ -3164,4 +3199,47 @@ pub(crate) fn user_name(uid: u32) -> String {
             (f.next()?.parse::<u32>().ok()? == uid).then(|| name.to_string())
         }))
         .unwrap_or_else(|| uid.to_string())
+}
+
+/// A project's lines of code in the details grid: the total, a bar of the languages'
+/// shares, then each language (the smallest together as Other).
+fn code_rows(ui: &mut Ui, c: &crate::linecount::Count, pal: &crate::theme::Palette) {
+    let small = |s: String| egui::RichText::new(s).size(11.5);
+    let total = c.lines.max(1) as f32;
+    ui.label(small("Code".into()).color(pal.text_dim));
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let what = format!("{} lines{}", crate::ui::fmt_count(c.lines as usize), if c.cut { " in the part read" } else { "" });
+        ui.add(egui::Label::new(small(what)).truncate());
+    });
+    ui.end_row();
+    ui.label("");
+    let w = ui.available_width().max(40.0);
+    let (r, _) = ui.allocate_exact_size(vec2(w, 8.0), Sense::hover());
+    let mut x = r.left();
+    for l in &c.langs {
+        let lw = r.width() * l.lines as f32 / total;
+        if lw >= 0.5 {
+            ui.painter().rect_filled(Rect::from_min_max(pos2(x, r.top()), pos2((x + lw).min(r.right()), r.bottom())), CornerRadius::ZERO, l.color);
+        }
+        x += lw;
+    }
+    // Round ends without a seam between the shares: the bar's own rounding drawn over.
+    ui.painter().rect_stroke(r.expand(0.5), CornerRadius::same(4), egui::Stroke::new(1.5, pal.panel), egui::StrokeKind::Outside);
+    ui.end_row();
+    let shown = if c.langs.len() > 6 { 5 } else { c.langs.len() };
+    let other: u64 = c.langs.iter().skip(shown).map(|l| l.lines).sum();
+    let rows = c.langs.iter().take(shown).map(|l| (l.name, Some(l.color), l.lines)).chain((other > 0).then_some(("Other", None, other)));
+    for (name, col, lines) in rows {
+        ui.horizontal(|ui| {
+            let (d, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+            ui.painter().rect_filled(d, CornerRadius::same(2), col.unwrap_or(pal.text_dim));
+            ui.label(small(name.into()).color(pal.text_dim));
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let pct = lines as f32 / total * 100.0;
+            let p = if pct < 1.0 { format!("{pct:.1}%") } else { format!("{pct:.0}%") };
+            ui.add(egui::Label::new(small(format!("{} · {p}", crate::ui::fmt_count(lines as usize)))).truncate());
+        });
+        ui.end_row();
+    }
 }

@@ -305,6 +305,8 @@ pub fn run(app: &mut crate::app::App, cmd: crate::commands::Cmd) {
                 }
             }
         }
+        // Photos attached without where they were taken: cleaned copies, made on a thread.
+        Cmd::Email if app.cfg.share_without_place && files.iter().any(|f| crate::scrub::applies(&f.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default())) => app.email_clean(files),
         Cmd::Email => match crate::sendto::email(&files) {
             Ok(()) => app.toast("Opening a new email"),
             Err(e) => app.toast(e),

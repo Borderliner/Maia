@@ -107,7 +107,7 @@ pub fn pump(panels: &HashMap<u64, crate::panel::Panel>, changed: &[PathBuf], wat
         }
         for p in panels.values() {
             let t = p.tab();
-            if crate::tab::is_computer(&t.path) || crate::tab::drive_dev(&t.path).is_some() {
+            if crate::tab::is_place(&t.path) || crate::tab::drive_dev(&t.path).is_some() {
                 continue;
             }
             let moved = match g.seen.iter_mut().find(|s| s.0 == t.id) {
@@ -306,7 +306,7 @@ pub fn parse(root: PathBuf, out: &[u8]) -> Repo {
 pub fn paint(p: &Painter, icon: Rect, repo: Option<&Repo>, path: &Path, pal: &crate::theme::Palette) {
     let Some(&m) = repo.and_then(|r| r.marks.get(path)) else { return };
     let col = match m {
-        Mark::Modified | Mark::Inside => AMBER,
+        Mark::Modified | Mark::Inside => pal.warn,
         Mark::Staged => GREEN,
         Mark::Untracked => pal.text_dim,
         Mark::Deleted => pal.danger,

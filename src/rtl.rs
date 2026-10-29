@@ -6,13 +6,19 @@
 //!
 //! Wrapping and eliding happen in reading order, before the reordering: a long name's
 //! first row holds its first words and the "…" lands where the reading stops.
+//!
+//! egui shapes text itself (harfrust) and lays a run of a right-to-left script out from
+//! the right, run by run: text already in display order would turn around again. So each
+//! right-to-left letter goes to egui as a section of its own (`append_shown`), which it
+//! draws as it is.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
-use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
+use egui::epaint::text::ByteIndex;
+use egui::text::{CCursor, CCursorRange, LayoutJob, LayoutSection, TextFormat, TextWrapping};
 use egui::text_edit::TextEditOutput;
 use egui::{Color32, Event, FontId, Galley, Id, Key, Rect, TextEdit, Ui, pos2};
 use unicode_bidi::{BidiClass, ParagraphBidiInfo, bidi_class};
@@ -45,6 +51,82 @@ pub fn display_path(path: &str) -> Cow<'_, str> {
     Cow::Owned(path.split('/').map(display_line).collect::<Vec<_>>().join("/"))
 }
 
+/// `text` as drawn, laid out on one line (`display`'s, in sections egui keeps in order);
+/// None when it has no right-to-left letters, for the caller's own way.
+pub fn shown_job(text: &str, font: FontId, color: Color32) -> Option<LayoutJob> {
+    if !has_rtl(text) {
+        return None;
+    }
+    let mut job = LayoutJob::default();
+    append_shown(&mut job, &display(text), 0.0, &TextFormat::simple(font, color));
+    Some(job)
+}
+
+/// A path laid out on one line as `display_path` has it; None when it has no
+/// right-to-left letters.
+pub fn shown_path_job(path: &str, font: FontId, color: Color32) -> Option<LayoutJob> {
+    if !has_rtl(path) {
+        return None;
+    }
+    let mut job = LayoutJob::default();
+    append_shown(&mut job, &display_path(path), 0.0, &TextFormat::simple(font, color));
+    Some(job)
+}
+
+/// A one-line label for `text`, drawn as `display` has it when it has right-to-left
+/// letters, else as egui draws a label.
+pub fn label(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> egui::Response {
+    match shown_job(text, font.clone(), color) {
+        Some(job) => ui.label(job),
+        None => ui.label(egui::RichText::new(text).font(font).color(color)),
+    }
+}
+
+/// Whether egui shapes `c` from right to left: a run takes its direction from its script,
+/// and these are the right-to-left scripts' blocks (their digits too).
+fn rtl_script(c: char) -> bool {
+    matches!(c, '\u{590}'..='\u{8ff}' | '\u{fb1d}'..='\u{fdff}' | '\u{fe70}'..='\u{feff}' | '\u{10800}'..='\u{10fff}' | '\u{1e800}'..='\u{1efff}')
+}
+
+/// Appends `text`, already in display order, to `job` so egui draws it in that order:
+/// each right-to-left letter, with the marks on it, a section of its own (pushed, as
+/// `append` joins sections of one format).
+fn append_shown(job: &mut LayoutJob, text: &str, leading_space: f32, format: &TextFormat) {
+    let mut leading = leading_space;
+    let mut push = |job: &mut LayoutJob, piece: &str| {
+        let start = job.text.len();
+        job.text += piece;
+        job.sections.push(LayoutSection { leading_space: std::mem::take(&mut leading), byte_range: ByteIndex(start)..ByteIndex(job.text.len()), format: format.clone() });
+    };
+    if text.is_empty() {
+        push(job, "");
+        return;
+    }
+    let mut plain = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if !rtl_script(c) {
+            continue;
+        }
+        if plain < i {
+            push(job, &text[plain..i]);
+        }
+        let mut end = i + c.len_utf8();
+        while let Some(&(j, m)) = chars.peek() {
+            if bidi_class(m) != BidiClass::NSM {
+                break;
+            }
+            end = j + m.len_utf8();
+            chars.next();
+        }
+        push(job, &text[i..end]);
+        plain = end;
+    }
+    if plain < text.len() {
+        push(job, &text[plain..]);
+    }
+}
+
 fn display_line(line: &str) -> String {
     let shaped = shape(line);
     let info = ParagraphBidiInfo::new(&shaped.text, None);
@@ -71,7 +153,7 @@ pub fn layout_job(ui: &Ui, spans: &[Span], wrap: TextWrapping) -> LayoutJob {
     let shaped: Vec<Shaped> = spans.iter().map(|s| shape(s.text)).collect();
     let mut reading = LayoutJob::default();
     for (s, sh) in spans.iter().zip(&shaped) {
-        reading.append(&sh.text, s.leading_space, s.format.clone());
+        append_shown(&mut reading, &sh.text, s.leading_space, &s.format);
     }
     reading.wrap = wrap;
     let galley = ui.fonts_mut(|f| f.layout_job(reading));
@@ -141,7 +223,7 @@ pub fn layout_job(ui: &Ui, spans: &[Span], wrap: TextWrapping) -> LayoutJob {
                 let hit = span.hits.filter(|(h, _)| ci < laid[*s] && h.contains(&sh.src[ci]));
                 let color = hit.map_or(span.format.color, |(_, c)| c);
                 if run_color.is_some_and(|c| c != color) {
-                    job.append(&run, leading, TextFormat { color: run_color.unwrap(), ..span.format.clone() });
+                    append_shown(&mut job, &run, leading, &TextFormat { color: run_color.unwrap(), ..span.format.clone() });
                     run.clear();
                     leading = 0.0;
                 }
@@ -149,7 +231,7 @@ pub fn layout_job(ui: &Ui, spans: &[Span], wrap: TextWrapping) -> LayoutJob {
                 run.push(drawn(text, i, mirror));
             }
             if let Some(color) = run_color {
-                job.append(&run, leading, TextFormat { color, ..span.format.clone() });
+                append_shown(&mut job, &run, leading, &TextFormat { color, ..span.format.clone() });
             }
         }
     }
@@ -193,7 +275,7 @@ pub fn line_edit(ui: &mut Ui, id: Id, text: &mut String, font: FontId, build: im
             let mut st = TextEdit::load_state(&ctx, id).unwrap_or_default();
             let mut r = st.cursor.char_range().unwrap_or_default();
             for (toward, shift) in moves {
-                let (caret, anchor) = (r.primary.index.min(carets.len() - 1), r.secondary.index.min(carets.len() - 1));
+                let (caret, anchor) = (r.primary.index.0.min(carets.len() - 1), r.secondary.index.0.min(carets.len() - 1));
                 let to = if !shift && caret != anchor {
                     // A selection collapses to its end on that side.
                     if (carets[caret] - carets[anchor]) * toward >= 0.0 { caret } else { anchor }
@@ -206,6 +288,14 @@ pub fn line_edit(ui: &mut Ui, id: Id, text: &mut String, font: FontId, build: im
             st.store(&ctx, id);
         }
     }
+    // egui's own layout of the text, which its keys (End, a word on) go by: a glyph per
+    // letter in reading order, as `append_shown` keeps it, where egui alone would give a
+    // right-to-left run more glyphs than letters.
+    let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, _: f32| {
+        let mut job = LayoutJob::default();
+        append_shown(&mut job, buf.as_str(), 0.0, &TextFormat::simple(font.clone(), Color32::TRANSPARENT));
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
     let out = ui
         .scope(|ui| {
             if rtl {
@@ -215,7 +305,7 @@ pub fn line_edit(ui: &mut Ui, id: Id, text: &mut String, font: FontId, build: im
                 v.text_cursor.stroke.color = Color32::TRANSPARENT;
             }
             let edit = build(TextEdit::singleline(&mut *text).id(id).font(font.clone()));
-            if rtl { edit.text_color(Color32::TRANSPARENT) } else { edit }.show(ui)
+            if rtl { edit.text_color(Color32::TRANSPARENT).layouter(&mut layouter) } else { edit }.show(ui)
         })
         .inner;
     if !rtl || !has_rtl(text) {
@@ -237,7 +327,7 @@ pub fn line_edit(ui: &mut Ui, id: Id, text: &mut String, font: FontId, build: im
         let (pressed, shift) = ui.input(|i| (i.pointer.any_pressed(), i.modifiers.shift));
         let anchor = match (pressed, shift) {
             (true, false) => at,
-            (true, true) => range.map_or(at, |r| r.secondary.index),
+            (true, true) => range.map_or(at, |r| r.secondary.index.0),
             _ => ctx.data(|d| d.get_temp(anchor_id)).unwrap_or(at),
         };
         if pressed {
@@ -263,7 +353,7 @@ pub fn line_edit(ui: &mut Ui, id: Id, text: &mut String, font: FontId, build: im
     }
     // Scrolled to keep the caret in view when the text is wider than the field.
     let width = out.text_clip_rect.width();
-    let caret = range.map_or(0, |r| r.primary.index).min(placed.carets.len() - 1);
+    let caret = range.map_or(0, |r| r.primary.index.0).min(placed.carets.len() - 1);
     let cx = placed.carets[caret];
     let full = placed.galley.size().x;
     if full <= width {
@@ -278,7 +368,8 @@ pub fn line_edit(ui: &mut Ui, id: Id, text: &mut String, font: FontId, build: im
     let mut galley = placed.galley.clone();
     if let Some(r) = range.filter(|r| focused && r.primary != r.secondary) {
         // The selected characters' places, merged where they touch.
-        let mut spans: Vec<(f32, f32)> = r.as_sorted_char_range().filter_map(|i| placed.spans.get(i).copied()).filter(|(a, b)| b > a).collect();
+        let sorted = r.as_sorted_char_range();
+        let mut spans: Vec<(f32, f32)> = (sorted.start.0..sorted.end.0).filter_map(|i| placed.spans.get(i).copied()).filter(|(a, b)| b > a).collect();
         spans.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut merged: Vec<(f32, f32)> = vec![];
         for (a, b) in spans {
@@ -291,12 +382,18 @@ pub fn line_edit(ui: &mut Ui, id: Id, text: &mut String, font: FontId, build: im
             painter.rect_filled(Rect::from_min_max(pos2(x0 + a, top), pos2(x0 + b, top + h)), 0.0, ui.visuals().selection.bg_fill);
         }
         // The selected letters in the selection's text colour, as egui's fields show them.
-        let selected = r.as_sorted_char_range();
+        let selected = sorted.start.0..sorted.end.0;
         let mut job = LayoutJob::default();
+        let mut run = (String::new(), color);
         for (c, &i) in placed.galley.text().chars().zip(&placed.logical) {
             let col = if selected.contains(&i) { ui.visuals().selection.stroke.color } else { color };
-            job.append(c.encode_utf8(&mut [0; 4]), 0.0, TextFormat::simple(font.clone(), col));
+            if col != run.1 && !run.0.is_empty() {
+                append_shown(&mut job, &std::mem::take(&mut run.0), 0.0, &TextFormat::simple(font.clone(), run.1));
+            }
+            run.1 = col;
+            run.0.push(c);
         }
+        append_shown(&mut job, &run.0, 0.0, &TextFormat::simple(font.clone(), run.1));
         galley = ui.fonts_mut(|f| f.layout_job(job));
     }
     painter.galley(pos2(x0, top), galley, color);
@@ -336,7 +433,9 @@ fn place(ui: &Ui, text: &str, font: &FontId, color: Color32) -> Placed {
         shown.push(drawn(&shaped.text, i, rtl));
         from.push((shaped.src[offsets.partition_point(|&o| o < i)], rtl));
     }
-    let galley = ui.painter().layout_no_wrap(shown, font.clone(), color);
+    let mut job = LayoutJob::default();
+    append_shown(&mut job, &shown, 0.0, &TextFormat::simple(font.clone(), color));
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
     // Each character's place and direction; one drawn with no glyph of its own (the alef
     // of a lam-alef, a left-out override) is a point where the one before it ends.
     let mut placed: Vec<Option<(f32, f32, bool)>> = vec![None; n];

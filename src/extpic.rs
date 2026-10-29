@@ -54,11 +54,11 @@ pub fn can(t: &Tools, ext: &str) -> bool {
 /// What to install to see such a picture, when nothing here reads it.
 pub fn install_note(ext: &str) -> Option<&'static str> {
     Some(match kind(ext)? {
-        Kind::Heif => "Install ImageMagick to see HEIC photos",
-        Kind::Avif => "Install ImageMagick to see AVIF pictures",
-        Kind::Tiff => "Install ImageMagick to see TIFF pictures",
-        Kind::Jxl => "Install ImageMagick or libjxl to see JPEG XL pictures",
-        Kind::Raw => "Install ImageMagick to see camera RAW photos",
+        Kind::Heif => "Showing HEIC photos needs ImageMagick",
+        Kind::Avif => "Showing AVIF pictures needs ImageMagick",
+        Kind::Tiff => "Showing TIFF pictures needs ImageMagick",
+        Kind::Jxl => "Showing JPEG XL pictures needs ImageMagick or libjxl",
+        Kind::Raw => "Showing camera RAW photos needs ImageMagick",
     })
 }
 
@@ -84,8 +84,13 @@ fn magick(t: &Tools, prog: &str, path: &Path, ext: &str, max: u32) -> Option<(Rg
     let mut c = t.cmd(prog);
     c.arg(format!("{format}:-[0]")).args(["-auto-orient", "-print", "%w %h\n", "-thumbnail"]).arg(format!("{max}x{max}>")).args(["-colorspace", "sRGB", "-depth", "8", "pam:-"]);
     let out = crate::errands::output_io(c, TIMEOUT, Some(input), None).ok()?;
-    let (img, rest) = pnm(&out)?;
-    let mut n = std::str::from_utf8(rest).ok()?.split_whitespace().filter_map(|v| v.parse().ok());
+    // ImageMagick 7.1.2 prints the size before the picture; earlier ones after it.
+    let (head, body) = match out.first() {
+        Some(b'P') => (&[][..], &out[..]),
+        _ => out.split_at(out.iter().position(|&b| b == b'\n').map_or(0, |i| i + 1)),
+    };
+    let (img, rest) = pnm(body)?;
+    let mut n = std::str::from_utf8(head).ok()?.split_whitespace().chain(std::str::from_utf8(rest).ok()?.split_whitespace()).filter_map(|v| v.parse().ok());
     let dims = n.next().zip(n.next()).map_or([img.w, img.h], |(w, h)| [w, h]);
     Some((img, dims))
 }

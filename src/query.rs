@@ -758,17 +758,17 @@ fn cond(w: &str, now: i64) -> Option<Cond> {
     Some(Cond { field, lo, hi })
 }
 
-/// "100M", "1.5g", "20kb", "0": binary units, like the sizes shown in the list.
+/// "100M", "1.5g", "20kb", "0": in thousands, like the sizes shown in the list.
 pub(crate) fn size(v: &str) -> Option<i64> {
     let v = v.to_ascii_lowercase();
     let digits = v.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(v.len());
     let n: f64 = v[..digits].parse().ok()?;
     let unit = match v[digits..].trim_end_matches(['b', 'i']) {
         "" => 1u64,
-        "k" => 1 << 10,
-        "m" => 1 << 20,
-        "g" => 1 << 30,
-        "t" => 1 << 40,
+        "k" => 1_000,
+        "m" => 1_000_000,
+        "g" => 1_000_000_000,
+        "t" => 1_000_000_000_000,
         _ => return None,
     };
     Some((n * unit as f64).round() as i64)

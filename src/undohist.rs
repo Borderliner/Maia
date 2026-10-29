@@ -121,8 +121,7 @@ pub fn popup(app: &mut App, ctx: &egui::Context, st: &mut State) -> bool {
                 }
             });
         }
-        pp::hints(ui, &[("↑↓", "choose"), ("Enter", if redoing { "do again" } else { "take back" }), ("Esc", "close")], &pal);
-        pp::dialog_buttons(ui, |ui| {
+        pp::footer(ui, &[("↑↓", "choose"), ("Enter", if redoing { "do again" } else { "take back" }), ("Esc", "close")], &pal, |ui| {
             let (verb, steps) = if redoing { ("Redo", rn - st.sel) } else { ("Undo", st.sel.saturating_sub(rn) + 1) };
             let label = if steps > 1 && rows > 0 { format!("{verb} {steps} changes") } else { verb.to_string() };
             let b = pp::primary_button(ui, &label, rows > 0, &pal);

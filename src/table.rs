@@ -268,7 +268,7 @@ fn letters(mut i: usize) -> String {
     String::from_utf8(s).unwrap_or_default()
 }
 
-pub fn view(ui: &mut Ui, body: Rect, v: &mut TableView, size: f32, pal: &Palette, spacing: f32, id: impl std::hash::Hash) {
+pub fn view(ui: &mut Ui, body: Rect, v: &mut TableView, size: f32, pal: &Palette, spacing: f32, id: impl std::hash::Hash + std::fmt::Debug) {
     let t = &v.t;
     if t.cols == 0 {
         ui.painter().text(body.center(), Align2::CENTER_CENTER, "Empty table", FontId::proportional(12.5), pal.text_dim);

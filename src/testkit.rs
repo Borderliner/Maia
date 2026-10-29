@@ -191,7 +191,7 @@ pub(crate) fn parse(line: &str) -> Vec<Vec<Event>> {
         // scroll X Y DY [ctrl]: DY in wheel lines (1 = one notch).
         Some("scroll") => {
             let m = mods_of(&w[4.min(w.len())..]);
-            vec![vec![Event::PointerMoved(pos2(num(1), num(2)))], vec![Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: vec2(0.0, num(3)), modifiers: m }]]
+            vec![vec![Event::PointerMoved(pos2(num(1), num(2)))], vec![Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: vec2(0.0, num(3)), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel, modifiers: m }]]
         }
         Some("text") => vec![vec![Event::Text(line[5..].to_string())]],
         Some("key") => {

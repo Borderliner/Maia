@@ -101,7 +101,7 @@ impl Drop for Job {
 fn run(path: &Path, algo: Algo, pid: &AtomicU32) -> Result<String, String> {
     let mut c = crate::media::tool(algo.program());
     c.arg("--").arg(path).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = c.spawn().map_err(|_| format!("{} is not installed", algo.program()))?;
+    let mut child = c.spawn().map_err(|_| format!("This checksum needs {}", algo.program()))?;
     pid.store(child.id(), Relaxed);
     let mut out = String::new();
     if let Some(mut o) = child.stdout.take() {

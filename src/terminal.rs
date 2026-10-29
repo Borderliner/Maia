@@ -389,7 +389,7 @@ impl Pane {
 /// Computer view, an archive, the trash or a kernel filesystem).
 fn place(t: &crate::tab::Tab) -> Option<PathBuf> {
     let p = &t.path;
-    let real = t.archive.is_none() && p.is_absolute() && !crate::tab::is_computer(p);
+    let real = t.archive.is_none() && p.is_absolute() && !crate::tab::is_place(p);
     (real && !p.ancestors().any(crate::trashcan::is_trash_files) && !crate::fsx::is_virtual_fs(p) && p.is_dir()).then(|| p.clone())
 }
 
@@ -711,7 +711,7 @@ fn ansi(pal: &Palette) -> [Color32; 16] {
     let s = &pal.syntax;
     let ink = |c: Color32| if pal.dark { c } else { c.lerp_to_gamma(Color32::BLACK, 0.25) };
     let black = if pal.dark { pal.bg.lerp_to_gamma(pal.text, 0.22) } else { pal.text };
-    let base = [black, pal.danger, ink(crate::gitstatus::GREEN), ink(crate::gitstatus::AMBER), pal.accent, s.keyword, s.kind, pal.text_dim];
+    let base = [black, pal.danger, ink(crate::gitstatus::GREEN), ink(pal.warn), pal.accent, s.keyword, s.kind, pal.text_dim];
     let mut c = [Color32::BLACK; 16];
     for (i, b) in base.into_iter().enumerate() {
         c[i] = b;
@@ -1065,7 +1065,7 @@ pub fn pane(app: &mut App, ui: &mut Ui, full: Rect, above: f32) {
                 }
                 job.text.push(ch);
                 if let Some(sec) = job.sections.last_mut() {
-                    sec.byte_range.end = job.text.len();
+                    sec.byte_range.end = egui::epaint::text::ByteIndex(job.text.len());
                 }
                 laid += if ch.is_ascii() { cw } else { f.glyph_width(&font, ch) };
                 want += w;
@@ -1368,7 +1368,7 @@ fn strip(ui: &mut Ui, hdr: Rect, body: Rect, pane: &mut Pane, pal: &Palette, rad
             p.rect_filled(r.shrink2(vec2(2.0, 3.0)), CornerRadius::same(rad.min(6)), pal.hover);
         }
         let ic = Rect::from_center_size(pos2(r.left() + 14.0, r.center().y), Vec2::splat(13.0));
-        crate::theme::paint_lucide(p, ic, "square-terminal", pal.text_dim);
+        crate::theme::paint_symbol(p, ic, "square-terminal", pal.text_dim);
         let close_w = if (hovered || active) && r.width() >= 52.0 { 18.0 } else { 0.0 };
         let text = Rect::from_min_max(pos2(r.left() + 26.0, r.top()), pos2(r.right() - 6.0 - close_w, r.bottom()));
         let g = crate::listing::elided(ui, &s.short, FontId::proportional(12.0), text.width(), if active { pal.text } else { pal.text_dim });

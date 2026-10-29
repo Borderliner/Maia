@@ -472,7 +472,7 @@ fn pack(out: &Path, tmp: &Path, base: &Path, names: &[OsString], level: Level, l
     if let (Lock::Seven { names: hidden }, Some(pw)) = (lock, pw) {
         let mut c = archive::tool(archive::seven()?);
         // The part file's name says nothing of its kind: -t7z does.
-        c.current_dir(base).stdout(Stdio::null()).args(["a", "-bso0", "-bsp0", "-y", "-t7z", "-snl", "-spd", &format!("-mx={}", level.n(false)), "-p"]);
+        c.current_dir(base).stdout(Stdio::null()).args(["a", "-bso0", "-bsp0", "-y", "-t7z", "-snl", LITERAL, &format!("-mx={}", level.n(false)), "-p"]);
         if hidden {
             c.arg("-mhe=on");
         }
@@ -668,12 +668,21 @@ fn tops(dir: &Path) -> Vec<OsString> {
 
 /// What says the 7z command can't do this one in place (a rename in a zip written with
 /// data descriptors, as bsdtar writes them): built anew instead.
+/// 7z treats `*` and `?` in names as wildcards unless told otherwise, so a member called
+/// "draft?.txt" couldn't be added, deleted or renamed on its own.
+const LITERAL: &str = "-spd";
+
 const NOT_IN_PLACE: &str = "maia: not in place";
 
 /// Change a zip or 7z with the 7z command, on a copy at `part`.
 #[allow(clippy::too_many_arguments)]
 fn in_place(t: &str, archive: &Path, part: &Path, kind: Kind, e: &Edit, lock: (Lock, Option<String>), pw: Option<&str>, all: &[archive::Item], p: &Mutex<Progress>, gate: &Gate, ctx: &egui::Context) -> Result<(), String> {
     let ty = if kind == Kind::Zip { "-tzip" } else { "-t7z" };
+    // 7-Zip 26 renames a ZipCrypto member without its data descriptor flag, and the
+    // password no longer opens it: built anew instead.
+    if matches!(e, Edit::Rename { .. }) && lock.0 == Lock::ZipCrypto {
+        return Err(NOT_IN_PLACE.into());
+    }
     let feed = pw.filter(|_| lock.0 != Lock::Open).map(|pw| format!("{pw}\n").repeat(4));
     // A wrong password would lock what is added with it: it is tried on one file first.
     if let (Some(probe), Some(_)) = (&lock.1, &feed) {
@@ -712,17 +721,17 @@ fn in_place(t: &str, archive: &Path, part: &Path, kind: Kind, e: &Edit, lock: (L
                 return Err(e);
             }
             // Whatever is there already gives way: newer or not.
-            c.current_dir(&st).args(["a", "-bso0", "-bsp0", "-y", ty, "-snl", "-spd", "-up1q1r2x2y2z2w2"]);
+            c.current_dir(&st).args(["a", "-bso0", "-bsp0", "-y", ty, "-snl", LITERAL, "-up1q1r2x2y2z2w2"]);
             lock_args(&mut c);
             c.arg("--").arg(part).args(tops(&st));
         }
         Edit::Delete { members } => {
-            c.args(["d", "-bso0", "-bsp0", "-y", ty, "-spd"]);
+            c.args(["d", "-bso0", "-bsp0", "-y", ty, LITERAL]);
             lock_args(&mut c);
             c.arg("--").arg(part).args(members);
         }
         Edit::Rename { pairs } => {
-            c.args(["rn", "-bso0", "-bsp0", "-y", ty, "-spd"]);
+            c.args(["rn", "-bso0", "-bsp0", "-y", ty, LITERAL]);
             lock_args(&mut c);
             c.arg("--").arg(part);
             for (a, b) in rename_moves(all, pairs) {
